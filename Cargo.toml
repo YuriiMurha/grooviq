@@ -1,0 +1,13 @@
+[workspace]
+members = ["dsp"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-or-later"
+rust-version = "1.100"
+repository = "https://github.com/YuriiMurha/grooviq"
+
+# Keep unwinding (no panic = "abort"): the engine catches panics.
+[profile.release]
+lto = "thin"
