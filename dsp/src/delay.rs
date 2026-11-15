@@ -10,7 +10,7 @@
 use crate::api::{Device, NoteEvent};
 use crate::util::*;
 
-/// `(min, max, default)` per parameter, devices.json order.
+/// `(min, max, default)` per parameter, `SPEC` index order.
 pub const SPEC: [(f32, f32, f32); 9] = [
     (0.0, 1.0, 1.0),           // 0 sync
     (0.0, 8.0, 4.0),           // 1 division
@@ -23,7 +23,7 @@ pub const SPEC: [(f32, f32, f32); 9] = [
     (40.0, 300.0, 140.0),      // 8 bpm
 ];
 
-/// Division lengths in quarter-note beats, devices.json order.
+/// Division lengths in quarter-note beats, `SPEC` index order.
 pub const DIVISION_BEATS: [f32; 9] = [
     0.125,
     0.25,

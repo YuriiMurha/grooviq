@@ -25,7 +25,7 @@ pub mod synth;
 pub mod utility;
 
 /// `(min, max, default)` of every parameter of a device, indexed like `set_param`
-/// (devices.json order). Useful for clamping, defaults and UI ranges.
+/// (`SPEC` index order). Useful for clamping, defaults and UI ranges.
 pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
     Some(match id {
         "synth" => &synth::SPEC,
@@ -41,7 +41,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
     })
 }
 
-/// Creates a device by its `id` from devices.json ("synth", "eq", "comp", "limiter", "drive",
+/// Creates a device by its `id` ("synth", "eq", "comp", "limiter", "drive",
 /// "reverb", "delay", "ott", "utility"). The sampler lives in the `core` crate.
 pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
     Some(match id {

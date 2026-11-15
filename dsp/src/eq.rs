@@ -20,7 +20,7 @@ const FFT_N: usize = 2048;
 const BINS: usize = 128;
 const OUTPUT: u32 = 48;
 
-/// (on, type, freq, gain, q) per band, from devices.json.
+/// (on, type, freq, gain, q) per band, in `SPEC` index order.
 const BAND_DEFAULTS: [(bool, u8, f32, f32, f32); BANDS] = [
     (true, 0, 30.0, 0.0, 0.71),
     (true, 1, 120.0, 0.0, 0.71),

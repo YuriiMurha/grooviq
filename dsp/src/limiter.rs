@@ -11,7 +11,7 @@
 use crate::api::{Device, NoteEvent, db_to_gain, gain_to_db};
 use crate::util::*;
 
-/// `(min, max, default)` per parameter, devices.json order.
+/// `(min, max, default)` per parameter, `SPEC` index order.
 pub const SPEC: [(f32, f32, f32); 3] = [
     (0.0, 24.0, 0.0),    // 0 input gain dB
     (-12.0, 0.0, -0.3),  // 1 ceiling dB

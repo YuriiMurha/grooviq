@@ -1,7 +1,7 @@
 //! Renders every synth preset (a short 140 BPM trap phrase) and every effect (on a synthetic
 //! drum + keys loop) to 32-bit float WAV files for listening and A/B comparisons.
 //!
-//!     cargo run --release -p dsp --example render -- <out_dir>
+//!     cargo run --release -p grooviq-dsp --example render -- <out_dir>
 
 use grooviq_dsp::{NoteEvent, create};
 use std::io::Write;

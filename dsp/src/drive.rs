@@ -13,7 +13,7 @@
 use crate::api::{Device, NoteEvent, db_to_gain};
 use crate::util::*;
 
-/// `(min, max, default)` per parameter, devices.json order.
+/// `(min, max, default)` per parameter, `SPEC` index order.
 pub const SPEC: [(f32, f32, f32); 6] = [
     (0.0, 4.0, 1.0),   // 0 mode
     (0.0, 36.0, 6.0),  // 1 drive dB

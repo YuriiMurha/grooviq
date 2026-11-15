@@ -9,7 +9,7 @@
 use crate::api::{Device, NoteEvent};
 use crate::util::*;
 
-/// `(min, max, default)` per parameter, devices.json order.
+/// `(min, max, default)` per parameter, `SPEC` index order.
 pub const SPEC: [(f32, f32, f32); 9] = [
     (-60.0, 0.0, -18.0),  // 0 threshold dB
     (1.0, 20.0, 4.0),     // 1 ratio

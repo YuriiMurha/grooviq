@@ -12,7 +12,7 @@
 use crate::api::{Device, NoteEvent, db_to_gain, gain_to_db};
 use crate::util::*;
 
-/// `(min, max, default)` per parameter, devices.json order.
+/// `(min, max, default)` per parameter, `SPEC` index order.
 pub const SPEC: [(f32, f32, f32); 10] = [
     (0.0, 1.0, 0.5),           // 0 depth
     (0.0, 1.0, 0.5),           // 1 time

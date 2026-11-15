@@ -12,7 +12,7 @@
 use crate::api::{Device, NoteEvent};
 use crate::util::*;
 
-/// `(min, max, default)` per parameter, devices.json order.
+/// `(min, max, default)` per parameter, `SPEC` index order.
 pub const SPEC: [(f32, f32, f32); 8] = [
     (0.0, 1.0, 0.5),           // 0 size
     (0.1, 20.0, 2.2),          // 1 decay s

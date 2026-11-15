@@ -64,7 +64,7 @@ const GLIDE: usize = 37;
 const VOICE_MODE: usize = 38;
 const MASTER: usize = 39;
 
-/// (min, max, default) for every parameter, in devices.json order.
+/// (min, max, default) for every parameter, in `SPEC` index order.
 pub const SPEC: [(f32, f32, f32); NUM_PARAMS] = [
     (0.0, 3.0, 2.0),         // 0 osc1_shape
     (-3.0, 3.0, 0.0),        // 1 osc1_octave
@@ -126,7 +126,7 @@ fn is_stepped(i: usize) -> bool {
     )
 }
 
-/// Preset names, in devices.json order.
+/// Preset names, in `SPEC` index order.
 pub const PRESETS: [&str; 7] = [
     "808 Glide",
     "Sub Bass",

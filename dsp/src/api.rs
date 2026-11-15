@@ -20,7 +20,7 @@ pub struct NoteEvent {
 }
 
 pub trait Device: Send {
-    /// Sets a parameter by its `index` from devices.json, in real units (min..max).
+    /// Sets a parameter by its `index` in the device's `SPEC` table, in real units (min..max).
     fn set_param(&mut self, index: u32, value: f32);
 
     /// Processes one block of `l.len()` frames (<= MAX_BLOCK).
@@ -42,7 +42,7 @@ pub trait Device: Send {
     /// Host tempo, for tempo-synced devices.
     fn set_tempo(&mut self, _bpm: f32) {}
 
-    /// Scalar meter by its position in the device's "meters" list in devices.json (0-based).
+    /// Scalar meter by its position in the device's meter list (0-based).
     fn meter(&self, _index: u32) -> f32 {
         0.0
     }
