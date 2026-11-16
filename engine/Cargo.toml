@@ -20,8 +20,9 @@ grooviq-dsp = { path = "../dsp" }
 rtrb = "0.3"
 getrandom = "0.4"
 tungstenite = "0.30"
-# Sample files (MPL-2.0): only the containers and codecs a sampler opens.
-symphonia = { version = "0.6", default-features = false, features = ["wav", "aiff", "pcm", "flac", "mp3", "ogg", "vorbis"] }
+# Sample files (MPL-2.0): only the containers and codecs a sampler opens, plus ID3 tags so an
+# MP3 with large cover art (past the probe's 1 MB byte scan) still opens.
+symphonia = { version = "0.6", default-features = false, features = ["wav", "aiff", "pcm", "flac", "mp3", "ogg", "vorbis", "id3v1", "id3v2"] }
 
 # An output's transport type (Bluetooth, built-in, HDMI...), which cpal does not expose, and the
 # thread CoreAudio notifies on (`AudioHardwareDeprecated` holds kAudioHardwarePropertyRunLoop):

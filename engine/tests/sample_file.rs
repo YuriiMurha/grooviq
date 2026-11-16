@@ -270,3 +270,33 @@ fn a_cut_off_file_plays_up_to_the_cut() {
     );
     assert_eq!(half.l[..], full.l[..half.len()]);
 }
+
+#[test]
+fn decodes_an_mp3_with_a_large_id3_tag() {
+    // An ID3v2.3 tag of about 1.5 MB (one title frame, then zero padding), larger than the
+    // probe's 1 MB byte scan: only an ID3v2 reader can skip it to find the audio.
+    let title = b"\x00Blip";
+    let mut frames = Vec::new();
+    frames.extend_from_slice(b"TIT2");
+    frames.extend_from_slice(&(title.len() as u32).to_be_bytes());
+    frames.extend_from_slice(&[0, 0]);
+    frames.extend_from_slice(title);
+    frames.resize(1_500_000, 0); // padding
+    let n = frames.len() as u32;
+    let syncsafe = [
+        (n >> 21) as u8 & 0x7f,
+        (n >> 14) as u8 & 0x7f,
+        (n >> 7) as u8 & 0x7f,
+        n as u8 & 0x7f,
+    ];
+    let mut bytes = b"ID3\x03\x00\x00".to_vec();
+    bytes.extend_from_slice(&syncsafe);
+    bytes.extend_from_slice(&frames);
+    bytes.extend_from_slice(&std::fs::read(data("blip.mp3")).unwrap());
+
+    let plain = load_sample(&data("blip.mp3")).unwrap();
+    let tagged = decode_sample(&bytes, Some("mp3"), 600.0).unwrap();
+    assert_eq!(tagged.rate, plain.rate);
+    assert_eq!(tagged.len(), plain.len());
+    assert_eq!(peak(&tagged), peak(&plain));
+}
