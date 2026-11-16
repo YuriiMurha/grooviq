@@ -3,7 +3,7 @@
 //! block; never call it from the audio thread.
 
 use crate::channel::ChannelNode;
-use crate::command::{Command, Msg, Trash};
+use crate::command::{Command, Msg, Trash, rebuilt_queue};
 use crate::graph::{Graph, ramp_len};
 use crate::live::{LiveShared, LiveSnapshot};
 use crate::processor::AudioProcessor;
@@ -332,6 +332,18 @@ impl Controller {
     /// the panic). Call it with the audio callback stopped (it needs the processor itself),
     /// never on the audio thread.
     pub fn reconfigure(&mut self, processor: &mut AudioProcessor, config: EngineConfig) {
+        // The fresh graph is built from the state every queued message already updated, so a
+        // message that only changes the graph would land in it a second time: a channel built
+        // for the old rate, a removal of the rebuilt channel, a parameter for a project that
+        // was replaced. Those are dropped here, on this thread, with the nodes and samples
+        // they carry, as are notes a later message would have cut; transport commands and the
+        // other notes go back in the queue, in order (see `rebuilt_queue`). Holding both ends
+        // of the queue (`&mut self` and the stopped processor), this sees every message, and
+        // what goes back fits.
+        for msg in rebuilt_queue(processor.take_queued()) {
+            let queued = self.commands.push(msg).is_ok();
+            debug_assert!(queued, "the queue was just emptied");
+        }
         self.sample_rate = config.rate();
         // Replacements queued before now are stale: the processor drops them.
         self.generation += 1;
@@ -526,20 +538,19 @@ mod tests {
             gain_db: -12.0,
         };
         c.send(tone).unwrap();
-        // Same rate: only the generation tells the queued graph is stale.
+        // Same rate: only the queue's age tells the queued graph is stale.
         c.reconfigure(
             &mut p,
             EngineConfig {
                 sample_rate: 48_000.0,
             },
         );
+        // Reconfigure freed the queued graph (and the tone command, already in its state).
+        assert!(c.commands_drained());
         p.process(&mut [0.0; crate::BLOCK * 2], 2);
-        // The queued graph came back unused; the one reconfigure built (tone on) plays.
-        let Ok(Trash::Graph(returned)) = c.trash.pop() else {
-            panic!("a graph handed back");
-        };
-        assert!(!returned.tone_on());
+        // The one it built (tone on) plays, and nothing came back to free.
         assert!(c.live().tone);
+        assert!(c.trash.pop().is_err());
     }
 
     fn setup(id: u32) -> ChannelSetup {

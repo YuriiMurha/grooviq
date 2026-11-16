@@ -154,6 +154,10 @@ impl AudioProcessor {
     /// old graph is freed on its thread. The transport keeps playing from the tick it reached.
     pub(crate) fn restart(&mut self, sample_rate: f32, graph: Box<Graph>) {
         self.transport.set_sample_rate(self.clock, sample_rate);
+        // A pattern of a new length can arrive with the fresh graph (its swap was still queued,
+        // or a faulted graph refused it): the place in the loop holds, as in `replace_graph`.
+        self.transport
+            .keep_position(self.graph.pattern_length(), graph.pattern_length());
         self.generation = graph.generation();
         self.graph = graph;
         self.unsent = None;
@@ -161,6 +165,17 @@ impl AudioProcessor {
         // Leftover frames were rendered at the old rate.
         self.served = BLOCK;
         self.meter_release = meter_release(sample_rate);
+    }
+
+    /// Takes every queued message out of the queue, in order. Only
+    /// [`crate::Controller::reconfigure`] calls this, with the audio callback stopped
+    /// (allocates, and what it returns is freed on the caller's thread).
+    pub(crate) fn take_queued(&mut self) -> Vec<Msg> {
+        let mut queued = Vec::with_capacity(self.commands.slots());
+        while let Ok(msg) = self.commands.pop() {
+            queued.push(msg);
+        }
+        queued
     }
 
     fn render_block(&mut self) {
