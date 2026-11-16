@@ -226,6 +226,8 @@ pub enum SessionError {
     TooManyChannels,
     /// The project has no file yet: ask where to save it.
     NoPath,
+    /// Another save of this session is still being written.
+    SaveRunning,
     /// The engine refused the change.
     Engine(ControlError),
     /// The previous file could not be backed up, so it was not overwritten.
@@ -250,6 +252,10 @@ impl fmt::Display for SessionError {
                 "A project holds at most {MAX_CHANNELS} channels; remove one to add another."
             ),
             Self::NoPath => write!(f, "Choose where to save this project."),
+            Self::SaveRunning => write!(
+                f,
+                "The project is already being saved; try again when that save is done."
+            ),
             Self::Engine(e) => write!(f, "The audio engine did not take the change ({e})."),
             Self::Backup(e) => write!(
                 f,
@@ -278,6 +284,9 @@ pub struct SaveJob {
     pub samples: SampleFiles,
     pub path: PathBuf,
     revision: u64,
+    /// The project it belongs to: [`Session::finish_save`] ignores a job of a project that was
+    /// replaced (opened, new, restored) while it was written.
+    generation: u64,
 }
 
 impl SaveJob {
@@ -301,6 +310,10 @@ pub struct Session {
     /// Counts changes; a save clears `dirty` only if none came in while it was written.
     revision: u64,
     saved_revision: u64,
+    /// Counts projects: opening, starting a new one or restoring one moves it on.
+    generation: u64,
+    /// A save is being written (between `begin_save` and `finish_save` or `save_failed`).
+    saving: bool,
     /// The first change since the last autosave (or save).
     pending_since: Option<Instant>,
     /// The first structural change since the last autosave (or save).
@@ -334,6 +347,8 @@ impl Session {
             path: None,
             revision: 0,
             saved_revision: 0,
+            generation: 0,
+            saving: false,
             pending_since: None,
             structural_since: None,
             autosaved_at: None,
@@ -761,6 +776,7 @@ impl Session {
         self.decoded = decoded;
         self.revision += 1;
         self.saved_revision = self.revision;
+        self.generation += 1;
         self.pending_since = None;
         self.structural_since = None;
         self.autosaved_at = None;
@@ -815,8 +831,12 @@ impl Session {
 
     /// Snapshots what to save, cheaply (the sample bytes are shared). `path` is a new place
     /// to save to (`.grooviq` is added if it has another extension); `None` saves where the
-    /// project lives, or is `NoPath` if it is untitled.
-    pub fn begin_save(&self, path: Option<&Path>) -> Result<SaveJob, SessionError> {
+    /// project lives, or is `NoPath` if it is untitled. One save at a time: while a job is out,
+    /// this is `SaveRunning`. End every job with [`Self::finish_save`] or [`Self::save_failed`].
+    pub fn begin_save(&mut self, path: Option<&Path>) -> Result<SaveJob, SessionError> {
+        if self.saving {
+            return Err(SessionError::SaveRunning);
+        }
         let path = match path {
             Some(p) if p.extension().is_some_and(|e| e == EXTENSION) => p.to_path_buf(),
             Some(p) => {
@@ -831,17 +851,25 @@ impl Session {
         if let Some(stem) = path.file_stem() {
             project.name = stem.to_string_lossy().into_owned();
         }
+        self.saving = true;
         Ok(SaveJob {
             project,
             samples: self.files.clone(),
             path,
             revision: self.revision,
+            generation: self.generation,
         })
     }
 
     /// Records a finished save: the project lives at the job's path now, and is clean unless
-    /// it changed while the file was written.
-    pub fn finish_save(&mut self, job: &SaveJob) {
+    /// it changed while the file was written. Returns false, changing nothing, if another
+    /// project was opened or started meanwhile: the file holds the old project, and the new
+    /// one must not take its path.
+    pub fn finish_save(&mut self, job: &SaveJob) -> bool {
+        self.saving = false;
+        if job.generation != self.generation {
+            return false;
+        }
         self.path = Some(job.path.clone());
         self.project.name = job.project.name.clone();
         if self.revision == job.revision {
@@ -849,13 +877,22 @@ impl Session {
             self.pending_since = None;
             self.structural_since = None;
         }
+        true
+    }
+
+    /// Records that the job from [`Self::begin_save`] was not written: the next save may start.
+    pub fn save_failed(&mut self) {
+        self.saving = false;
     }
 
     /// Saves in one go (begin, write, finish). Holds the session the whole time: the app splits
     /// the steps instead.
     pub fn save(&mut self, path: Option<&Path>, backups: &Path) -> Result<PathBuf, SessionError> {
         let job = self.begin_save(path)?;
-        job.write(backups)?;
+        if let Err(e) = job.write(backups) {
+            self.save_failed();
+            return Err(e);
+        }
         self.finish_save(&job);
         Ok(job.path)
     }
@@ -873,6 +910,11 @@ impl Session {
     /// Whether to write an autosave now: something changed since the last one, and either the
     /// first such change is [`AUTOSAVE_PERIOD`] old or a structural one is [`STRUCTURAL_DELAY`]
     /// old.
+    ///
+    /// The minute counts from the first change since the last autosave, not from the autosave
+    /// itself: no edit stays out of the autosave longer than [`AUTOSAVE_PERIOD`], and editing
+    /// without a pause still autosaves once a minute. (Counting from the last autosave would
+    /// risk the same 60 s of work at most.)
     pub fn autosave_due(&self, now: Instant) -> bool {
         let old = |since: Option<Instant>, age: Duration| {
             since.is_some_and(|t| now.saturating_duration_since(t) >= age)

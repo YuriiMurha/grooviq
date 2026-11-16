@@ -9,6 +9,7 @@
 mod audio_log;
 mod commands;
 mod events;
+mod exit;
 pub mod panic_hook;
 mod project_cmds;
 mod settings;
@@ -23,7 +24,7 @@ use grooviq_project::recovery::{Recovery, RecoveryDir};
 use grooviq_project::session::Session;
 use settings::Settings;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
@@ -67,8 +68,8 @@ pub(crate) struct Audio {
     /// Set to stop the running export.
     export_cancel: Arc<AtomicBool>,
     export_running: AtomicBool,
-    /// The person chose to quit: closing is no longer held back.
-    exiting: AtomicBool,
+    /// Whether the person chose to quit: closing is held back until then.
+    exit: exit::ExitState,
 }
 
 /// Locks `mutex` even if a thread panicked while holding it.
@@ -183,7 +184,7 @@ fn start_audio(app: &AppHandle) -> Audio {
         backups,
         export_cancel: Arc::new(AtomicBool::new(false)),
         export_running: AtomicBool::new(false),
-        exiting: AtomicBool::new(false),
+        exit: exit::ExitState::default(),
     }
 }
 
@@ -263,42 +264,18 @@ fn autosave_loop(
     }
 }
 
-/// Ends the session cleanly: the autosave and the lock go, so the next launch offers nothing.
-pub(crate) fn clean_exit(audio: &Audio) {
-    if let Some(dir) = lock(&audio.recovery).take()
-        && let Err(e) = dir.clean_exit()
-    {
-        lock(&audio.log).push(
-            Level::Warn,
-            format!("The recovery folder was not cleaned: {e}"),
-        );
-    }
-}
-
-/// The app is ending. Unsaved changes the person did not choose to lose (a forced quit) are
-/// autosaved and the lock is left, so the next launch offers them back; otherwise a clean exit.
+/// The app is ending: a clean exit, or a last autosave that the next launch offers back (see
+/// [`exit::end_session`]). Nothing to report to if it fails: the UI is gone.
 fn end_session(audio: &Audio) {
-    let unsaved =
-        !audio.exiting.load(Ordering::Acquire) && lock(&audio.session).needs_confirmation();
-    if !unsaved {
-        clean_exit(audio);
-        return;
-    }
-    let snapshot = lock(&audio.session).autosave_snapshot(Instant::now());
-    if let Some(dir) = lock(&audio.recovery).take()
-        && let Some((project, samples, original)) = snapshot
-    {
-        // Nothing to report to: the UI is gone. The previous autosave stays if this fails.
-        let _ = dir.write_autosave(&project, &samples, original.as_deref());
-    }
+    let _ = exit::end_session(&audio.exit, &audio.session, &audio.recovery);
 }
 
-/// Whether closing must wait for the person: unsaved changes, and they have not chosen yet.
+/// Whether closing must wait for the person; if so, asks the UI.
 fn hold_close(app: &AppHandle) -> bool {
     let Some(audio) = app.try_state::<Audio>() else {
         return false;
     };
-    let hold = !audio.exiting.load(Ordering::Acquire) && lock(&audio.session).needs_confirmation();
+    let hold = audio.exit.hold(&audio.session);
     if hold {
         // Fails only while the app shuts down.
         let _ = app.emit(CLOSE_REQUESTED_EVENT, ());

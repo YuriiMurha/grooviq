@@ -621,6 +621,18 @@ fn structural_edits_autosave_after_two_seconds() {
         .unwrap();
     assert!(!session.autosave_due(t1 + Duration::from_secs(1)));
     assert!(session.autosave_due(t1 + STRUCTURAL_DELAY));
+    session.autosave_snapshot(t1 + STRUCTURAL_DELAY).unwrap();
+
+    let kick = session.view().channels[0].id;
+    let t2 = t1 + Duration::from_secs(10);
+    session
+        .apply(Edit::RemoveChannel { channel: kick }, t2)
+        .unwrap();
+    assert!(!session.autosave_due(t2 + Duration::from_secs(1)));
+    assert!(
+        session.autosave_due(t2 + STRUCTURAL_DELAY),
+        "removing is structural"
+    );
 }
 
 #[test]
@@ -1153,4 +1165,186 @@ fn a_velocity_on_an_empty_step_adds_a_hit_there() {
         .unwrap();
     assert_eq!(cells(&session, kick)[7], Some(0.4));
     assert_eq!(controller.lock().unwrap().state().pattern.notes.len(), 1);
+}
+
+/// The engine mirrors the project exactly: the state the project compiles to is the state the
+/// controller holds, the model keeps every value in range (as the engine clamps it), and each
+/// mix, sampler value and the tempo are the very values the engine got.
+fn assert_mirror(session: &Session, controller: &Mutex<Controller>, after: &str) {
+    let state = controller.lock().unwrap().state().clone();
+    assert_eq!(session.export_state(), state, "after {after}");
+    let project = session.project();
+    assert_eq!(
+        project.clone().validate(),
+        Vec::<String>::new(),
+        "after {after}: the model holds a value the engine clamped"
+    );
+    assert_eq!(project.bpm, state.bpm, "after {after}");
+    for (channel, engine) in project.channels.iter().zip(&state.channels) {
+        assert_eq!(channel.id, engine.id.0, "after {after}");
+        assert_eq!(
+            (channel.volume, channel.pan, channel.mute, channel.solo),
+            (
+                engine.mix.volume,
+                engine.mix.pan,
+                engine.mix.mute,
+                engine.mix.solo
+            ),
+            "after {after}"
+        );
+        for (param, value) in &channel.sampler {
+            let index = grooviq_dsp::sampler::PARAM_IDS
+                .iter()
+                .position(|p| p == param)
+                .unwrap();
+            assert_eq!(*value, engine.sampler[index], "after {after}: {param}");
+        }
+    }
+    let pattern = &project.patterns[0];
+    assert_eq!(
+        pattern.steps * STEP_TICKS,
+        state.pattern.length,
+        "after {after}"
+    );
+}
+
+#[test]
+fn out_of_range_values_reach_the_model_as_the_engine_clamps_them() {
+    let (mut session, controller, _) = rig();
+    let now = Instant::now();
+    let kick = add(&mut session, "kick", now);
+    let snare = add(&mut session, "snare", now);
+    assert_mirror(&session, &controller, "adding channels");
+    let edits = [
+        Edit::ToggleStep {
+            channel: kick,
+            step: 1,
+        },
+        Edit::ToggleStep {
+            channel: snare,
+            step: 3,
+        },
+        Edit::SetStepVelocity {
+            channel: kick,
+            step: 1,
+            velocity: 7.0,
+        },
+        Edit::SetStepVelocity {
+            channel: snare,
+            step: 5,
+            velocity: -3.0,
+        },
+        Edit::SetChannelMix {
+            channel: kick,
+            volume: 5.0,
+            pan: -9.0,
+            mute: false,
+            solo: true,
+        },
+        Edit::SetChannelMix {
+            channel: snare,
+            volume: -1.0,
+            pan: 4.0,
+            mute: true,
+            solo: false,
+        },
+        Edit::SetSamplerParam {
+            channel: kick,
+            param: "tune".into(),
+            value: 99.0,
+        },
+        Edit::SetSamplerParam {
+            channel: snare,
+            param: "root".into(),
+            value: -40.0,
+        },
+        Edit::SetSwing { swing: 5.0 },
+        Edit::SetSwing { swing: -2.0 },
+        Edit::SetSwing { swing: 0.5 },
+        Edit::SetTempo { bpm: 9_000.0 },
+        Edit::SetTempo { bpm: 1.0 },
+        Edit::SetPatternLength { steps: 999 },
+        Edit::SetPatternLength { steps: 0 },
+        Edit::SetPatternLength { steps: 16 },
+        Edit::SetTimeSignature { beats: 3, unit: 8 },
+        Edit::ClearStep {
+            channel: snare,
+            step: 3,
+        },
+        Edit::RemoveChannel { channel: snare },
+    ];
+    for edit in edits {
+        session.apply(edit.clone(), now).unwrap();
+        assert_mirror(&session, &controller, &format!("{edit:?}"));
+    }
+    let view = session.view();
+    assert_eq!((view.bpm, view.pattern.swing), (20.0, 0.5));
+    assert_eq!((view.channels[0].volume, view.channels[0].pan), (2.0, -1.0));
+}
+
+#[test]
+fn opening_or_starting_a_project_during_a_save_does_not_take_its_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let backups = dir.path().join("backups");
+    let old = dir.path().join("old.grooviq");
+    let (mut session, _, _) = rig();
+    let now = Instant::now();
+    session.apply(Edit::SetTempo { bpm: 100.0 }, now).unwrap();
+
+    // The app writes the file without the session's lock: a new project lands meanwhile.
+    let job = session.begin_save(Some(&old)).unwrap();
+    session.new_project().unwrap();
+    session.apply(Edit::SetTempo { bpm: 150.0 }, now).unwrap();
+    job.write(&backups).unwrap();
+    assert!(
+        !session.finish_save(&job),
+        "the save belongs to another project"
+    );
+    let view = session.view();
+    assert_eq!(view.path, None);
+    assert_eq!(view.name, "Untitled");
+    assert!(view.dirty);
+    assert!(matches!(
+        session.save(None, &backups),
+        Err(SessionError::NoPath)
+    ));
+    assert_eq!(
+        load(&old).unwrap().project.bpm,
+        100.0,
+        "the old file is untouched"
+    );
+
+    // The same with a project opened during the save.
+    let job = session.begin_save(Some(&old)).unwrap();
+    let loaded = loaded_with_a_missing_sample();
+    let decoded = decode_samples(&loaded);
+    let other = dir.path().join("other.grooviq");
+    session.open(&other, loaded, decoded).unwrap();
+    job.write(&backups).unwrap();
+    assert!(!session.finish_save(&job));
+    assert_eq!(
+        session.view().path.as_deref(),
+        Some(other.to_str().unwrap())
+    );
+}
+
+#[test]
+fn only_one_save_runs_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _, _) = rig();
+    let a = dir.path().join("a.grooviq");
+    let b = dir.path().join("b.grooviq");
+    let job = session.begin_save(Some(&a)).unwrap();
+    let err = session.begin_save(Some(&b)).unwrap_err();
+    assert!(matches!(err, SessionError::SaveRunning), "{err}");
+    assert!(err.to_string().contains("already being saved"), "{err}");
+    job.write(dir.path()).unwrap();
+    assert!(session.finish_save(&job));
+    assert_eq!(session.view().path.as_deref(), Some(a.to_str().unwrap()));
+
+    // A failed write frees the next save too.
+    let job = session.begin_save(Some(&b)).unwrap();
+    drop(job);
+    session.save_failed();
+    assert!(session.begin_save(Some(&b)).is_ok());
 }

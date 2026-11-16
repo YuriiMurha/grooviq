@@ -282,15 +282,24 @@ async fn save_to(audio: &Audio, path: Option<PathBuf>) -> Result<ProjectView, St
         .begin_save(path.as_deref())
         .map_err(|e| e.to_string())?;
     let backups = audio.backups.clone();
-    let job = blocking(move || {
+    let written = blocking(move || {
         job.write(&backups).map_err(|e| e.to_string())?;
         Ok(job)
     })
-    .await?;
+    .await;
     let (view, clean) = {
         let mut session = session(audio);
-        session.finish_save(&job);
-        (session.view(), !session.needs_confirmation())
+        let job = match written {
+            Ok(job) => job,
+            Err(e) => {
+                session.save_failed();
+                return Err(e);
+            }
+        };
+        // False if another project was opened or started while the file was written: that
+        // file holds the old project, and the open one keeps its own path.
+        let applied = session.finish_save(&job);
+        (session.view(), applied && !session.needs_confirmation())
     };
     if clean && let Some(dir) = lock(&audio.recovery).as_ref() {
         // Nothing unsaved is left to recover. A stale autosave is only an older copy.
@@ -403,8 +412,12 @@ pub async fn recovery_discard(audio: State<'_, Audio>) -> Result<(), String> {
 /// app ends.
 #[tauri::command]
 pub async fn app_exit(app: AppHandle, audio: State<'_, Audio>) -> Result<(), String> {
-    audio.exiting.store(true, Ordering::Release);
-    crate::clean_exit(&audio);
+    if let Err(e) = crate::exit::confirm_exit(&audio.exit, &audio.recovery) {
+        lock(&audio.log).push(
+            crate::audio_log::Level::Warn,
+            format!("The recovery folder was not cleaned: {e}"),
+        );
+    }
     app.exit(0);
     Ok(())
 }
