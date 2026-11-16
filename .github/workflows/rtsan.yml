@@ -20,11 +20,7 @@ concurrency:
 
 jobs:
   rtsan:
-    name: rtsan (macos-latest, ${{ matrix.mutation }})
-    strategy:
-      fail-fast: false
-      matrix:
-        mutation: [none, lock, file, alloc]
+    name: rtsan (macos-latest)
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -36,5 +32,3 @@ jobs:
       # The build downloads LLVM's prebuilt RTSan runtime (rtsan-standalone-sys, with curl).
       # Cargo is on PATH here, not in ~/.cargo/bin where the Makefile looks by default.
       - run: make rtsan CARGO=cargo
-        env:
-          RUSTFLAGS: --cfg rtsan_mutation="${{ matrix.mutation }}"

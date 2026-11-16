@@ -48,7 +48,3 @@ tempfile = "3"
 [[test]]
 name = "panic"
 required-features = ["test-hooks"]
-
-# TEMPORARY (mutation proof for the rtsan job; reverted in the next commit).
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rtsan_mutation, values(any()))'] }
