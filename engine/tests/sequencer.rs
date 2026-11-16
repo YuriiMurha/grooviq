@@ -757,6 +757,119 @@ fn a_new_sample_rate_mid_play_keeps_the_position() {
     assert_eq!(onsets(&out), expected);
 }
 
+/// A click recorded at 96 kHz (one frame at 96 kHz) on every step of 16, at `bpm`.
+fn clicks96(bpm: f32) -> EngineState {
+    let mut l = vec![0.0; 16];
+    l[0] = 1.0;
+    let click96 = Arc::new(SampleBuf {
+        rate: 96_000.0,
+        r: l.clone(),
+        l,
+    });
+    let every: Vec<u32> = (0..16).collect();
+    EngineState {
+        bpm,
+        channels: vec![channel(1, &click96, exact())],
+        pattern: pattern(16, &steps(&every)),
+    }
+}
+
+#[test]
+fn transport_commands_queued_before_a_rate_change_still_apply() {
+    // 240 BPM and Play (or PlayLoops 1) still queued when the engine moves from 48 to 96 kHz:
+    // they apply, so steps come every 6 000 frames from 0 (for one loop with PlayLoops).
+    let every_step = |n: u64| (0..n).map(|s| s * 6_000).collect::<Vec<u64>>();
+    for (play, steps) in [(Command::Play, 20), (Command::PlayLoops { loops: 1 }, 16)] {
+        let (mut c, mut p) = engine_with(cfg(48_000.0), clicks96(120.0));
+        c.send(Command::SetTempo { bpm: 240.0 }).unwrap();
+        c.send(play).unwrap();
+        c.reconfigure(&mut p, cfg(96_000.0));
+        let mut out = vec![0f32; 120_000 * 2];
+        p.process(&mut out, 2);
+        assert_eq!(onsets(&out), every_step(steps), "{play:?}");
+    }
+}
+
+#[test]
+fn a_project_opened_while_playing_before_a_rate_change_stops_the_transport() {
+    // Opening a project stops the transport; still queued at a rate change, it still does.
+    let (mut c, mut p) = engine_with(cfg(48_000.0), clicks96(240.0));
+    c.send(Command::Play).unwrap();
+    let mut out = vec![0f32; 12_800 * 2];
+    p.process(&mut out, 2);
+    assert_eq!(onsets(&out), [0, 3_000, 6_000, 9_000, 12_000]);
+    c.load_state(clicks96(240.0)).unwrap();
+    c.reconfigure(&mut p, cfg(96_000.0));
+    p.process(&mut out, 2);
+    assert!(!c.live().playing);
+    assert!(onsets(&out).is_empty(), "{:?}", onsets(&out));
+}
+
+#[test]
+fn all_sound_off_queued_before_a_rate_change_stops_and_keeps_a_later_tone() {
+    // A preview click, AllSoundOff, then a test tone, all still queued at a rate change: the
+    // transport stops, the click (cut by the AllSoundOff) stays silent, and the tone
+    // (switched on after it) plays.
+    let (mut c, mut p) = engine_with(cfg(48_000.0), clicks96(240.0));
+    c.send(Command::Play).unwrap();
+    let mut out = vec![0f32; 6_400 * 2];
+    p.process(&mut out, 2);
+    assert!(c.live().playing);
+    let click = Command::ChannelNote {
+        channel: ChannelId(1),
+        key: 60,
+        velocity: 1.0,
+        on: true,
+    };
+    c.send(click).unwrap();
+    c.send(Command::AllSoundOff).unwrap();
+    let tone = Command::TestTone {
+        on: true,
+        hz: 440.0,
+        gain_db: -12.0,
+    };
+    c.send(tone).unwrap();
+    c.reconfigure(&mut p, cfg(96_000.0));
+    let mut out = vec![0f32; 9_600 * 2];
+    p.process(&mut out, 2);
+    assert!(!c.live().playing, "stopped");
+    assert!(c.live().tone, "the tone is on");
+    let peak = left(&out).iter().fold(0f32, |m, x| m.max(x.abs()));
+    assert!(
+        (peak - 0.251).abs() < 0.01,
+        "a -12 dB tone, nothing else: {peak}"
+    );
+}
+
+#[test]
+fn a_new_length_queued_before_a_rate_change_keeps_the_place_in_the_loop() {
+    // 16 steps, then 32 during step 4 of the second loop (as in
+    // changing_the_pattern_length_mid_play_keeps_the_place_in_the_loop), but the new pattern
+    // is still queued when the engine restarts (at the same rate), so it arrives with the
+    // fresh graph. The place in the loop carries on all the same: step 5 next.
+    let (mut c, mut p) = engine_with(cfg(SR), clicks(120.0, numbered(16)));
+    c.send(Command::Play).unwrap();
+    let at_step = 16 + 4;
+    let swap = block_start(at_step * 6_000 + 100) as usize;
+    let total_steps = at_step + 1 + 2 * 32;
+    let mut out = vec![0f32; total_steps as usize * 6_000 * 2];
+    p.process(&mut out[..swap * 2], 2);
+    c.set_pattern(numbered(32)).unwrap();
+    c.reconfigure(&mut p, cfg(SR));
+    p.process(&mut out[swap * 2..], 2);
+    let expected: Vec<(u64, u32)> = (0..total_steps)
+        .map(|n| {
+            let step = if n <= at_step {
+                n % 16
+            } else {
+                (4 + n - at_step) % 32
+            };
+            (n * 6_000, step as u32)
+        })
+        .collect();
+    assert_eq!(numbered_onsets(&out), expected);
+}
+
 #[test]
 fn a_tempo_change_and_a_pattern_swap_in_one_block_neither_replay_nor_skip() {
     // A click every 5 ticks, including tick 23 (frame 575 at 120 BPM). Tempo changes both
