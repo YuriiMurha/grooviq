@@ -300,3 +300,89 @@ fn decodes_an_mp3_with_a_large_id3_tag() {
     assert_eq!(tagged.len(), plain.len());
     assert_eq!(peak(&tagged), peak(&plain));
 }
+
+/// `blip.mp3` without its first (Info) frame: five 1152-frame MPEG-1 Layer III frames at these
+/// byte offsets. Copies of it concatenate into a longer stream with no gapless header.
+fn mp3_frames() -> (Vec<u8>, [usize; 6]) {
+    let mp3 = std::fs::read(data("blip.mp3")).unwrap();
+    let audio = mp3[208..].to_vec();
+    let bounds = [0, 208, 417, 626, 835, 1044];
+    assert_eq!(audio.len(), bounds[5]);
+    for b in &bounds[..5] {
+        assert_eq!(&audio[*b..*b + 2], &[0xff, 0xfb], "frame sync at {b}");
+    }
+    (audio, bounds)
+}
+
+/// Garbles a frame's body, keeping its 4-byte header and the first side-info bytes so the
+/// demuxer still delivers it as a packet; the decoder then fails on it.
+fn garble(bytes: &mut [u8]) {
+    for b in &mut bytes[6..] {
+        *b ^= 0xa5;
+    }
+}
+
+#[test]
+fn a_packet_that_fails_to_decode_is_skipped() {
+    let (audio, bounds) = mp3_frames();
+    let long: Vec<u8> = (0..10).flat_map(|_| audio.clone()).collect();
+    let clean = decode_sample(&long, Some("mp3"), 600.0).unwrap();
+    assert_eq!(clean.len(), 50 * 1152);
+
+    // Damage one frame in the middle (copy 5, frame 2).
+    let mut damaged = long.clone();
+    let at = 5 * audio.len();
+    garble(&mut damaged[at + bounds[2]..at + bounds[3]]);
+    let b = decode_sample(&damaged, Some("mp3"), 600.0).unwrap();
+    assert_eq!(
+        b.len(),
+        clean.len() - 1152,
+        "only the damaged packet is lost"
+    );
+}
+
+#[test]
+fn a_file_where_no_packet_decodes_is_corrupt() {
+    let mp3 = std::fs::read(data("blip.mp3")).unwrap();
+    let (_, bounds) = mp3_frames();
+    let mut damaged = mp3.clone();
+    for f in 0..5 {
+        garble(&mut damaged[208 + bounds[f]..208 + bounds[f + 1]]);
+    }
+    let e = decode_sample(&damaged, Some("mp3"), 600.0).unwrap_err();
+    assert!(matches!(e, SampleError::Corrupt(_)), "{e:?}");
+}
+
+#[test]
+fn a_rate_above_384_khz_is_rejected() {
+    let dir = TempDir::new();
+    let path = dir.path("fast.wav");
+    write_wav(&path, 1, 400_000, 16, false, 400);
+    assert_eq!(load_sample(&path), Err(SampleError::BadRate(400_000)));
+    let edge = dir.path("edge.wav");
+    write_wav(&edge, 1, 384_000, 16, false, 400);
+    assert_eq!(load_sample(&edge).unwrap().rate, 384_000.0);
+}
+
+#[test]
+fn a_too_long_file_without_a_frame_count_is_caught_while_decoding() {
+    // blip.flac with STREAMINFO's 36-bit total-samples field zeroed ("unknown"): the reader
+    // reports no frame count, so only the check while decoding can stop it.
+    let mut flac = std::fs::read(data("blip.flac")).unwrap();
+    assert_eq!(&flac[..4], b"fLaC");
+    flac[8 + 13] &= 0xf0;
+    flac[8 + 14..8 + 18].fill(0);
+    assert_eq!(
+        decode_sample(&flac, Some("flac"), 1.0).unwrap().len(),
+        4_410
+    );
+    match decode_sample(&flac, Some("flac"), 0.05) {
+        Err(SampleError::TooLong { seconds }) => {
+            assert!(
+                (seconds - 0.1).abs() <= 0.001,
+                "reports the full length: {seconds} s"
+            )
+        }
+        other => panic!("expected TooLong, got {other:?}"),
+    }
+}

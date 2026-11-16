@@ -228,6 +228,23 @@ fn a_44k1_sample_plays_at_its_pitch_in_a_48k_engine() {
 }
 
 #[test]
+fn reads_between_samples_with_a_cubic() {
+    // A 2 kHz sine played 7 semitones up reads between samples almost everywhere. Max error
+    // against the ideal sine: cubic Hermite 2.9e-4, linear interpolation 8.5e-3.
+    let x = sine(SR, 2_000.0, SR as usize);
+    let mut s = sampler(SR, buf(SR, x));
+    let (l, _) = render(&mut s, 20_000, &[on(0, 67, 1.0)]);
+    let step = 2f64.powf(7.0 / 12.0);
+    let err = (10..20_000)
+        .map(|i| {
+            let ideal = (2.0 * std::f64::consts::PI * 2_000.0 * i as f64 * step / SR as f64).sin();
+            (l[i] as f64 - ideal).abs()
+        })
+        .fold(0.0, f64::max);
+    assert!(err < 1.5e-3, "max interpolation error {err}");
+}
+
+#[test]
 fn start_end_and_reverse_play_the_chosen_region() {
     let len = 1000;
     let ramp: Vec<f32> = (0..len).map(|i| i as f32 / len as f32).collect();
@@ -243,6 +260,27 @@ fn start_end_and_reverse_play_the_chosen_region() {
     assert_eq!(played_len(&l), 250);
     let backwards: Vec<f32> = ramp[250..500].iter().rev().copied().collect();
     assert_eq!(&l[..250], &backwards[..], "reverse plays 0.5 down to 0.25");
+}
+
+#[test]
+fn a_switch_at_exactly_one_half_is_on() {
+    // A scenario each switch changes: a ramp played an octave up, released early.
+    let len = 4_800;
+    let ramp: Vec<f32> = (0..len).map(|i| i as f32 / len as f32).collect();
+    let play = |switch: &str, value: f32| {
+        let mut s = sampler(SR, buf(SR, ramp.clone()));
+        s.set_param(p("release"), 1.0);
+        s.set_param(p(switch), value);
+        render(&mut s, len, &[on(0, 72, 1.0), off(500, 72)]).0
+    };
+    for switch in ["reverse", "pitch_track", "one_shot", "declick"] {
+        let (off_, half, on_) = (play(switch, 0.0), play(switch, 0.5), play(switch, 1.0));
+        assert_ne!(
+            off_, on_,
+            "{switch}: the scenario must depend on the switch"
+        );
+        assert_eq!(half, on_, "{switch} at 0.5 is on");
+    }
 }
 
 #[test]
@@ -283,6 +321,14 @@ fn attack_and_decay_shape_the_level() {
     s.set_param(p("sustain"), 0.5);
     let (l, _) = render(&mut s, 24_000, &[on(0, 60, 1.0)]);
     assert!(l[0] > 0.99, "decay starts at full level");
+    // The decay falls by e every quarter of its time: 25 ms (1200 frames) into a 100 ms decay
+    // the distance to sustain is 1/e of where it started. Frame i has had i + 1 decay steps.
+    let quarter = 0.5 + 0.5 / std::f32::consts::E;
+    assert!(
+        (l[1_199] - quarter).abs() < 1e-3,
+        "level a quarter into the decay: {} (expected {quarter})",
+        l[1_199]
+    );
     let settled = &l[20_000..];
     assert!(
         settled.iter().all(|v| (v - 0.5).abs() < 1e-3),
