@@ -1,19 +1,27 @@
-//! "Squash": OTT-style 3-band upward + downward compressor.
+//! Multiband upward/downward compressor: pushes quiet detail up and loud peaks down in three
+//! bands at once.
 //!
 //! Bands are split with Linkwitz-Riley 24 dB/oct crossovers (cascaded Butterworth biquads); the
 //! low band also runs through the high crossover's allpass so the three bands sum back flat.
 //! Each band has a stereo-linked peak/RMS detector and a two-sided static curve: above the
 //! downward threshold it compresses hard (66.7:1, 6 dB knee), below the upward threshold it
 //! lifts quiet detail (1:4.17, capped at +24 dB and faded out below -90 dBFS so the noise floor
-//! and silence are not boosted). Thresholds and ratios follow the classic OTT preset. Gain is
-//! smoothed in dB with attack/release scaled by Time. Depth is the wet amount of the gain change
-//! (per band, in amplitude, so it is phase coherent), then band gains and output.
+//! and silence are not boosted). Gain is smoothed in dB with attack/release scaled by Time.
+//! Depth is the wet amount of the gain change (per band, in amplitude, so it is phase coherent);
+//! at depth 0 the device is just the flat band split plus the gains. The signal path is
+//! input gain, band split, per-band dynamics, band gains, output gain.
+//!
+//! The global Upward and Downward amounts scale the curve for all bands; each band's own
+//! upward/downward amount (parameters 11..=16) scales it again for that band.
+//!
+//! Parameter ids for hosts and UIs are in [`PARAM_IDS`], factory settings in [`PRESETS`] and
+//! [`preset`].
 
 use crate::api::{Device, NoteEvent, db_to_gain, gain_to_db};
 use crate::util::*;
 
 /// `(min, max, default)` per parameter, `SPEC` index order.
-pub const SPEC: [(f32, f32, f32); 10] = [
+pub const SPEC: [(f32, f32, f32); 17] = [
     (0.0, 1.0, 0.5),           // 0 depth
     (0.0, 1.0, 0.5),           // 1 time
     (0.0, 1.0, 1.0),           // 2 upward
@@ -24,7 +32,99 @@ pub const SPEC: [(f32, f32, f32); 10] = [
     (40.0, 1000.0, 120.0),     // 7 low/mid split Hz
     (1000.0, 12000.0, 2500.0), // 8 mid/high split Hz
     (-24.0, 12.0, 0.0),        // 9 output dB
+    (-24.0, 12.0, 0.0),        // 10 input dB
+    (0.0, 1.0, 1.0),           // 11 low upward
+    (0.0, 1.0, 1.0),           // 12 mid upward
+    (0.0, 1.0, 1.0),           // 13 high upward
+    (0.0, 1.0, 1.0),           // 14 low downward
+    (0.0, 1.0, 1.0),           // 15 mid downward
+    (0.0, 1.0, 1.0),           // 16 high downward
 ];
+
+/// Short snake_case id of every parameter, in `SPEC` order.
+pub const PARAM_IDS: [&str; 17] = [
+    "depth",
+    "time",
+    "upward",
+    "downward",
+    "low_gain",
+    "mid_gain",
+    "high_gain",
+    "low_mid_split",
+    "mid_high_split",
+    "output_gain",
+    "input_gain",
+    "low_upward",
+    "mid_upward",
+    "high_upward",
+    "low_downward",
+    "mid_downward",
+    "high_downward",
+];
+
+/// Factory preset names.
+pub const PRESETS: [&str; 7] = [
+    "Soft Lift",
+    "Drum Grip",
+    "Air Bloom",
+    "Bass Anchor",
+    "Full Squeeze",
+    "Detail Only",
+    "Peak Tamer",
+];
+
+/// Full parameter list `(index, value)` for a factory preset (all 17 parameters), or None.
+/// "Init" returns the default settings.
+pub fn preset(name: &str) -> Option<Vec<(u32, f32)>> {
+    // depth, time, upward, downward, low/mid/high gain, low/mid and mid/high split, output,
+    // input, band upward (low, mid, high), band downward (low, mid, high)
+    #[rustfmt::skip]
+    let v: [f32; 17] = match name {
+        "Init" | "Default" => return Some(
+            SPEC.iter().enumerate().map(|(i, s)| (i as u32, s.2)).collect(),
+        ),
+        // Light touch: low depth, full upward but only 40% downward, +1.5 dB on the top band.
+        "Soft Lift" => [
+            0.35, 0.6, 1.0, 0.4, 0.0, 0.0, 1.5, 120.0, 2500.0, -1.0,
+            0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ],
+        // Fast time and full downward; the upward lift is strongest in the lows and tapers off toward
+        // the top (band upward 1.0 / 0.8 / 0.6, half the global amount), with +1 dB low and +2 dB high.
+        "Drum Grip" => [
+            0.6, 0.25, 0.5, 1.0, 1.0, 0.0, 2.0, 100.0, 3500.0, -2.0,
+            0.0, 1.0, 0.8, 0.6, 1.0, 1.0, 1.0,
+        ],
+        // Slow time; lifts mostly the top band (band upward 0.2 / 0.6 / 1.0, light downward) and adds
+        // +3 dB there from 5 kHz up, so the lows and mids are barely moved.
+        "Air Bloom" => [
+            0.5, 0.7, 1.0, 0.3, 0.0, 0.0, 3.0, 150.0, 5000.0, -2.0,
+            0.0, 0.2, 0.6, 1.0, 0.2, 0.4, 0.2,
+        ],
+        // Evens out a bass line: full downward in every band, but upward only at 60% overall, weaker
+        // in the mids and off in the highs; +2 dB low, -1 dB mid, -2 dB high.
+        "Bass Anchor" => [
+            0.7, 0.5, 0.6, 1.0, 2.0, -1.0, -2.0, 160.0, 2000.0, -1.0,
+            0.0, 0.5, 0.3, 0.0, 1.0, 1.0, 1.0,
+        ],
+        // Everything squashed and lifted at once: loud, dense and obvious.
+        "Full Squeeze" => [
+            1.0, 0.4, 1.0, 1.0, 2.0, -1.0, 3.0, 120.0, 2500.0, -6.0,
+            0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ],
+        // Upward only: raises quiet detail without pulling any peak down.
+        "Detail Only" => [
+            0.8, 0.5, 1.0, 0.0, 0.0, 0.0, 1.0, 120.0, 2500.0, -2.0,
+            0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ],
+        // Downward only (upward off); +2 dB of input gain drives the bands harder into the curve.
+        "Peak Tamer" => [
+            0.45, 0.35, 0.0, 1.0, 0.0, 0.0, 0.0, 120.0, 2500.0, 0.0,
+            2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ],
+        _ => return None,
+    };
+    Some(v.iter().enumerate().map(|(i, &x)| (i as u32, x)).collect())
+}
 
 const CTRL: u32 = 16;
 const DOWN_T: [f32; 3] = [-33.8, -30.2, -35.5];
@@ -72,8 +172,13 @@ pub struct Ott {
     sr: f32,
     depth: Smooth,
     time: f32,
-    up_amt: f32,
-    down_amt: f32,
+    up_amt: [f32; 3],
+    down_amt: [f32; 3],
+    global_up: f32,
+    global_down: f32,
+    band_up: [f32; 3],
+    band_down: [f32; 3],
+    input: Smooth,
     band_g: [Smooth; 3],
     out: Smooth,
     x_lo: Smooth, // log2 Hz
@@ -99,8 +204,13 @@ impl Ott {
             sr,
             depth: Smooth::new(0.5, 15.0, sr),
             time: 0.5,
-            up_amt: 1.0,
-            down_amt: 1.0,
+            up_amt: [1.0; 3],
+            down_amt: [1.0; 3],
+            global_up: 1.0,
+            global_down: 1.0,
+            band_up: [1.0; 3],
+            band_down: [1.0; 3],
+            input: Smooth::new(1.0, 15.0, sr),
             band_g: core::array::from_fn(|_| Smooth::new(1.0, 15.0, sr)),
             out: Smooth::new(1.0, 15.0, sr),
             x_lo: Smooth::new(7.0, 15.0, ctrl_rate),
@@ -148,8 +258,16 @@ impl Ott {
         self.c_ap2 = Coefs::allpass(hi, q, sr);
     }
 
+    fn update_amounts(&mut self) {
+        for b in 0..3 {
+            self.up_amt[b] = self.global_up * self.band_up[b];
+            self.down_amt[b] = self.global_down * self.band_down[b];
+        }
+    }
+
     fn snap_all(&mut self) {
         self.depth.snap();
+        self.input.snap();
         for g in self.band_g.iter_mut() {
             g.snap();
         }
@@ -182,12 +300,27 @@ impl Device for Ott {
                 self.time = v;
                 self.update_times();
             }
-            2 => self.up_amt = v,
-            3 => self.down_amt = v,
+            2 => {
+                self.global_up = v;
+                self.update_amounts();
+            }
+            3 => {
+                self.global_down = v;
+                self.update_amounts();
+            }
             4..=6 => self.band_g[(index - 4) as usize].set(db_to_gain(v)),
             7 => self.x_lo.set(v.log2()),
             8 => self.x_hi.set(v.log2()),
-            _ => self.out.set(db_to_gain(v)),
+            9 => self.out.set(db_to_gain(v)),
+            10 => self.input.set(db_to_gain(v)),
+            11..=13 => {
+                self.band_up[(index - 11) as usize] = v;
+                self.update_amounts();
+            }
+            _ => {
+                self.band_down[(index - 14) as usize] = v;
+                self.update_amounts();
+            }
         }
         if self.fresh {
             self.snap_all();
@@ -209,8 +342,9 @@ impl Device for Ott {
                 self.update_xover();
             }
             self.ctr = (self.ctr + 1) % CTRL;
-            let bl = self.split(0, sane(l[i]) as f64);
-            let br = self.split(1, sane(r[i]) as f64);
+            let ig = self.input.next() as f64;
+            let bl = self.split(0, sane(l[i]) as f64 * ig);
+            let br = self.split(1, sane(r[i]) as f64 * ig);
             let depth = self.depth.next();
             let og = self.out.next();
             let (mut yl, mut yr) = (0.0f32, 0.0f32);
@@ -228,7 +362,7 @@ impl Device for Ott {
                 let down = knee_curve(lvl_db - DOWN_T[b], 1.0 / DOWN_R - 1.0);
                 let up = knee_curve(UP_T[b] - lvl_db, 1.0 - 1.0 / UP_R).min(MAX_UP)
                     * ((lvl_db + 90.0) / 20.0).clamp(0.0, 1.0);
-                let target = down * self.down_amt + up * self.up_amt;
+                let target = down * self.down_amt[b] + up * self.up_amt[b];
                 let c = if target < d.g_db { d.att } else { d.rel };
                 d.g_db = target + (d.g_db - target) * c;
                 if d.g_db.abs() < 1.0e-6 {
