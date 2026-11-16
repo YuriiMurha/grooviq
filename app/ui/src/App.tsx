@@ -22,6 +22,7 @@ import { Meter } from "./meter/Meter";
 import { OutputChip } from "./output/OutputChip";
 import { OutputPopover } from "./output/OutputPopover";
 import { ProjectContext } from "./project/context";
+import { ChannelRack } from "./rack/ChannelRack";
 import { ProjectMenu } from "./project/ProjectMenu";
 import { SaveState } from "./project/SaveState";
 import { isTypingTarget, shortcutFor } from "./project/shortcuts";
@@ -217,6 +218,7 @@ export function App() {
   };
 
   const sampleRate = current?.sampleRate ?? FALLBACK_RATE;
+  const rackError = useCallback((message: string) => toast(message, true), [toast]);
 
   return (
     <ProjectContext.Provider value={session.context}>
@@ -272,9 +274,8 @@ export function App() {
             <Meter latest={latest} />
           </div>
         </header>
-        {/* The channel rack mounts here. */}
         <main className="stage">
-          <p className="hint">Nothing plays until you ask: press play, or switch on the test tone to check your output.</p>
+          {view && <ChannelRack latest={latest} sampleRate={sampleRate} onError={rackError} />}
         </main>
         <HintBar />
         <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />

@@ -31,6 +31,9 @@
   --well: #0a0d20;          /* recessed slots, meters, fields */
   --step-a: #1a1e40;        /* beats 1 and 3 of the bar */
   --step-b: #14183a;        /* beats 2 and 4 */
+  --step-lit: #2a3566;      /* a lit step above its velocity fill */
+  --grid-focus: var(--select);    /* the step grid's keyboard focus ring */
+  --grid-playhead: var(--accent); /* the playhead column in the step grid */
   --knob-track: #2a3062;
   --knob-gap: var(--bg);
   --reg-x: 2px;             /* the one misregistration vector, used everywhere */

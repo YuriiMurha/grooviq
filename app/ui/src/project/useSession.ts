@@ -32,22 +32,25 @@ export function useSession(onError: (message: string) => void) {
     return run;
   }, []);
 
-  const apply = useCallback(
-    async (edit: Edit) => {
+  const run = useCallback(
+    async (command: () => Promise<ProjectView>) => {
       try {
-        adopt(await enqueue(() => projectEdit(edit)));
+        adopt(await enqueue(command));
+        return true;
       } catch (e) {
         onError(errorText(e));
+        return false;
       }
     },
     [adopt, enqueue, onError],
   );
+  const apply = useCallback((edit: Edit) => run(() => projectEdit(edit)), [run]);
 
   // The project the engine holds at start.
   useEffect(() => {
     enqueue(projectView).then(adopt, (e: unknown) => onError(errorText(e)));
   }, [adopt, enqueue, onError]);
 
-  const context: ProjectContextValue = { view: state.view, apply, setView: adopt };
+  const context: ProjectContextValue = { view: state.view, apply, run, setView: adopt };
   return { view: state.view, cleanSince: state.cleanSince, latest, adopt, enqueue, apply, context };
 }
