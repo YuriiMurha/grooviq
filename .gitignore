@@ -7,3 +7,5 @@ docs/evidence/
 tests/golden/out/
 *.local
 .superpowers/
+app/ui/e2e-results/
+app/ui/playwright-report/

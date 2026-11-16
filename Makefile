@@ -1,5 +1,5 @@
 # Repeatable commands. `make help` lists them. macOS or Linux shell.
-.PHONY: help hooks ui-install fmt check check-changed golden-update build-app install-app
+.PHONY: help hooks ui-install fmt check check-changed golden-update build-app install-app qa-ui
 
 # rustup installs cargo into ~/.cargo/bin, which is often not on PATH.
 export PATH := $(HOME)/.cargo/bin:$(PATH)
@@ -30,6 +30,9 @@ check: ui-install ## Everything CI runs: fmt, clippy, workspace tests, UI lint/t
 
 check-changed: ## Only the checks the changes against origin/main need (ARGS=--plan prints the plan)
 	node scripts/check-changed.mjs $(ARGS)
+
+qa-ui: ui-install ## Playwright on the web build with the mock engine (WebKit and Chromium); shots in app/ui/e2e-results
+	cd $(UI) && npx playwright install chromium webkit && npm run e2e
 
 golden-update: ## Rewrite the golden reference WAVs on purpose; say why in the PR
 	GOLDEN_UPDATE=1 $(CARGO) test -p grooviq-golden
