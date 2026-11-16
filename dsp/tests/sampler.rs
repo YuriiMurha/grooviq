@@ -536,3 +536,117 @@ fn process_never_allocates() {
     }
     assert!(swapped.is_some(), "the old buffer came back out");
 }
+
+/// The M1 reference scene: a ramp played at keys 55, 60 and 67 in one-shot and gate mode
+/// through attack, decay, sustain and release, with gain, pan, tune and fine tune, a start/end
+/// region and reverse. Declick is on only where the sample plays at its own rate (Grooviq M2
+/// times the edge fade in output frames, which only changes a pitched note). Returns the
+/// sections concatenated, stereo interleaved.
+fn m1_scene() -> Vec<f32> {
+    let len = 4_800;
+    let ramp: Vec<f32> = (0..len)
+        .map(|i| 2.0 * i as f32 / len as f32 - 1.0)
+        .collect();
+    let section = |params: &[(&str, f32)], events: &[NoteEvent], frames: usize| {
+        let mut s = Sampler::new(SR);
+        s.set_sample(Some(buf(SR, ramp.clone())));
+        for &(name, value) in params {
+            s.set_param(p(name), value);
+        }
+        let (l, r) = render(&mut s, frames, events);
+        l.into_iter()
+            .zip(r)
+            .flat_map(|(l, r)| [l, r])
+            .collect::<Vec<f32>>()
+    };
+    let mut out = Vec::new();
+    // Defaults: one-shot, declick on, at the root key.
+    out.extend(section(&[], &[on(0, 60, 1.0), on(1_000, 60, 0.7)], 6_000));
+    // Gate mode, a chord with attack, decay to a sustain, and release.
+    out.extend(section(
+        &[
+            ("declick", 0.0),
+            ("one_shot", 0.0),
+            ("attack", 5.0),
+            ("decay", 50.0),
+            ("sustain", 0.6),
+            ("release", 30.0),
+        ],
+        &[
+            on(0, 55, 1.0),
+            on(10, 60, 0.8),
+            on(20, 67, 0.5),
+            off(1_500, 60),
+            off(2_000, 55),
+            off(2_500, 67),
+        ],
+        6_000,
+    ));
+    // Gain, pan, tune and fine tune in one-shot mode.
+    out.extend(section(
+        &[
+            ("declick", 0.0),
+            ("gain", -6.0),
+            ("pan", 0.4),
+            ("tune", 2.0),
+            ("fine", 30.0),
+        ],
+        &[on(0, 55, 1.0), on(700, 67, 0.9)],
+        6_000,
+    ));
+    // A start/end region, reversed, with declick at the root key.
+    out.extend(section(
+        &[
+            ("start", 0.2),
+            ("end", 0.7),
+            ("reverse", 1.0),
+            ("pan", -0.5),
+        ],
+        &[on(0, 60, 1.0), on(3_000, 60, 0.6)],
+        6_000,
+    ));
+    // The same region pitched, without declick, in gate mode.
+    out.extend(section(
+        &[
+            ("declick", 0.0),
+            ("start", 0.7),
+            ("end", 0.2),
+            ("reverse", 1.0),
+            ("one_shot", 0.0),
+            ("release", 10.0),
+        ],
+        &[
+            on(0, 67, 1.0),
+            on(100, 55, 1.0),
+            off(900, 67),
+            off(1_800, 55),
+        ],
+        6_000,
+    ));
+    out
+}
+
+#[test]
+fn defaults_leave_the_m1_sound_unchanged() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/sampler_m1.f32");
+    let scene = m1_scene();
+    if std::env::var("GOLDEN_UPDATE").as_deref() == Ok("1") {
+        let bytes: Vec<u8> = scene.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(path, bytes).expect("write the M1 reference");
+    }
+    let bytes = std::fs::read(path).expect("the M1 reference (create it with GOLDEN_UPDATE=1)");
+    let reference: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    assert_eq!(scene.len(), reference.len(), "length");
+    assert!(peak(&reference) > 0.1, "the reference is not silent");
+    if let Some(i) = (0..scene.len()).find(|&i| scene[i].to_bits() != reference[i].to_bits()) {
+        panic!(
+            "first difference at sample {i} (frame {}): {} vs reference {}",
+            i / 2,
+            scene[i],
+            reference[i]
+        );
+    }
+}
