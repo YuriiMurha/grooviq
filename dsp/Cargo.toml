@@ -11,6 +11,8 @@ description = "Built-in instruments and effects (ranges live in each device modu
 name = "grooviq_dsp"
 
 [dependencies]
+# Pure-Rust exp/pow: the same bits on every platform (bit-identical golden renders).
+libm = "0.2"
 
 [dev-dependencies]
 # Without the default `disable_release`, the allocation check also runs in release test builds.
