@@ -1,20 +1,46 @@
-//! How a CoreAudio output is connected (`kAudioDevicePropertyTransportType`), which cpal does not
-//! expose. Two property reads on the device; nothing is opened.
+//! CoreAudio details cpal does not cover: how an output is connected
+//! (`kAudioDevicePropertyTransportType`: two property reads, nothing opened), and which thread
+//! CoreAudio's notifications arrive on.
 
 use super::Transport;
 use objc2_core_audio::{
     AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
-    AudioObjectPropertySelector, kAudioDevicePropertyTransportType,
+    AudioObjectPropertySelector, AudioObjectSetPropertyData, kAudioDevicePropertyTransportType,
     kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE,
     kAudioDeviceTransportTypeBuiltIn, kAudioDeviceTransportTypeDisplayPort,
     kAudioDeviceTransportTypeHDMI, kAudioDeviceTransportTypeUSB, kAudioHardwareNoError,
-    kAudioHardwarePropertyTranslateUIDToDevice, kAudioObjectPropertyElementMain,
-    kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, kAudioObjectUnknown,
+    kAudioHardwarePropertyRunLoop, kAudioHardwarePropertyTranslateUIDToDevice,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+    kAudioObjectUnknown,
 };
 use objc2_core_foundation::CFString;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{self, NonNull};
+use std::sync::Once;
+
+/// Has CoreAudio deliver its notifications on a thread of its own rather than on the main
+/// thread's run loop, which the app's UI may keep busy (cpal waits for one of them when it
+/// switches a device's rate). Once per process, before any device is listed. Best effort: if
+/// CoreAudio refuses, notifications stay on the main run loop.
+pub(super) fn notify_on_own_thread() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // A null CFRunLoopRef means CoreAudio's own thread.
+        let run_loop: *const c_void = ptr::null();
+        // SAFETY: the property is one CFRunLoopRef, matching the size; there is no qualifier.
+        let _status = unsafe {
+            AudioObjectSetPropertyData(
+                kAudioObjectSystemObject as AudioObjectID,
+                NonNull::from(&address(kAudioHardwarePropertyRunLoop)),
+                0,
+                ptr::null(),
+                size_of::<*const c_void>() as u32,
+                NonNull::from(&run_loop).cast(),
+            )
+        };
+    });
+}
 
 /// The transport of the device whose UID (cpal's device id on macOS) is `uid`, or `None` if
 /// CoreAudio does not know the device.

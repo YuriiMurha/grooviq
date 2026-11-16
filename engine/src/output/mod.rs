@@ -1,9 +1,10 @@
 //! Output devices: which device the engine plays on, and moving it there safely.
 //!
 //! [`OutputMonitor`] decides from the device list alone. It follows the system default (or the
-//! device the user chose, using the default while that one is gone), and its speaker guard stops
-//! playback when sound would move from headphones to anything else. [`AudioOutput`] carries the
-//! decisions out on an [`OutputBackend`]: it owns the processor, looks at the devices every
+//! device the user chose, using the default while that one is gone). Its speaker guard stops
+//! playback whenever the output moves by itself (a new default, a lost device, a moment with no
+//! device) to anything but headphones; a move the user picks plays on. [`AudioOutput`] carries
+//! the decisions out on an [`OutputBackend`]: it owns the processor, looks at the devices every
 //! 500 ms and switches streams so that a guard stop never reaches the new device.
 //! [`cpal_backend`] is the real backend.
 //!
@@ -17,6 +18,7 @@ mod macos;
 
 pub use backend::{AudioOutput, AudioSlot, OutputBackend};
 pub use cpal_backend::cpal_backend;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// What an output is, as far as the speaker guard is concerned.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,7 +51,8 @@ pub struct OutputInfo {
     pub kind: OutputKind,
     /// The system's default output.
     pub is_default: bool,
-    /// The rate the backend runs the device at when it opens it.
+    /// The rate the backend asks the device for when it opens it. [`AudioOutput::current`] and
+    /// the events [`AudioOutput`] delivers carry the rate the stream really runs at.
     pub sample_rate: u32,
 }
 
@@ -62,22 +65,27 @@ pub enum OutputChoice {
     Device(String),
 }
 
-/// A change [`OutputMonitor::tick`] decided, in the order it happened.
+/// A change [`OutputMonitor::tick`] decided (or, for `OpenFailed`, a failure [`AudioOutput`]
+/// met), in the order it happened.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OutputEvent {
-    /// An output was chosen while none was in use. [`AudioOutput`] also reports it when it
-    /// reopens a device whose stream failed.
+    /// An output was chosen while none was in use. [`AudioOutput`] also reports it when a
+    /// device it could not open opens at last, and once when it reopens a failed stream.
     Opened(OutputInfo),
     /// The output moved to another device.
     Switched { from: OutputInfo, to: OutputInfo },
-    /// The speaker guard stopped playback, because sound would have moved from headphones to
-    /// `to`. It comes before the `Switched` or `Opened` that moves there.
+    /// The speaker guard stopped playback, because the output moved by itself to `to`, which
+    /// is not headphones. It comes before the `Switched` or `Opened` that moves there.
     GuardStopped { to: OutputInfo },
     /// The chosen device is gone. The output falls back to the system default, if there is
-    /// one. Reported once until the device returns or the choice changes.
+    /// one. Reported again once the device has come back, or the choice has changed.
     Lost { fallback: Option<OutputInfo> },
-    /// There is no device to play on. Reported once until there is one again.
+    /// There is no device to play on. Reported again once there has been one.
     NoDevice,
+    /// [`AudioOutput`] could not open `output`, so nothing plays. It keeps trying the same
+    /// device (after 0.5 s, then doubling up to 8 s) and never falls back to another one.
+    /// Reported once per device until it opens or the choice changes.
+    OpenFailed { output: OutputInfo, error: String },
 }
 
 /// Name words that mean headphones. They win over the transport: "External Headphones" is a
@@ -96,12 +104,12 @@ const HEADPHONE_WORDS: [&str; 11] = [
     "wf-",
 ];
 
-/// Name words that mean speakers, for outputs whose transport does not tell.
+/// Name words that mean speakers.
 const SPEAKER_WORDS: [&str; 5] = ["speaker", "display", "monitor", "hdmi", "tv"];
 
-/// Classifies an output by headphone words in its name, then by its transport (Bluetooth means
-/// headphones; built-in, HDMI and DisplayPort mean speakers), then by speaker words in its name.
-/// Names match case-insensitively.
+/// Classifies an output: headphone words in its name mean headphones; then a built-in, HDMI or
+/// DisplayPort transport, or speaker words in its name, mean speakers. Anything else is
+/// unknown, Bluetooth included (Bluetooth speakers exist). Names match case-insensitively.
 pub fn classify(name: &str, transport: Option<Transport>) -> OutputKind {
     let name = name.to_lowercase();
     let says = |words: &[&str]| words.iter().any(|word| name.contains(word));
@@ -109,7 +117,6 @@ pub fn classify(name: &str, transport: Option<Transport>) -> OutputKind {
         return OutputKind::Headphones;
     }
     match transport {
-        Some(Transport::Bluetooth) => OutputKind::Headphones,
         Some(Transport::BuiltIn | Transport::Hdmi | Transport::DisplayPort) => OutputKind::Speakers,
         _ if says(&SPEAKER_WORDS) => OutputKind::Speakers,
         _ => OutputKind::Unknown,
@@ -122,9 +129,11 @@ pub struct OutputMonitor {
     choice: OutputChoice,
     guard: bool,
     current: Option<OutputInfo>,
-    /// The kind of the device in use last. It outlives a moment with no device, so the guard
-    /// also covers headphones, then nothing, then speakers.
-    last_kind: Option<OutputKind>,
+    /// A device has been in use: from now on a move may need the guard. The very first open
+    /// never does.
+    used_before: bool,
+    /// The choice changed since the last tick, so the move it causes is the user's own.
+    chosen_by_user: bool,
     /// `Lost` was reported, and the chosen device has not come back since.
     lost_reported: bool,
     /// `NoDevice` was reported, and there has been no device since.
@@ -137,16 +146,20 @@ impl OutputMonitor {
             choice,
             guard,
             current: None,
-            last_kind: None,
+            used_before: false,
+            chosen_by_user: false,
             lost_reported: false,
             no_device_reported: false,
         }
     }
 
-    /// Applies at the next tick.
+    /// Applies at the next tick. The move it causes there, to the device the choice names, is
+    /// the user's own: the guard lets it play on. A fallback (the chosen device is missing)
+    /// still counts as a move by itself.
     pub fn set_choice(&mut self, c: OutputChoice) {
         self.choice = c;
         self.lost_reported = false;
+        self.chosen_by_user = true;
     }
 
     /// Turns the speaker guard on or off.
@@ -158,12 +171,14 @@ impl OutputMonitor {
     ///
     /// The target is the chosen device if it is listed, otherwise the system default (with
     /// `Lost` when the chosen one is gone). If no device is flagged default, the current one
-    /// stays while it is listed. Moving away from headphones to anything else emits
-    /// `GuardStopped` first when the guard is on. `Opened` means nothing was in use;
+    /// stays while it is listed. When the guard is on and the output moves by itself to
+    /// anything but headphones, `GuardStopped` comes first. `Opened` means nothing was in use;
     /// `NoDevice`, that there is nothing to use.
     pub fn tick(&mut self, devices: &[OutputInfo]) -> Vec<OutputEvent> {
         let mut events = Vec::new();
-        let Some(target) = self.target(devices, &mut events).cloned() else {
+        let by_user = std::mem::take(&mut self.chosen_by_user);
+        let (target, as_chosen) = self.target(devices, &mut events);
+        let Some(target) = target.cloned() else {
             self.current = None;
             if !std::mem::replace(&mut self.no_device_reported, true) {
                 events.push(OutputEvent::NoDevice);
@@ -171,11 +186,12 @@ impl OutputMonitor {
             return events;
         };
         self.no_device_reported = false;
+        let by_itself = !(by_user && as_chosen);
         match self.current.take() {
             // The same device: keep it, with its fresh details.
             Some(current) if current.id == target.id => {}
             Some(current) => {
-                if self.guard_stops(current.kind, &target) {
+                if self.guard_stops(by_itself, &target) {
                     events.push(OutputEvent::GuardStopped { to: target.clone() });
                 }
                 events.push(OutputEvent::Switched {
@@ -184,15 +200,13 @@ impl OutputMonitor {
                 });
             }
             None => {
-                if let Some(last) = self.last_kind
-                    && self.guard_stops(last, &target)
-                {
+                if self.used_before && self.guard_stops(by_itself, &target) {
                     events.push(OutputEvent::GuardStopped { to: target.clone() });
                 }
                 events.push(OutputEvent::Opened(target.clone()));
             }
         }
-        self.last_kind = Some(target.kind);
+        self.used_before = true;
         self.current = Some(target);
         events
     }
@@ -202,24 +216,19 @@ impl OutputMonitor {
         self.current.as_ref()
     }
 
-    /// Drops the device in use because it failed to open. Its kind stays for the guard, and the
-    /// next tick opens the target again.
-    pub(crate) fn forget_current(&mut self) {
-        self.current = None;
-    }
-
+    /// The device to use, and whether it is the one the choice names (not a fallback).
     fn target<'a>(
         &mut self,
         devices: &'a [OutputInfo],
         events: &mut Vec<OutputEvent>,
-    ) -> Option<&'a OutputInfo> {
+    ) -> (Option<&'a OutputInfo>, bool) {
         let default = devices.iter().find(|d| d.is_default);
-        let wanted = match &self.choice {
-            OutputChoice::SystemDefault => default,
+        let (wanted, named) = match &self.choice {
+            OutputChoice::SystemDefault => (default, true),
             OutputChoice::Device(id) => match devices.iter().find(|d| d.id == *id) {
                 Some(chosen) => {
                     self.lost_reported = false;
-                    Some(chosen)
+                    (Some(chosen), true)
                 }
                 None => {
                     if !std::mem::replace(&mut self.lost_reported, true) {
@@ -227,19 +236,27 @@ impl OutputMonitor {
                             fallback: default.cloned(),
                         });
                     }
-                    default
+                    (default, false)
                 }
             },
         };
+        if wanted.is_some() {
+            return (wanted, named);
+        }
         // While the system moves its default, a list may have none flagged: stay put.
-        wanted.or_else(|| {
-            let current = self.current.as_ref()?;
-            devices.iter().find(|d| d.id == current.id)
-        })
+        let current = self.current.as_ref();
+        let stay = current.and_then(|current| devices.iter().find(|d| d.id == current.id));
+        (stay, false)
     }
 
-    /// Whether the guard stops playback when the output moves from a `from` device to `to`.
-    fn guard_stops(&self, from: OutputKind, to: &OutputInfo) -> bool {
-        self.guard && from == OutputKind::Headphones && to.kind != OutputKind::Headphones
+    /// Whether the guard stops playback for a move to `to`.
+    fn guard_stops(&self, by_itself: bool, to: &OutputInfo) -> bool {
+        self.guard && by_itself && to.kind != OutputKind::Headphones
     }
+}
+
+/// Locks `mutex` even if a thread panicked while holding it: the output layer must still be
+/// able to stop the sound.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

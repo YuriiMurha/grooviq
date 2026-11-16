@@ -27,9 +27,9 @@ impl OutputBackend for OneDevice {
         }]
     }
 
-    fn open(&mut self, _info: &OutputInfo, slot: Arc<AudioSlot>) -> Result<(), String> {
+    fn open(&mut self, info: &OutputInfo, slot: Arc<AudioSlot>) -> Result<u32, String> {
         *self.0.lock().unwrap() = Some(slot);
-        Ok(())
+        Ok(info.sample_rate)
     }
 
     fn close(&mut self) {
