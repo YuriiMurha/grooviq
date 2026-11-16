@@ -2013,7 +2013,9 @@ impl Device for Synth {
         }
         self.p[i] = v;
         self.apply(i);
-        if self.fresh {
+        // Before the first block, or while no voice sounds, there is nothing to declick: the
+        // change takes effect at once (a preset loaded between notes must not ramp in).
+        if self.fresh || self.voices.iter().all(|v| !v.active) {
             self.snap_all();
         }
     }
@@ -2238,6 +2240,59 @@ mod tests {
             i = e;
         }
         (l, r)
+    }
+
+    /// A preset loaded while the engine runs but no note sounds takes effect at once: the first
+    /// note after it sounds exactly as on a synth that had the preset from the start. (These
+    /// presets leave the LFO rate and shape at their defaults, so its phase matches too.)
+    #[test]
+    fn a_preset_loaded_while_silent_does_not_ramp_in() {
+        for name in ["Pluck", "Bell Keys", "808 Glide"] {
+            let silent = 4_800;
+            let render = |load_first: bool| {
+                let mut s = Synth::new(48_000.0);
+                let load = |s: &mut Synth| {
+                    for (i, v) in preset(name).unwrap() {
+                        s.set_param(i, v);
+                    }
+                };
+                if load_first {
+                    load(&mut s);
+                }
+                let (mut l, mut r) = (vec![0.0f32; silent + 24_000], vec![0.0f32; silent + 24_000]);
+                let mut c = 0;
+                while c < l.len() {
+                    if c == silent && !load_first {
+                        load(&mut s);
+                    }
+                    let e = (c + MAX_BLOCK).min(l.len()).min(if c < silent {
+                        silent
+                    } else {
+                        usize::MAX
+                    });
+                    let on = NoteEvent {
+                        offset: 0,
+                        key: 48,
+                        velocity: 0.9,
+                        on: true,
+                        slide: false,
+                    };
+                    let ev: &[NoteEvent] = if c == silent { &[on] } else { &[] };
+                    s.process(&mut l[c..e], &mut r[c..e], None, ev);
+                    c = e;
+                }
+                (l, r)
+            };
+            let (a, b) = (render(true), render(false));
+            assert!(
+                a.0[..4_800].iter().all(|v| *v == 0.0),
+                "{name}: not silent before the note"
+            );
+            let diff = (0..a.0.len())
+                .map(|i| (a.0[i] - b.0[i]).abs().max((a.1[i] - b.1[i]).abs()))
+                .fold(0.0f32, f32::max);
+            assert!(diff == 0.0, "{name}: loaded while silent differs by {diff}");
+        }
     }
 
     #[test]
