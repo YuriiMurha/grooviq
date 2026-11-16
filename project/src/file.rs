@@ -412,12 +412,29 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
     })
 }
 
-/// Whether a path a project file names is a UNC share (`\\server\share`, `//server/share`) or a
-/// Windows device or verbatim path (`\\?\`, `\\.\`). Checked on the text, on every platform, so
-/// a file saved on one system is judged the same on another.
+/// Whether a path a project file names is a UNC share (`\\server\share`), a Windows device or
+/// verbatim path (`\\?\`, `\\.\`) or an NT path (`\??\`). Windows reads `/` and `\` as the
+/// same separator, so `\/server` and `/\server` are shares too: any path that starts with two
+/// separators, or with a separator and `?`, is refused. The text check runs on every platform,
+/// so a file saved on one system is judged the same on another; on Windows the parsed prefix
+/// must also be a plain drive.
 fn is_network_or_device_path(path: &Path) -> bool {
     let text = path.to_string_lossy();
-    text.starts_with("\\\\") || text.starts_with("//")
+    let mut chars = text.chars();
+    let sep = |c: char| c == '/' || c == '\\';
+    let by_text = matches!(
+        (chars.next(), chars.next()),
+        (Some(a), Some(b)) if sep(a) && (sep(b) || b == '?')
+    );
+    #[cfg(windows)]
+    let by_prefix = matches!(
+        path.components().next(),
+        Some(std::path::Component::Prefix(p))
+            if !matches!(p.kind(), std::path::Prefix::Disk(_))
+    );
+    #[cfg(not(windows))]
+    let by_prefix = false;
+    by_text || by_prefix
 }
 
 /// Brings a parsed `project.json` up to [`VERSION`]. Version 1 passes through unchanged; a
@@ -607,11 +624,17 @@ mod tests {
             "//server/share/kick.wav",
             "\\\\?\\C:\\kick.wav",
             "\\\\.\\pipe\\x",
+            "\\/server/share/kick.wav", // mixed separators: still a share on Windows
+            "/\\server\\share\\kick.wav",
+            "\\??\\C:\\kick.wav",
+            "/?/C:/kick.wav",
         ] {
             assert!(is_network_or_device_path(Path::new(path)), "{path}");
         }
         for path in [
             "/music/kick.wav",
+            "/.config/kick.wav",
+            "C:/music/kick.wav",
             "C:\\music\\kick.wav",
             "kick.wav",
             "../kick.wav",
