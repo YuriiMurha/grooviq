@@ -3,11 +3,12 @@
 //! comparison. Refresh the refs on purpose with `GOLDEN_UPDATE=1 cargo test -p grooviq-golden`
 //! and say why in the commit message.
 
-pub mod devices;
 use std::path::Path;
 
 use grooviq_dsp::synth::preset;
 use grooviq_engine::{Command, EngineConfig, render_offline};
+
+pub mod devices;
 
 /// Sample rate of every scene and reference file.
 pub const SAMPLE_RATE: u32 = 48_000;

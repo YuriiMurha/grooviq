@@ -149,6 +149,30 @@ fn the_amounts_scale_each_direction_and_each_band() {
     }
 }
 
+/// The low (params 11, 14) and high (13, 16) band amounts act on their own band: an 80 Hz sine
+/// sits in the low band and an 8 kHz sine in the high band. The splits are moved to 400 Hz and
+/// 2 kHz so each sine is two octaves or more from the nearest crossover (the 24 dB/oct slopes
+/// then keep it out of the neighbouring band's detector).
+#[test]
+fn the_low_and_high_band_amounts_act_on_their_own_band() {
+    let base = [(0u32, 1.0f32), (7, 400.0), (8, 2000.0)];
+    // (parameter, frequency, level in dBFS: -60 for upward, -6 for downward)
+    for (idx, hz, amp_db) in [
+        (11u32, 80.0f32, -60.0f32),
+        (14, 80.0, -6.0),
+        (13, 8000.0, -60.0),
+        (16, 8000.0, -6.0),
+    ] {
+        let on = gain_for(&base, hz, amp_db);
+        let off = gain_for(&[base[0], base[1], base[2], (idx, 0.0)], hz, amp_db);
+        assert!(
+            on.abs() > 8.0 && off.abs() < 0.5,
+            "{} at {hz} Hz, {amp_db} dBFS: on {on:+.1} dB, off {off:+.1} dB",
+            PARAM_IDS[idx as usize]
+        );
+    }
+}
+
 /// The crossovers sum flat: with depth 0 the output level equals the input level for sines from
 /// 20 Hz to 20 kHz, at the default splits and at the extremes of both split controls.
 #[test]
@@ -301,16 +325,23 @@ fn process_never_allocates() {
     let x = sine(440.0, n, 0.5);
     let (mut l, mut r) = (x.clone(), x);
     for k in 0..200 {
-        // parameter changes of every kind, including the crossover frequencies
-        for (i, &(lo, hi, _)) in SPEC.iter().enumerate() {
-            let t = ((k * 7 + i * 13) % 20) as f32 / 19.0;
-            d.set_param(i as u32, lo + (hi - lo) * t);
-        }
+        // parameter changes of every kind (all indices, several values each, plus out-of-range
+        // and non-finite values and an unknown index), including the crossover frequencies
+        assert_no_alloc::assert_no_alloc(|| {
+            for (i, &(lo, hi, _)) in SPEC.iter().enumerate() {
+                let t = ((k * 7 + i * 13) % 20) as f32 / 19.0;
+                d.set_param(i as u32, lo + (hi - lo) * t);
+                d.set_param(i as u32, hi * 2.0);
+                d.set_param(i as u32, f32::NAN);
+                d.set_param(i as u32, lo);
+                d.set_param(i as u32, hi);
+            }
+            d.set_param(SPEC.len() as u32, 1.0);
+        });
         assert_no_alloc::assert_no_alloc(|| {
             d.process(&mut l, &mut r, None, &[]);
             d.meter(0);
         });
-        assert_no_alloc::assert_no_alloc(|| d.set_param(7, 200.0 + k as f32));
     }
     assert_no_alloc::assert_no_alloc(|| d.reset());
 }

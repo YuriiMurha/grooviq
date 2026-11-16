@@ -83,22 +83,25 @@ pub fn preset(name: &str) -> Option<Vec<(u32, f32)>> {
         "Init" | "Default" => return Some(
             SPEC.iter().enumerate().map(|(i, s)| (i as u32, s.2)).collect(),
         ),
-        // Light touch: lifts room and tail detail, leaves the peaks mostly alone.
+        // Light touch: low depth, full upward but only 40% downward, +1.5 dB on the top band.
         "Soft Lift" => [
             0.35, 0.6, 1.0, 0.4, 0.0, 0.0, 1.5, 120.0, 2500.0, -1.0,
             0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
         ],
-        // Fast and punchy: keeps the low end firm and brings out the top of a drum loop.
+        // Fast time and full downward; the upward lift is strongest in the lows and tapers off toward
+        // the top (band upward 1.0 / 0.8 / 0.6, half the global amount), with +1 dB low and +2 dB high.
         "Drum Grip" => [
             0.6, 0.25, 0.5, 1.0, 1.0, 0.0, 2.0, 100.0, 3500.0, -2.0,
             0.0, 1.0, 0.8, 0.6, 1.0, 1.0, 1.0,
         ],
-        // Opens the top band with a slow release; the lows are left nearly untouched.
+        // Slow time; lifts mostly the top band (band upward 0.2 / 0.6 / 1.0, light downward) and adds
+        // +3 dB there from 5 kHz up, so the lows and mids are barely moved.
         "Air Bloom" => [
             0.5, 0.7, 1.0, 0.3, 0.0, 0.0, 3.0, 150.0, 5000.0, -2.0,
             0.0, 0.2, 0.6, 1.0, 0.2, 0.4, 0.2,
         ],
-        // Evens out a bass line: mostly downward in the lows, lifts only a little above.
+        // Evens out a bass line: full downward in every band, but upward only at 60% overall, weaker
+        // in the mids and off in the highs; +2 dB low, -1 dB mid, -2 dB high.
         "Bass Anchor" => [
             0.7, 0.5, 0.6, 1.0, 2.0, -1.0, -2.0, 160.0, 2000.0, -1.0,
             0.0, 0.5, 0.3, 0.0, 1.0, 1.0, 1.0,
@@ -113,7 +116,7 @@ pub fn preset(name: &str) -> Option<Vec<(u32, f32)>> {
             0.8, 0.5, 1.0, 0.0, 0.0, 0.0, 1.0, 120.0, 2500.0, -2.0,
             0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
         ],
-        // Downward only, driven a little harder into the bands to catch peaks.
+        // Downward only (upward off); +2 dB of input gain drives the bands harder into the curve.
         "Peak Tamer" => [
             0.45, 0.35, 0.0, 1.0, 0.0, 0.0, 0.0, 120.0, 2500.0, 0.0,
             2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
