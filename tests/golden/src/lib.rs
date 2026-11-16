@@ -9,6 +9,9 @@ use grooviq_dsp::synth::preset;
 use grooviq_engine::{Command, EngineConfig, render_offline};
 
 pub mod devices;
+pub mod drums;
+
+pub use drums::{KIT, LOOPS, decode_samples, drums_4ch_project, kit_dir};
 
 /// Sample rate of every scene and reference file.
 pub const SAMPLE_RATE: u32 = 48_000;

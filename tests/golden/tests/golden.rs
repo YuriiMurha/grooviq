@@ -61,3 +61,172 @@ fn compare_rejects_non_finite_samples() {
         assert!(compare(&bad, &good).is_err(), "{bad_value} accepted");
     }
 }
+
+mod drums_4ch {
+    use grooviq_engine::{
+        Command, EngineConfig, ExportOptions, WavFormat, export_wav, render_offline_with,
+        ticks_to_frames,
+    };
+    use grooviq_golden::{LOOPS, SAMPLE_RATE, decode_samples, drums_4ch_project, kit_dir};
+    use grooviq_project::{engine_state, load, save};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicBool;
+
+    fn golden_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn read_f32(path: &Path) -> Vec<f32> {
+        hound::WavReader::open(path)
+            .unwrap_or_else(|e| panic!("cannot open {} ({e})", path.display()))
+            .samples::<f32>()
+            .map(|s| s.unwrap())
+            .collect()
+    }
+
+    /// The first sample that differs, as "frame N, left/right: a vs b".
+    fn first_difference(actual: &[f32], reference: &[f32]) -> String {
+        match actual
+            .iter()
+            .zip(reference)
+            .position(|(a, b)| a.to_bits() != b.to_bits())
+        {
+            Some(i) => format!(
+                "frame {}, {}: {:e} exported vs {:e} in the reference",
+                i / 2,
+                if i % 2 == 0 { "left" } else { "right" },
+                actual[i],
+                reference[i]
+            ),
+            None => format!(
+                "no sample differs in the first {} ({} vs {} samples)",
+                actual.len().min(reference.len()),
+                actual.len(),
+                reference.len()
+            ),
+        }
+    }
+
+    /// Kit → project → `.grooviq` → load → decode → engine state → WAV, exactly as the app does.
+    #[test]
+    fn drums_4ch_exports_bit_identical_to_its_golden_file() {
+        let out = golden_dir().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let (project, files) = drums_4ch_project(&kit_dir());
+        let project_path = out.join("drums_4ch.grooviq");
+        save(&project, &files, &project_path).expect("save the project");
+        let loaded = load(&project_path).expect("load the project");
+        assert_eq!(loaded.warnings, Vec::<String>::new());
+        assert_eq!(loaded.samples.len(), 4, "every sample is embedded");
+        let state = engine_state(&loaded.project, &decode_samples(&loaded.samples));
+
+        let wav = out.join("drums_4ch.wav");
+        let options = ExportOptions {
+            sample_rate: SAMPLE_RATE,
+            format: WavFormat::Float32,
+            loops: LOOPS,
+            max_tail_seconds: 10.0,
+        };
+        let report = export_wav(state, &options, &wav, &mut |_| {}, &AtomicBool::new(false))
+            .expect("export");
+        assert!(
+            report.peak < 1.0,
+            "the reference clips: peak {}",
+            report.peak
+        );
+
+        let reference = golden_dir().join("refs").join("drums_4ch.wav");
+        if std::env::var("GOLDEN_UPDATE").as_deref() == Ok("1") {
+            std::fs::copy(&wav, &reference).unwrap();
+            println!("golden file updated: explain why in the commit message");
+            return;
+        }
+        let actual_bytes = std::fs::read(&wav).unwrap();
+        let reference_bytes = std::fs::read(&reference).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {} ({e}); create it with GOLDEN_UPDATE=1",
+                reference.display()
+            )
+        });
+        if actual_bytes != reference_bytes {
+            panic!(
+                "the export is not byte-identical to {} ({} vs {} bytes); first difference: {}",
+                reference.display(),
+                actual_bytes.len(),
+                reference_bytes.len(),
+                first_difference(&read_f32(&wav), &read_f32(&reference))
+            );
+        }
+    }
+
+    /// The reference itself, checked without listening: the pattern plus a tail of whole blocks,
+    /// below full scale, and a kick onset on every kick step.
+    #[test]
+    fn drums_4ch_reference_is_sane() {
+        let reference = read_f32(&golden_dir().join("refs").join("drums_4ch.wav"));
+        let (project, _) = drums_4ch_project(&kit_dir());
+        let pattern = ticks_to_frames(
+            f64::from(LOOPS * 16 * grooviq_engine::STEP_TICKS),
+            project.bpm,
+            SAMPLE_RATE as f32,
+        ) as usize;
+        let frames = reference.len() / 2;
+        // The last hat ends before the pattern does, so its tail is all silence and is cut.
+        assert!(frames >= pattern, "{frames} frames, pattern {pattern}");
+        assert_eq!((frames - pattern) % 64, 0, "the tail is not whole blocks");
+        assert!(frames < pattern + SAMPLE_RATE as usize, "a tail over 1 s");
+        let peak = reference.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(peak > 0.3 && peak < 1.0, "peak {peak}");
+
+        // Kick steps 0, 3 (swung by 60 ticks), 8 and 10 in both loops: the 10 ms after each
+        // is much louder than the 10 ms before.
+        let window = SAMPLE_RATE as usize / 100;
+        let level = |from: usize, to: usize| {
+            reference[from * 2..to * 2]
+                .iter()
+                .fold(0.0f32, |m, x| m.max(x.abs()))
+        };
+        for lp in 0..LOOPS {
+            for tick in [0, 3 * 240 + 60, 8 * 240, 10 * 240] {
+                let at = ticks_to_frames(
+                    f64::from(lp * 16 * 240 + tick),
+                    project.bpm,
+                    SAMPLE_RATE as f32,
+                ) as usize;
+                let before = level(at.saturating_sub(window), at);
+                let after = level(at, at + window);
+                assert!(
+                    after > 1.5 * before && after > 0.3,
+                    "no kick onset at frame {at}: {before} before, {after} after"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn drums_4ch_is_identical_at_callback_sizes_37_64_512() {
+        let (project, files) = drums_4ch_project(&kit_dir());
+        let state = engine_state(&project, &decode_samples(&files));
+        let config = EngineConfig {
+            sample_rate: SAMPLE_RATE as f32,
+        };
+        let frames = 3 * SAMPLE_RATE as usize;
+        let events = [(0, Command::PlayLoops { loops: LOOPS })];
+        let render =
+            |callback| render_offline_with(config, state.clone(), &events, frames, callback);
+        let reference = render(64);
+        assert!(reference.iter().any(|x| x.abs() > 0.1), "silent render");
+        for callback in [37, 512] {
+            let other = render(callback);
+            assert!(
+                other.len() == reference.len()
+                    && other
+                        .iter()
+                        .zip(&reference)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "callback size {callback} differs: {}",
+                first_difference(&other, &reference)
+            );
+        }
+    }
+}
