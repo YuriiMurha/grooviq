@@ -6,10 +6,11 @@
 static A: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
 use grooviq_engine::{
-    Command, EngineConfig, HealthEvent, INJECTED_PANIC, engine, in_audio_callback,
+    ChannelId, ChannelMix, ChannelSetup, Command, EngineConfig, EngineState, HealthEvent,
+    INJECTED_PANIC, SampleBuf, engine, engine_with, in_audio_callback,
 };
-use std::sync::Once;
 use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+use std::sync::{Arc, Once};
 
 /// Injected panics the hook saw with the rendering flag on, and with it off.
 static INSIDE: AtomicU32 = AtomicU32::new(0);
@@ -209,4 +210,102 @@ fn a_fault_cleared_by_reconfigure_is_reported_but_never_restarts_the_new_graph()
     let mut buf = vec![0f32; 4096 * 2];
     p.process(&mut buf, 2);
     assert!(peak(&buf) > 0.05, "held note: {}", peak(&buf));
+}
+
+#[test]
+fn a_panic_restart_restores_channels_samples_and_mix() {
+    silence_injected_panics();
+    let l: Vec<f32> = (0..2_000).map(|i| (i as f32 * 0.03).sin() * 0.7).collect();
+    let r: Vec<f32> = l.iter().map(|x| -0.5 * x).collect();
+    let first = Arc::new(SampleBuf {
+        rate: SR,
+        l: vec![0.3; 100],
+        r: vec![0.3; 100],
+    });
+    let sample = Arc::new(SampleBuf { rate: SR, l, r });
+    let state = EngineState {
+        channels: vec![ChannelSetup {
+            id: ChannelId(4),
+            sample: Some(Arc::clone(&first)),
+            sampler: Vec::new(),
+            mix: ChannelMix::default(),
+        }],
+        ..EngineState::default()
+    };
+    let swap = |c: &mut grooviq_engine::Controller| {
+        c.set_channel_sample(ChannelId(4), Some(Arc::clone(&sample)))
+            .unwrap();
+    };
+    // Changed after creation, so only the controller's mirror carries them into the rebuild.
+    let setup = [
+        Command::SetChannelMix {
+            channel: ChannelId(4),
+            mix: ChannelMix {
+                volume: 0.5,
+                pan: 0.6,
+                mute: false,
+                solo: false,
+            },
+        },
+        // Tune +7 semitones, release 300 ms, gate mode.
+        Command::SetSamplerParam {
+            channel: ChannelId(4),
+            index: 1,
+            value: 7.0,
+        },
+        Command::SetSamplerParam {
+            channel: ChannelId(4),
+            index: 11,
+            value: 300.0,
+        },
+        Command::SetSamplerParam {
+            channel: ChannelId(4),
+            index: 7,
+            value: 0.0,
+        },
+    ];
+    let note = Command::ChannelNote {
+        channel: ChannelId(4),
+        key: 64,
+        velocity: 0.7,
+        on: true,
+    };
+    let mut buf = vec![0f32; 1024 * 2];
+
+    let (mut rc, mut rp) = engine_with(cfg(), state.clone());
+    swap(&mut rc);
+    for cmd in setup {
+        rc.send(cmd).unwrap();
+    }
+    rp.process(&mut buf, 2);
+    rc.send(note).unwrap();
+    let mut expected = vec![0f32; 4096 * 2];
+    rp.process(&mut expected, 2);
+    assert!(peak(&expected) > 0.05, "the note is audible");
+
+    let (mut c, mut p) = engine_with(cfg(), state);
+    swap(&mut c);
+    for cmd in setup {
+        c.send(cmd).unwrap();
+    }
+    c.send(Command::InjectPanic).unwrap();
+    p.process(&mut buf, 2);
+    assert!(
+        c.check_health()
+            .contains(&HealthEvent::Restarted { faults: 1 })
+    );
+    p.process(&mut buf, 2);
+    c.send(note).unwrap();
+    let mut actual = vec![0f32; 4096 * 2];
+    p.process(&mut actual, 2);
+    assert!(
+        actual == expected,
+        "the rebuilt channel plays like the original"
+    );
+    // The faulted graph went back to the controller, so only the test, both states and both
+    // live graphs hold the sample now (after the next free); the reference engine still holds
+    // the replaced sample in its trash queue.
+    c.check_health();
+    assert_eq!(Arc::strong_count(&sample), 5);
+    assert_eq!(Arc::strong_count(&first), 2);
 }

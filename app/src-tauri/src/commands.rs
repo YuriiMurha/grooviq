@@ -6,6 +6,7 @@ use crate::events::{OutputDto, output_dto};
 use crate::{Audio, lock, settings};
 use grooviq_engine::{Command, OutputChoice};
 use serde::Serialize;
+use std::sync::Mutex;
 use tauri::State;
 
 /// The id `audio_select` takes for "follow the system default".
@@ -60,9 +61,10 @@ pub async fn audio_select(audio: State<'_, Audio>, id: String) -> Result<(), Str
         let message = format!("Output set to {}", info.name);
         (OutputChoice::Device(id.clone()), Some(id), message)
     };
-    audio.output.select(choice);
+    // One settings lock around the switch and the save: two quick picks must save the output
+    // that ended up playing, not the one that applied first. `select` never blocks.
+    apply_and_save(&audio, || audio.output.select(choice), |s| s.output = saved);
     lock(&audio.log).push(Level::Info, message);
-    save_settings(&audio, |s| s.output = saved);
     Ok(())
 }
 
@@ -82,14 +84,15 @@ pub async fn audio_settings(audio: State<'_, Audio>) -> Result<AudioSettings, St
 /// Turns the speaker guard on or off and remembers it.
 #[tauri::command]
 pub async fn audio_set_guard(audio: State<'_, Audio>, on: bool) -> Result<(), String> {
-    audio.output.set_guard(on);
+    // Same as `audio_select`: the switch and the save under one settings lock. `set_guard` is
+    // one atomic store.
+    apply_and_save(&audio, || audio.output.set_guard(on), |s| s.guard = on);
     let message = if on {
         "Speaker guard on: playback stops if sound would move to speakers"
     } else {
         "Speaker guard off"
     };
     lock(&audio.log).push(Level::Info, message);
-    save_settings(&audio, |s| s.guard = on);
     Ok(())
 }
 
@@ -144,13 +147,102 @@ fn send(audio: &Audio, cmd: Command) -> Result<(), String> {
     })
 }
 
-/// Changes the settings and writes them, logging a failure (the change still applies now).
-fn save_settings(audio: &Audio, change: impl FnOnce(&mut settings::Settings)) {
-    let mut current = lock(&audio.settings);
+/// Runs `apply`, then changes the settings and writes them, all under the settings lock. A
+/// failed save is logged (the change still applies now).
+///
+/// Lock order: settings, then log (a failed save logs while holding the settings lock). Nothing
+/// takes the settings lock while holding the log lock, and `apply` must not take either.
+fn apply_and_save(
+    audio: &Audio,
+    apply: impl FnOnce(),
+    change: impl FnOnce(&mut settings::Settings),
+) {
+    under_lock(&audio.settings, apply, change, |current| {
+        if let Some(path) = &audio.settings_path
+            && let Err(e) = settings::save(path, current)
+        {
+            lock(&audio.log).push(Level::Warn, format!("Settings could not be saved: {e}"));
+        }
+    });
+}
+
+/// Holds `state`'s lock while it runs `apply`, `change` and `save`, so concurrent callers
+/// cannot interleave: what `save` writes is what the last `apply` did.
+fn under_lock<S>(
+    state: &Mutex<S>,
+    apply: impl FnOnce(),
+    change: impl FnOnce(&mut S),
+    save: impl FnOnce(&S),
+) {
+    let mut current = lock(state);
+    apply();
     change(&mut current);
-    if let Some(path) = &audio.settings_path
-        && let Err(e) = settings::save(path, &current)
-    {
-        lock(&audio.log).push(Level::Warn, format!("Settings could not be saved: {e}"));
+    save(&current);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::under_lock;
+    use std::sync::mpsc;
+    use std::sync::{Barrier, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn the_lock_is_held_while_applying_and_saving() {
+        let state = Mutex::new(0);
+        under_lock(
+            &state,
+            || assert!(state.try_lock().is_err(), "unlocked while applying"),
+            |s| *s = 1,
+            |_| assert!(state.try_lock().is_err(), "unlocked while saving"),
+        );
+        assert_eq!(*state.lock().unwrap(), 1);
+    }
+
+    /// Two racing picks: whichever applies last must also be what is saved. The first pick
+    /// waits (briefly) for the other to apply; without the lock it gets it, and the second
+    /// pick saves before the first, so the file ends on the output that stopped playing.
+    #[test]
+    fn two_quick_picks_save_the_output_that_plays() {
+        let state = Mutex::new(String::new());
+        let playing = Mutex::new(String::new());
+        let saved = Mutex::new(String::new());
+        let (applied_tx, applied_rx) = mpsc::channel::<()>();
+        let applied_rx = Mutex::new(applied_rx);
+        let start = Barrier::new(2);
+
+        thread::scope(|scope| {
+            for (name, first) in [("A", true), ("B", false)] {
+                let (state, playing, saved, start) = (&state, &playing, &saved, &start);
+                let (applied_tx, applied_rx) = (applied_tx.clone(), &applied_rx);
+                scope.spawn(move || {
+                    start.wait();
+                    if !first {
+                        // Let A get into its apply first.
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    under_lock(
+                        state,
+                        || {
+                            *playing.lock().unwrap() = name.to_owned();
+                            if first {
+                                // Hold the pick open until B applies (never, under the lock).
+                                let _ = applied_rx
+                                    .lock()
+                                    .unwrap()
+                                    .recv_timeout(Duration::from_millis(300));
+                            } else {
+                                let _ = applied_tx.send(());
+                            }
+                        },
+                        |s| *s = name.to_owned(),
+                        |s| *saved.lock().unwrap() = s.clone(),
+                    );
+                });
+            }
+        });
+
+        assert_eq!(*saved.lock().unwrap(), *playing.lock().unwrap());
     }
 }

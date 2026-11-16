@@ -9,7 +9,10 @@
 mod audio_log;
 mod commands;
 mod events;
+mod exit;
+mod menu;
 pub mod panic_hook;
+mod project_cmds;
 mod settings;
 
 use audio_log::{AudioLog, Level};
@@ -18,13 +21,16 @@ use grooviq_engine::{
     AudioOutput, Controller, EngineConfig, OutputChoice, OutputEvent, StreamServer, cpal_backend,
     engine, start_stream,
 };
+use grooviq_project::recovery::{Recovery, RecoveryDir};
+use grooviq_project::session::Session;
 use settings::Settings;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
-use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 
 /// The rate the engine starts at; the output layer moves it to the device's own.
 const START_RATE: f32 = 48_000.0;
@@ -34,6 +40,12 @@ const LIVE_HZ: u32 = 60;
 const HEALTH_PERIOD: Duration = Duration::from_millis(250);
 /// The event the UI listens to.
 const AUDIO_EVENT: &str = "audio-event";
+/// How often the autosave thread asks the session whether an autosave is due.
+const AUTOSAVE_CHECK: Duration = Duration::from_secs(1);
+/// Sent with the unix seconds of each autosave written.
+const AUTOSAVED_EVENT: &str = "project-autosaved";
+/// Sent when closing or quitting waits for the person to save or discard.
+const CLOSE_REQUESTED_EVENT: &str = "close-requested";
 
 /// Everything the commands reach, kept in Tauri's managed state.
 pub(crate) struct Audio {
@@ -45,6 +57,21 @@ pub(crate) struct Audio {
     settings_path: Option<PathBuf>,
     /// The live-state stream; `None` if it could not start (the meters stay still).
     stream: Option<StreamServer>,
+    /// The open project.
+    session: Arc<Mutex<Session>>,
+    /// The recovery folder; `None` if it could not be taken (no autosave then). Taken out by a
+    /// clean exit.
+    recovery: Arc<Mutex<Option<RecoveryDir>>>,
+    /// The newest project an earlier session left unsaved, until the person restores or
+    /// discards it (undecided, it is offered again on the next launch).
+    pending_recovery: Mutex<Option<Recovery>>,
+    /// Where backups of overwritten project files go.
+    backups: PathBuf,
+    /// Set to stop the running export.
+    export_cancel: Arc<AtomicBool>,
+    export_running: AtomicBool,
+    /// Whether the person chose to quit: closing is held back until then.
+    exit: exit::ExitState,
 }
 
 /// Locks `mutex` even if a thread panicked while holding it.
@@ -86,6 +113,15 @@ fn start_audio(app: &AppHandle) -> Audio {
     });
     let live = controller.live_shared();
     let controller = Arc::new(Mutex::new(controller));
+    let session = Arc::new(Mutex::new(Session::new(Arc::clone(&controller))));
+    let data_dir = app.path().app_data_dir().ok();
+    let (recovery, pending_recovery) = start_recovery(data_dir.as_deref(), &log);
+    let backups = data_dir.map_or_else(
+        || std::env::temp_dir().join("grooviq-backups"),
+        |dir| dir.join("backups"),
+    );
+    let autosave_on = recovery.is_some();
+    let recovery = Arc::new(Mutex::new(recovery));
     let stream = match start_stream(live, LIVE_HZ) {
         Ok(stream) => Some(stream),
         Err(e) => {
@@ -125,6 +161,17 @@ fn start_audio(app: &AppHandle) -> Audio {
         let (controller, log, app) = (Arc::clone(&controller), Arc::clone(&log), app.clone());
         move || watch_health(&controller, &log, &app)
     });
+    if autosave_on {
+        spawn_named("grooviq-autosave", {
+            let (session, recovery, log, app) = (
+                Arc::clone(&session),
+                Arc::clone(&recovery),
+                Arc::clone(&log),
+                app.clone(),
+            );
+            move || autosave_loop(&session, &recovery, &log, &app)
+        });
+    }
 
     Audio {
         controller,
@@ -133,7 +180,114 @@ fn start_audio(app: &AppHandle) -> Audio {
         settings: Mutex::new(settings),
         settings_path,
         stream,
+        session,
+        recovery,
+        pending_recovery: Mutex::new(pending_recovery),
+        backups,
+        export_cancel: Arc::new(AtomicBool::new(false)),
+        export_running: AtomicBool::new(false),
+        exit: exit::ExitState::default(),
     }
+}
+
+/// Takes the recovery folder in the app's data folder, logging why autosave is off if it
+/// cannot.
+fn start_recovery(
+    data_dir: Option<&std::path::Path>,
+    log: &Mutex<AudioLog>,
+) -> (Option<RecoveryDir>, Option<Recovery>) {
+    let Some(dir) = data_dir else {
+        lock(log).push(Level::Warn, "No data folder: autosave and recovery are off");
+        return (None, None);
+    };
+    match RecoveryDir::start(&dir.join("recovery")) {
+        Ok((recovery, found)) => {
+            if !found.is_empty() {
+                lock(log).push(
+                    Level::Info,
+                    format!(
+                        "An earlier session ended without saving; its autosave is offered back \
+                         ({} waiting)",
+                        found.len()
+                    ),
+                );
+            }
+            // The newest first; the others wait for later launches.
+            (Some(recovery), found.into_iter().next())
+        }
+        Err(e) => {
+            lock(log).push(Level::Warn, format!("Autosave and recovery are off: {e}"));
+            (None, None)
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Every second: if an autosave is due, snapshots the project under the session's lock and
+/// writes it outside it, then tells the UI. Stops once a clean exit took the folder.
+fn autosave_loop(
+    session: &Mutex<Session>,
+    recovery: &Mutex<Option<RecoveryDir>>,
+    log: &Mutex<AudioLog>,
+    app: &AppHandle,
+) {
+    loop {
+        thread::sleep(AUTOSAVE_CHECK);
+        let now = Instant::now();
+        let snapshot = {
+            let mut session = lock(session);
+            if session.autosave_due(now) {
+                session.autosave_snapshot(now)
+            } else {
+                None
+            }
+        };
+        let Some((project, samples, original)) = snapshot else {
+            continue;
+        };
+        let written = match lock(recovery).as_ref() {
+            Some(dir) => dir.write_autosave(&project, &samples, original.as_deref()),
+            None => return,
+        };
+        match written {
+            Ok(()) => {
+                let at = unix_now();
+                lock(session).autosaved(at);
+                let _ = app.emit(AUTOSAVED_EVENT, at);
+            }
+            Err(e) => {
+                lock(session).autosave_failed(Instant::now());
+                lock(log).push(
+                    Level::Warn,
+                    format!("The autosave could not be written: {e}"),
+                );
+            }
+        }
+    }
+}
+
+/// The app is ending: a clean exit, or a last autosave that the next launch offers back (see
+/// [`exit::end_session`]). Nothing to report to if it fails: the UI is gone.
+fn end_session(audio: &Audio) {
+    let _ = exit::end_session(&audio.exit, &audio.session, &audio.recovery);
+}
+
+/// Whether closing must wait for the person; if so, asks the UI.
+fn hold_close(app: &AppHandle) -> bool {
+    let Some(audio) = app.try_state::<Audio>() else {
+        return false;
+    };
+    let hold = audio.exit.hold(&audio.session);
+    if hold {
+        // Fails only while the app shuts down.
+        let _ = app.emit(CLOSE_REQUESTED_EVENT, ());
+    }
+    hold
 }
 
 fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
@@ -176,7 +330,17 @@ fn watch_health(controller: &Mutex<Controller>, log: &Mutex<AudioLog>, app: &App
 /// Runs the app.
 pub fn run() {
     panic_hook::install();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Cmd+Q through our own Quit item, so it asks about unsaved changes (see `menu`).
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(menu::build).on_menu_event(|app, event| {
+        if menu::is_quit(event.id().as_ref()) {
+            // Raises a preventable `ExitRequested`, held below like a window close.
+            app.exit(0);
+        }
+    });
+    let app = builder
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let audio = start_audio(app.handle());
             app.manage(audio);
@@ -191,7 +355,45 @@ pub fn run() {
             commands::synth_note,
             commands::live_endpoint,
             commands::audio_log,
+            project_cmds::project_view,
+            project_cmds::project_edit,
+            project_cmds::channel_add,
+            project_cmds::channel_set_sample,
+            project_cmds::channel_preview,
+            project_cmds::transport_play,
+            project_cmds::transport_stop,
+            project_cmds::project_new,
+            project_cmds::project_open,
+            project_cmds::project_save,
+            project_cmds::project_save_as,
+            project_cmds::project_export,
+            project_cmds::project_export_cancel,
+            project_cmds::recovery_status,
+            project_cmds::recovery_restore,
+            project_cmds::recovery_discard,
+            project_cmds::app_exit,
         ])
-        .run(tauri::generate_context!())
-        .expect("the Tauri app runs");
+        .build(tauri::generate_context!())
+        .expect("the Tauri app builds");
+    app.run(|app, event| match event {
+        RunEvent::WindowEvent {
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } => {
+            if hold_close(app) {
+                api.prevent_close();
+            }
+        }
+        RunEvent::ExitRequested { api, .. } => {
+            if hold_close(app) {
+                api.prevent_exit();
+            }
+        }
+        RunEvent::Exit => {
+            if let Some(audio) = app.try_state::<Audio>() {
+                end_session(&audio);
+            }
+        }
+        _ => {}
+    });
 }

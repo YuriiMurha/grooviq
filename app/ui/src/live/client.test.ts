@@ -22,10 +22,11 @@ class FakeSocket {
   }
 }
 
-function v1(peakL: number): ArrayBuffer {
-  const buf = new ArrayBuffer(32);
+/** A wire-format v2 frame (40 bytes) with only the left peak set. */
+function v2(peakL: number): ArrayBuffer {
+  const buf = new ArrayBuffer(40);
   const v = new DataView(buf);
-  v.setUint8(0, 1);
+  v.setUint8(0, 2);
   v.setFloat32(4, peakL, true);
   return buf;
 }
@@ -70,15 +71,33 @@ test("puts the token in the URL and reconnects with backoff from 250 ms up to 2 
   expect(FakeSocket.all).toHaveLength(waits.length + 2);
 });
 
+test("percent-encodes a token that has URL-special characters", () => {
+  connectLive({ port: 41234, token: "a+b/c=d&e" }, () => {}, { WebSocketImpl });
+  expect(FakeSocket.all[0].url).toBe("ws://127.0.0.1:41234/live?token=a%2Bb%2Fc%3Dd%26e");
+});
+
+test("stopping during the reconnect wait cancels the pending reconnect", () => {
+  const stop = connectLive(endpoint, () => {}, { WebSocketImpl });
+  FakeSocket.all[0].drop(); // arms the 250 ms reconnect timer
+  vi.advanceTimersByTime(100);
+  stop();
+  vi.advanceTimersByTime(10_000);
+  expect(FakeSocket.all).toHaveLength(1);
+});
+
 test("ignores frames with an unknown version", () => {
   const frames: LiveFrame[] = [];
   connectLive(endpoint, (f) => frames.push(f), { WebSocketImpl, backoffMs: [100, 400] });
   const ws = FakeSocket.all[0];
   ws.onopen?.();
-  const bad = new Uint8Array(32).fill(2).buffer;
+  const bad = new Uint8Array(40).fill(3).buffer;
   ws.onmessage?.({ data: bad });
+  // A v1 frame from an older engine.
+  const old = new Uint8Array(32);
+  old[0] = 1;
+  ws.onmessage?.({ data: old.buffer });
   ws.onmessage?.({ data: "not binary" });
-  ws.onmessage?.({ data: v1(0.5) });
+  ws.onmessage?.({ data: v2(0.5) });
   expect(frames).toHaveLength(1);
   expect(frames[0].peak[0]).toBe(0.5);
 });

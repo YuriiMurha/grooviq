@@ -13,7 +13,7 @@
 **Grooviq is a free, open-source desktop DAW for beatmakers.** It works the way FL Studio does (channel rack, step sequencer, piano roll, playlist, mixer), adds the best ideas from Ableton, and ships good built-in instruments and effects, so you can go from an idea to a finished beat without buying plugins.
 
 > [!WARNING]
-> **Pre-alpha.** You cannot make a beat with it yet. What exists today is the foundation: a real-time audio engine, safe output handling, a synth and effects, and the app shell. Follow the [roadmap](#roadmap) and the [issues](https://github.com/YuriiMurha/grooviq/issues).
+> **Early development.** You cannot make a beat with Grooviq yet. Star or watch the repo to follow along.
 
 ## Why another DAW?
 
@@ -24,7 +24,7 @@
 
 ## What it looks like
 
-The app today (milestone M0): the output chip follows your Mac's audio output, and the live meter runs at 60 frames per second.
+The app today: the output chip follows your Mac's audio output, and the live meter runs at 60 frames per second.
 
 <p align="center">
   <img src="docs/images/app-m0-output.png" alt="Grooviq output picker with the speaker guard and the audio log" width="640"><br>
@@ -44,29 +44,15 @@ Where it is going: interactive design mockups of the main window, in two of the 
 
 ## Features
 
-| Area | Today | Planned for version 1 |
-| --- | --- | --- |
-| Audio engine | Real-time-safe core in Rust: fixed 64-frame blocks, sample-accurate events, NaN guard, crash isolation, offline rendering | Multi-core mixing, plugin delay compensation |
-| Output | Follows the system device, device picker, speaker guard, sample-rate changes, no-device handling | Output latency compensation for visuals |
-| Instruments | Basic synth (7 presets), click-free | Sampler with slicing, drum pads |
-| Effects | EQ, compressor, limiter, drive, reverb, delay, multiband, utility (DSP ready) | Mixer inserts, sidechain, clipper |
-| Workflow | App shell, live meters, audio log | Channel rack, step sequencer, piano roll, playlist, mixer, browser |
-| Plugins | | VST3 and CLAP hosting |
-| Export | Offline render engine | WAV, MP3 and stems |
-
-## Roadmap
-
-| Milestone | What works at the end | Status |
-| --- | --- | --- |
-| M0 Foundation | Engine, output devices, live stream, golden tests, app shell, CI on macOS and Windows | ✅ Done |
-| M1 First beat | Transport, channel rack, sampler, step sequencer, WAV export, save and load | ⏳ Next |
-| M2 Notes | GPU piano roll, synth, MIDI keyboard input and recording | |
-| M3 Song | Playlist with pattern, audio and automation clips | |
-| M4 Mix | Mixer, inserts, sends, sidechain, core effects | |
-| M5 Plugins | VST3 and CLAP hosting with their own windows | |
-| M6 Version 1 | Browser, drum pads, undo, command palette, installers, first release | |
-
-After version 1: better sampling (warping, slicing, stems), then sound design (modulators, racks, a wavetable synth and more effects).
+| Area | What you get |
+| --- | --- |
+| Workflow | Channel rack, step sequencer, piano roll, playlist and mixer, the way FL Studio users expect; a browser and a command palette |
+| Instruments | Sampler with slicing, drum pads, synths |
+| Effects | EQ, compressor, limiter, clipper, drive, reverb, delay, multiband, utility; mixer inserts, sends and sidechain |
+| Plugins | VST3 and CLAP |
+| Export | WAV, MP3 and stems |
+| Audio engine | Real-time-safe Rust core: fixed 64-frame blocks, sample-accurate events, NaN guard, crash isolation, offline rendering |
+| Output | Follows the system device, device picker, speaker guard, sample-rate changes, no-device handling |
 
 ## Try it
 

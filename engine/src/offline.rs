@@ -1,8 +1,7 @@
 //! Offline rendering: the real engine, driven faster than real time. Every engine test and the
 //! golden renders use it as the reference.
 
-use crate::controller::SendError;
-use crate::{BLOCK, Command, EngineConfig, engine};
+use crate::{BLOCK, Command, ControlError, EngineConfig, EngineState, engine_with};
 
 /// Renders `frames` frames of interleaved stereo, calling the processor with `callback` frames
 /// at a time (0 counts as 1) as an audio device would.
@@ -21,7 +20,22 @@ pub fn render_offline(
     frames: usize,
     callback: usize,
 ) -> Vec<f32> {
-    let (mut controller, mut processor) = engine(config);
+    render_offline_with(config, EngineState::default(), events, frames, callback)
+}
+
+/// [`render_offline`] for an engine that starts in `state` (see [`crate::engine_with`]).
+///
+/// # Panics
+///
+/// If `state` is one [`crate::Controller::load_state`] would refuse.
+pub fn render_offline_with(
+    config: EngineConfig,
+    state: EngineState,
+    events: &[(u64, Command)],
+    frames: usize,
+    callback: usize,
+) -> Vec<f32> {
+    let (mut controller, mut processor) = engine_with(config, state);
     let mut order: Vec<&(u64, Command)> = events.iter().collect();
     order.sort_by_key(|(frame, _)| *frame);
     let mut waiting = order.into_iter().peekable();
@@ -33,7 +47,7 @@ pub fn render_offline(
         while pos < chunk_end {
             // Queue every event that fits; the processor holds each back until its block.
             while let Some(&&(frame, cmd)) = waiting.peek() {
-                if controller.send_at(frame, cmd) == Err(SendError::Full) {
+                if controller.send_at(frame, cmd) == Err(ControlError::Full) {
                     break;
                 }
                 waiting.next();

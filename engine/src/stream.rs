@@ -1,5 +1,5 @@
 //! The live-state stream: a localhost WebSocket that pushes [`LiveShared`] to the UI at a fixed
-//! rate in the 32-byte [`encode_live`] format, guarded by a random per-launch token.
+//! rate in the 40-byte [`encode_live`] format, guarded by a random per-launch token.
 //!
 //! Connect to `ws://127.0.0.1:{port}/live?token={token}`. The server binds loopback only,
 //! answers 404 for another path, 401 for a missing or wrong token (compared in constant time)
@@ -42,7 +42,7 @@ const MAX_INCOMING: usize = 256;
 const MAX_DRAIN: usize = 16;
 /// Frame rates outside this range are clamped.
 const HZ_RANGE: (u32, u32) = (1, 240);
-/// A client that cannot take a 32-byte frame within this long is dropped.
+/// A client that cannot take a 40-byte frame within this long is dropped.
 const WRITE_TIMEOUT: Duration = Duration::from_millis(50);
 /// After a stall longer than this the schedule restarts instead of bursting to catch up.
 const MAX_LAG: Duration = Duration::from_millis(250);
