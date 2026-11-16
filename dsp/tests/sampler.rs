@@ -1483,10 +1483,14 @@ fn a_slide_note_bends_the_held_note() {
 #[test]
 fn a_late_note_off_of_a_slid_note_leaves_the_newer_note_alone() {
     // 48 slides to 52, then a new 48 starts before the first 48's note-off arrives. That
-    // note-off belongs to the note that slid away: the new 48 plays on until its own.
+    // note-off belongs to the note that slid away: the new 48 plays on until its own. (A short
+    // 52 first, so the slide is 52's second note: the slid voice must take the slide's own
+    // note-off, not one that only matches by count.)
     let mut s = configured(&dc(), &[("one_shot", 0.0), ("release", 1.0)]);
     let events = [
-        on(0, 48, 1.0),
+        on(0, 52, 1.0),
+        off(10, 52),
+        on(20, 48, 1.0),
         slide(4_800, 52, 1.0),
         on(9_600, 48, 1.0),
         off(12_000, 48),

@@ -264,3 +264,33 @@ fn synth_a_late_note_off_after_a_choke_leaves_the_newer_note_alone() {
         );
     }
 }
+
+#[test]
+fn synth_a_re_struck_key_keeps_its_priority() {
+    // Mono and legato: 48, 55, then 48 struck again while the first 48 is still down. The first
+    // 48's note-off belongs to that note: the new 48 keeps sounding, and releasing 55 and then
+    // the new 48 ends the note (it never returns to the released 55).
+    for mode in [1.0, 2.0] {
+        let mut s = sine_synth_in(mode);
+        let events = [
+            on(0, 48, false),
+            on(4_800, 55, false),
+            on(9_600, 48, false),
+            off(14_400, 48),
+            off(24_000, 55),
+            off(28_800, 48),
+        ];
+        let l = render(&mut s, 76_800, &events);
+        let keys: Vec<f64> = pitch_track(&l[..28_800])
+            .into_iter()
+            .filter(|(t, _)| (15_000.0..23_500.0).contains(t))
+            .map(|(_, k)| k)
+            .collect();
+        assert!(keys.len() > 10);
+        assert!(
+            keys.iter().all(|k| (k - 48.0).abs() < 0.05),
+            "mode {mode}: still 48 after the first 48's note-off: {keys:?}"
+        );
+        assert_eq!(voices(&s), 0.0, "mode {mode}: released");
+    }
+}

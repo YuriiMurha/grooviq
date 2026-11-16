@@ -231,9 +231,6 @@ struct Voice {
     order: u64,
     /// The note's ticket on its key: the n-th note-on of a key owns that key's n-th note-off.
     ticket: u32,
-    /// Gate or loop mode: this note's note-off has not arrived yet. Only slot choice reads it (a
-    /// silent slot still owed a note-off is reused last).
-    held: bool,
     /// Loop mode: the voice repeats `lo..hi` (`len` frames, a whole number) instead of ending.
     looping: bool,
     lo: f64,
@@ -277,7 +274,6 @@ impl Voice {
         age: 0,
         order: 0,
         ticket: 0,
-        held: false,
         looping: false,
         lo: 0.0,
         hi: 0.0,
@@ -291,18 +287,6 @@ impl Voice {
         k: DAMP_MAX,
         ic: [[0.0; 2]; 2],
     };
-
-    /// This voice, silent, but keeping its key, order, ticket and owed note-off (as a voice that
-    /// ends by itself does).
-    fn quieted(&self) -> Self {
-        Self {
-            key: self.key,
-            order: self.order,
-            ticket: self.ticket,
-            held: self.held,
-            ..Self::OFF
-        }
-    }
 
     /// The rate (frames per output frame, signed by direction) at `pitch`.
     fn rate(&self, pitch: f32) -> f64 {
@@ -533,8 +517,7 @@ impl Voices {
         }
     }
 
-    /// Starts a note in slot `i`. `held`: it owes its own note-off (poly gate or loop mode).
-    /// `glide`: the pitch it glides from and the time in ms.
+    /// Starts a note in slot `i`. `glide`: the pitch it glides from and the time in ms.
     #[allow(clippy::too_many_arguments)]
     fn start(
         &mut self,
@@ -545,7 +528,6 @@ impl Voices {
         key: u8,
         ticket: u32,
         velocity: f32,
-        held: bool,
         glide: Option<(f32, f32)>,
     ) {
         let len = buf.len() as f64;
@@ -598,7 +580,6 @@ impl Voices {
             age: 0,
             order: self.counter,
             ticket,
-            held: held && (p[ONE_SHOT] < 0.5 || looping),
             looping,
             lo,
             hi,
@@ -685,27 +666,20 @@ impl Voices {
                 return;
             }
         }
-        // A free voice; else the oldest silent one still owed a note-off; else the one
-        // started first, which moves to a fade slot.
-        let i = match self.v[..VOICES]
-            .iter()
-            .position(|v| v.stage == Stage::Off && !v.held)
-        {
+        // A free voice; else the one started first, which moves to a fade slot.
+        let i = match self.v[..VOICES].iter().position(|v| v.stage == Stage::Off) {
             Some(i) => i,
             None => {
-                let silent = self.v[..VOICES].iter().any(|v| v.stage == Stage::Off);
-                let mut oldest: Option<usize> = None;
+                let mut oldest = 0;
                 for (i, v) in self.v[..VOICES].iter().enumerate() {
-                    let candidate = !silent || v.stage == Stage::Off;
-                    if candidate && oldest.is_none_or(|o| v.order < self.v[o].order) {
-                        oldest = Some(i);
+                    if v.order < self.v[oldest].order {
+                        oldest = i;
                     }
                 }
-                let i = oldest.unwrap_or(0);
-                if !self.park(self.v[i]) {
+                if !self.park(self.v[oldest]) {
                     return;
                 }
-                i
+                oldest
             }
         };
         let glide = if slide {
@@ -713,7 +687,7 @@ impl Voices {
         } else {
             None
         };
-        self.start(i, p, sr, buf, key, ticket, velocity, true, glide);
+        self.start(i, p, sr, buf, key, ticket, velocity, glide);
     }
 
     /// Mono and legato note-on, as the synth's: the newest key sounds on slot 0. With a key
@@ -763,7 +737,7 @@ impl Voices {
             return;
         }
         let glide = from.map(|f| (f, ms));
-        self.start(0, p, sr, buf, key, ticket, velocity, false, glide);
+        self.start(0, p, sr, buf, key, ticket, velocity, glide);
         self.mono = true;
     }
 
@@ -788,11 +762,8 @@ impl Voices {
         }
         let gate = p[ONE_SHOT] < 0.5;
         for v in &mut self.v {
-            if v.key == key && v.ticket == ticket {
-                v.held = false;
-                if gate || v.looping {
-                    v.release();
-                }
+            if v.key == key && v.ticket == ticket && (gate || v.looping) {
+                v.release();
             }
         }
     }
@@ -836,17 +807,17 @@ impl Voices {
         self.stack_len = 0;
     }
 
-    /// Every sounding voice fades out over STEAL_FADE_S, in a fade slot (its note slot keeps
-    /// waiting for the note-off it is owed) or, with none free, where it is. Held keys leave
-    /// the mono priority stack: a note after the choke never returns to them.
+    /// Every sounding voice fades out over STEAL_FADE_S, in a fade slot or, with none free,
+    /// where it is. Held keys leave the mono priority stack: a note after the choke never
+    /// returns to them (their note-offs still find nothing newer to end).
     fn choke(&mut self) {
         for i in 0..VOICES {
             let v = self.v[i];
             if v.stage == Stage::Off {
                 continue;
             }
-            if self.park(Voice { held: false, ..v }) {
-                self.v[i] = v.quieted();
+            if self.park(v) {
+                self.v[i] = Voice::OFF;
             } else if v.fade == 0 {
                 self.v[i].fade = self.fade;
             }
@@ -859,11 +830,10 @@ impl Voices {
         *self = Self::new(self.fade);
     }
 
-    /// Silences every voice, as a voice that ends by itself does. Held notes stay held.
+    /// Silences every voice, as a voice that ends by itself does. Held notes stay held: their
+    /// note-offs still find nothing newer to end.
     fn quiet(&mut self) {
-        for v in &mut self.v {
-            *v = v.quieted();
-        }
+        self.v = [Voice::OFF; SLOTS];
         self.mono = false;
     }
 
@@ -926,9 +896,9 @@ impl Sampler {
     }
 
     /// Comes to rest once nothing sounds: every voice is silent and the output smoothing sits
-    /// at its target, as after [`Device::reset`]. Unlike a reset, a note that ended before its
-    /// note-off still waits for it, so that late note-off finds it rather than a newer note on
-    /// its key. Never allocates.
+    /// at its target, as after [`Device::reset`]. Unlike a reset, held notes stay held, so a
+    /// late note-off of a note that ended before it still ends nothing newer on its key. Never
+    /// allocates.
     pub fn settle(&mut self) {
         self.voices.quiet();
         self.rest();
@@ -1064,12 +1034,12 @@ impl Device for Sampler {
                     continue;
                 }
                 // Fading out (stolen, cut or choked): a straight line to silence, then the slot
-                // is free (a note-off it is still owed must find it).
+                // is free.
                 let mut fade = None;
                 if v.fade > 0 {
                     v.fade -= 1;
                     if v.fade == 0 {
-                        *v = v.quieted();
+                        *v = Voice::OFF;
                         continue;
                     }
                     fade = Some(v.fade as f32 / fade_frames as f32);
@@ -1092,9 +1062,9 @@ impl Device for Sampler {
                     }
                     Stage::Sustain => {
                         v.env = sustain;
-                        // Decayed to silence: the slot is free (its note-off still finds it).
+                        // Decayed to silence: the slot is free.
                         if v.env < FREE {
-                            *v = v.quieted();
+                            *v = Voice::OFF;
                             continue;
                         }
                     }
@@ -1191,8 +1161,8 @@ impl Device for Sampler {
                         v.wrapped = true;
                     }
                 } else if v.pos >= v.end || v.pos < v.start {
-                    // Ended by itself: a note-off it is still owed must find it.
-                    *v = v.quieted();
+                    // Ended by itself: the slot is free.
+                    *v = Voice::OFF;
                 }
             }
             for ch in 0..2 {
