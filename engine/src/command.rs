@@ -166,6 +166,27 @@ impl Msg {
     pub(crate) fn makes_trash(&self) -> bool {
         !matches!(self, Self::Command { .. })
     }
+
+    /// Whether a graph rebuilt from the controller's state already holds this message's
+    /// effect: the controller updates its state when it queues the message, so after a
+    /// `reconfigure` the message is stale. The rest acts on the transport (which outlives the
+    /// graph) or plays notes in time, and must still apply.
+    pub(crate) fn rebuilt(&self) -> bool {
+        match self {
+            Self::Command { cmd, .. } => matches!(
+                cmd,
+                Command::TestTone { .. }
+                    | Command::SetSynthParam { .. }
+                    | Command::SetChannelMix { .. }
+                    | Command::SetSamplerParam { .. }
+            ),
+            Self::ReplaceGraph(_)
+            | Self::AddChannel(_)
+            | Self::RemoveChannel(_)
+            | Self::SetSample { .. }
+            | Self::SetPattern(_) => true,
+        }
+    }
 }
 
 /// What the processor hands back for the controller to free, so nothing is freed on the audio

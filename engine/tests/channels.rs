@@ -713,3 +713,97 @@ fn render_offline_with_matches_a_hand_driven_engine_with() {
     p.process(&mut out[pos * 2..], 2);
     assert!(out == offline);
 }
+
+/// 4 800 frames (0.1 s) of 0.25 at 48 kHz.
+fn short() -> Arc<SampleBuf> {
+    Arc::new(SampleBuf {
+        rate: SR,
+        l: vec![0.25; 4_800],
+        r: vec![0.25; 4_800],
+    })
+}
+
+/// Frames from the start of `l` until it first stops being 0.25, and whether only silence
+/// follows.
+fn played(l: &[f32]) -> (usize, bool) {
+    let n = l.iter().position(|&x| x != 0.25).unwrap_or(l.len());
+    (n, l[n..].iter().all(|&x| x == 0.0))
+}
+
+#[test]
+fn a_remove_and_add_queued_before_a_rate_change_are_dropped() {
+    // Channel 1 plays `old` at 44.1 kHz. Removing it and adding a channel 1 with `new` (its
+    // node built for 44.1 kHz) are still queued when the engine moves to 48 kHz. The graph
+    // rebuilt for 48 kHz already has the new channel 1: the queued pair must not replace it
+    // with the 44.1 kHz node, which would play `new` 1.5 semitones sharp.
+    let (old, new) = (dc(0.5), short());
+    let rate = |sample_rate| EngineConfig { sample_rate };
+    let (mut c, mut p) = engine_with(
+        rate(44_100.0),
+        state(vec![channel(1, &old, ChannelMix::default())]),
+    );
+    c.remove_channel(ChannelId(1)).unwrap();
+    c.add_channel(channel(1, &new, ChannelMix::default()))
+        .unwrap();
+    // The test, the controller's state and the queued node.
+    assert_eq!(Arc::strong_count(&new), 3);
+    c.reconfigure(&mut p, rate(SR));
+    // The test, the state and the rebuilt node: the queued node was freed by reconfigure, on
+    // this thread, as was the old graph.
+    assert_eq!(Arc::strong_count(&new), 3);
+    assert_eq!(Arc::strong_count(&old), 1);
+    c.send(note(1, true)).unwrap();
+    let mut out = vec![0f32; 6_000 * 2];
+    p.process(&mut out, 2);
+    assert_eq!(played(&left(&out)), (4_800, true), "new, at its own pitch");
+    c.check_health();
+    assert_eq!(Arc::strong_count(&new), 3);
+}
+
+#[test]
+fn edits_queued_before_a_new_project_and_a_rate_change_do_not_reach_it() {
+    // For channel 1: another sample, tune +12, mute and a pattern that plays it; then a new
+    // project whose channel 1 plays `s` untuned with an empty pattern. All still queued when
+    // the engine restarts (at the same rate: only the queue's age tells them stale). On Play
+    // and a note, only the note sounds: `s`, untuned and unmuted.
+    let s = short();
+    let (mut c, mut p) = engine_with(cfg(), state(vec![channel(1, &s, ChannelMix::default())]));
+    c.set_channel_sample(ChannelId(1), Some(dc(0.5))).unwrap();
+    let tune = Command::SetSamplerParam {
+        channel: ChannelId(1),
+        index: 1,
+        value: 12.0,
+    };
+    c.send(tune).unwrap();
+    let muted = ChannelMix {
+        mute: true,
+        ..ChannelMix::default()
+    };
+    c.send(mix(1, muted)).unwrap();
+    c.set_pattern(PatternData {
+        length: 16 * STEP_TICKS,
+        notes: vec![SeqNote {
+            tick: 2 * STEP_TICKS,
+            channel: ChannelId(1),
+            key: 60,
+            velocity: 1.0,
+            length: STEP_TICKS,
+        }],
+    })
+    .unwrap();
+    c.load_state(state(vec![channel(1, &s, ChannelMix::default())]))
+        .unwrap();
+    c.reconfigure(&mut p, cfg());
+    c.send(Command::Play).unwrap();
+    c.send(note(1, true)).unwrap();
+    // Step 2 lands before frame 16 000 at any tempo above 90 BPM.
+    let mut out = vec![0f32; 16_000 * 2];
+    p.process(&mut out, 2);
+    assert!(c.live().playing);
+    assert_eq!(
+        played(&left(&out)),
+        (4_800, true),
+        "an octave up plays 2 400"
+    );
+    assert_eq!(c.state().channels[0].sampler[1], 0.0);
+}

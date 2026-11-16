@@ -659,6 +659,61 @@ fn a_new_sample_rate_mid_play_keeps_the_position() {
 }
 
 #[test]
+fn transport_commands_queued_before_a_rate_change_still_apply() {
+    // A click recorded at 96 kHz on every step. 240 BPM and Play are still queued when the
+    // engine moves from 48 to 96 kHz: both apply, so steps come every 6 000 frames from 0.
+    let mut l = vec![0.0; 16];
+    l[0] = 1.0;
+    let click96 = Arc::new(SampleBuf {
+        rate: 96_000.0,
+        r: l.clone(),
+        l,
+    });
+    let every: Vec<u32> = (0..16).collect();
+    let state = EngineState {
+        bpm: 120.0,
+        channels: vec![channel(1, &click96, exact())],
+        pattern: pattern(16, &steps(&every)),
+    };
+    let (mut c, mut p) = engine_with(cfg(48_000.0), state);
+    c.send(Command::SetTempo { bpm: 240.0 }).unwrap();
+    c.send(Command::Play).unwrap();
+    c.reconfigure(&mut p, cfg(96_000.0));
+    let mut out = vec![0f32; 30_000 * 2];
+    p.process(&mut out, 2);
+    assert_eq!(onsets(&out), [0, 6_000, 12_000, 18_000, 24_000]);
+}
+
+#[test]
+fn a_new_length_queued_before_a_rate_change_keeps_the_place_in_the_loop() {
+    // 16 steps, then 32 during step 4 of the second loop (as in
+    // changing_the_pattern_length_mid_play_keeps_the_place_in_the_loop), but the new pattern
+    // is still queued when the engine restarts (at the same rate), so it arrives with the
+    // fresh graph. The place in the loop carries on all the same: step 5 next.
+    let (mut c, mut p) = engine_with(cfg(SR), clicks(120.0, numbered(16)));
+    c.send(Command::Play).unwrap();
+    let at_step = 16 + 4;
+    let swap = block_start(at_step * 6_000 + 100) as usize;
+    let total_steps = at_step + 1 + 2 * 32;
+    let mut out = vec![0f32; total_steps as usize * 6_000 * 2];
+    p.process(&mut out[..swap * 2], 2);
+    c.set_pattern(numbered(32)).unwrap();
+    c.reconfigure(&mut p, cfg(SR));
+    p.process(&mut out[swap * 2..], 2);
+    let expected: Vec<(u64, u32)> = (0..total_steps)
+        .map(|n| {
+            let step = if n <= at_step {
+                n % 16
+            } else {
+                (4 + n - at_step) % 32
+            };
+            (n * 6_000, step as u32)
+        })
+        .collect();
+    assert_eq!(numbered_onsets(&out), expected);
+}
+
+#[test]
 fn a_tempo_change_and_a_pattern_swap_in_one_block_neither_replay_nor_skip() {
     // A click every 5 ticks, including tick 23 (frame 575 at 120 BPM). Tempo changes both
     // ways; with the same pattern set again in each change's block, the output is the same.
