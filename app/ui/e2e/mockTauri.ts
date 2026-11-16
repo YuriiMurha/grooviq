@@ -113,7 +113,8 @@ export function installMockTauri(seed: MockSeed): void {
     backups: new Map<string, number>(),
     exitCount: 0,
     export: null as null | { cancel: boolean },
-    transport: { playing: false, startMs: 0, startTicks: 0 },
+    /** `held`: a position the test pinned the clock at (`hold`), or null to run in real time. */
+    transport: { playing: false, startMs: 0, startTicks: 0, held: null as number | null },
     tone: false,
     previews: new Map<number, boolean>(),
     dialogs: [] as unknown[],
@@ -342,6 +343,7 @@ export function installMockTauri(seed: MockSeed): void {
   // --- The transport clock: ticks since play, as the engine reports them. ---
   const ticksNow = () => {
     if (!s.transport.playing) return 0;
+    if (s.transport.held !== null) return s.transport.held;
     const seconds = (performance.now() - s.transport.startMs) / 1000;
     return Math.floor(s.transport.startTicks + (seconds * s.project.bpm * PPQ) / 60);
   };
@@ -364,7 +366,7 @@ export function installMockTauri(seed: MockSeed): void {
     s.transport.startMs = performance.now();
   };
   const stopTransport = () => {
-    s.transport = { playing: false, startMs: 0, startTicks: 0 };
+    s.transport = { playing: false, startMs: 0, startTicks: 0, held: null };
   };
 
   // --- The live stream: a fake WebSocket that sends v2 frames at 60 Hz. ---
@@ -481,7 +483,7 @@ export function installMockTauri(seed: MockSeed): void {
       return null;
     },
     transport_play: () => {
-      s.transport = { playing: true, startMs: performance.now(), startTicks: 0 };
+      s.transport = { playing: true, startMs: performance.now(), startTicks: 0, held: null };
       return null;
     },
     transport_stop: () => {
@@ -666,6 +668,10 @@ export function installMockTauri(seed: MockSeed): void {
     view,
     emit,
     ticks: ticksNow,
+    /** Pins the playing transport at `ticks` (the live frames report it), or lets it run on. */
+    hold: (ticks: number | null) => {
+      s.transport.held = ticks;
+    },
     /** Answers for the next open/save dialogs, in order (`null`: the person cancels). */
     queueDialog: (...answers: unknown[]) => s.dialogs.push(...answers),
     /** What the shell does on a window close or Cmd+Q: ask the UI while there are unsaved

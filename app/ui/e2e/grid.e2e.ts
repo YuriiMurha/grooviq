@@ -51,21 +51,24 @@ test.describe("drawing (check 1)", () => {
     expect(colourDistance(empty1, empty5), "beats are shaded apart").toBeGreaterThan(5);
     expect(brightness(ring) - brightness(plainGap), "the focus ring").toBeGreaterThan(150);
 
-    // The playhead: one column of empty steps changes colour while playing, and none before.
+    // The playhead: with the transport pinned at a step, exactly that column of empty snare
+    // steps changes colour; it follows the position; Stop clears it.
     const snareRow = Array.from({ length: 16 }, (_, step) => step).filter((step) => step !== 4 && step !== 12);
     const before = await pixelsAt(app, g, snareRow.map((step) => at(1, step)));
-    const again = await pixelsAt(app, g, snareRow.map((step) => at(1, step)));
-    expect(before.filter((c, i) => colourDistance(c, again[i]) > 10)).toEqual([]);
+    const playheadColumns = async () => {
+      const now = await pixelsAt(app, g, snareRow.map((step) => at(1, step)));
+      return snareRow.filter((_, i) => colourDistance(now[i], before[i]) > 20);
+    };
+    expect(await playheadColumns(), "no playhead while stopped").toEqual([]);
     await app.getByRole("button", { name: "Play" }).click();
-    await expect.poll(() => mock.eval<number>("(m) => m.ticks()")).toBeGreaterThan(5 * 240);
-    await expect
-      .poll(async () => {
-        const now = await pixelsAt(app, g, snareRow.map((step) => at(1, step)));
-        return now.filter((c, i) => colourDistance(c, before[i]) > 20).length;
-      }, { message: "a playhead column" })
-      .toBe(1);
+    await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(true);
+    for (const step of [2, 9]) {
+      await mock.eval(`(m) => m.hold(${step * 240 + 10})`);
+      await expect.poll(playheadColumns, { message: `the playhead on step ${step + 1}` }).toEqual([step]);
+    }
     await g.screenshot({ path: info.outputPath("grid-playing.png") });
     await app.getByRole("button", { name: "Stop" }).click();
+    await expect.poll(playheadColumns, { message: "Stop clears the playhead" }).toEqual([]);
   });
 });
 
