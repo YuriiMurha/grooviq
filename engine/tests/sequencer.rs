@@ -410,6 +410,105 @@ fn a_note_off_booked_before_a_tempo_jump_does_not_cut_a_newer_note() {
 }
 
 #[test]
+fn a_note_off_owed_across_an_idle_block_end_does_not_cut_the_next_hit() {
+    // Gate mode, one key, a sample of 6 390 frames of 0.5 at 120 BPM (25 frames per tick).
+    // Note A (tick 0, two steps) ends by itself after frame 6 389, so the block ending at
+    // 6 400 finishes with nothing sounding; note B (tick 257, frame 6 425) starts in the next
+    // block. A's note-off arrives at frame 12 000, while B sounds: it belongs to A, so B
+    // plays on to its own sample end (frame 12 815).
+    let len = 6_390;
+    let state = gated(
+        len,
+        vec![note(0, 1, 2 * STEP_TICKS), note(257, 1, 4 * STEP_TICKS)],
+    );
+    let (a_end, b_on, a_off) = (len - 1, 257 * 25, 2 * STEP_TICKS as usize * 25);
+    assert!(
+        block_start(a_end as u64) < block_start(b_on as u64),
+        "a block ends between"
+    );
+    let l = left(&play(state, SR, &[], 13_000));
+    assert_eq!(l[a_end], 0.5, "A sounds to its end");
+    assert!(
+        l[a_end + 1..b_on].iter().all(|&x| x == 0.0),
+        "the gap is silent"
+    );
+    assert_eq!(l[b_on], 0.5, "B starts");
+    assert!(a_off < 12_500 && 12_500 < b_on + len);
+    assert_eq!(l[12_500], 0.5, "A's note-off did not release B");
+}
+
+/// One gate-mode channel at 120 BPM (25 frames per tick) playing `len` frames of 0.5.
+fn gated(len: usize, notes: Vec<SeqNote>) -> EngineState {
+    let mut gate = exact();
+    gate[ONE_SHOT] = 0.0;
+    let sample = Arc::new(SampleBuf {
+        rate: SR,
+        l: vec![0.5; len],
+        r: vec![0.5; len],
+    });
+    EngineState {
+        bpm: 120.0,
+        channels: vec![channel(1, &sample, gate)],
+        pattern: PatternData {
+            length: 16 * STEP_TICKS,
+            notes,
+        },
+    }
+}
+
+#[test]
+fn a_note_off_owed_across_skipped_silent_blocks_does_not_cut_the_next_hit() {
+    // Note A (tick 0, one step) ends by itself after frame 3 999; nothing sounds for about
+    // 15 blocks, which the channel skips, until note B (tick 200, frame 5 000). A's note-off
+    // at frame 6 000 is still A's: B plays on to its sample end (frame 9 000).
+    let state = gated(
+        4_000,
+        vec![note(0, 1, STEP_TICKS), note(200, 1, STEP_TICKS)],
+    );
+    let l = left(&play(state, SR, &[], 9_000));
+    assert!(
+        l[4_000..5_000].iter().all(|&x| x == 0.0),
+        "the gap is silent"
+    );
+    assert_eq!(l[7_000], 0.5, "A's note-off did not release B");
+}
+
+#[test]
+fn a_note_off_ignored_in_one_shot_mode_still_ends_its_own_note() {
+    // Note A (tick 0, one step, an 8 000-frame sample) gets its note-off at frame 6 000 while
+    // the channel is one-shot (5 504 to 7 040): A plays on to its end, but the note-off was
+    // still A's. Notes B (tick 480) and C (tick 960), half a step each, are each released by
+    // their own note-off (frames 15 000 and 27 000), long before their samples end.
+    let state = gated(
+        8_000,
+        vec![
+            note(0, 1, STEP_TICKS),
+            note(480, 1, STEP_TICKS / 2),
+            note(960, 1, STEP_TICKS / 2),
+        ],
+    );
+    let one_shot = |on: bool| Command::SetSamplerParam {
+        channel: ChannelId(1),
+        index: ONE_SHOT as u32,
+        value: if on { 1.0 } else { 0.0 },
+    };
+    let (on, off) = (5_504, 7_040);
+    assert!(block_start(on) == on && block_start(off) == off);
+    let l = left(&play(
+        state,
+        SR,
+        &[(on, one_shot(true)), (off, one_shot(false))],
+        29_000,
+    ));
+    assert_eq!(l[7_999], 0.5, "one-shot: A ignored its note-off");
+    assert_eq!(l[14_000], 0.5, "B sounds until its note-off");
+    // A 40 ms release falls by e every 480 frames: 1 000 frames in, about 0.062.
+    for (name, at) in [("B", 16_000), ("C", 28_000)] {
+        assert!(l[at] < 0.1, "{name} was released: {}", l[at]);
+    }
+}
+
+#[test]
 fn play_loops_stops_emitting_at_the_end() {
     let pat = pattern(16, &steps(&[0, 4, 8, 12]));
     let loop_frames = 96_000; // 16 steps at 120 BPM
