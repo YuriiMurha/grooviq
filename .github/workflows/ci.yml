@@ -38,6 +38,18 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
 
+  # The DSP crate is meant to also run in a browser; this keeps it compiling for the web.
+  # Not a required check: it only has to stay green, and the `rust` jobs gate merging.
+  dsp-wasm32:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p grooviq-dsp --target wasm32-unknown-unknown
+
   ui:
     runs-on: ubuntu-latest
     timeout-minutes: 15

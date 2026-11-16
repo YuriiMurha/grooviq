@@ -197,7 +197,7 @@ fn rejects_missing_empty_corrupt_non_audio_and_too_long() {
     let second = dir.path("second.wav");
     write_wav(&second, 1, 48_000, 16, false, 48_000);
     match load_sample_with_limit(&second, 0.5) {
-        Err(SampleError::TooLong { seconds }) => {
+        Err(SampleError::TooLong { seconds, .. }) => {
             assert!((seconds - 1.0).abs() <= 0.01, "{seconds} s")
         }
         other => panic!("expected TooLong, got {other:?}"),
@@ -213,7 +213,7 @@ fn rejects_missing_empty_corrupt_non_audio_and_too_long() {
     let liar = dir.path("liar.wav");
     std::fs::write(&liar, &claims).unwrap();
     match load_sample_with_limit(&liar, 50.0) {
-        Err(SampleError::TooLong { seconds }) => {
+        Err(SampleError::TooLong { seconds, .. }) => {
             assert!((seconds - 100.0).abs() <= 0.01, "{seconds} s")
         }
         other => panic!("expected TooLong from the header, got {other:?}"),
@@ -234,7 +234,11 @@ fn every_error_reads_as_one_sentence() {
         SampleError::Unsupported,
         SampleError::Corrupt("bad header".into()),
         SampleError::Empty,
-        SampleError::TooLong { seconds: 845.2 },
+        SampleError::TooLong {
+            seconds: 845.2,
+            limit: 600.0,
+        },
+        SampleError::Unfinished,
         SampleError::BadRate(4_000),
     ];
     for e in cases {
@@ -243,7 +247,11 @@ fn every_error_reads_as_one_sentence() {
         assert!(s.chars().next().unwrap().is_uppercase(), "{s}");
     }
     assert_eq!(
-        SampleError::TooLong { seconds: 845.0 }.to_string(),
+        SampleError::TooLong {
+            seconds: 845.0,
+            limit: 600.0
+        }
+        .to_string(),
         "This sample is 14:05 long; samples can be up to 10 minutes."
     );
 }
@@ -377,12 +385,233 @@ fn a_too_long_file_without_a_frame_count_is_caught_while_decoding() {
         4_410
     );
     match decode_sample(&flac, Some("flac"), 0.05) {
-        Err(SampleError::TooLong { seconds }) => {
+        Err(SampleError::TooLong { seconds, limit }) => {
+            assert_eq!(limit, 0.05);
             assert!(
                 (seconds - 0.1).abs() <= 0.001,
                 "reports the full length: {seconds} s"
             )
         }
         other => panic!("expected TooLong, got {other:?}"),
+    }
+}
+
+// ---- Items from issue #73 ----
+
+/// A mono 16-bit 48 kHz WAV with `frames` frames (the 44-byte header hound writes), its RIFF
+/// and data sizes then overwritten with `riff` and `data`, as a recorder that never came back
+/// to finish its header leaves them.
+fn wav_with_sizes(frames: usize, riff: u32, data: u32) -> Vec<u8> {
+    let dir = TempDir::new();
+    let path = dir.path("unfinished.wav");
+    write_wav(&path, 1, 48_000, 16, false, frames);
+    let mut bytes = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[36..40], b"data", "plain 44-byte header");
+    bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+    bytes[40..44].copy_from_slice(&data.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn an_unfinished_wav_header_reads_to_the_end_of_the_file() {
+    let finished = {
+        let dir = TempDir::new();
+        let path = dir.path("finished.wav");
+        write_wav(&path, 1, 48_000, 16, false, 3_000);
+        load_sample(&path).unwrap()
+    };
+    // (RIFF size, data size): a header never filled in, a streamed one, and only the data
+    // size left unfinished.
+    for (riff, data) in [
+        (0, 0),
+        (u32::MAX, u32::MAX),
+        (36 + 6_000, 0),
+        (36 + 6_000, u32::MAX),
+    ] {
+        let bytes = wav_with_sizes(3_000, riff, data);
+        let b = decode_sample(&bytes, Some("wav"), 600.0)
+            .unwrap_or_else(|e| panic!("riff {riff:#x}, data {data:#x}: {e:?}"));
+        assert_eq!(b, finished, "riff {riff:#x}, data {data:#x}");
+    }
+}
+
+#[test]
+fn an_unfinished_wav_with_no_audio_says_it_was_not_finished() {
+    for (riff, data) in [(0, 0), (u32::MAX, u32::MAX), (0, u32::MAX)] {
+        let bytes = wav_with_sizes(0, riff, data);
+        assert_eq!(
+            decode_sample(&bytes, Some("wav"), 600.0),
+            Err(SampleError::Unfinished),
+            "riff {riff:#x}, data {data:#x}"
+        );
+    }
+    // Less than one frame of sound after an unfinished header is no sound at all.
+    let mut stub = wav_with_sizes(0, 0, 0);
+    stub.push(0x12);
+    assert_eq!(
+        decode_sample(&stub, Some("wav"), 600.0),
+        Err(SampleError::Unfinished)
+    );
+    // A header that was finished, with no frames in it, is simply empty.
+    assert_eq!(
+        decode_sample(&wav_with_sizes(0, 36, 0), Some("wav"), 600.0),
+        Err(SampleError::Empty)
+    );
+}
+
+/// The little-endian pages of an Ogg stream as `(offset, length)`.
+fn ogg_pages(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let mut pages = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        assert_eq!(&bytes[at..at + 4], b"OggS");
+        let segments = bytes[at + 26] as usize;
+        let body: usize = bytes[at + 27..at + 27 + segments]
+            .iter()
+            .map(|&s| s as usize)
+            .sum();
+        pages.push((at, 27 + segments + body));
+        at += 27 + segments + body;
+    }
+    pages
+}
+
+/// Ogg's CRC-32: polynomial 0x04c11db7, no reflection, zero start and no final xor.
+fn ogg_crc(page: &[u8]) -> u32 {
+    let mut crc = 0u32;
+    for &b in page {
+        crc ^= (b as u32) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04c1_1db7
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+/// `blip.ogg` made longer: its two header pages, then its audio page repeated `copies` times
+/// with fresh sequence numbers, granule positions and checksums. Returns the stream and the
+/// pages' `(offset, length)`.
+fn long_ogg(copies: usize) -> (Vec<u8>, Vec<(usize, usize)>) {
+    let src = std::fs::read(data("blip.ogg")).unwrap();
+    let pages = ogg_pages(&src);
+    assert_eq!(pages.len(), 3, "two header pages, one audio page");
+    let (at, len) = pages[2];
+    let mut out = src[..at].to_vec();
+    for n in 0..copies {
+        let mut page = src[at..at + len].to_vec();
+        // The blip's own page ends the stream (flag 4) at granule 4416.
+        page[5] = if n + 1 == copies { 4 } else { 0 };
+        page[6..14].copy_from_slice(&((4_416 * (n + 1)) as i64).to_le_bytes());
+        page[18..22].copy_from_slice(&(2 + n as u32).to_le_bytes());
+        page[22..26].fill(0);
+        let crc = ogg_crc(&page);
+        page[22..26].copy_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&page);
+    }
+    let pages = ogg_pages(&out);
+    (out, pages)
+}
+
+#[test]
+fn a_damaged_ogg_page_keeps_the_audio_around_it() {
+    let (ogg, pages) = long_ogg(12);
+    assert_eq!(pages.len(), 2 + 12);
+    let clean = decode_sample(&ogg, Some("ogg"), 600.0).unwrap();
+    assert!(clean.len() > 10 * 4_000, "{}", clean.len());
+
+    // Flip one byte in the body of a page in the middle: its CRC no longer matches.
+    let mut damaged = ogg.clone();
+    let (at, len) = pages[2 + 6];
+    damaged[at + len - 3] ^= 0xff;
+    let b = decode_sample(&damaged, Some("ogg"), 600.0).expect("the audio around the damage");
+    assert!(
+        b.len() > clean.len() - 2 * 4_416 && b.len() < clean.len(),
+        "only the damaged page's audio is lost: {} of {} frames",
+        b.len(),
+        clean.len()
+    );
+    // What decodes before the damage is what a clean file decodes there.
+    let before = 5 * 4_416;
+    assert_eq!(b.l[..before], clean.l[..before]);
+    assert_eq!(b.rate, 44_100.0);
+
+    // The same damage in the first audio page, right after the headers, which the reader
+    // otherwise gives up on while still opening the file.
+    let mut damaged = ogg.clone();
+    let (at, len) = pages[2];
+    damaged[at + len - 3] ^= 0xff;
+    let b = decode_sample(&damaged, Some("ogg"), 600.0).expect("the audio after the damage");
+    assert!(
+        b.len() > clean.len() - 2 * 4_416 && b.len() < clean.len(),
+        "{} of {} frames",
+        b.len(),
+        clean.len()
+    );
+}
+
+#[test]
+fn an_ogg_with_every_audio_page_damaged_is_corrupt() {
+    let (ogg, pages) = long_ogg(2);
+    let mut damaged = ogg.clone();
+    for &(at, len) in &pages[2..] {
+        damaged[at + len - 3] ^= 0xff;
+    }
+    let e = decode_sample(&damaged, Some("ogg"), 600.0).unwrap_err();
+    assert!(
+        matches!(e, SampleError::Corrupt(_) | SampleError::Empty),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn the_too_long_message_states_the_limit_it_was_given() {
+    let limit_in = |seconds: f32| {
+        SampleError::TooLong {
+            seconds: 845.0,
+            limit: seconds,
+        }
+        .to_string()
+    };
+    assert_ne!(
+        limit_in(600.0),
+        limit_in(90.0),
+        "the message follows the limit"
+    );
+
+    // The variant carries the limit load_sample_with_limit was called with.
+    let dir = TempDir::new();
+    let path = dir.path("two-seconds.wav");
+    write_wav(&path, 1, 48_000, 16, false, 96_000);
+    match load_sample_with_limit(&path, 1.5) {
+        Err(SampleError::TooLong { seconds, limit }) => {
+            assert!((seconds - 2.0).abs() <= 0.01, "{seconds}");
+            assert_eq!(limit, 1.5);
+        }
+        other => panic!("expected TooLong, got {other:?}"),
+    }
+    match load_sample(&path) {
+        Ok(_) => {}
+        other => panic!("expected Ok, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_decoded_buffer_holds_no_spare_capacity() {
+    let dir = TempDir::new();
+    let path = dir.path("long.wav");
+    // Odd lengths: many packets, so growth by doubling would leave slack behind.
+    write_wav(&path, 2, 44_100, 16, false, 100_003);
+    let mut files = vec![load_sample(&path).unwrap()];
+    for name in ["blip.aif", "blip.flac", "blip.mp3", "blip.ogg"] {
+        files.push(load_sample(&data(name)).unwrap());
+    }
+    files.push(decode_sample(&long_ogg(12).0, Some("ogg"), 600.0).unwrap());
+    for b in files {
+        assert_eq!(b.l.capacity(), b.l.len());
+        assert_eq!(b.r.capacity(), b.r.len());
     }
 }

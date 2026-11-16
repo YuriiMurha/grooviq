@@ -8,13 +8,14 @@ use grooviq_dsp::sampler::SampleBuf;
 use std::fmt;
 use std::io::{Cursor, ErrorKind};
 use std::path::Path;
+use symphonia::core::checksum::Crc32;
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::{
-    MediaSource, MediaSourceStream, MediaSourceStreamOptions, ReadOnlySource,
+    MediaSource, MediaSourceStream, MediaSourceStreamOptions, Monitor, ReadOnlySource,
 };
 use symphonia::core::meta::MetadataOptions;
 
@@ -37,8 +38,11 @@ pub enum SampleError {
     Corrupt(String),
     /// Decodes to no frames.
     Empty,
-    /// Longer than the limit.
-    TooLong { seconds: f32 },
+    /// Longer than the limit; `limit` is the limit that was applied, in seconds.
+    TooLong { seconds: f32, limit: f32 },
+    /// A WAV whose header was never filled in (the recorder stopped before finishing it) and
+    /// that holds no sound after it.
+    Unfinished,
     /// A sample rate outside 8 kHz..=384 kHz.
     BadRate(u32),
 }
@@ -54,11 +58,15 @@ impl fmt::Display for SampleError {
             ),
             Self::Corrupt(why) => write!(f, "This sample file is damaged ({why})."),
             Self::Empty => write!(f, "This sample file has no sound in it."),
-            Self::TooLong { seconds } => write!(
+            Self::TooLong { seconds, limit } => write!(
                 f,
-                "This sample is {} long; samples can be up to {} minutes.",
+                "This sample is {} long; samples can be up to {}.",
                 clock(*seconds),
-                MAX_SAMPLE_SECONDS / 60.0
+                limit_text(*limit)
+            ),
+            Self::Unfinished => write!(
+                f,
+                "This WAV file was not finished by the program that recorded it."
             ),
             Self::BadRate(rate) => write!(
                 f,
@@ -82,6 +90,16 @@ fn clock(seconds: f32) -> String {
         format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m}:{s:02}")
+    }
+}
+
+/// A length limit in words: "10 minutes" for whole minutes, otherwise `m:ss`.
+fn limit_text(seconds: f32) -> String {
+    let minutes = seconds / 60.0;
+    if seconds.is_finite() && minutes >= 1.0 && minutes.fract() == 0.0 {
+        format!("{minutes} minute{}", if minutes == 1.0 { "" } else { "s" })
+    } else {
+        clock(seconds)
     }
 }
 
@@ -112,15 +130,36 @@ pub fn decode_sample(
     if let Some(ext) = extension {
         hint.with_extension(&ext.to_ascii_lowercase());
     }
+    // A WAV whose recorder never came back to fill in its header sizes: read to the file's end.
+    let header = unfinished_wav_header(bytes);
+    let unfinished = header.is_some();
+    let wav_fixed;
+    let bytes = match header {
+        Some(UnfinishedWav::NoSound) => return Err(SampleError::Unfinished),
+        Some(UnfinishedWav::Sound(fixed)) => {
+            wav_fixed = fixed;
+            wav_fixed.as_slice()
+        }
+        None => bytes,
+    };
     let eof = |e: &Error| matches!(e, Error::IoError(io) if io.kind() == ErrorKind::UnexpectedEof);
-    // Readers that may seek scan the whole file while opening (for trailing chunks, the last
-    // page), so a cut-off file fails there. Opened as a stream, the same reader stops at the
-    // sound data, and the part before the cut still plays.
-    let mut format = match open(bytes, &hint, true) {
-        Err(e) if eof(&e) => open(bytes, &hint, false),
+    let opened = open_any(bytes, &hint);
+    // An Ogg page that fails its checksum next to the headers stops the reader from opening
+    // the file at all, though the pages after it are fine: open it again without them.
+    let ogg_fixed;
+    let opened = match opened {
+        Err(Error::DecodeError(_)) if bytes.starts_with(b"OggS") => {
+            match without_damaged_ogg_pages(bytes) {
+                Some(fixed) => {
+                    ogg_fixed = fixed;
+                    open_any(&ogg_fixed, &hint)
+                }
+                None => opened,
+            }
+        }
         opened => opened,
-    }
-    .map_err(|e| match e {
+    };
+    let mut format = opened.map_err(|e| match e {
         // No container marker anywhere: not a sound file.
         Error::Unsupported(_) => SampleError::Unsupported,
         // A container was recognised, but the file ends inside its header.
@@ -144,12 +183,18 @@ pub fn decode_sample(
     }
     if let (Some(r), Some(frames)) = (rate, track.num_frames) {
         if frames == 0 {
-            return Err(SampleError::Empty);
+            // A WAV's header sizes were filled in by us: no frames there means no sound written.
+            return Err(if unfinished {
+                SampleError::Unfinished
+            } else {
+                SampleError::Empty
+            });
         }
         let seconds = frames as f64 / r as f64;
         if seconds > max_seconds as f64 {
             return Err(SampleError::TooLong {
                 seconds: seconds as f32,
+                limit: max_seconds,
             });
         }
     }
@@ -216,6 +261,7 @@ pub fn decode_sample(
             let rest: u64 = remaining_frames(&mut *format, track_id);
             return Err(SampleError::TooLong {
                 seconds: ((l.len() as u64 + rest) as f64 / r_hz) as f32,
+                limit: max_seconds,
             });
         }
     }
@@ -229,11 +275,115 @@ pub fn decode_sample(
     if l.is_empty() {
         return Err(SampleError::Empty);
     }
+    // The vectors grew by doubling; hand back exactly what was decoded.
+    l.shrink_to_fit();
+    r.shrink_to_fit();
     Ok(SampleBuf {
         rate: rate as f32,
         l,
         r,
     })
+}
+
+/// Opens `bytes` as a seekable source and, if that hits the end of the data, as a stream.
+fn open_any<'a>(bytes: &'a [u8], hint: &Hint) -> Result<Box<dyn FormatReader + 'a>, Error> {
+    match open(bytes, hint, true) {
+        Err(Error::IoError(io)) if io.kind() == ErrorKind::UnexpectedEof => {
+            open(bytes, hint, false)
+        }
+        opened => opened,
+    }
+}
+
+/// What an unfinished WAV header turned out to hold.
+enum UnfinishedWav {
+    /// Nothing follows the header.
+    NoSound,
+    /// A copy of the file with the RIFF and data sizes filled in for what follows the header.
+    Sound(Vec<u8>),
+}
+
+/// A WAV recorder that stops before it can come back to fill in its header leaves a data chunk
+/// size of 0 (never filled in) or 0xFFFF_FFFF (streamed, size unknown). Other tools read such a
+/// file to its end; this returns the file with the sizes made true so the reader does the same.
+/// `None` when this is not a WAV, or its header is finished.
+fn unfinished_wav_header(bytes: &[u8]) -> Option<UnfinishedWav> {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let riff_size = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    let mut at = 12usize;
+    while let Some(chunk) = bytes.get(at..at + 8) {
+        let size = u32::from_le_bytes(chunk[4..8].try_into().ok()?);
+        if &chunk[..4] != b"data" {
+            // Chunks are padded to an even size.
+            at = at.checked_add(8 + size as usize + (size as usize & 1))?;
+            continue;
+        }
+        let sound = at + 8;
+        let after = bytes.len() - sound;
+        let finished_riff = riff_size as usize == bytes.len() - 8;
+        return match size {
+            // A finished file with no frames in it is merely empty.
+            0 if after == 0 && finished_riff => None,
+            0 | u32::MAX if after == 0 => Some(UnfinishedWav::NoSound),
+            0 | u32::MAX => {
+                let mut fixed = bytes.to_vec();
+                let end = |n: usize| u32::try_from(n).unwrap_or(u32::MAX - 1).min(u32::MAX - 1);
+                fixed[4..8].copy_from_slice(&end(bytes.len() - 8).to_le_bytes());
+                fixed[at + 4..at + 8].copy_from_slice(&end(after).to_le_bytes());
+                Some(UnfinishedWav::Sound(fixed))
+            }
+            _ => None,
+        };
+    }
+    None
+}
+
+/// `bytes` (an Ogg stream) with the pages whose checksum fails removed, or `None` when every
+/// page is sound. Bytes between pages are dropped too; a page cut off by the end of the data is
+/// kept as it is.
+fn without_damaged_ogg_pages(bytes: &[u8]) -> Option<Vec<u8>> {
+    const HEADER: usize = 27;
+    let mut out = Vec::with_capacity(bytes.len());
+    let (mut at, mut dropped) = (0usize, false);
+    while at < bytes.len() {
+        let Some(page_at) = bytes[at..].windows(4).position(|w| w == b"OggS") else {
+            dropped |= at < bytes.len();
+            break;
+        };
+        dropped |= page_at > 0;
+        at += page_at;
+        let Some(segments) = bytes.get(at + HEADER - 1).map(|&n| n as usize) else {
+            out.extend_from_slice(&bytes[at..]);
+            break;
+        };
+        let table = at + HEADER..at + HEADER + segments;
+        let Some(lacing) = bytes.get(table.clone()) else {
+            out.extend_from_slice(&bytes[at..]);
+            break;
+        };
+        let end = table.end + lacing.iter().map(|&s| s as usize).sum::<usize>();
+        let Some(page) = bytes.get(at..end) else {
+            out.extend_from_slice(&bytes[at..]);
+            break;
+        };
+        // The checksum is taken with its own four bytes zeroed.
+        let mut crc = Crc32::new(0);
+        crc.process_buf_bytes(&page[..22]);
+        crc.process_buf_bytes(&[0; 4]);
+        crc.process_buf_bytes(&page[26..]);
+        if crc.crc().to_le_bytes() == page[22..26] {
+            out.extend_from_slice(page);
+            at = end;
+        } else {
+            dropped = true;
+            // Resume right after this page's capture pattern, as the reader does: the damage may
+            // be in its length fields, with a good page inside what they claimed.
+            at += 4;
+        }
+    }
+    dropped.then_some(out)
 }
 
 /// Opens a container reader over `bytes`, as a seekable source or as a plain stream.
