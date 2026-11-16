@@ -1,5 +1,14 @@
 import { expect, test as base, type Locator, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { installMockTauri, type MockChannel, type MockProject, type MockSeed } from "./mockTauri";
+
+/** The sampler's parameter ids, ranges and defaults, as the engine has them (the fixture the
+ * Rust tests keep in step with `grooviq_dsp::sampler`). */
+const SAMPLER_PARAMS = (
+  JSON.parse(readFileSync(new URL("../../../tests/fixtures/device-params.json", import.meta.url), "utf8")) as {
+    sampler: MockSeed["samplerParams"];
+  }
+).sampler;
 
 // Grid geometry (src/rack/gridModel.ts): 28 px cells, 6 px gaps, 4 px edge.
 const CELL = 28;
@@ -17,6 +26,7 @@ export function project(
     name,
     color: i % 6,
     sample: `/qa/sounds/${name}.wav`,
+    embedded: true,
     volume: 1,
     pan: 0,
     mute: false,
@@ -37,7 +47,7 @@ export function project(
   };
 }
 
-/** Generated sound files for every channel name, so nothing shows as missing. */
+/** Sound files for every channel name, for adding or relinking them. */
 export function soundsFor(names: string[]): MockSeed["files"] {
   return Object.fromEntries(names.map((n) => [`/qa/sounds/${n}.wav`, { kind: "sample" as const }]));
 }
@@ -61,7 +71,7 @@ export const test = base.extend<{ seed: MockSeed; app: Page; mock: Mock }>({
       if (m.type() === "error" || m.type() === "warning") consoleErrors.push(`${m.type()}: ${m.text()}`);
     });
     page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
-    await page.addInitScript(installMockTauri, seed);
+    await page.addInitScript(installMockTauri, { samplerParams: SAMPLER_PARAMS, ...seed });
     await page.goto("/");
     await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
     await use(page);
@@ -97,3 +107,29 @@ export async function clickCell(page: Page, row: number, step: number, button: "
 
 /** The position readout ("bar.beat.step"). */
 export const position = (page: Page) => page.getByRole("timer", { name: "Position" });
+
+/** RGBA at points (CSS pixels, relative to the element) of what the element shows on screen. */
+export async function pixelsAt(page: Page, el: Locator, points: { x: number; y: number }[]) {
+  const png = (await el.screenshot({ scale: "css" })).toString("base64");
+  return page.evaluate(
+    async ({ png, points }) => {
+      const img = new Image();
+      img.src = `data:image/png;base64,${png}`;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      if (!ctx) throw new Error("no 2D context");
+      ctx.drawImage(img, 0, 0);
+      return points.map(({ x, y }) => Array.from(ctx.getImageData(Math.round(x), Math.round(y), 1, 1).data));
+    },
+    { png, points },
+  );
+}
+
+/** Distance between two colours (RGB, 0..441). */
+export const colourDistance = (a: number[], b: number[]) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+/** Brightness, 0..255. */
+export const brightness = (c: number[]) => (c[0] + c[1] + c[2]) / 3;

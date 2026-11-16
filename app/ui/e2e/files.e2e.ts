@@ -5,6 +5,9 @@ import { expect, project, soundsFor, test, type Mock } from "./fixture";
 
 const KIT = ["Kick", "Snare", "Hat"];
 const kitSeed = { project: project(KIT, { 1: [0, 8] }), files: soundsFor(KIT) };
+/** The channel rows the rack shows, top to bottom. */
+const rows = (app: import("@playwright/test").Page) =>
+  app.getByRole("region", { name: "Channel rack" }).getByRole("group").evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
 const sounding = (cmd: string, args: Record<string, unknown>) =>
   cmd === "transport_play" ||
   cmd === "synth_note" ||
@@ -40,7 +43,7 @@ test.describe("dropping files on the window (check 4)", () => {
     await mock.eval(
       "(m) => m.drag(['/qa/drop/Boom.wav', '/qa/drop/notes.txt', '/qa/drop/Tick.flac', '/qa/drop/Loops', '/qa/drop/Shaker.ogg'], true)",
     );
-    await expect.poll(() => mock.view().then((v) => v.channels.map((c) => c.name))).toEqual(["Boom", "Tick", "Shaker"]);
+    await expect.poll(() => rows(app)).toEqual(["Boom", "Tick", "Shaker"]);
     await expect(rack).not.toHaveClass(/drop-over/);
     const messages = app.getByRole("status", { name: "Messages" });
     await expect(messages).toContainText('"notes.txt": This file is not a sound Grooviq can open');
@@ -51,7 +54,7 @@ test.describe("dropping files on the window (check 4)", () => {
   test("+ Add channel takes several files in the order picked", async ({ app, mock }) => {
     await mock.eval("(m) => m.queueDialog(['/qa/drop/Shaker.ogg', '/qa/drop/Boom.wav'])");
     await app.getByRole("button", { name: "+ Add channel" }).click();
-    await expect.poll(() => mock.view().then((v) => v.channels.map((c) => c.name))).toEqual(["Shaker", "Boom"]);
+    await expect.poll(() => rows(app)).toEqual(["Shaker", "Boom"]);
   });
 });
 
@@ -205,6 +208,19 @@ test.describe("export (check 13)", () => {
       expect(await mock.eval<boolean>(`(m) => m.files.has('/qa/out/${format}.wav')`)).toBe(true);
     });
   }
+
+  test("Cancel over an existing file keeps that file", async ({ app, mock }) => {
+    await app.keyboard.press("ControlOrMeta+r");
+    const dialog = app.getByRole("dialog", { name: "Export WAV" });
+    await mock.eval("(m) => m.files.set('/qa/out/beat.wav', { kind: 'sample', seconds: 9 })");
+    await mock.eval("(m) => m.queueDialog('/qa/out/beat.wav')");
+    await dialog.getByRole("button", { name: "Export…" }).click();
+    await expect.poll(async () => Number(await dialog.getByRole("progressbar").getAttribute("aria-valuenow"))).toBeGreaterThan(0);
+    await dialog.getByRole("button", { name: "Cancel export" }).click();
+    await expect(dialog.getByRole("button", { name: "Export…" })).toBeVisible();
+    expect(await mock.eval<number>("(m) => m.files.get('/qa/out/beat.wav')?.seconds")).toBe(9);
+    expect(await mock.eval<string[]>("(m) => [...m.files.keys()].filter((k) => k.endsWith('.part'))")).toEqual([]);
+  });
 
   test("Cancel leaves no file behind and goes back to the options", async ({ app, mock }) => {
     await app.keyboard.press("ControlOrMeta+r");

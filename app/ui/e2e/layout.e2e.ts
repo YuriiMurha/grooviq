@@ -38,22 +38,25 @@ for (const [w, h] of [
 }
 
 test.describe("the project name in the toolbar", () => {
-  for (const name of ["Untitled", "Late Night Flip"]) {
-    test.describe(name, () => {
-      test.use({ seed: { project: { ...project(KIT), name }, files: soundsFor(KIT) } });
-      test(`"${name}" shows in full at 1280 px`, async ({ app }, info) => {
-        // #104: the toolbar cuts names short long before it is full. Remove this once fixed.
-        test.fail(name === "Late Night Flip", "#104");
-        const button = app.getByRole("button", { name, exact: true });
-        const cut = await button.evaluate((el) => {
-          const label = el.querySelector("span:not([aria-hidden])") ?? el;
-          return label.scrollWidth > label.clientWidth;
-        });
-        await app.locator("header.toolbar").screenshot({ path: info.outputPath("toolbar.png") });
-        expect(cut, "the name is cut off").toBe(false);
-      });
+  // The mockup's name. "Untitled" is cut too in the real app and on Linux, but fits in macOS
+  // headless WebKit, so only this name pins #104 everywhere.
+  test.use({ seed: { project: { ...project(KIT), name: "Late Night Flip" }, files: soundsFor(KIT) } });
+
+  test("is cut short at 1280 px while the toolbar has room (#104)", async ({ app }, info) => {
+    await app.evaluate(() => document.fonts.ready.then(() => undefined));
+    const button = app.getByRole("button", { name: "Late Night Flip", exact: true });
+    const label = button.locator(".project-name-text");
+    const { cut, room } = await label.evaluate((el) => {
+      const chip = document.querySelector(".chip-anchor")?.getBoundingClientRect();
+      const position = document.querySelector("[aria-label='Position']")?.getBoundingClientRect();
+      return { cut: el.scrollWidth > el.clientWidth, room: chip && position ? chip.left - position.right : 0 };
     });
-  }
+    await app.locator("header.toolbar").screenshot({ path: info.outputPath("toolbar.png") });
+    expect(room, "free toolbar space between the position and the output chip").toBeGreaterThan(300);
+    // Known defect #104: pinned. When it is fixed this fails: expect `false` instead.
+    info.annotations.push({ type: "issue", description: "#104" });
+    expect(cut, "#104 fixed? expect the full name now").toBe(true);
+  });
 });
 
 test.describe("keyboard path", () => {

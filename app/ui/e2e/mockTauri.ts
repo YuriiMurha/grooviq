@@ -27,6 +27,9 @@ export interface MockChannel {
   color: number;
   /** The sample's path; `null` for a channel without one. */
   sample: string | null;
+  /** The project holds the sample's bytes (every saved sample is embedded). `false`: they are
+   * missing from the project file, so the channel shows "Missing" until relinked. */
+  embedded?: boolean;
   volume: number;
   pan: number;
   mute: boolean;
@@ -49,6 +52,8 @@ export interface MockSeed {
   recovery?: { savedAt: number; original: string | null; project: MockProject } | null;
   /** How long an export takes, in ms. */
   exportMs?: number;
+  /** The sampler's parameters (tests/fixtures/device-params.json); the fixture fills it in. */
+  samplerParams?: { id: string; min: number; max: number; default: number }[];
 }
 
 export function installMockTauri(seed: MockSeed): void {
@@ -58,24 +63,8 @@ export function installMockTauri(seed: MockSeed): void {
   const MAX_CHANNELS = 256;
   const INKS = 6;
   const DEFAULT_VELOCITY = 0.8;
-  const PARAMS: [string, number, number, number][] = [
-    ["root", 0, 127, 60],
-    ["tune", -24, 24, 0],
-    ["fine", -100, 100, 0],
-    ["start", 0, 1, 0],
-    ["end", 0, 1, 1],
-    ["reverse", 0, 1, 0],
-    ["pitch_track", 0, 1, 1],
-    ["one_shot", 0, 1, 1],
-    ["attack", 0, 5000, 0],
-    ["decay", 1, 10000, 500],
-    ["sustain", 0, 1, 1],
-    ["release", 1, 10000, 40],
-    ["gain", -60, 12, 0],
-    ["pan", -1, 1, 0],
-    ["declick", 0, 1, 1],
-  ];
-  const SAMPLE_EXTENSIONS = ["wav", "aif", "aiff", "flac", "mp3", "ogg"];
+  if (!seed.samplerParams?.length) throw new Error("the mock needs the sampler's parameters");
+  const PARAMS: [string, number, number, number][] = seed.samplerParams.map((p) => [p.id, p.min, p.max, p.default]);
   const SILENT_OUTPUT = {
     id: "null",
     name: "Silent (QA mode)",
@@ -93,10 +82,14 @@ export function installMockTauri(seed: MockSeed): void {
   const extension = (path: string) => {
     const name = fileName(path);
     const dot = name.lastIndexOf(".");
-    return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+    return dot > 0 ? name.slice(dot + 1) : "";
   };
-  const withExtension = (path: string, ext: string) =>
-    extension(path) === ext ? path : `${path}.${ext}`;
+  /** `.ext` added unless the path ends in it: exactly (a project, session.rs `begin_save`) or in
+   * any case (an export, project_cmds.rs `with_extension`). */
+  const withExtension = (path: string, ext: string, anyCase: boolean) => {
+    const has = anyCase ? extension(path).toLowerCase() === ext : extension(path) === ext;
+    return has ? path : `${path}.${ext}`;
+  };
   const emptyProject = (): Project => ({
     name: "Untitled",
     bpm: 140,
@@ -139,10 +132,11 @@ export function installMockTauri(seed: MockSeed): void {
     });
     return id;
   };
-  let nextEventId = 1;
+  // Like the shell: `id` is the listener's id (what `listen` returned), which `once` uses to
+  // unlisten.
   const emit = (event: string, payload: unknown) => {
-    for (const handler of listeners.get(event) ?? []) {
-      callbacks.get(handler)?.({ event, id: nextEventId++, payload });
+    for (const handler of [...(listeners.get(event) ?? [])]) {
+      callbacks.get(handler)?.({ event, id: handler, payload });
     }
   };
 
@@ -158,11 +152,8 @@ export function installMockTauri(seed: MockSeed): void {
   };
   const samplerValues = (c: MockChannel) =>
     Object.fromEntries(PARAMS.map(([id, , , def]) => [id, c.sampler[id] ?? def]));
-  const missing = (c: MockChannel) => {
-    if (c.sample === null) return false;
-    const f = files.get(c.sample);
-    return !f || f.kind !== "sample";
-  };
+  // session.rs: missing = a sample reference without decoded bytes. The path is never opened.
+  const missing = (c: MockChannel) => c.sample !== null && c.embedded === false;
   const view = () => {
     const p = s.project;
     const steps = p.pattern.steps;
@@ -322,12 +313,13 @@ export function installMockTauri(seed: MockSeed): void {
     const f = files.get(path);
     if (!f) throw `"${name}" could not be read: No such file or directory (os error 2).`;
     if (f.kind === "folder") throw `"${name}" could not be read: not a regular file.`;
-    if (f.kind !== "sample" || !SAMPLE_EXTENSIONS.includes(extension(path))) {
+    // The decoder reads the content; the extension is only a hint (sample_file.rs).
+    if (f.kind !== "sample") {
       throw `"${name}": This file is not a sound Grooviq can open; use WAV, AIFF, FLAC, MP3 or OGG.`;
     }
   };
   const saveTo = (target: string | null) => {
-    const path = target === null ? s.path : withExtension(target, "grooviq");
+    const path = target === null ? s.path : withExtension(target, "grooviq", false);
     if (path === null) throw "Choose where to save this project.";
     if (files.get(path)?.kind === "project") s.backups.set(path, (s.backups.get(path) ?? 0) + 1);
     files.set(path, { kind: "project", project: clone(s.project) });
@@ -342,8 +334,8 @@ export function installMockTauri(seed: MockSeed): void {
     markClean();
     if (unsaved) changed();
     const warnings = p.channels
-      .filter((c) => c.sample !== null && missing(c))
-      .map((c) => `The sample for "${c.name}" was not found: ${c.sample}.`);
+      .filter((c) => missing(c))
+      .map((c) => `Channel "${c.name}": its sample is missing from the project file. Relink it to hear it.`);
     return { view: view(), warnings };
   };
 
@@ -463,6 +455,7 @@ export function installMockTauri(seed: MockSeed): void {
         name: stem(path) || "Sample",
         color: last ? (last.color + 1) % INKS : 0,
         sample: path,
+        embedded: true,
         volume: 1,
         pan: 0,
         mute: false,
@@ -476,7 +469,9 @@ export function installMockTauri(seed: MockSeed): void {
     channel_set_sample: (a) => {
       const path = String(a.path);
       readSample(path);
-      s.project.channels[channelIndex(a.channel)].sample = path;
+      const c = s.project.channels[channelIndex(a.channel)];
+      c.sample = path;
+      c.embedded = true;
       changed();
       return view();
     },
@@ -509,23 +504,24 @@ export function installMockTauri(seed: MockSeed): void {
       }
       if (!(o.loops >= 1 && o.loops <= LOOPS_MAX)) throw `The pattern can play 1 to ${LOOPS_MAX} times.`;
       if (s.export) throw "An export is already running.";
-      const path = withExtension(String(a.path), "wav");
+      const path = withExtension(String(a.path), "wav", true);
+      // export.rs: written to `<path>.part`, renamed over `path` only when complete; a cancel
+      // or an error deletes the part and leaves `path` as it was.
+      const part = `${path}.part`;
       const job = { cancel: false };
       s.export = job;
       const total = seed.exportMs ?? 1500;
       const steps = 20;
       try {
-        files.set(path, { kind: "text" });
+        files.set(part, { kind: "text" });
         for (let i = 1; i <= steps; i++) {
           await new Promise((r) => setTimeout(r, total / steps));
-          if (job.cancel) {
-            files.delete(path);
-            throw "The export was cancelled.";
-          }
+          if (job.cancel) throw "The export was cancelled.";
           emit("export-progress", i / steps);
         }
         files.set(path, { kind: "sample", seconds: 1 });
       } finally {
+        files.delete(part);
         s.export = null;
       }
       const seconds = ((o.loops * s.project.pattern.steps * STEP_TICKS) / PPQ) * (60 / s.project.bpm);
@@ -582,10 +578,68 @@ export function installMockTauri(seed: MockSeed): void {
     "plugin:window|set_title": () => null,
   };
 
+  // Argument types as serde reads them from the payload (the command signatures, `Edit`,
+  // `ExportRequest`): a wrong type is refused before the command runs, as in the shell.
+  type Check = (v: unknown) => string | null;
+  const isInt = (v: unknown, max: number) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= max;
+  const u8: Check = (v) => (isInt(v, 255) ? null : `invalid value: ${JSON.stringify(v)}, expected u8`);
+  const u32: Check = (v) => (isInt(v, 0xffffffff) ? null : `invalid value: ${JSON.stringify(v)}, expected u32`);
+  // JSON has no NaN or infinity: they arrive as null.
+  const f32: Check = (v) => (typeof v === "number" && Number.isFinite(v) ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected f32`);
+  const bool: Check = (v) => (typeof v === "boolean" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a boolean`);
+  const str: Check = (v) => (typeof v === "string" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a string`);
+  const fields = (spec: Record<string, Check>): Check => (v) => {
+    if (typeof v !== "object" || v === null) return "expected a map";
+    for (const [key, check] of Object.entries(spec)) {
+      const why = check((v as Record<string, unknown>)[key]);
+      if (why) return `${key}: ${why}`;
+    }
+    return null;
+  };
+  const EDITS: Record<string, Check> = {
+    removeChannel: fields({ channel: u32 }),
+    setChannelMix: fields({ channel: u32, volume: f32, pan: f32, mute: bool, solo: bool }),
+    setSamplerParam: fields({ channel: u32, param: str, value: f32 }),
+    toggleStep: fields({ channel: u32, step: u32 }),
+    setStepVelocity: fields({ channel: u32, step: u32, velocity: f32 }),
+    clearStep: fields({ channel: u32, step: u32 }),
+    setPatternLength: fields({ steps: u32 }),
+    setSwing: fields({ swing: f32 }),
+    setTempo: fields({ bpm: f32 }),
+    setTimeSignature: fields({ beats: u8, unit: u8 }),
+  };
+  const edit: Check = (v) => {
+    const kind = (v as { kind?: unknown } | null)?.kind;
+    const check = typeof kind === "string" ? EDITS[kind] : undefined;
+    return check ? check(v) : `unknown variant ${JSON.stringify(kind ?? null)}`;
+  };
+  const exportOptions: Check = (v) =>
+    fields({ sampleRate: u32, loops: u32 })(v) ??
+    (["pcm24", "float32"].includes((v as { format?: unknown }).format as string)
+      ? null
+      : `format: unknown variant ${JSON.stringify((v as { format?: unknown }).format ?? null)}, expected \`pcm24\` or \`float32\``);
+  const ARGS: Record<string, Record<string, Check>> = {
+    audio_select: { id: str },
+    audio_set_guard: { on: bool },
+    test_tone: { on: bool },
+    synth_note: { key: u8, on: bool },
+    project_edit: { edit },
+    channel_add: { path: str },
+    channel_set_sample: { channel: u32, path: str },
+    channel_preview: { channel: u32, on: bool },
+    project_open: { path: str },
+    project_save_as: { path: str },
+    project_export: { path: str, options: exportOptions },
+  };
+
   const invoke = async (cmd: string, args: Record<string, unknown> = {}) => {
     calls.push({ cmd, args: clone(args ?? {}), at: performance.now() });
     const handler = commands[cmd];
     if (!handler) throw `The mock engine has no command ${cmd}`;
+    for (const [name, check] of Object.entries(ARGS[cmd] ?? {})) {
+      const why = check((args ?? {})[name]);
+      if (why) throw `invalid args \`${name}\` for command \`${cmd}\`: ${why}`;
+    }
     return clone(await handler(args ?? {}));
   };
 
