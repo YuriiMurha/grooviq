@@ -416,8 +416,8 @@ fn live_position_counts_ticks_while_playing() {
     let mut buf = vec![0f32; 48_000 * 2];
     p.process(&mut buf, 2);
     // 25 frames a tick: the last block started 64 frames (2.56 ticks) before frame 48 000.
-    let pos = c.live().position_ticks;
-    assert!((1_917..=1_920).contains(&pos), "{pos}");
+    // Published for the block start: frame 47 936 is tick 1 917.44.
+    assert_eq!(c.live().position_ticks, 1_917);
     c.send(Command::Stop).unwrap();
     p.process(&mut buf[..BLOCK * 2], 2);
     assert_eq!(c.live().position_ticks, 0);
@@ -540,4 +540,92 @@ fn a_new_sample_rate_mid_play_keeps_the_position() {
         .collect();
     assert_eq!(expected[6], 41_984);
     assert_eq!(onsets(&out), expected);
+}
+
+#[test]
+fn a_tempo_change_and_a_pattern_swap_in_one_block_neither_replay_nor_skip() {
+    // A click every 5 ticks, including tick 23 (frame 575 at 120 BPM). Tempo changes both
+    // ways; with the same pattern set again in each change's block, the output is the same.
+    let ticks: Vec<u32> = (0..768).map(|i| i * 5).chain([23]).collect();
+    let mut pat = pattern(16, &ticks);
+    pat.notes.sort_by_key(|n| n.tick);
+    let changes = [
+        (576, 140.0),
+        (20_000, 60.0),
+        (40_000, 333.0),
+        (60_011, 20.0),
+        (61_000, 400.0),
+    ];
+    let script = |swap: bool| {
+        let mut s = vec![(0, Action::Send(Command::Play))];
+        for (frame, bpm) in changes {
+            s.push((frame, Action::Send(Command::SetTempo { bpm })));
+            if swap {
+                s.push((frame, Action::Pattern(pat.clone())));
+            }
+        }
+        s
+    };
+    let frames = 120_000;
+    let plain = drive(clicks(120.0, pat.clone()), &script(false), frames, 64);
+    let swapped = drive(clicks(120.0, pat.clone()), &script(true), frames, 64);
+    assert!(onsets(&plain).len() > 500);
+    assert!(onsets(&plain).contains(&575));
+    assert!(swapped == plain);
+}
+
+#[test]
+fn a_new_rate_mid_play_neither_replays_nor_skips_a_note() {
+    // A click on every tick at 44.1 kHz (22.97 frames a tick), then 22.05 kHz from a block
+    // that starts one frame after a tick's frame: that tick has played and must not again.
+    let mut l = vec![0.0; 16];
+    l[0] = 1.0;
+    let click44 = Arc::new(SampleBuf {
+        rate: 44_100.0,
+        r: l.clone(),
+        l,
+    });
+    let every: Vec<u32> = (0..3_840).collect();
+    let state = EngineState {
+        bpm: 120.0,
+        channels: vec![channel(1, &click44, exact())],
+        pattern: PatternData {
+            length: 3_840,
+            notes: every.iter().map(|&t| note(t, 1, 1)).collect(),
+        },
+    };
+    let at44 = |t: u32| ticks_to_frames(f64::from(t), 120.0, 44_100.0);
+    let switch = (1..3_000)
+        .map(at44)
+        .find(|f| f % BLOCK as u64 == BLOCK as u64 - 1)
+        .expect("a tick one frame before a block start")
+        + 1;
+    let (mut c, mut p) = engine_with(cfg(44_100.0), state);
+    c.send(Command::Play).unwrap();
+    let total = switch as usize + 20_000;
+    let mut out = vec![0f32; total * 2];
+    p.process(&mut out[..switch as usize * 2], 2);
+    c.reconfigure(&mut p, cfg(22_050.0));
+    p.process(&mut out[switch as usize * 2..], 2);
+    let reached = switch as f64 / (44_100.0 * 60.0 / (120.0 * f64::from(PPQ)));
+    let expected: Vec<u64> = every
+        .iter()
+        .map(|&t| {
+            let old = at44(t);
+            if old < switch {
+                old
+            } else {
+                switch + ticks_to_frames(f64::from(t) - reached, 120.0, 22_050.0)
+            }
+        })
+        .take_while(|&f| f < total as u64)
+        .collect();
+    assert!(expected.contains(&(switch - 1)));
+    let got = onsets(&out);
+    assert_eq!(got, expected);
+    let l = left(&out);
+    assert!(
+        got.iter().all(|&f| l[f as usize] == 1.0),
+        "one voice per onset"
+    );
 }

@@ -35,6 +35,10 @@ pub(crate) struct TransportClock {
     anchor_tick: f64,
     /// `PlayLoops`: the number of loops to play (no note starts at or after `loops * length`).
     loops: Option<u32>,
+    /// The first tick the blocks so far have not covered: every note before it has had its
+    /// turn. A sequencer seeks from here, so a seek is exact whatever the tick-to-frame map
+    /// does at the block start.
+    covered: u64,
 }
 
 impl TransportClock {
@@ -46,6 +50,7 @@ impl TransportClock {
             anchor_frame: 0,
             anchor_tick: 0.0,
             loops: None,
+            covered: 0,
         }
     }
 
@@ -63,6 +68,7 @@ impl TransportClock {
         self.anchor_frame = at;
         self.anchor_tick = 0.0;
         self.loops = loops;
+        self.covered = 0;
     }
 
     /// Stops and rewinds to tick 0.
@@ -71,6 +77,7 @@ impl TransportClock {
         self.anchor_frame = 0;
         self.anchor_tick = 0.0;
         self.loops = None;
+        self.covered = 0;
     }
 
     /// Changes the tempo from frame `at` (a block start) on: the tick reached there stays put.
@@ -114,6 +121,35 @@ impl TransportClock {
         // Frames below 2^53 convert exactly.
         let elapsed = frame as f64 - self.anchor_frame as f64;
         self.anchor_tick + elapsed / frames_per_tick
+    }
+
+    /// The first tick not covered yet (0 before the first block of a play).
+    pub(crate) fn covered(&self) -> u64 {
+        self.covered
+    }
+
+    /// Records that the block ending before frame `end` is done: every tick whose frame is
+    /// before `end` is covered. Call it after the block, before the next one's commands change
+    /// the map.
+    ///
+    /// Known limit: when more than a block's worth of notes (256) are due in one block, the
+    /// rest start at the next block's start; a re-seek in exactly that next block skips them
+    /// rather than replay the ones already started at their tick.
+    pub(crate) fn mark_covered(&mut self, end: u64) {
+        if !self.playing {
+            return;
+        }
+        // The first tick that lands at or after `end`: start two ticks before the exact
+        // tick there (a tick is at least 1.25 frames, so that one lands before `end`) and
+        // step forward; a handful of steps.
+        let mut tick = (self.tick_at(end).floor() - 2.0).max(0.0) as u64;
+        for _ in 0..64 {
+            if self.frame_of(tick as f64) >= end {
+                break;
+            }
+            tick += 1;
+        }
+        self.covered = tick;
     }
 
     /// Whole ticks since play started at `frame`, 0 while stopped.

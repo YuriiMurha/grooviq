@@ -191,6 +191,9 @@ impl AudioProcessor {
             self.block_l = [0.0; BLOCK];
             self.block_r = [0.0; BLOCK];
         }
+        // Before the next block's commands can change the tick-to-frame map: a sequencer that
+        // re-seeks there starts from the first tick this block did not cover.
+        self.transport.mark_covered(end);
         self.update_meter();
         self.clock = end;
         self.served = 0;

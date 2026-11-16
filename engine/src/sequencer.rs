@@ -5,8 +5,11 @@
 //! A cursor walks the pattern's notes loop after loop: a note at `tick` in loop `k` starts at
 //! tick `k * length + tick` (ticks since play started), on the frame the transport maps it to.
 //! Every note-on that a channel takes leaves a note-off in a fixed table of [`PENDING`] slots,
-//! due at the note's end. The cursor re-seeks (to the first note at or after the block start)
-//! on Play, on a pattern swap and in a fresh graph, so neither leaves a gap nor replays a note.
+//! due at the note's end. The cursor re-seeks on Play, on a pattern swap and in a fresh graph:
+//! to the first note at or after the first tick the previous blocks have not covered (which
+//! the transport keeps). Seeking by tick, not by frame, keeps that exact when the tick-to-frame
+//! map changed at the block start (a tempo change or a new rate in the same block), so a seek
+//! neither replays a note nor skips one.
 //!
 //! Real-time: nothing here allocates, frees or locks.
 
@@ -67,8 +70,8 @@ impl Sequencer {
         }
     }
 
-    /// The cursor moves to the first note at or after the next block's start: after Play or
-    /// a pattern swap.
+    /// The cursor moves to the first note the transport has not covered yet: after Play or a
+    /// pattern swap.
     pub(crate) fn reseek(&mut self) {
         self.seek = true;
     }
@@ -127,7 +130,7 @@ impl Sequencer {
         let length = u64::from(pattern.length);
         let end = clock.loops().map(|loops| u64::from(loops) * length);
         if std::mem::take(&mut self.seek) {
-            self.seek_to(notes, length, clock, f0);
+            self.seek_to(notes, length, clock.covered());
         }
         for _ in 0..MAX_EVENTS {
             let Some(&note) = notes.get(self.next) else {
@@ -231,25 +234,16 @@ impl Sequencer {
         self.earliest = earliest;
     }
 
-    /// Points the cursor at the first note that starts at or after frame `f0`.
-    fn seek_to(&mut self, notes: &[SeqNote], length: u64, clock: &TransportClock, f0: u64) {
-        let reached = clock.tick_at(f0).max(0.0);
-        // One loop early, in case rounding put `reached` just past a loop's start.
-        let mut loop_index = ((reached / length as f64).floor() as u64).saturating_sub(1);
-        // At most three loops: `reached` lies in the second.
-        for _ in 0..3 {
-            let base = loop_index * length;
-            let first =
-                notes.partition_point(|n| clock.frame_of((base + u64::from(n.tick)) as f64) < f0);
-            if first < notes.len() {
-                self.next = first;
-                self.loop_index = loop_index;
-                return;
-            }
-            loop_index += 1;
+    /// Points the cursor at the first note that starts at or after tick `from` (integer
+    /// arithmetic only).
+    fn seek_to(&mut self, notes: &[SeqNote], length: u64, from: u64) {
+        self.loop_index = from / length;
+        let within = from % length;
+        self.next = notes.partition_point(|n| u64::from(n.tick) < within);
+        if self.next == notes.len() {
+            self.next = 0;
+            self.loop_index += 1;
         }
-        self.next = 0;
-        self.loop_index = loop_index;
     }
 }
 
@@ -278,11 +272,12 @@ mod tests {
         }
     }
 
-    /// Runs `blocks` blocks from frame `from`, recording what every channel takes.
+    /// Runs `blocks` blocks from frame `from`, recording what every channel takes, and marks
+    /// each block covered as the processor does.
     fn record(
         seq: &mut Sequencer,
         pattern: &PatternData,
-        clock: &TransportClock,
+        clock: &mut TransportClock,
         from: u64,
         blocks: u64,
     ) -> Vec<Sent> {
@@ -298,6 +293,7 @@ mod tests {
                 });
                 Delivery::Taken
             });
+            clock.mark_covered(f0 + BLOCK as u64);
         }
         sent
     }
@@ -320,9 +316,9 @@ mod tests {
                 note(961, 1, 62, 1),
             ],
         };
-        let clock = playing(120.0);
+        let mut clock = playing(120.0);
         let mut seq = Sequencer::new();
-        let sent = record(&mut seq, &pattern, &clock, 0, 1_000);
+        let sent = record(&mut seq, &pattern, &mut clock, 0, 1_000);
         let at = |frame: u64, key: u8| -> Vec<bool> {
             sent.iter()
                 .filter(|s| s.frame == frame && s.key == key)
@@ -430,6 +426,7 @@ mod tests {
                     taken += 1;
                     Delivery::Taken
                 });
+                clock.mark_covered(f0 + BLOCK as u64);
                 f0 += BLOCK as u64;
             }
             clock.stop();
@@ -461,10 +458,10 @@ mod tests {
                 .map(|t| note(t, 1, (t % 128) as u8, length))
                 .collect(),
         };
-        let clock = playing(400.0);
+        let mut clock = playing(400.0);
         let mut seq = Sequencer::new();
         let blocks = u64::from(count) * 15 / 2 / BLOCK as u64 + 2;
-        let sent = record(&mut seq, &pattern, &clock, 0, blocks);
+        let sent = record(&mut seq, &pattern, &mut clock, 0, blocks);
         assert_eq!(seq.pending(), PENDING);
         let ons = sent.iter().filter(|s| s.on).count();
         assert_eq!(ons, PENDING, "the rest were skipped, note-on and note-off");
@@ -474,7 +471,7 @@ mod tests {
         let rest = record(
             &mut seq,
             &pattern,
-            &clock,
+            &mut clock,
             blocks * BLOCK as u64,
             frames_to_end / BLOCK as u64,
         );
@@ -488,17 +485,20 @@ mod tests {
             length: 3_840,
             notes: vec![note(0, 1, 60, 10), note(1_600, 1, 61, 10)],
         };
-        let clock = playing(120.0);
-        // Tick 1 600 is frame 40 000, a block start.
+        // Tick 1 600 is frame 40 000, a block start. A fresh sequencer there (a rebuilt
+        // graph) plays it, and nothing before it.
+        let mut clock = playing(120.0);
+        let mut first = Sequencer::new();
+        let before = record(&mut first, &pattern, &mut clock, 0, 40_000 / BLOCK as u64);
+        assert_eq!(before.iter().filter(|s| s.on).count(), 1, "tick 0 only");
         let mut seq = Sequencer::new();
-        let sent = record(&mut seq, &pattern, &clock, 40_000, 1);
-        assert_eq!(sent[0].frame, 40_000);
-        assert_eq!(sent[0].key, 61);
+        let sent = record(&mut seq, &pattern, &mut clock, 40_000, 1);
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0].frame, sent[0].key), (40_000, 61));
         // One block later, the next is the following loop's first note.
         let mut seq = Sequencer::new();
-        let sent = record(&mut seq, &pattern, &clock, 40_064, 1_500);
-        assert_eq!(sent[0].frame, 96_000);
-        assert_eq!(sent[0].key, 60);
+        let sent = record(&mut seq, &pattern, &mut clock, 40_064, 1_500);
+        assert_eq!((sent[0].frame, sent[0].key), (96_000, 60));
     }
 
     #[test]
@@ -510,7 +510,7 @@ mod tests {
         let mut clock = TransportClock::new(SR, 120.0);
         clock.start(0, Some(2));
         let mut seq = Sequencer::new();
-        let sent = record(&mut seq, &pattern, &clock, 0, 2_000);
+        let sent = record(&mut seq, &pattern, &mut clock, 0, 2_000);
         let frames: Vec<(u64, bool)> = sent.iter().map(|s| (s.frame, s.on)).collect();
         assert_eq!(
             frames,
@@ -529,7 +529,7 @@ mod tests {
                 .collect(),
         };
         let mut seq = Sequencer::new();
-        let sent = record(&mut seq, &pattern, &playing(120.0), 0, 2);
+        let sent = record(&mut seq, &pattern, &mut playing(120.0), 0, 2);
         let ons: Vec<u64> = sent.iter().filter(|s| s.on).map(|s| s.frame).collect();
         assert_eq!(ons.len(), 300);
         assert_eq!(ons.iter().filter(|&&f| f == 0).count(), MAX_EVENTS);
@@ -540,13 +540,32 @@ mod tests {
     }
 
     #[test]
+    fn a_seek_right_after_an_overfull_block_never_replays_a_burst() {
+        // 300 notes on tick 0: 256 start in the first block. A re-seek in the next block (a
+        // pattern swap) moves on from the covered ticks: the 256 do not start again.
+        let pattern = PatternData {
+            length: 3_840,
+            notes: (0..300u32)
+                .map(|i| note(0, 1 + i % 3, (i / 3) as u8, 10))
+                .collect(),
+        };
+        let mut clock = playing(120.0);
+        let mut seq = Sequencer::new();
+        let mut sent = record(&mut seq, &pattern, &mut clock, 0, 1);
+        seq.reseek();
+        sent.extend(record(&mut seq, &pattern, &mut clock, BLOCK as u64, 100));
+        let ons = sent.iter().filter(|s| s.on).count();
+        assert_eq!(ons, MAX_EVENTS);
+    }
+
+    #[test]
     fn a_zero_length_note_is_held_for_one_tick() {
         let pattern = PatternData {
             length: 3_840,
             notes: vec![note(0, 1, 60, 0)],
         };
         let mut seq = Sequencer::new();
-        let sent = record(&mut seq, &pattern, &playing(120.0), 0, 2);
+        let sent = record(&mut seq, &pattern, &mut playing(120.0), 0, 2);
         let got: Vec<(u64, bool)> = sent.iter().map(|s| (s.frame, s.on)).collect();
         // 25 frames a tick at 120 BPM and 48 kHz.
         assert_eq!(got, [(0, true), (25, false)]);
@@ -563,7 +582,7 @@ mod tests {
             ],
         };
         let mut seq = Sequencer::new();
-        let sent = record(&mut seq, &pattern, &playing(120.0), 0, 1_000);
+        let sent = record(&mut seq, &pattern, &mut playing(120.0), 0, 1_000);
         assert!(sent.iter().all(|s| s.key == 60), "{sent:?}");
         assert_eq!(
             sent.iter().filter(|s| s.on).count(),
@@ -573,15 +592,94 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_pattern_and_a_stopped_transport_send_nothing() {
-        let clock = playing(120.0);
+    fn a_seek_after_a_speed_up_in_the_same_block_does_not_replay() {
+        // Tick 23 is frame 575 at 120 BPM. At the next block (576), 140 BPM and a re-seek in
+        // the same block: under the new map tick 23 lands on 576, but it has played.
+        let pattern = PatternData {
+            length: 3_840,
+            notes: vec![note(23, 1, 60, 1), note(100, 1, 61, 1)],
+        };
+        let mut clock = playing(120.0);
         let mut seq = Sequencer::new();
-        assert!(record(&mut seq, &PatternData::default(), &clock, 0, 100).is_empty());
-        let stopped = TransportClock::new(SR, 120.0);
+        let mut sent = record(&mut seq, &pattern, &mut clock, 0, 9);
+        clock.set_bpm(576, 140.0);
+        seq.reseek();
+        sent.extend(record(&mut seq, &pattern, &mut clock, 576, 40));
+        let ons: Vec<(u64, u8)> = sent
+            .iter()
+            .filter(|s| s.on)
+            .map(|s| (s.frame, s.key))
+            .collect();
+        let tick_100 = clock.frame_of(100.0);
+        assert_eq!(ons, [(575, 60), (tick_100, 61)]);
+    }
+
+    #[test]
+    fn a_seek_after_a_tempo_change_in_the_same_block_skips_nothing() {
+        // A note on every tick (its channel names the tick). Tempo changes both ways, each
+        // with a re-seek in the same block: every tick still plays once, in order.
+        let pattern = PatternData {
+            length: 960,
+            notes: (0..960).map(|t| note(t, t, 60, 1)).collect(),
+        };
+        let mut clock = playing(140.0);
+        let mut seq = Sequencer::new();
+        let mut sent = Vec::new();
+        let mut f0 = 0;
+        for (i, bpm) in [60.0, 140.0, 61.0, 400.0, 20.0, 333.0, 59.5, 140.0]
+            .into_iter()
+            .enumerate()
+        {
+            sent.extend(record(
+                &mut seq,
+                &pattern,
+                &mut clock,
+                f0,
+                37 + i as u64 * 11,
+            ));
+            f0 += (37 + i as u64 * 11) * BLOCK as u64;
+            clock.set_bpm(f0, bpm);
+            seq.reseek();
+        }
+        sent.extend(record(&mut seq, &pattern, &mut clock, f0, 50));
+        let ticks: Vec<u32> = sent.iter().filter(|s| s.on).map(|s| s.channel).collect();
+        let covered = clock.covered();
+        assert!(covered > 1_500, "{covered}");
+        let expected: Vec<u32> = (0..covered).map(|t| (t % 960) as u32).collect();
+        assert_eq!(ticks, expected);
+    }
+
+    #[test]
+    fn play_loops_releases_every_note_without_a_stop() {
+        // Two notes at tick 0, ending at ticks 100 and 1 000: both note-offs arrive, with
+        // no Stop to flush them.
+        let pattern = PatternData {
+            length: 3_840,
+            notes: vec![note(0, 1, 60, 100), note(0, 1, 61, 1_000)],
+        };
+        let mut clock = TransportClock::new(SR, 120.0);
+        clock.start(0, Some(1));
+        let mut seq = Sequencer::new();
+        let sent = record(&mut seq, &pattern, &mut clock, 0, 2_000);
+        let offs: Vec<(u8, u64)> = sent
+            .iter()
+            .filter(|s| !s.on)
+            .map(|s| (s.key, s.frame))
+            .collect();
+        assert_eq!(offs, [(60, 2_500), (61, 25_000)]);
+        assert_eq!(seq.pending(), 0);
+    }
+
+    #[test]
+    fn an_empty_pattern_and_a_stopped_transport_send_nothing() {
+        let mut clock = playing(120.0);
+        let mut seq = Sequencer::new();
+        assert!(record(&mut seq, &PatternData::default(), &mut clock, 0, 100).is_empty());
+        let mut stopped = TransportClock::new(SR, 120.0);
         let pattern = PatternData {
             length: 960,
             notes: vec![note(0, 1, 60, 10)],
         };
-        assert!(record(&mut seq, &pattern, &stopped, 0, 100).is_empty());
+        assert!(record(&mut seq, &pattern, &mut stopped, 0, 100).is_empty());
     }
 }
