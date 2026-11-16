@@ -1752,3 +1752,73 @@ fn a_note_off_finds_its_note_after_the_fade_slots_fill() {
         l2[4_799]
     );
 }
+
+#[test]
+fn a_choke_retires_held_keys_from_priority() {
+    // Mono and legato: 48 is down when the channel is choked. A new note 60 then plays alone:
+    // releasing it ends the note instead of returning to the choked 48.
+    for mode in [1.0, 2.0] {
+        let mut s = configured(
+            &dc(),
+            &[("one_shot", 0.0), ("release", 1.0), ("voice_mode", mode)],
+        );
+        render(&mut s, 4_800, &[on(0, 48, 1.0)]);
+        s.choke();
+        let (l, _) = render(&mut s, 9_600, &[on(0, 60, 1.0), off(4_800, 60)]);
+        assert!(
+            peak(&l[4_800 + 480..]) < 1e-3,
+            "mode {mode}: 60's note-off ends it"
+        );
+        assert_eq!(s.active_voices(), 0, "mode {mode}");
+        // 48's own note-off, late, finds nothing to end.
+        render(&mut s, 480, &[off(0, 48)]);
+        assert_eq!(s.active_voices(), 0, "mode {mode}");
+    }
+}
+
+/// 16 sustained DC voices with 10 ms attacks (level 16), then `steals` note-ons one frame
+/// apart from frame 4 800.
+fn saturated(steals: u32) -> (Sampler, Vec<NoteEvent>) {
+    let s = configured(&dc(), &[("one_shot", 0.0), ("attack", 10.0)]);
+    let mut events: Vec<NoteEvent> = (0..16).map(|i| on(i, 20 + i as u8, 1.0)).collect();
+    events.extend((0..steals).map(|i| on(4_800 + i, 40 + (i % 32) as u8, 1.0)));
+    (s, events)
+}
+
+#[test]
+fn a_choke_during_saturated_stealing_never_cuts_a_fade() {
+    // All 16 voices stolen at once (or twice, filling every fade slot), then a choke 48 frames
+    // later: up to 48 voices fade together, the last 16 where they are. No fade is cut short:
+    // no frame moves by more than all those full-scale fades do together.
+    for steals in [16u32, 32] {
+        let (mut s, mut events) = saturated(0);
+        events.extend((0..steals).map(|i| on(4_800, 40 + i as u8, 1.0)));
+        let (mut l, _) = render(&mut s, 4_848, &events);
+        s.choke();
+        let (rest, _) = render(&mut s, FADE, &[]);
+        l.extend(rest);
+        assert_eq!(
+            s.active_voices(),
+            0,
+            "{steals} steals: every voice freed after 3 ms"
+        );
+        let limit = (16 + steals) as f32 / FADE as f32;
+        let step = max_step(&l[4_700..]);
+        assert!(step <= limit, "{steals} steals: step {step} above {limit}");
+        assert!(
+            l[l.len() - 1].abs() < 1e-6,
+            "{steals} steals: silent after the fades"
+        );
+    }
+}
+
+#[test]
+fn rapid_steals_never_cut_a_fade() {
+    // 48 steals one frame apart: more fades than there are fade slots. None is cut short.
+    let (mut s, events) = saturated(48);
+    let (l, _) = render(&mut s, 9_600, &events);
+    let limit = 0.3;
+    let step = max_step(&l[4_700..]);
+    assert!(step <= limit, "step {step} above {limit}");
+    assert_eq!(s.active_voices(), VOICES);
+}
