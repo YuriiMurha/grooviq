@@ -16,8 +16,10 @@ pub const MAX_CHANNELS: usize = 256;
 /// Steps in a new pattern, and the most a pattern may have.
 const DEFAULT_STEPS: u32 = 16;
 const MAX_STEPS: u32 = 256;
-/// Tempo range and default in beats per minute.
-const BPM: (f32, f32, f32) = (20.0, 400.0, 140.0);
+/// Tempo range in beats per minute.
+pub const BPM_RANGE: (f32, f32) = (20.0, 400.0);
+/// Tempo of a new state.
+const DEFAULT_BPM: f32 = 140.0;
 /// Channel volume range (linear gain).
 const VOLUME: (f32, f32) = (0.0, 2.0);
 
@@ -125,7 +127,7 @@ pub struct SeqNote {
 pub struct PatternData {
     /// In ticks: at least 1, at most 256 steps.
     pub length: u32,
-    /// Sorted by tick, then channel.
+    /// Sorted by tick, then channel. Notes at or past `length` never play.
     pub notes: Vec<SeqNote>,
 }
 
@@ -172,7 +174,7 @@ impl Default for EngineState {
     /// 140 BPM, no channels, an empty 16-step pattern.
     fn default() -> Self {
         Self {
-            bpm: BPM.2,
+            bpm: DEFAULT_BPM,
             channels: Vec::new(),
             pattern: PatternData::default(),
         }
@@ -196,7 +198,7 @@ impl EngineState {
             return Err(ControlError::ChannelExists);
         }
         Ok(Self {
-            bpm: self.bpm.clamp(BPM.0, BPM.1),
+            bpm: self.bpm.clamp(BPM_RANGE.0, BPM_RANGE.1),
             channels: self
                 .channels
                 .into_iter()

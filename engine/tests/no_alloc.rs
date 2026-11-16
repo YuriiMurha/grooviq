@@ -239,3 +239,78 @@ fn channel_messages_never_allocate_on_the_audio_thread() {
     );
     assert_eq!(Arc::strong_count(&b), 1);
 }
+
+#[test]
+fn sequencing_never_allocates() {
+    // Steady, so the default de-click fade-in still lets it be heard.
+    let steady = |len: usize| {
+        Arc::new(SampleBuf {
+            rate: SR,
+            l: vec![0.5; len],
+            r: vec![0.5; len],
+        })
+    };
+    let gate = {
+        // Gate mode, so held notes wait for their note-offs.
+        let mut p: Vec<f32> = grooviq_dsp::sampler::SPEC
+            .iter()
+            .map(|&(_, _, d)| d)
+            .collect();
+        p[7] = 0.0;
+        p
+    };
+    let setup = |id, sampler: Vec<f32>| ChannelSetup {
+        id: ChannelId(id),
+        sample: Some(steady(4_800)),
+        sampler,
+        mix: ChannelMix::default(),
+    };
+    // Dense: every tick of 60 on 2 channels, held across each other.
+    let dense = |length: u32, hold: u32| PatternData {
+        length,
+        notes: (0..length / 60)
+            .flat_map(|i| {
+                [1, 2].map(|ch| SeqNote {
+                    tick: i * 60,
+                    channel: ChannelId(ch),
+                    key: (36 + i % 24) as u8,
+                    velocity: 0.9,
+                    length: hold,
+                })
+            })
+            .collect(),
+    };
+    let state = EngineState {
+        bpm: 400.0,
+        channels: vec![setup(1, Vec::new()), setup(2, gate)],
+        pattern: dense(3_840, 500),
+    };
+    let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
+    let mut buf = vec![0f32; 441 * 2];
+    let mut run = |c: &mut grooviq_engine::Controller, blocks: usize| {
+        for _ in 0..blocks {
+            assert_no_alloc(|| p.process(&mut buf, 2));
+        }
+        c.check_health();
+    };
+    c.send(Command::Play).unwrap();
+    run(&mut c, 20);
+    assert!(c.live().position_ticks > 0, "it played");
+    assert!(c.live().peak[0] > 0.1, "it sounded");
+    c.send(Command::SetTempo { bpm: 77.0 }).unwrap();
+    run(&mut c, 20);
+    c.set_pattern(dense(1_920, 2_000)).unwrap();
+    run(&mut c, 20);
+    c.remove_channel(ChannelId(2)).unwrap();
+    run(&mut c, 10);
+    c.send(Command::Stop).unwrap();
+    run(&mut c, 5);
+    c.send(Command::PlayLoops { loops: 2 }).unwrap();
+    run(&mut c, 40);
+    c.send(Command::Play).unwrap();
+    c.send(Command::AllSoundOff).unwrap();
+    run(&mut c, 5);
+    c.load_state(EngineState::default()).unwrap();
+    c.send(Command::Play).unwrap();
+    run(&mut c, 5);
+}

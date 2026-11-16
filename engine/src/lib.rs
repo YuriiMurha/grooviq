@@ -14,6 +14,10 @@
 //! [`decode_sample`] and [`load_sample`] turn sample files into [`SampleBuf`]s (on a control
 //! thread) for the sampler.
 //!
+//! The transport plays the pattern at [`PPQ`] ticks per quarter note: a step sequencer in the
+//! graph sends each note to its channel on the frame [`ticks_to_frames`] gives it, and
+//! [`LiveSnapshot::position_ticks`] reports where playback is.
+//!
 //! Real-time rules for everything [`AudioProcessor::process`] reaches: no allocating or
 //! freeing, no locks, no I/O, no logging. A panic is the one exception (unwinding allocates and
 //! the panic hook may print); the processor catches it and stays silent until the controller
@@ -28,8 +32,10 @@ mod offline;
 mod output;
 mod processor;
 mod sample_file;
+mod sequencer;
 mod state;
 mod stream;
+mod transport;
 
 use std::sync::Arc;
 
@@ -47,10 +53,11 @@ pub use sample_file::{
     MAX_SAMPLE_SECONDS, SampleError, decode_sample, load_sample, load_sample_with_limit,
 };
 pub use state::{
-    ChannelId, ChannelMix, ChannelSetup, EngineState, MAX_CHANNELS, PPQ, PatternData, STEP_TICKS,
-    SeqNote,
+    BPM_RANGE, ChannelId, ChannelMix, ChannelSetup, EngineState, MAX_CHANNELS, PPQ, PatternData,
+    STEP_TICKS, SeqNote,
 };
 pub use stream::{StreamServer, start_stream};
+pub use transport::ticks_to_frames;
 
 /// Frames in every internal block. Commands apply at block starts; notes at their exact frame.
 pub const BLOCK: usize = 64;
@@ -112,7 +119,8 @@ pub fn engine_with(config: EngineConfig, state: EngineState) -> (Controller, Aud
     let live = Arc::new(LiveShared::default());
     let mut controller = Controller::new(sample_rate, commands, trash, Arc::clone(&live), state);
     let graph = controller.build_graph();
-    let processor = AudioProcessor::new(sample_rate, graph, commands_rx, trash_tx, live);
+    let bpm = controller.state().bpm;
+    let processor = AudioProcessor::new(sample_rate, bpm, graph, commands_rx, trash_tx, live);
     (controller, processor)
 }
 

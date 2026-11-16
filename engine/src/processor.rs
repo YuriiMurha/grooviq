@@ -10,6 +10,7 @@
 use crate::command::{Command, Msg, Trash};
 use crate::graph::Graph;
 use crate::live::LiveShared;
+use crate::transport::TransportClock;
 use crate::{BLOCK, QUEUE_CAPACITY};
 use grooviq_dsp::NoteEvent;
 use rtrb::{Consumer, Producer, PushError};
@@ -81,7 +82,8 @@ pub struct AudioProcessor {
     events: [NoteEvent; MAX_EVENTS],
     /// First frame of the next block: the engine's sample clock.
     clock: u64,
-    playing: bool,
+    /// Play state and tempo. Owned here, not by the graph, so it survives graph swaps.
+    transport: TransportClock,
     faults: u32,
     guard_hits: u32,
     meter: [f32; 2],
@@ -91,6 +93,7 @@ pub struct AudioProcessor {
 impl AudioProcessor {
     pub(crate) fn new(
         sample_rate: f32,
+        bpm: f32,
         graph: Box<Graph>,
         commands: Consumer<Msg>,
         trash: Producer<Trash>,
@@ -109,7 +112,7 @@ impl AudioProcessor {
             served: BLOCK,
             events: [NO_EVENT; MAX_EVENTS],
             clock: 0,
-            playing: false,
+            transport: TransportClock::new(sample_rate, bpm),
             faults: 0,
             guard_hits: 0,
             meter: [0.0; 2],
@@ -148,8 +151,9 @@ impl AudioProcessor {
 
     /// Restarts with `graph`, built for `sample_rate` in a new generation. Only
     /// [`crate::Controller::reconfigure`] calls this, with the audio callback stopped, so the
-    /// old graph is freed on its thread.
+    /// old graph is freed on its thread. The transport keeps playing from the tick it reached.
     pub(crate) fn restart(&mut self, sample_rate: f32, graph: Box<Graph>) {
+        self.transport.set_sample_rate(self.clock, sample_rate);
         self.generation = graph.generation();
         self.graph = graph;
         self.unsent = None;
@@ -170,9 +174,11 @@ impl AudioProcessor {
                 block_l,
                 block_r,
                 events,
+                transport,
                 ..
             } = self;
             match catch_unwind(AssertUnwindSafe(|| {
+                graph.sequence(transport, start);
                 graph.render(block_l, block_r, &events[..count])
             })) {
                 Ok(silenced) => self.guard_hits = self.guard_hits.wrapping_add(silenced),
@@ -189,13 +195,11 @@ impl AudioProcessor {
         self.clock = end;
         self.served = 0;
         let tone = !self.faulted && self.graph.tone_on();
-        self.live.publish(
-            self.meter,
-            self.playing,
-            tone,
-            self.clock,
-            self.faults,
-            self.guard_hits,
+        self.live
+            .publish(self.meter, tone, self.clock, self.faults, self.guard_hits);
+        self.live.publish_transport(
+            self.transport.playing(),
+            self.transport.position_ticks(start),
         );
     }
 
@@ -319,10 +323,16 @@ impl AudioProcessor {
                     } => {
                         self.with_graph(|g| g.set_sampler_param(channel, index, value));
                     }
-                    Command::Play => self.playing = true,
-                    Command::Stop => self.playing = false,
+                    Command::Play => {
+                        if !self.transport.playing() {
+                            self.play(start, None);
+                        }
+                    }
+                    Command::PlayLoops { loops } => self.play(start, Some(loops)),
+                    Command::Stop => self.stop(),
+                    Command::SetTempo { bpm } => self.transport.set_bpm(start, bpm),
                     Command::AllSoundOff => {
-                        self.playing = false;
+                        self.stop();
                         self.with_graph(Graph::all_sound_off);
                     }
                     Command::TestTone { on, hz, gain_db } => {
@@ -339,6 +349,22 @@ impl AudioProcessor {
             }
         }
         count
+    }
+
+    /// Plays from tick 0 at frame `at` (a block start). While playing, the notes sounding are
+    /// released first.
+    fn play(&mut self, at: u64, loops: Option<u32>) {
+        if self.transport.playing() {
+            self.with_graph(Graph::transport_stopped);
+        }
+        self.transport.start(at, loops);
+        self.with_graph(Graph::transport_started);
+    }
+
+    /// Stops and rewinds; the sequenced notes sounding are released at this block's start.
+    fn stop(&mut self) {
+        self.transport.stop();
+        self.with_graph(Graph::transport_stopped);
     }
 
     /// Runs `f` on the graph unless it is faulted, catching a panic like a render does.
@@ -424,7 +450,7 @@ mod tests {
         let (trash_tx, trash) = rtrb::RingBuffer::new(1);
         let graph = Box::new(Graph::new(SR, 0));
         let live = Arc::new(LiveShared::default());
-        let p = AudioProcessor::new(SR, graph, commands_rx, trash_tx, live);
+        let p = AudioProcessor::new(SR, 140.0, graph, commands_rx, trash_tx, live);
         (p, commands, trash)
     }
 
@@ -540,7 +566,7 @@ mod tests {
         let (trash_tx, mut trash) = rtrb::RingBuffer::new(8);
         let live = Arc::new(LiveShared::default());
         let graph = Box::new(Graph::new(SR, 0));
-        let mut p = AudioProcessor::new(SR, graph, commands_rx, trash_tx, live);
+        let mut p = AudioProcessor::new(SR, 140.0, graph, commands_rx, trash_tx, live);
         let held = sample();
         let mut buf = [0.0; BLOCK * 2];
         let mut back = |p: &mut AudioProcessor, msg: Msg| {
@@ -619,10 +645,10 @@ mod tests {
         p.process(&mut buf, 2);
         // The extra note-on was dropped; the note-off and everything behind it wait.
         assert_eq!(commands.slots(), QUEUE_CAPACITY - 2);
-        assert!(!p.playing);
+        assert!(!p.transport.playing());
         p.process(&mut buf, 2);
         assert_eq!(commands.slots(), QUEUE_CAPACITY);
-        assert!(p.playing);
+        assert!(p.transport.playing());
     }
 
     #[test]

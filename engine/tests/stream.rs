@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use grooviq_engine::{
-    LIVE_LEN, LiveShared, LiveSnapshot, StreamServer, decode_live, encode_live, start_stream,
+    LIVE_LEN, LIVE_VERSION, LiveShared, LiveSnapshot, StreamServer, decode_live, encode_live,
+    start_stream,
 };
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Error, Message};
@@ -20,6 +21,7 @@ fn sample() -> LiveSnapshot {
         faults: 2,
         guard_hits: 3,
         output_latency_frames: 7_680,
+        position_ticks: 0x0102_0304_0506_0708,
     }
 }
 
@@ -55,19 +57,31 @@ fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
 }
 
 #[test]
-fn live_v1_layout_matches_fixture() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/live-v1.bin");
+fn live_v2_layout_matches_fixture() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/live-v2.bin");
     let encoded = encode_live(&sample());
     if std::env::var_os("FIXTURE_UPDATE").is_some() {
         std::fs::create_dir_all(std::path::Path::new(path).parent().unwrap()).unwrap();
         std::fs::write(path, encoded).unwrap();
     }
     let fixture = std::fs::read(path).expect("fixture (create it with FIXTURE_UPDATE=1)");
+    assert_eq!(LIVE_LEN, 40);
+    assert_eq!(LIVE_VERSION, 2);
     assert_eq!(fixture.len(), LIVE_LEN);
     assert_eq!(encoded.as_slice(), fixture.as_slice());
+    assert_eq!(&fixture[32..40], 0x0102_0304_0506_0708u64.to_le_bytes());
     assert_eq!(decode_live(&fixture), Some(sample()));
-    assert_eq!(decode_live(&[2; 32]), None);
-    assert_eq!(decode_live(&fixture[..31]), None);
+    // An unknown version, and a v1 frame, are refused.
+    assert_eq!(decode_live(&[3; 40]), None);
+    let mut v1 = fixture.clone();
+    v1[0] = 1;
+    assert_eq!(decode_live(&v1), None);
+    assert_eq!(decode_live(&v1[..32]), None);
+    // Valid v2 bytes at a wrong length are refused.
+    assert_eq!(decode_live(&fixture[..39]), None);
+    let mut long = fixture.clone();
+    long.push(0);
+    assert_eq!(decode_live(&long), None);
 }
 
 #[test]
@@ -435,4 +449,11 @@ fn flags_and_wide_counters_round_trip() {
     let b = encode_live(&wide);
     assert_eq!(&b[12..20], 0x0123_4567_89AB_CDEFu64.to_le_bytes());
     assert_eq!(decode_live(&b), Some(wide));
+    let far = LiveSnapshot {
+        position_ticks: u64::MAX - 1,
+        ..sample()
+    };
+    let b = encode_live(&far);
+    assert_eq!(&b[32..40], (u64::MAX - 1).to_le_bytes());
+    assert_eq!(decode_live(&b), Some(far));
 }

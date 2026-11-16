@@ -115,12 +115,19 @@ impl ChannelNode {
         self.count == CHANNEL_EVENTS
     }
 
-    /// Queues a note for the next render; false (and dropped) if the buffer is full.
+    /// Queues a note for the next render, in offset order (after every queued event at the
+    /// same offset, so arrival order holds there); false (and dropped) if the buffer is full.
+    /// Preview notes and sequenced ones arrive separately, so this keeps the block sorted.
     pub(crate) fn push_event(&mut self, event: NoteEvent) -> bool {
-        let Some(slot) = self.events.get_mut(self.count) else {
+        if self.count == CHANNEL_EVENTS {
             return false;
-        };
-        *slot = event;
+        }
+        let mut i = self.count;
+        while i > 0 && self.events[i - 1].offset > event.offset {
+            self.events[i] = self.events[i - 1];
+            i -= 1;
+        }
+        self.events[i] = event;
         self.count += 1;
         true
     }
@@ -227,6 +234,48 @@ mod tests {
             on: true,
             slide: false,
         }
+    }
+
+    #[test]
+    fn events_queue_in_offset_order_and_keep_arrival_order_at_one_offset() {
+        let mut n = node(true);
+        let ev = |offset, key, on| NoteEvent {
+            offset,
+            key,
+            velocity: 0.5,
+            on,
+            slide: false,
+        };
+        for e in [
+            ev(10, 1, true),
+            ev(40, 2, true),
+            ev(10, 1, false),
+            ev(5, 3, false),
+            ev(40, 2, false),
+            ev(63, 4, true),
+            ev(0, 5, true),
+        ] {
+            assert!(n.push_event(e));
+        }
+        let got: Vec<(u32, u8, bool)> = n.events[..n.count]
+            .iter()
+            .map(|e| (e.offset, e.key, e.on))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (0, 5, true),
+                (5, 3, false),
+                (10, 1, true),
+                (10, 1, false),
+                (40, 2, true),
+                (40, 2, false),
+                (63, 4, true)
+            ]
+        );
+        while n.push_event(ev(1, 9, true)) {}
+        assert!(n.events_full());
+        assert!(!n.push_event(ev(0, 9, false)));
     }
 
     /// Skipping silent blocks renders exactly what rendering them would: notes, fades that
