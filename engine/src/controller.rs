@@ -188,3 +188,55 @@ impl Controller {
         while self.trash.pop().is_ok() {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine;
+
+    fn controller() -> (Controller, AudioProcessor) {
+        engine(EngineConfig {
+            sample_rate: 48_000.0,
+        })
+    }
+
+    /// Publishes what the processor would after `faults` panics and `guard_hits` NaN blocks
+    /// (the processor itself is never run, so nothing overwrites it).
+    fn pretend(c: &Controller, faults: u32, guard_hits: u32) {
+        c.live
+            .publish([0.0; 2], false, false, 0, faults, guard_hits);
+    }
+
+    #[test]
+    fn each_health_event_is_reported_once_with_one_restart_per_fault() {
+        let (mut c, _p) = controller();
+        let free = c.commands.slots();
+        pretend(&c, 1, 2);
+        assert_eq!(
+            c.check_health(),
+            [
+                HealthEvent::Restarted { faults: 1 },
+                HealthEvent::DeviceSilenced { total: 2 }
+            ]
+        );
+        assert_eq!(c.commands.slots(), free - 1, "one replacement queued");
+        assert!(c.check_health().is_empty());
+        assert_eq!(c.commands.slots(), free - 1, "and no second one");
+    }
+
+    #[test]
+    fn an_unknown_preset_or_a_full_queue_sends_nothing() {
+        let (mut c, _p) = controller();
+        let free = c.commands.slots();
+        assert!(!c.synth_preset("nope"));
+        assert_eq!(c.commands.slots(), free);
+        // Room for 39 commands, one short of a preset: all or nothing.
+        while c.commands.slots() > 39 {
+            c.send(Command::Play).unwrap();
+        }
+        let before = c.synth.clone();
+        assert!(!c.synth_preset("Reese"));
+        assert_eq!(c.commands.slots(), 39);
+        assert_eq!(c.synth, before);
+    }
+}

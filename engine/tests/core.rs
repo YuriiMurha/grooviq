@@ -33,10 +33,170 @@ fn peak(x: &[f32]) -> f32 {
     x.iter().fold(0f32, |m, x| m.max(x.abs()))
 }
 
+/// Index of the first sample that is not exactly zero.
+fn onset(x: &[f32]) -> Option<usize> {
+    x.iter().position(|v| *v != 0.0)
+}
+
+fn note_on(key: u8) -> Command {
+    Command::Note {
+        key,
+        velocity: 1.0,
+        on: true,
+    }
+}
+
+/// Samples from a note-on at offset 0 to the synth's first non-zero sample, measured on the
+/// device itself (outside the engine).
+fn synth_onset_delay() -> usize {
+    let mut synth = grooviq_dsp::create("synth", SR).unwrap();
+    let (mut l, mut r) = ([0f32; 64], [0f32; 64]);
+    let note = grooviq_dsp::NoteEvent {
+        offset: 0,
+        key: 60,
+        velocity: 1.0,
+        on: true,
+        slide: false,
+    };
+    synth.process(&mut l, &mut r, None, &[note]);
+    onset(&l).unwrap()
+}
+
 #[test]
 fn silent_until_asked() {
     let out = render_offline(cfg(), &[], 48_000, 256);
     assert!(out.iter().all(|x| *x == 0.0));
+}
+
+#[test]
+fn notes_are_sample_accurate() {
+    let delay = synth_onset_delay();
+    assert!(delay < 8, "delay {delay}");
+    for frame in [1_000u64, 1_001, 1_023] {
+        let l = left(&render_offline(cfg(), &[(frame, note_on(60))], 1_200, 37));
+        assert_eq!(onset(&l), Some(frame as usize + delay), "note at {frame}");
+    }
+}
+
+#[test]
+fn events_on_a_block_edge_apply_in_the_block_they_name() {
+    // Frame 1024 starts a block: 1023 is the last frame of the block before it.
+    let delay = synth_onset_delay();
+    for frame in [1_023u64, 1_024] {
+        let l = left(&render_offline(cfg(), &[(frame, note_on(60))], 1_200, 37));
+        assert_eq!(onset(&l), Some(frame as usize + delay), "note at {frame}");
+    }
+    // A command due at 1024 is silent through 1023 and plays in the block from 1024.
+    let l = left(&render_offline(cfg(), &[(1_024, tone(true))], 1_200, 37));
+    assert!(l[..1_024].iter().all(|x| *x == 0.0));
+    assert!(peak(&l[1_024..1_088]) > 0.0);
+}
+
+#[test]
+fn tone_settings_are_clamped_to_their_ranges() {
+    let render = |hz, gain_db| {
+        let ev = [(
+            0,
+            Command::TestTone {
+                on: true,
+                hz,
+                gain_db,
+            },
+        )];
+        left(&render_offline(cfg(), &ev, 48_000, 256))
+    };
+    // 1 Hz plays at the 20 Hz floor and 1 GHz at the 20 kHz ceiling (one second each).
+    let c = upward_crossings(&render(1.0, -12.0));
+    assert!((19..=21).contains(&c), "low: {c}");
+    let c = upward_crossings(&render(1e9, -12.0));
+    assert!((19_990..=20_010).contains(&c), "high: {c}");
+    // -200 dB plays at the -60 dB floor (0.001), +40 dB at full scale.
+    let p = peak(&render(440.0, -200.0));
+    assert!((p - 0.001).abs() < 1e-4, "quiet: {p}");
+    let p = peak(&render(440.0, 40.0));
+    assert!((0.99..=1.0).contains(&p), "loud: {p}");
+}
+
+#[test]
+fn synth_values_beyond_their_range_play_as_the_limit() {
+    let render = |ev: &[(u64, Command)]| render_offline(cfg(), ev, 4_800, 256);
+    let spec = grooviq_dsp::param_spec("synth").unwrap();
+    // Cutoff, resonance and master.
+    for index in [20u32, 21, 39] {
+        let (_, max, default) = spec[index as usize];
+        let at = |value| {
+            render(&[
+                (0, Command::SetSynthParam { index, value }),
+                (0, note_on(48)),
+            ])
+        };
+        let at_max = at(max);
+        assert!(at_max != at(default), "index {index} is audible");
+        assert!(at(max * 1_000.0 + 1_000.0) == at_max, "index {index}");
+    }
+    let loud = |velocity| Command::Note {
+        key: 48,
+        velocity,
+        on: true,
+    };
+    assert!(render(&[(0, loud(5.0))]) == render(&[(0, loud(1.0))]));
+    let (mut c, _p) = engine(cfg());
+    assert!(c.send(note_on(128)).is_err());
+    assert!(c.send(note_on(127)).is_ok());
+}
+
+#[test]
+fn play_and_stop_drive_the_transport_flag() {
+    let (mut c, mut p) = engine(cfg());
+    let mut buf = vec![0f32; 64 * 2];
+    c.send(Command::Play).unwrap();
+    p.process(&mut buf, 2);
+    assert!(c.live().playing);
+    c.send(Command::Stop).unwrap();
+    p.process(&mut buf, 2);
+    assert!(!c.live().playing);
+}
+
+#[test]
+fn frames_count_the_rendered_blocks() {
+    let (c, mut p) = engine(cfg());
+    let mut buf = vec![0f32; 640 * 2];
+    p.process(&mut buf, 2);
+    assert_eq!(c.live().frames, 10 * 64);
+    // One more frame needs one more block.
+    p.process(&mut [0f32; 2], 2);
+    assert_eq!(c.live().frames, 11 * 64);
+}
+
+#[test]
+fn every_channel_layout_carries_the_same_signal() {
+    // Each output starts as 9.0 and ends in a partial frame, so any sample not written shows.
+    let run = |channels: usize| {
+        let (mut c, mut p) = engine(cfg());
+        assert!(c.synth_preset("Reese")); // wide unison: left and right differ
+        c.send(note_on(40)).unwrap();
+        let mut out = vec![9.0; 1_000 * channels + channels - 1];
+        p.process(&mut out, channels);
+        out
+    };
+    let stereo = run(2);
+    let mono = run(1);
+    let three = run(3);
+    let six = run(6);
+    assert!(stereo.chunks(2).any(|f| f[0] != f[1]));
+    for i in 0..1_000 {
+        let (l, r) = (stereo[2 * i], stereo[2 * i + 1]);
+        assert_eq!(mono[i], 0.5 * (l + r), "mono frame {i}");
+        assert_eq!(three[3 * i..3 * i + 3], [l, r, 0.0], "frame {i}");
+        assert_eq!(
+            six[6 * i..6 * i + 6],
+            [l, r, 0.0, 0.0, 0.0, 0.0],
+            "frame {i}"
+        );
+    }
+    for partial in [&stereo[2_000..], &three[3_000..], &six[6_000..]] {
+        assert!(partial.iter().all(|x| *x == 0.0));
+    }
 }
 
 #[test]
@@ -278,7 +438,37 @@ fn a_node_that_outputs_nan_is_silenced_and_reported() {
         c.check_health()
             .contains(&HealthEvent::DeviceSilenced { total: 1 })
     );
+    // Reported once.
+    assert!(c.check_health().is_empty());
     let mut buf = vec![0f32; 4096 * 2];
     p.process(&mut buf, 2);
     assert!(peak(&buf) > 0.2, "peak {}", peak(&buf));
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn the_nan_guard_resets_the_device() {
+    // A held note; then either a NaN in one synth block or nothing.
+    let run = |nan: bool| {
+        let (mut c, mut p) = engine(cfg());
+        let note = Command::Note {
+            key: 48,
+            velocity: 1.0,
+            on: true,
+        };
+        c.send(note).unwrap();
+        let mut buf = vec![0f32; 1024 * 2];
+        p.process(&mut buf, 2);
+        if nan {
+            c.send(Command::InjectNaN).unwrap();
+        }
+        p.process(&mut buf, 2);
+        let mut after = vec![0f32; 4096 * 2];
+        p.process(&mut after, 2);
+        after
+    };
+    let held = run(false);
+    assert!(peak(&held) > 0.05, "without the NaN the note still sounds");
+    // The reset dropped the voice: no tail after the silenced block.
+    assert!(run(true).iter().all(|x| *x == 0.0));
 }

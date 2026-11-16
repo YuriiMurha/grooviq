@@ -74,3 +74,65 @@ pub(crate) enum Msg {
     /// A fresh graph to swap in after a panic; the old one goes back through the trash queue.
     ReplaceGraph(Box<Graph>),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamped_keeps_every_value_inside_its_range() {
+        let tone = |hz, gain_db| {
+            Command::TestTone {
+                on: true,
+                hz,
+                gain_db,
+            }
+            .clamped()
+        };
+        let tone_ok = |hz, gain_db| {
+            Some(Command::TestTone {
+                on: true,
+                hz,
+                gain_db,
+            })
+        };
+        assert_eq!(tone(1.0, -200.0), tone_ok(20.0, -60.0));
+        assert_eq!(tone(1e9, 40.0), tone_ok(20_000.0, 0.0));
+        assert_eq!(tone(440.0, -12.0), tone_ok(440.0, -12.0));
+        assert_eq!(tone(f32::NAN, 0.0), None);
+        assert_eq!(tone(440.0, f32::INFINITY), None);
+
+        let note = |key, velocity| {
+            Command::Note {
+                key,
+                velocity,
+                on: true,
+            }
+            .clamped()
+        };
+        let note_ok = |key, velocity| {
+            Some(Command::Note {
+                key,
+                velocity,
+                on: true,
+            })
+        };
+        assert_eq!(note(60, 5.0), note_ok(60, 1.0));
+        assert_eq!(note(60, -1.0), note_ok(60, 0.0));
+        assert_eq!(note(127, 0.5), note_ok(127, 0.5));
+        assert_eq!(note(128, 1.0), None);
+        assert_eq!(note(60, f32::NAN), None);
+
+        let param = |index, value| Command::SetSynthParam { index, value }.clamped();
+        let param_ok = |index, value| Some(Command::SetSynthParam { index, value });
+        let spec = grooviq_dsp::param_spec("synth").unwrap();
+        for (index, &(min, max, default)) in (0u32..).zip(spec) {
+            assert_eq!(param(index, f32::MAX), param_ok(index, max));
+            assert_eq!(param(index, f32::MIN), param_ok(index, min));
+            assert_eq!(param(index, default), param_ok(index, default));
+            assert_eq!(param(index, f32::NAN), None);
+        }
+        assert_eq!(param(spec.len() as u32, 0.0), None);
+        assert_eq!(Command::Play.clamped(), Some(Command::Play));
+    }
+}
