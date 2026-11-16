@@ -757,10 +757,8 @@ fn a_new_sample_rate_mid_play_keeps_the_position() {
     assert_eq!(onsets(&out), expected);
 }
 
-#[test]
-fn transport_commands_queued_before_a_rate_change_still_apply() {
-    // A click recorded at 96 kHz on every step. 240 BPM and Play are still queued when the
-    // engine moves from 48 to 96 kHz: both apply, so steps come every 6 000 frames from 0.
+/// A click recorded at 96 kHz (one frame at 96 kHz) on every step of 16, at `bpm`.
+fn clicks96(bpm: f32) -> EngineState {
     let mut l = vec![0.0; 16];
     l[0] = 1.0;
     let click96 = Arc::new(SampleBuf {
@@ -769,18 +767,78 @@ fn transport_commands_queued_before_a_rate_change_still_apply() {
         l,
     });
     let every: Vec<u32> = (0..16).collect();
-    let state = EngineState {
-        bpm: 120.0,
+    EngineState {
+        bpm,
         channels: vec![channel(1, &click96, exact())],
         pattern: pattern(16, &steps(&every)),
-    };
-    let (mut c, mut p) = engine_with(cfg(48_000.0), state);
-    c.send(Command::SetTempo { bpm: 240.0 }).unwrap();
+    }
+}
+
+#[test]
+fn transport_commands_queued_before_a_rate_change_still_apply() {
+    // 240 BPM and Play (or PlayLoops 1) still queued when the engine moves from 48 to 96 kHz:
+    // they apply, so steps come every 6 000 frames from 0 (for one loop with PlayLoops).
+    let every_step = |n: u64| (0..n).map(|s| s * 6_000).collect::<Vec<u64>>();
+    for (play, steps) in [(Command::Play, 20), (Command::PlayLoops { loops: 1 }, 16)] {
+        let (mut c, mut p) = engine_with(cfg(48_000.0), clicks96(120.0));
+        c.send(Command::SetTempo { bpm: 240.0 }).unwrap();
+        c.send(play).unwrap();
+        c.reconfigure(&mut p, cfg(96_000.0));
+        let mut out = vec![0f32; 120_000 * 2];
+        p.process(&mut out, 2);
+        assert_eq!(onsets(&out), every_step(steps), "{play:?}");
+    }
+}
+
+#[test]
+fn a_project_opened_while_playing_before_a_rate_change_stops_the_transport() {
+    // Opening a project stops the transport; still queued at a rate change, it still does.
+    let (mut c, mut p) = engine_with(cfg(48_000.0), clicks96(240.0));
     c.send(Command::Play).unwrap();
-    c.reconfigure(&mut p, cfg(96_000.0));
-    let mut out = vec![0f32; 30_000 * 2];
+    let mut out = vec![0f32; 12_800 * 2];
     p.process(&mut out, 2);
-    assert_eq!(onsets(&out), [0, 6_000, 12_000, 18_000, 24_000]);
+    assert_eq!(onsets(&out), [0, 3_000, 6_000, 9_000, 12_000]);
+    c.load_state(clicks96(240.0)).unwrap();
+    c.reconfigure(&mut p, cfg(96_000.0));
+    p.process(&mut out, 2);
+    assert!(!c.live().playing);
+    assert!(onsets(&out).is_empty(), "{:?}", onsets(&out));
+}
+
+#[test]
+fn all_sound_off_queued_before_a_rate_change_stops_and_keeps_a_later_tone() {
+    // A preview click, AllSoundOff, then a test tone, all still queued at a rate change: the
+    // transport stops, the click (cut by the AllSoundOff) stays silent, and the tone
+    // (switched on after it) plays.
+    let (mut c, mut p) = engine_with(cfg(48_000.0), clicks96(240.0));
+    c.send(Command::Play).unwrap();
+    let mut out = vec![0f32; 6_400 * 2];
+    p.process(&mut out, 2);
+    assert!(c.live().playing);
+    let click = Command::ChannelNote {
+        channel: ChannelId(1),
+        key: 60,
+        velocity: 1.0,
+        on: true,
+    };
+    c.send(click).unwrap();
+    c.send(Command::AllSoundOff).unwrap();
+    let tone = Command::TestTone {
+        on: true,
+        hz: 440.0,
+        gain_db: -12.0,
+    };
+    c.send(tone).unwrap();
+    c.reconfigure(&mut p, cfg(96_000.0));
+    let mut out = vec![0f32; 9_600 * 2];
+    p.process(&mut out, 2);
+    assert!(!c.live().playing, "stopped");
+    assert!(c.live().tone, "the tone is on");
+    let peak = left(&out).iter().fold(0f32, |m, x| m.max(x.abs()));
+    assert!(
+        (peak - 0.251).abs() < 0.01,
+        "a -12 dB tone, nothing else: {peak}"
+    );
 }
 
 #[test]

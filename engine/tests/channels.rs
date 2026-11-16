@@ -807,3 +807,78 @@ fn edits_queued_before_a_new_project_and_a_rate_change_do_not_reach_it() {
     );
     assert_eq!(c.state().channels[0].sampler[1], 0.0);
 }
+
+fn synth_note(on: bool) -> Command {
+    Command::Note {
+        key: 60,
+        velocity: 1.0,
+        on,
+    }
+}
+
+#[test]
+fn notes_queued_before_a_new_project_and_a_rate_change_do_not_sound() {
+    // A preview note on channel 1 and a synth note, then a new project whose channel 1 plays
+    // `new`; all still queued at a rate change. Without the rate change the new project
+    // replaces the graph the notes went to, so nothing plays: the same holds with it.
+    let (old, new) = (dc(0.5), short());
+    let (mut c, mut p) = engine_with(cfg(), state(vec![channel(1, &old, ChannelMix::default())]));
+    c.send(note(1, true)).unwrap();
+    c.send(synth_note(true)).unwrap();
+    c.load_state(state(vec![channel(1, &new, ChannelMix::default())]))
+        .unwrap();
+    c.reconfigure(
+        &mut p,
+        EngineConfig {
+            sample_rate: 44_100.0,
+        },
+    );
+    let mut out = vec![0f32; 4_800 * 2];
+    p.process(&mut out, 2);
+    assert!(out.iter().all(|x| *x == 0.0), "nothing anyone asked for");
+    c.send(note(1, true)).unwrap();
+    p.process(&mut out, 2);
+    assert_eq!(left(&out)[100], 0.25, "a new note plays the new channel 1");
+}
+
+#[test]
+fn a_note_queued_before_its_channel_changes_does_not_survive_a_rate_change() {
+    // Notes on channels 1, 2 and 3; then channel 1 gets a new sample and channel 3 is removed
+    // and added again, which would cut their notes; all still queued when the engine
+    // restarts. Only channel 2's note plays.
+    let (half, quarter) = (dc(0.5), short());
+    let (mut c, mut p) = engine_with(
+        cfg(),
+        state(vec![
+            channel(1, &quarter, ChannelMix::default()),
+            channel(2, &half, ChannelMix::default()),
+            channel(3, &quarter, ChannelMix::default()),
+        ]),
+    );
+    for id in 1..=3 {
+        c.send(note(id, true)).unwrap();
+    }
+    c.set_channel_sample(ChannelId(1), Some(dc(0.5))).unwrap();
+    c.remove_channel(ChannelId(3)).unwrap();
+    c.add_channel(channel(3, &quarter, ChannelMix::default()))
+        .unwrap();
+    c.reconfigure(&mut p, cfg());
+    let mut out = vec![0f32; 1_000 * 2];
+    p.process(&mut out, 2);
+    assert_eq!(left(&out)[500], 0.5, "channel 2 alone");
+}
+
+#[test]
+fn a_synth_note_queued_before_a_rate_change_still_plays() {
+    let (mut c, mut p) = engine(cfg());
+    c.send(synth_note(true)).unwrap();
+    c.reconfigure(
+        &mut p,
+        EngineConfig {
+            sample_rate: 44_100.0,
+        },
+    );
+    let mut out = vec![0f32; 4_410 * 2];
+    p.process(&mut out, 2);
+    assert!(out.iter().any(|x| x.abs() > 0.01), "the synth plays it");
+}

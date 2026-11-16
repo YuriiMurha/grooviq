@@ -3,7 +3,7 @@
 //! block; never call it from the audio thread.
 
 use crate::channel::ChannelNode;
-use crate::command::{Command, Msg, Trash};
+use crate::command::{Command, Msg, Trash, rebuilt_queue};
 use crate::graph::{Graph, ramp_len};
 use crate::live::{LiveShared, LiveSnapshot};
 use crate::processor::AudioProcessor;
@@ -336,14 +336,13 @@ impl Controller {
         // message that only changes the graph would land in it a second time: a channel built
         // for the old rate, a removal of the rebuilt channel, a parameter for a project that
         // was replaced. Those are dropped here, on this thread, with the nodes and samples
-        // they carry. Transport commands and notes go back in the queue, in order. Holding
-        // both ends of the queue (`&mut self` and the stopped processor), this sees every
-        // message, and they all fit back.
-        for msg in processor.take_queued() {
-            if !msg.rebuilt() {
-                let queued = self.commands.push(msg).is_ok();
-                debug_assert!(queued, "the queue was just emptied");
-            }
+        // they carry, as are notes a later message would have cut; transport commands and the
+        // other notes go back in the queue, in order (see `rebuilt_queue`). Holding both ends
+        // of the queue (`&mut self` and the stopped processor), this sees every message, and
+        // what goes back fits.
+        for msg in rebuilt_queue(processor.take_queued()) {
+            let queued = self.commands.push(msg).is_ok();
+            debug_assert!(queued, "the queue was just emptied");
         }
         self.sample_rate = config.rate();
         // Replacements queued before now are stale: the processor drops them.
