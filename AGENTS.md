@@ -1,0 +1,92 @@
+# Grooviq
+
+Grooviq is a free, open-source desktop DAW for beatmakers. GPL-3.0-or-later.
+The owner and coding agents work in parallel threads and worktrees.
+
+| Path             | Owns                                                                  |
+| ---------------- | --------------------------------------------------------------------- |
+| `dsp`            | `grooviq-dsp`: instruments and effects, allocation-free.              |
+| `engine`         | `grooviq-engine`: real-time core, output devices, live-state stream.  |
+| `project`        | `grooviq-project`: the project file format, saving and recovery.      |
+| `tests/golden`   | `grooviq-golden`: offline reference renders compared byte for byte.   |
+| `app/src-tauri`  | `grooviq-app`: the Tauri v2 desktop shell.                            |
+| `app/ui`         | React + TypeScript interface.                                         |
+
+Read the code; it is the documentation. `make help` lists the supported commands.
+
+## Work boundaries
+
+- Non-trivial work needs a GitHub issue. One PR per issue.
+- Never play sound through the owner's speakers in automated checks.
+  Tests render offline or use fake devices. Launch the app for QA only in silent mode.
+- Audio thread: no allocation, locks, I/O or logging.
+- The export path stays platform-identical: `libm` maths, no `mul_add`.
+  The acceptance golden must match byte for byte on macOS and Windows.
+- Built-in devices are original work. No other products' names, presets, sounds or artwork.
+  Simple utility devices get plain descriptive names, such as "Multiband Compressor".
+- The owner's sample kit under `/Users/yurii/Music` never enters the repo, a fixture or a test.
+- A repeatable command gets a Makefile target. One-off scripts stay untracked.
+
+## Git
+
+- Branch from fresh `origin/main` in your own worktree. Check `git branch --show-current` first.
+- Stage explicit paths. Never `git add -A`. A stray change you did not make is another session's.
+- Commit through the hook (`make hooks` enables it). Never `--no-verify`.
+- End every commit message with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- `Closes #N` only for the complete result; `Refs #N` otherwise.
+- Squash-merge after the three required checks pass:
+  `rust (macos-latest)`, `rust (windows-latest)`, `ui`.
+
+CI quirks:
+
+- `rust (macos-latest)` is sometimes cancelled at about 15 minutes with zero steps (no runner).
+  Re-run it with `gh run rerun <run-id> --failed`.
+- Branch protection is strict. After another merge, run `gh pr update-branch <n>`.
+- Auto-merge sometimes stalls at CLEAN. Then merge with `gh pr merge <n> --squash`.
+
+## Verify
+
+- Run `make check-changed` once before review; `ARGS=--plan` shows what it will run and why.
+  `make check` runs everything CI runs.
+- A failed, skipped or interrupted check is not a pass.
+- Golden refs change only on purpose: `make golden-update`, and say why in the PR.
+- Write tests for real-time safety, determinism and golden renders, data writes and file formats,
+  crash safety, security boundaries, and bugs that already happened.
+- Never test copy, markup or wiring.
+- UI logic lives in plain `.ts` modules. Test it there.
+- UI behaviour is proved by a live fixture and a Playwright pass, not a new mocked component test.
+
+## Review
+
+- Every behaviour change gets an independent review on a different model family than the implementer.
+- Reviewer: GPT 6.1 Sol (`gpt-6.1-sol` on Codex, high effort), each round a fresh `delegate_task`
+  with `role: "review"`. Fallback: GPT 6 Astra, then the thread's own model; say so in the PR.
+- The reviewer is read-only. It replies:
+
+  ```text
+  VERDICT: APPROVE | CHANGES
+  R1 [blocker|should|nit] <file>:<line> <claim>. Fix: <suggestion>
+  ```
+
+- Check every finding yourself. Fix, or disagree with evidence. Keep a ledger:
+  id, severity, fixed / disagreed / declined, evidence.
+- Budget: 3 rounds; 5 for data loss, real-time, determinism or security.
+  An item disputed twice, or an exhausted budget, goes to the owner.
+- Real-time path, file format, crash safety, determinism and security changes also get a QA pass.
+  Post its report as a PR comment in four sections: Worked / Failed / Blocked / Follow-up.
+
+## Documentation
+
+- Most changes need no documentation. Agents can read the code.
+- Write a trap note only for what an agent would get wrong from the code alone.
+- A local reason goes in a short comment next to the code. A mechanical rule becomes a test.
+- Never add feature descriptions, file catalogs, QA diaries or task summaries.
+  GitHub issues own plans, history, progress and evidence.
+- README.md never carries milestones, a roadmap or feature status.
+- Specs, plans and evidence stay untracked under `docs/superpowers/`, `docs/evidence/`, `.superpowers/`.
+- When a rule changes, rewrite or delete the old text. Do not append.
+
+## Communication
+
+- Answer first. Plain words, short sentences.
+- Bullets for three or more facts. No filler or closing summaries.

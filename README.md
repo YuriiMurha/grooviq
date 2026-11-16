@@ -97,6 +97,8 @@ The audio thread never allocates, locks, logs or touches files; tests fail if it
 
 ## Development
 
+On macOS or Linux, `make help` lists the commands: `make check` runs everything CI runs, `make check-changed` runs only what your change needs, and `make hooks` turns on a formatting check before each commit. The same checks by hand:
+
 ```sh
 cargo test --workspace --all-features      # Rust tests (engine, DSP, golden renders)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -109,7 +111,7 @@ npm --prefix app/ui run lint && npm --prefix app/ui run typecheck
 
 ## Contributing
 
-Issues are the plan: pick one from the [issue list](https://github.com/YuriiMurha/grooviq/issues), or open a new one with the bug or feature template. Pull requests run CI on macOS and Windows and are squash-merged. New code needs tests; audio code needs a test that would catch the problem it fixes.
+Issues are the plan: pick one from the [issue list](https://github.com/YuriiMurha/grooviq/issues), or open a new one with the bug or feature template. Pull requests run CI on macOS and Windows and are squash-merged. New code needs tests; audio code needs a test that would catch the problem it fixes. The working rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 
 ## Licence
 

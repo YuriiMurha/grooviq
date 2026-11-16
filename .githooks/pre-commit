@@ -1,0 +1,19 @@
+#!/bin/sh
+# Read-only formatting check of the staged Rust files: the content being committed, not
+# the working tree. Enabled by `make hooks`. Fix with `make fmt`, then stage again.
+# The UI has no formatter yet, so TypeScript is not checked here.
+PATH="$HOME/.cargo/bin:$PATH"
+export PATH
+if git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' |
+  xargs -0 -n 1 sh -c '
+    [ -n "$1" ] || exit 0
+    # On stdin, rustfmt --check prints the diff but still exits 0: any output is a failure.
+    out=$(git show ":$1" | rustfmt --edition 2024 --check 2>&1) && [ -z "$out" ] && exit 0
+    echo "not formatted (or not parsable): $1"
+    exit 1
+  ' sh
+then
+  exit 0
+fi
+echo "pre-commit: run make fmt, stage the result and commit again."
+exit 1
