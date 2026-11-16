@@ -1,0 +1,20 @@
+name: Feature request
+description: Something Grooviq should do
+labels: ["type: feature"]
+body:
+  - type: textarea
+    id: why
+    attributes:
+      label: What are you trying to do?
+      description: The beat-making problem, in your own words.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How could Grooviq help?
+  - type: textarea
+    id: elsewhere
+    attributes:
+      label: Seen elsewhere?
+      description: Another DAW or plugin that does this well, and what you like about it.
