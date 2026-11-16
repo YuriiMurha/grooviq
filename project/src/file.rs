@@ -414,10 +414,10 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
     }
     // A channel whose bytes could not be had keeps its path (to relink) but has no entry.
     for channel in &mut project.channels {
-        if let Some(sample_ref) = &mut channel.sample {
-            if !samples.contains_key(&channel.id) {
-                sample_ref.file = None;
-            }
+        if let Some(sample_ref) = &mut channel.sample
+            && !samples.contains_key(&channel.id)
+        {
+            sample_ref.file = None;
         }
     }
     Ok(Loaded {
