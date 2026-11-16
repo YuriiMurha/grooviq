@@ -78,3 +78,47 @@ impl LiveShared {
         self.guard_hits.store(guard_hits, Relaxed);
     }
 }
+
+/// Version byte of the live-state wire format.
+pub const LIVE_VERSION: u8 = 1;
+/// Bytes in one encoded live-state frame.
+pub const LIVE_LEN: usize = 32;
+
+const FLAG_PLAYING: u8 = 1;
+const FLAG_TONE: u8 = 1 << 1;
+
+/// Encodes a snapshot as one 32-byte little-endian frame (the stream's wire format, v1):
+/// `[0]` version, `[1]` flags (bit 0 playing, bit 1 tone), `[2..4]` zero, `[4..8]` peak L f32,
+/// `[8..12]` peak R f32, `[12..20]` frames u64, `[20..24]` faults u32, `[24..28]` guard hits
+/// u32, `[28..32]` output latency frames u32.
+pub fn encode_live(s: &LiveSnapshot) -> [u8; LIVE_LEN] {
+    let mut b = [0u8; LIVE_LEN];
+    b[0] = LIVE_VERSION;
+    b[1] = (u8::from(s.playing) * FLAG_PLAYING) | (u8::from(s.tone) * FLAG_TONE);
+    b[4..8].copy_from_slice(&s.peak[0].to_le_bytes());
+    b[8..12].copy_from_slice(&s.peak[1].to_le_bytes());
+    b[12..20].copy_from_slice(&s.frames.to_le_bytes());
+    b[20..24].copy_from_slice(&s.faults.to_le_bytes());
+    b[24..28].copy_from_slice(&s.guard_hits.to_le_bytes());
+    b[28..32].copy_from_slice(&s.output_latency_frames.to_le_bytes());
+    b
+}
+
+/// Decodes a frame; `None` for a wrong length or an unknown version.
+pub fn decode_live(b: &[u8]) -> Option<LiveSnapshot> {
+    let b: &[u8; LIVE_LEN] = b.try_into().ok()?;
+    if b[0] != LIVE_VERSION {
+        return None;
+    }
+    let f32_at = |i: usize| f32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    Some(LiveSnapshot {
+        peak: [f32_at(4), f32_at(8)],
+        playing: b[1] & FLAG_PLAYING != 0,
+        tone: b[1] & FLAG_TONE != 0,
+        frames: u64::from_le_bytes(b[12..20].try_into().unwrap()),
+        faults: u32_at(20),
+        guard_hits: u32_at(24),
+        output_latency_frames: u32_at(28),
+    })
+}

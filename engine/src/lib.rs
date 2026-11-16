@@ -22,18 +22,20 @@ mod live;
 mod offline;
 mod output;
 mod processor;
+mod stream;
 
 use std::sync::Arc;
 
 pub use command::Command;
 pub use controller::{Controller, HealthEvent};
-pub use live::{LiveShared, LiveSnapshot};
+pub use live::{LIVE_LEN, LIVE_VERSION, LiveShared, LiveSnapshot, decode_live, encode_live};
 pub use offline::render_offline;
 pub use output::{
     AudioOutput, AudioSlot, OutputBackend, OutputChoice, OutputEvent, OutputInfo, OutputKind,
     OutputMonitor, Transport, classify, cpal_backend,
 };
 pub use processor::AudioProcessor;
+pub use stream::{StreamServer, start_stream};
 
 /// Frames in every internal block. Commands apply at block starts; notes at their exact frame.
 pub const BLOCK: usize = 64;
