@@ -3,6 +3,7 @@
 //! comparison. Refresh the refs on purpose with `GOLDEN_UPDATE=1 cargo test -p grooviq-golden`
 //! and say why in the commit message.
 
+pub mod devices;
 use std::path::Path;
 
 use grooviq_dsp::synth::preset;

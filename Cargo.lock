@@ -1283,6 +1283,9 @@ dependencies = [
 [[package]]
 name = "grooviq-dsp"
 version = "0.1.0"
+dependencies = [
+ "assert_no_alloc",
+]
 
 [[package]]
 name = "grooviq-engine"
