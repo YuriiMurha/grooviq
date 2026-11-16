@@ -314,3 +314,51 @@ fn sequencing_never_allocates() {
     c.send(Command::Play).unwrap();
     run(&mut c, 5);
 }
+
+#[test]
+fn messages_queued_before_a_rate_change_never_free_on_the_audio_thread() {
+    let setup = |id, sample: &Arc<SampleBuf>| ChannelSetup {
+        id: ChannelId(id),
+        sample: Some(Arc::clone(sample)),
+        sampler: Vec::new(),
+        mix: ChannelMix::default(),
+    };
+    let (a, b) = (tone_sample(4_800), tone_sample(9_000));
+    let state = EngineState {
+        channels: vec![setup(1, &a), setup(2, &a)],
+        ..EngineState::default()
+    };
+    let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
+    let note = Command::ChannelNote {
+        channel: ChannelId(1),
+        key: 60,
+        velocity: 0.9,
+        on: true,
+    };
+    // Queued, never processed: a remove, an add, a new sample, a new pattern, a note.
+    c.remove_channel(ChannelId(1)).unwrap();
+    c.add_channel(setup(1, &b)).unwrap();
+    c.set_channel_sample(ChannelId(2), Some(Arc::clone(&b)))
+        .unwrap();
+    c.set_pattern(PatternData {
+        length: 1_920,
+        notes: Vec::new(),
+    })
+    .unwrap();
+    c.send(note).unwrap();
+    c.reconfigure(
+        &mut p,
+        EngineConfig {
+            sample_rate: 44_100.0,
+        },
+    );
+    let mut buf = vec![0f32; 441 * 2];
+    for _ in 0..4 {
+        assert_no_alloc(|| p.process(&mut buf, 2));
+    }
+    assert!(buf.iter().any(|x| *x != 0.0), "the note plays");
+    c.check_health();
+    assert_eq!(Arc::strong_count(&a), 1, "nothing holds the old sample");
+    // The test, the state's two channels and the graph's two nodes.
+    assert_eq!(Arc::strong_count(&b), 5);
+}

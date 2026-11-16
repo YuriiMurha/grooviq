@@ -168,6 +168,64 @@ impl Msg {
     }
 }
 
+/// What is left of the queued messages, in queue order, once the graph is rebuilt from the
+/// controller's state (which each message updated when it was queued), so that the rebuilt
+/// graph ends up as if every message had reached the old one:
+///
+/// * Dropped: what only changes the graph, since the rebuilt one already has it (a graph, a
+///   channel added or removed, a sample, a pattern, the tone, a synth, mix or sampler
+///   parameter), and a note-on that a later message would have cut (a new graph or
+///   `AllSoundOff` for any note; a removal or a new sample for a note on that channel).
+/// * Kept: the transport commands (the transport outlives the graph; `AllSoundOff` keeps only
+///   its `Stop`, its fade and tone-off being in the rebuilt graph), the other notes (note-offs
+///   always: one that finds no note does nothing), and the test hooks.
+pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
+    // From the back: whether a later message cuts every note, and the channels whose notes a
+    // later message cuts.
+    let mut all_cut = false;
+    let mut cut: Vec<ChannelId> = Vec::new();
+    let mut kept = Vec::with_capacity(queued.len());
+    for msg in queued.into_iter().rev() {
+        let (due, cmd) = match msg {
+            Msg::ReplaceGraph(_) => {
+                all_cut = true;
+                continue;
+            }
+            Msg::RemoveChannel(id) | Msg::SetSample { channel: id, .. } => {
+                cut.push(id);
+                continue;
+            }
+            Msg::AddChannel(_) | Msg::SetPattern(_) => continue,
+            Msg::Command { due, cmd } => (due, cmd),
+        };
+        let cmd = match cmd {
+            Command::TestTone { .. }
+            | Command::SetSynthParam { .. }
+            | Command::SetChannelMix { .. }
+            | Command::SetSamplerParam { .. } => continue,
+            Command::AllSoundOff => {
+                all_cut = true;
+                Command::Stop
+            }
+            Command::Note { on: true, .. } if all_cut => continue,
+            Command::ChannelNote {
+                channel, on: true, ..
+            } if all_cut || cut.contains(&channel) => continue,
+            Command::Note { .. }
+            | Command::ChannelNote { .. }
+            | Command::Play
+            | Command::PlayLoops { .. }
+            | Command::Stop
+            | Command::SetTempo { .. } => cmd,
+            #[cfg(feature = "test-hooks")]
+            Command::InjectNaN | Command::InjectPanic => cmd,
+        };
+        kept.push(Msg::Command { due, cmd });
+    }
+    kept.reverse();
+    kept
+}
+
 /// What the processor hands back for the controller to free, so nothing is freed on the audio
 /// thread.
 #[allow(

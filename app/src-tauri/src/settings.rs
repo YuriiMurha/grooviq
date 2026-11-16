@@ -2,7 +2,7 @@
 
 use crate::audio_log::Level;
 use serde::{Deserialize, Serialize};
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 
 /// What the app remembers between launches.
@@ -50,15 +50,20 @@ pub fn load(path: &Path) -> (Settings, Option<(Level, String)>) {
     (Settings::default(), Some(problem))
 }
 
-/// Writes `settings` to `path` atomically: a temporary file next to it, then a rename, so a
-/// crash mid-write never leaves a half-written file. Creates the directory if needed.
+/// Writes `settings` to `path` atomically: a temporary file next to it, flushed to disk, then
+/// a rename, so a crash or power loss mid-write never leaves a half-written or empty file.
+/// Creates the directory if needed.
 pub fn save(path: &Path, settings: &Settings) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let json = serde_json::to_vec_pretty(settings).map_err(io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(&json)?;
+    // Without this a power loss after the rename can leave an empty file behind.
+    file.sync_all()?;
+    drop(file);
     std::fs::rename(&tmp, path)
 }
 
