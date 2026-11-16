@@ -1,4 +1,4 @@
-//! The macOS app menu: Tauri's standard one, except Quit.
+//! The macOS app menu: Tauri's standard one, except Quit, plus View > High Refresh Rate.
 //!
 //! The standard menu's Quit (Cmd+Q) is the native `terminate:` item, and tao 0.37 has no
 //! `applicationShouldTerminate:` handler, so it ends the app at once: no `ExitRequested`, no
@@ -14,7 +14,8 @@
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use tauri::menu::{
-    AboutMetadata, HELP_SUBMENU_ID, Menu, MenuItem, PredefinedMenuItem, Submenu, WINDOW_SUBMENU_ID,
+    AboutMetadata, CheckMenuItem, HELP_SUBMENU_ID, Menu, MenuItem, PredefinedMenuItem, Submenu,
+    WINDOW_SUBMENU_ID,
 };
 use tauri::{AppHandle, Runtime};
 
@@ -22,6 +23,10 @@ use tauri::{AppHandle, Runtime};
 pub(crate) const QUIT_ID: &str = "grooviq-quit";
 /// Its shortcut: Cmd+Q on macOS.
 pub(crate) const QUIT_ACCELERATOR: &str = "CmdOrCtrl+Q";
+/// The View submenu, found by this id to tick its High Refresh Rate item.
+pub(crate) const VIEW_ID: &str = "grooviq-view";
+/// The View > High Refresh Rate check item (see `display`).
+pub(crate) const HIGH_REFRESH_ID: &str = "grooviq-high-refresh";
 
 /// One of Tauri's predefined (native) menu items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +59,8 @@ pub(crate) enum Entry {
     Separator,
     /// Grooviq's Quit: [`QUIT_ID`], [`QUIT_ACCELERATOR`].
     Quit,
+    /// The High Refresh Rate check item: [`HIGH_REFRESH_ID`], unticked until the settings load.
+    HighRefresh,
 }
 
 /// A submenu: its id (when macOS gives it a role), title and entries.
@@ -65,9 +72,9 @@ pub(crate) struct Sub {
 }
 
 /// The menu of an app called `app_name`: Tauri's standard macOS menu (`Menu::default`), with
-/// Show All added and Grooviq's own Quit in place of the native one.
+/// Show All added, Grooviq's own Quit in place of the native one and High Refresh Rate in View.
 pub(crate) fn spec(app_name: &str) -> Vec<Sub> {
-    use Entry::{Native as N, Quit, Separator};
+    use Entry::{HighRefresh, Native as N, Quit, Separator};
     use Native::*;
     let sub = |id, title: &str, entries| Sub {
         id,
@@ -104,7 +111,11 @@ pub(crate) fn spec(app_name: &str) -> Vec<Sub> {
                 N(SelectAll),
             ],
         ),
-        sub(None, "View", vec![N(Fullscreen)]),
+        sub(
+            Some(VIEW_ID),
+            "View",
+            vec![N(Fullscreen), Separator, HighRefresh],
+        ),
         sub(
             Some(WINDOW_SUBMENU_ID),
             "Window",
@@ -122,6 +133,23 @@ pub(crate) fn quit_text(app_name: &str) -> String {
 /// Whether a menu event asks to quit.
 pub(crate) fn is_quit(id: &str) -> bool {
     id == QUIT_ID
+}
+
+/// Whether a menu event toggles High Refresh Rate.
+pub(crate) fn is_high_refresh(id: &str) -> bool {
+    id == HIGH_REFRESH_ID
+}
+
+/// Ticks or unticks View > High Refresh Rate (no menu on other platforms: nothing happens).
+pub(crate) fn set_high_refresh_checked<R: Runtime>(app: &AppHandle<R>, on: bool) {
+    let item = app
+        .menu()
+        .and_then(|menu| menu.get(VIEW_ID))
+        .and_then(|view| view.as_submenu().and_then(|view| view.get(HIGH_REFRESH_ID)));
+    if let Some(check) = item.as_ref().and_then(|item| item.as_check_menuitem()) {
+        // Fails only while the app shuts down.
+        let _ = check.set_checked(on);
+    }
 }
 
 /// Builds [`spec`] as the app's menu.
@@ -150,6 +178,14 @@ pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
                     quit_text(&name),
                     true,
                     Some(QUIT_ACCELERATOR),
+                )?)?,
+                Entry::HighRefresh => submenu.append(&CheckMenuItem::with_id(
+                    app,
+                    HIGH_REFRESH_ID,
+                    "High Refresh Rate",
+                    true,
+                    false,
+                    None::<&str>,
                 )?)?,
                 Entry::Native(native) => submenu.append(&predefined(app, native, &about)?)?,
             }

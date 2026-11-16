@@ -152,7 +152,7 @@ fn send(audio: &Audio, cmd: Command) -> Result<(), String> {
 ///
 /// Lock order: settings, then log (a failed save logs while holding the settings lock). Nothing
 /// takes the settings lock while holding the log lock, and `apply` must not take either.
-fn apply_and_save(
+pub(crate) fn apply_and_save(
     audio: &Audio,
     apply: impl FnOnce(),
     change: impl FnOnce(&mut settings::Settings),
