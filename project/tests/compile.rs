@@ -76,6 +76,31 @@ fn swing_delays_odd_steps_only() {
 }
 
 #[test]
+fn swing_rounds_to_the_nearest_tick() {
+    // 0.105 * 120 = 12.6 ticks: rounded to 13, not cut to 12.
+    let p = project_with(&[1], pattern(16, 0.105, vec![note(1, 240)]));
+    assert_eq!(compile_pattern(&p, &p.patterns[0]).notes[0].tick, 253);
+    // 0.104 * 120 = 12.48 rounds down.
+    let p = project_with(&[1], pattern(16, 0.104, vec![note(1, 240)]));
+    assert_eq!(compile_pattern(&p, &p.patterns[0]).notes[0].tick, 252);
+}
+
+#[test]
+fn a_non_finite_velocity_compiles_to_the_default() {
+    let mut n = note(1, 0);
+    n.velocity = f32::NAN;
+    let mut m = note(1, 240);
+    m.velocity = f32::INFINITY;
+    let p = project_with(&[1], pattern(16, 0.0, vec![n, m]));
+    let got: Vec<f32> = compile_pattern(&p, &p.patterns[0])
+        .notes
+        .iter()
+        .map(|n| n.velocity)
+        .collect();
+    assert_eq!(got, vec![0.8, 0.8]);
+}
+
+#[test]
 fn compile_drops_notes_of_missing_channels_and_past_the_end_and_sorts() {
     let p = project_with(
         &[1, 2],

@@ -1,7 +1,9 @@
 //! From a project to what the engine plays: sampler parameter lists, a pattern with swing
 //! applied, and the whole [`EngineState`].
 
-use crate::model::{BPM, Channel, DEFAULT_STEPS, MAX_STEPS, Pattern, Project, VOLUME};
+use crate::model::{
+    BPM, Channel, DEFAULT_STEPS, DEFAULT_VELOCITY, MAX_STEPS, Pattern, Project, VOLUME,
+};
 use grooviq_dsp::sampler::{PARAM_IDS, SPEC, SampleBuf};
 use grooviq_engine::{
     ChannelId, ChannelMix, ChannelSetup, EngineState, MAX_CHANNELS, PatternData, STEP_TICKS,
@@ -57,7 +59,7 @@ pub fn compile_pattern(project: &Project, pattern: &Pattern) -> PatternData {
             velocity: if n.velocity.is_finite() {
                 n.velocity.clamp(0.0, 1.0)
             } else {
-                0.0
+                DEFAULT_VELOCITY
             },
             length: n.length.max(1),
         })

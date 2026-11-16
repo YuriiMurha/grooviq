@@ -627,6 +627,20 @@ fn a_missing_entry_falls_back_to_the_original_path_then_to_no_sample() {
     assert_eq!(loaded.samples[&1].name, "kick.wav");
     assert!(!loaded.samples.contains_key(&2));
     assert_eq!(*loaded.samples[&3].bytes, wav_bytes(32));
+    // A channel with no bytes has no entry any more, but keeps its path so it can be relinked.
+    let snare = loaded.project.channels[1].sample.as_ref().unwrap();
+    assert_eq!(snare.file, None);
+    assert_eq!(snare.path, gone);
+    // The channels that were found keep what the file said.
+    assert_eq!(
+        loaded.project.channels[0]
+            .sample
+            .as_ref()
+            .unwrap()
+            .file
+            .as_deref(),
+        Some("samples/1-kick.wav")
+    );
     // The channel keeps its reference, so the person can relink it.
     assert_eq!(
         loaded.project.channels[1].sample.as_ref().unwrap().path,
@@ -657,6 +671,11 @@ fn sample_entries_are_stored_uncompressed() {
         }
     }
     assert_eq!(zip.by_name("samples/1-kick.wav").unwrap().size(), 50_000);
+    // The host system is recorded explicitly, not taken from the platform the file is saved on.
+    for i in 0..zip.len() {
+        let entry = zip.by_index(i).unwrap();
+        assert_eq!(entry.system(), zip::System::Unix, "{:?}", entry.name());
+    }
 }
 
 #[test]
@@ -762,4 +781,87 @@ fn the_disk_fallback_only_reads_audio_that_decodes() {
     let again = dir.path().join("again.grooviq");
     save(&loaded.project, &loaded.samples, &again).unwrap();
     assert_eq!(names(&again), vec!["project.json", "samples/1-REAL.WAV"]);
+}
+
+#[test]
+fn load_validates_and_reports_what_it_fixed() {
+    let json = r#"{
+        "format": "grooviq-project", "version": 1, "name": "x", "bpm": 999.0,
+        "timeSignature": {"beats": 4, "unit": 4},
+        "channels": [{"id": 1, "name": "Kick"}],
+        "patterns": [{"id": 2, "name": "Beat", "steps": 16, "swing": 0.0, "notes": [
+            {"channel": 1, "tick": 0}, {"channel": 9, "tick": 240}]}],
+        "currentPattern": 2, "nextId": 3
+    }"#;
+    let dir = tempfile::tempdir().unwrap();
+    let loaded = load(&write(dir.path(), "a.grooviq", &json_zip(json))).unwrap();
+    assert_eq!(loaded.project.bpm, 400.0, "clamped");
+    assert_eq!(
+        loaded.project.patterns[0].notes.len(),
+        1,
+        "orphan note dropped"
+    );
+    assert_eq!(
+        loaded.warnings,
+        vec![
+            "Tempo 999 is outside 20 to 400 BPM; changed to 400.".to_string(),
+            "Pattern \"Beat\": dropped 1 note of a channel that does not exist.".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn validate_replaces_non_finite_values_with_their_defaults() {
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut p = Project::new();
+        p.bpm = bad;
+        let mut c = channel(1, "Kick", None);
+        c.volume = bad;
+        c.pan = bad;
+        c.sampler.insert("gain".into(), bad);
+        p.channels = vec![c];
+        p.next_id = 2;
+        p.patterns[0].swing = bad;
+        p.patterns[0].notes = vec![Note {
+            channel: 1,
+            tick: 0,
+            length: 240,
+            key: 60,
+            velocity: bad,
+        }];
+        let lines = p.validate();
+        assert_eq!(p.bpm, 140.0, "{bad}");
+        assert_eq!(p.channels[0].volume, 1.0, "{bad}");
+        assert_eq!(p.channels[0].pan, 0.0, "{bad}");
+        let gain = grooviq_dsp::sampler::PARAM_IDS
+            .iter()
+            .position(|&id| id == "gain")
+            .unwrap();
+        assert_eq!(p.channels[0].sampler["gain"], SPEC[gain].2, "{bad}");
+        assert_eq!(p.patterns[0].swing, 0.0, "{bad}");
+        assert_eq!(p.patterns[0].notes[0].velocity, 0.8, "{bad}");
+        assert_eq!(lines.len(), 6, "{bad}: {lines:#?}");
+        assert!(p.validate().is_empty(), "{bad}");
+    }
+}
+
+#[test]
+fn saving_never_overwrites_the_old_file_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.grooviq");
+    let link = dir.path().join("old.link");
+    let (mut p, samples) = project();
+    save(&p, &samples, &path).unwrap();
+    let old = fs::read(&path).unwrap();
+    // A second name for the same file: it sees any in-place write, and none made to a new file.
+    fs::hard_link(&path, &link).unwrap();
+
+    p.name = "A different name".into();
+    save(&p, &samples, &path).unwrap();
+    assert_eq!(
+        fs::read(&link).unwrap(),
+        old,
+        "the old file was written into"
+    );
+    assert_eq!(load(&path).unwrap().project.name, "A different name");
 }

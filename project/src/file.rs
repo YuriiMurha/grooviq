@@ -241,6 +241,8 @@ fn write_zip(file: &mut File, project: &Project, entries: &[Entry]) -> io::Resul
         .map_err(|_| io::Error::other("the zip epoch is not a valid timestamp"))?;
     let options = SimpleFileOptions::default()
         .last_modified_time(epoch)
+        // Not the host's default (DOS on Windows, Unix elsewhere): the same bytes everywhere.
+        .system(zip::System::Unix)
         .unix_permissions(0o644);
 
     let json = serde_json::to_vec_pretty(&Document {
@@ -408,6 +410,14 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
                 channel.name,
                 why.trim_end_matches('.')
             )),
+        }
+    }
+    // A channel whose bytes could not be had keeps its path (to relink) but has no entry.
+    for channel in &mut project.channels {
+        if let Some(sample_ref) = &mut channel.sample {
+            if !samples.contains_key(&channel.id) {
+                sample_ref.file = None;
+            }
         }
     }
     Ok(Loaded {
