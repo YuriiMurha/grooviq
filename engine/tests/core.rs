@@ -2,7 +2,7 @@
 
 #[cfg(feature = "test-hooks")]
 use grooviq_engine::HealthEvent;
-use grooviq_engine::{Command, EngineConfig, engine, render_offline};
+use grooviq_engine::{BPM_RANGE, Command, EngineConfig, engine, render_offline};
 
 const SR: f32 = 48_000.0;
 
@@ -155,6 +155,29 @@ fn play_and_stop_drive_the_transport_flag() {
     c.send(Command::Stop).unwrap();
     p.process(&mut buf, 2);
     assert!(!c.live().playing);
+    c.send(Command::PlayLoops { loops: 1 }).unwrap();
+    p.process(&mut buf, 2);
+    assert!(c.live().playing);
+    c.send(Command::AllSoundOff).unwrap();
+    p.process(&mut buf, 2);
+    assert!(!c.live().playing);
+}
+
+#[test]
+fn tempo_and_loop_counts_are_checked_and_mirrored() {
+    let (mut c, _p) = engine(cfg());
+    assert_eq!(c.state().bpm, 140.0, "the default tempo");
+    assert!(c.send(Command::SetTempo { bpm: f32::NAN }).is_err());
+    assert!(c.send(Command::SetTempo { bpm: f32::INFINITY }).is_err());
+    assert!(c.send(Command::PlayLoops { loops: 0 }).is_err());
+    assert_eq!(c.state().bpm, 140.0, "a refused tempo changes nothing");
+    c.send(Command::SetTempo { bpm: 1_000.0 }).unwrap();
+    assert_eq!(c.state().bpm, BPM_RANGE.1);
+    c.send(Command::SetTempo { bpm: 1.0 }).unwrap();
+    assert_eq!(c.state().bpm, BPM_RANGE.0);
+    c.send(Command::SetTempo { bpm: 97.5 }).unwrap();
+    assert_eq!(c.state().bpm, 97.5);
+    c.send(Command::PlayLoops { loops: 1 }).unwrap();
 }
 
 #[test]

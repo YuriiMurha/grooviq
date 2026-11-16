@@ -229,26 +229,28 @@ impl Controller {
         Ok(())
     }
 
-    /// Replaces the whole state: stops the transport, then swaps in one graph built from
-    /// `state` (cutting every note; the test tone and the synth keep their settings). Checked
+    /// Replaces the whole state: stops the transport, sets the tempo, then swaps in one graph
+    /// built from `state` (cutting every note; the test tone and the synth keep their
+    /// settings). Checked
     /// like [`Self::add_channel`] and [`Self::set_pattern`], and refused as a whole
     /// (`ChannelExists` for two channels with one id, `TooManyChannels` for more than
     /// [`MAX_CHANNELS`], `Rejected` for a value that is not finite).
     pub fn load_state(&mut self, state: EngineState) -> Result<(), ControlError> {
         let state = state.checked()?;
-        if self.commands.slots() < 2 {
+        if self.commands.slots() < 3 {
             return Err(ControlError::Full);
         }
         // The old state (and the samples only it held) is freed here, on this thread.
         let _old = std::mem::replace(&mut self.state, state);
         let graph = self.build_graph();
-        // Only this thread pushes, and the queue had room for both.
-        let stop = Msg::Command {
-            due: 0,
-            cmd: Command::Stop,
+        // Only this thread pushes, and the queue had room for all three.
+        let command = |cmd| Msg::Command { due: 0, cmd };
+        let tempo = Command::SetTempo {
+            bpm: self.state.bpm,
         };
-        let queued =
-            self.commands.push(stop).is_ok() && self.push(Msg::ReplaceGraph(graph)).is_ok();
+        let queued = self.commands.push(command(Command::Stop)).is_ok()
+            && self.commands.push(command(tempo)).is_ok()
+            && self.push(Msg::ReplaceGraph(graph)).is_ok();
         debug_assert!(queued);
         Ok(())
     }
@@ -404,6 +406,7 @@ impl Controller {
         match cmd {
             Command::TestTone { on, hz, gain_db } => self.tone = ToneState { on, hz, gain_db },
             Command::AllSoundOff => self.tone.on = false,
+            Command::SetTempo { bpm } => self.state.bpm = bpm,
             Command::SetSynthParam { index, value } => {
                 if let Some(param) = self.synth.get_mut(index as usize) {
                     *param = value;
@@ -466,8 +469,7 @@ mod tests {
     /// Publishes what the processor would after `faults` panics and `guard_hits` NaN blocks
     /// (the processor itself is never run, so nothing overwrites it).
     fn pretend(c: &Controller, faults: u32, guard_hits: u32) {
-        c.live
-            .publish([0.0; 2], false, false, 0, faults, guard_hits);
+        c.live.publish([0.0; 2], false, 0, faults, guard_hits);
     }
 
     #[test]
@@ -590,13 +592,14 @@ mod tests {
         assert_eq!(c.state, before, "nothing changed");
 
         // A full queue: every change is refused whole.
-        while c.commands.slots() > 1 {
+        while c.commands.slots() > 2 {
             c.send(Command::Play).unwrap();
         }
         assert_eq!(
             c.load_state(EngineState::default()),
             Err(ControlError::Full)
         );
+        c.send(Command::Play).unwrap();
         c.send(Command::Play).unwrap();
         assert_eq!(c.add_channel(setup(2)), Err(ControlError::Full));
         assert_eq!(c.remove_channel(ChannelId(1)), Err(ControlError::Full));

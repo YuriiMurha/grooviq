@@ -22,10 +22,11 @@ class FakeSocket {
   }
 }
 
-function v1(peakL: number): ArrayBuffer {
-  const buf = new ArrayBuffer(32);
+/** A wire-format v2 frame (40 bytes) with only the left peak set. */
+function v2(peakL: number): ArrayBuffer {
+  const buf = new ArrayBuffer(40);
   const v = new DataView(buf);
-  v.setUint8(0, 1);
+  v.setUint8(0, 2);
   v.setFloat32(4, peakL, true);
   return buf;
 }
@@ -89,10 +90,14 @@ test("ignores frames with an unknown version", () => {
   connectLive(endpoint, (f) => frames.push(f), { WebSocketImpl, backoffMs: [100, 400] });
   const ws = FakeSocket.all[0];
   ws.onopen?.();
-  const bad = new Uint8Array(32).fill(2).buffer;
+  const bad = new Uint8Array(40).fill(3).buffer;
   ws.onmessage?.({ data: bad });
+  // A v1 frame from an older engine.
+  const old = new Uint8Array(32);
+  old[0] = 1;
+  ws.onmessage?.({ data: old.buffer });
   ws.onmessage?.({ data: "not binary" });
-  ws.onmessage?.({ data: v1(0.5) });
+  ws.onmessage?.({ data: v2(0.5) });
   expect(frames).toHaveLength(1);
   expect(frames[0].peak[0]).toBe(0.5);
 });
