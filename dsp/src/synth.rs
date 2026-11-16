@@ -47,6 +47,11 @@ const XFADE_MS: f32 = 5.0;
 /// resonant filter far more than a one-pole's decelerating approach (on a resonant sine patch a
 /// 5 ms ramp reads +5.9 dB on the click detector, a 5 ms one-pole -9.4 dB).
 const CUTOFF_MOD_MS: f32 = 5.0;
+/// Smoothing time (one-pole, in log frequency) of the cutoff knob or automation value only: the
+/// filter envelope, key tracking, velocity and LFO move the cutoff unsmoothed. A jump of a
+/// resonant filter's cutoff sweeps its peak through the harmonics (a "zap"); 6 ms read +6.9 dB
+/// on the click detector for a jump on a resonant saw, 8 ms reads +5.1 dB.
+const CUTOFF_SMOOTH_MS: f32 = 8.0;
 /// An attack whose time is shortened while it runs rises no faster than full scale in this time.
 const SOFT_RISE_MS: f64 = 3.0;
 /// `Bufs::ftype` while a filter type switch crossfades.
@@ -1481,7 +1486,7 @@ impl Synth {
             s_lvl2: sm(0.0, 8.0),
             s_sub: sm(0.0, 8.0),
             s_noise: sm(0.0, 8.0),
-            s_cut: sm(0.0, 6.0),
+            s_cut: sm(0.0, CUTOFF_SMOOTH_MS),
             s_res: sm(0.0, 8.0),
             s_drive: sm(0.0, 8.0),
             s_lfo_amt: sm(0.0, 8.0),
