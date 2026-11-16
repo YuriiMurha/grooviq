@@ -37,8 +37,8 @@ pub struct AudioProcessor {
     /// A replaced graph the full trash queue could not take yet; retried every block.
     unsent: Option<Box<Graph>>,
     graph: Box<Graph>,
-    /// The rate `graph` must be built for.
-    sample_rate: f32,
+    /// The generation of the last `restart`: replacements from earlier ones are stale.
+    generation: u64,
     /// A panic unwound out of the graph: it stays untouched (and the output silent) until the
     /// controller sends a replacement.
     faulted: bool,
@@ -70,8 +70,8 @@ impl AudioProcessor {
             commands,
             trash,
             unsent: None,
+            generation: graph.generation(),
             graph,
-            sample_rate,
             faulted: false,
             live,
             block_l: [0.0; BLOCK],
@@ -115,11 +115,12 @@ impl AudioProcessor {
         frames.into_remainder().fill(0.0);
     }
 
-    /// Restarts with `graph`, built for `sample_rate`. Only [`crate::Controller::reconfigure`]
-    /// calls this, with the audio callback stopped, so the old graph is freed on its thread.
+    /// Restarts with `graph`, built for `sample_rate` in a new generation. Only
+    /// [`crate::Controller::reconfigure`] calls this, with the audio callback stopped, so the
+    /// old graph is freed on its thread.
     pub(crate) fn restart(&mut self, sample_rate: f32, graph: Box<Graph>) {
+        self.generation = graph.generation();
         self.graph = graph;
-        self.sample_rate = sample_rate;
         self.unsent = None;
         self.faulted = false;
         // Leftover frames were rendered at the old rate.
@@ -251,10 +252,11 @@ impl AudioProcessor {
         self.faults = self.faults.wrapping_add(1);
     }
 
-    /// Swaps in a fresh graph, unless it was built for another rate: a restart queued just
-    /// before `reconfigure` arrives after it, and must not bring back the old rate.
+    /// Swaps in a fresh graph, unless it is from an earlier generation: a restart queued
+    /// before `reconfigure` arrives after the fresh graph it made, and must not replace it
+    /// (cutting held voices, or bringing back the old rate).
     fn replace_graph(&mut self, graph: Box<Graph>) {
-        let leaving = if graph.sample_rate() == self.sample_rate {
+        let leaving = if graph.generation() == self.generation {
             self.faulted = false;
             std::mem::replace(&mut self.graph, graph)
         } else {
@@ -311,7 +313,7 @@ mod tests {
     fn processor() -> (AudioProcessor, Producer<Msg>, Consumer<Box<Graph>>) {
         let (commands, commands_rx) = rtrb::RingBuffer::new(QUEUE_CAPACITY);
         let (trash_tx, trash) = rtrb::RingBuffer::new(1);
-        let graph = Box::new(Graph::new(SR));
+        let graph = Box::new(Graph::new(SR, 0));
         let live = Arc::new(LiveShared::default());
         let p = AudioProcessor::new(SR, graph, commands_rx, trash_tx, live);
         (p, commands, trash)
@@ -321,7 +323,7 @@ mod tests {
     fn a_full_trash_queue_parks_the_old_graph_until_there_is_room() {
         let (mut p, mut commands, mut trash) = processor();
         for _ in 0..3 {
-            let msg = Msg::ReplaceGraph(Box::new(Graph::new(SR)));
+            let msg = Msg::ReplaceGraph(Box::new(Graph::new(SR, 0)));
             assert!(commands.push(msg).is_ok());
         }
         let mut buf = [0.0; BLOCK * 2];
@@ -347,19 +349,20 @@ mod tests {
     }
 
     #[test]
-    fn a_restart_queued_before_a_rate_change_is_discarded() {
+    fn a_restart_queued_before_reconfigure_is_discarded() {
         let (mut p, mut commands, mut trash) = processor();
-        // check_health queued a graph for 48 kHz, then reconfigure switched to 44.1 kHz.
+        // check_health queued a graph in generation 0, then reconfigure started generation 1
+        // at the same rate.
         assert!(
             commands
-                .push(Msg::ReplaceGraph(Box::new(Graph::new(SR))))
+                .push(Msg::ReplaceGraph(Box::new(Graph::new(SR, 0))))
                 .is_ok()
         );
-        p.restart(44_100.0, Box::new(Graph::new(44_100.0)));
+        p.restart(SR, Box::new(Graph::new(SR, 1)));
         let mut buf = [0.0; BLOCK * 2];
         p.process(&mut buf, 2);
-        assert_eq!(p.graph.sample_rate(), 44_100.0);
+        assert_eq!(p.graph.generation(), 1);
         // The stale graph goes back to be freed off the audio thread.
-        assert_eq!(trash.pop().ok().map(|g| g.sample_rate()), Some(SR));
+        assert_eq!(trash.pop().ok().map(|g| g.generation()), Some(0));
     }
 }

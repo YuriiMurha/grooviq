@@ -47,7 +47,14 @@ pub struct Controller {
     /// The state the queued commands lead to, to rebuild the graph from.
     tone: ToneState,
     synth: Vec<f32>,
+    /// Counts `reconfigure` calls. Every graph carries the generation it was built in, and the
+    /// processor drops a replacement from an earlier one.
+    generation: u64,
+    /// Faults already answered with a restart (queued by `check_health`, or done by
+    /// `reconfigure`).
     seen_faults: u32,
+    /// A restart happened that `check_health` has not reported yet.
+    restart_owed: bool,
     seen_guard_hits: u32,
 }
 
@@ -74,7 +81,9 @@ impl Controller {
                 gain_db: -12.0,
             },
             synth,
+            generation: 0,
             seen_faults: 0,
+            restart_owed: false,
             seen_guard_hits: 0,
         }
     }
@@ -137,10 +146,13 @@ impl Controller {
                 .is_ok()
             {
                 self.seen_faults = live.faults;
-                events.push(HealthEvent::Restarted {
-                    faults: live.faults,
-                });
+                self.restart_owed = true;
             }
+        }
+        if std::mem::take(&mut self.restart_owed) {
+            events.push(HealthEvent::Restarted {
+                faults: self.seen_faults,
+            });
         }
         if live.guard_hits != self.seen_guard_hits {
             self.seen_guard_hits = live.guard_hits;
@@ -156,13 +168,24 @@ impl Controller {
     /// on the audio thread.
     pub fn reconfigure(&mut self, processor: &mut AudioProcessor, config: EngineConfig) {
         self.sample_rate = config.rate();
+        // Replacements queued before now are stale: the processor drops them.
+        self.generation += 1;
+        // The fresh graph also recovers from every fault so far, so `check_health` must not
+        // restart it again; a fault it has not reported yet is still owed. (The processor
+        // publishes its count after every block, and its callback is stopped now.)
+        let faults = self.live.snapshot().faults;
+        if faults != self.seen_faults {
+            self.seen_faults = faults;
+            self.restart_owed = true;
+        }
         processor.restart(self.sample_rate, self.build_graph());
         self.free_trash();
     }
 
-    /// A graph for the current sample rate in the state the queued commands lead to.
+    /// A graph for the current sample rate and generation, in the state the queued commands
+    /// lead to.
     pub(crate) fn build_graph(&self) -> Box<Graph> {
-        let mut graph = Box::new(Graph::new(self.sample_rate));
+        let mut graph = Box::new(Graph::new(self.sample_rate, self.generation));
         let ToneState { on, hz, gain_db } = self.tone;
         graph.set_tone(on, hz, gain_db);
         for (index, &value) in (0u32..).zip(&self.synth) {
@@ -222,6 +245,32 @@ mod tests {
         assert_eq!(c.commands.slots(), free - 1, "one replacement queued");
         assert!(c.check_health().is_empty());
         assert_eq!(c.commands.slots(), free - 1, "and no second one");
+    }
+
+    #[test]
+    fn reconfigure_makes_restarts_queued_before_it_stale() {
+        let (mut c, mut p) = controller();
+        pretend(&c, 1, 0);
+        // Queues a replacement built with the tone off.
+        assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 1 }]);
+        let tone = Command::TestTone {
+            on: true,
+            hz: 440.0,
+            gain_db: -12.0,
+        };
+        c.send(tone).unwrap();
+        // Same rate: only the generation tells the queued graph is stale.
+        c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 48_000.0,
+            },
+        );
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        // The queued graph came back unused; the one reconfigure built (tone on) plays.
+        let returned = c.trash.pop().expect("a graph handed back");
+        assert!(!returned.tone_on());
+        assert!(c.live().tone);
     }
 
     #[test]

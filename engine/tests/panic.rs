@@ -149,3 +149,31 @@ fn reconfigure_restarts_a_faulted_graph_without_check_health() {
     p.process(&mut buf, 2);
     assert!(peak(&buf) > 0.2, "peak {}", peak(&buf));
 }
+
+#[test]
+fn a_fault_cleared_by_reconfigure_is_reported_but_never_restarts_the_new_graph() {
+    silence_injected_panics();
+    let (mut c, mut p) = engine(cfg());
+    c.send(Command::InjectPanic).unwrap();
+    let mut buf = vec![0f32; 64 * 2];
+    p.process(&mut buf, 2);
+    assert_eq!(c.live().faults, 1);
+    // The output device changes (same rate) before the next health check.
+    c.reconfigure(&mut p, cfg());
+    let note = Command::Note {
+        key: 48,
+        velocity: 1.0,
+        on: true,
+    };
+    c.send(note).unwrap();
+    let mut buf = vec![0f32; 1024 * 2];
+    p.process(&mut buf, 2);
+    assert!(peak(&buf) > 0.05, "the note sounds");
+    // The panic is still reported, once, but reconfigure already restarted the graph...
+    assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 1 }]);
+    assert!(c.check_health().is_empty());
+    // ...so no second restart cuts the held note.
+    let mut buf = vec![0f32; 4096 * 2];
+    p.process(&mut buf, 2);
+    assert!(peak(&buf) > 0.05, "held note: {}", peak(&buf));
+}

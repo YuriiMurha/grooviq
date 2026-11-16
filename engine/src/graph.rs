@@ -10,7 +10,8 @@ use std::f64::consts::TAU;
 const RAMP_SECONDS: f32 = 0.005;
 
 pub(crate) struct Graph {
-    sample_rate: f32,
+    /// The controller's `reconfigure` count when the graph was built.
+    generation: u64,
     tone: ToneNode,
     synth: SynthNode,
     /// The block of the node being rendered, checked by the guard before it joins the master.
@@ -20,10 +21,10 @@ pub(crate) struct Graph {
 
 impl Graph {
     /// Builds every node for `sample_rate` (allocates: call it off the audio thread).
-    pub(crate) fn new(sample_rate: f32) -> Self {
+    pub(crate) fn new(sample_rate: f32, generation: u64) -> Self {
         let ramp_len = (RAMP_SECONDS * sample_rate).round().max(1.0) as u32;
         Self {
-            sample_rate,
+            generation,
             tone: ToneNode::new(sample_rate, ramp_len),
             synth: SynthNode::new(sample_rate, ramp_len),
             node_l: [0.0; BLOCK],
@@ -31,9 +32,8 @@ impl Graph {
         }
     }
 
-    /// The rate the graph was built for.
-    pub(crate) fn sample_rate(&self) -> f32 {
-        self.sample_rate
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub(crate) fn set_tone(&mut self, on: bool, hz: f32, gain_db: f32) {
