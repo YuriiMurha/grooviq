@@ -667,8 +667,10 @@ fn defaults_leave_the_m1_sound_unchanged() {
     }
     let bytes = std::fs::read(path).expect("the M1 reference (create it with GOLDEN_UPDATE=1)");
     let reference: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect();
     assert_eq!(scene.len(), reference.len(), "length");
     assert!(peak(&reference) > 0.1, "the reference is not silent");
@@ -742,7 +744,7 @@ fn power_at(x: &[f32], hz: f64) -> f64 {
         .collect();
     let mut total = 0.0;
     let mut count = 0;
-    for seg in x.chunks_exact(SEG) {
+    for seg in x.as_chunks::<SEG>().0 {
         let (mut s1, mut s2) = (0.0f64, 0.0f64);
         for (v, w) in seg.iter().zip(&window) {
             let s0 = *v as f64 * w + coeff * s1 - s2;
