@@ -770,25 +770,38 @@ fn prepare(p: &mut [(u32, f32)], param: u32) {
 
 fn check_moves(c: &mut Checker, tag: &str, base: &[(u32, f32)], keys: &[u8]) {
     for &(param, label, vals) in MOVES {
-        let mut p = base.to_vec();
-        prepare(&mut p, param);
-        let mut acts = Vec::new();
-        for &k in keys {
-            acts.push((ms(20.0), Act::On(k, 0.9)));
-            acts.push((ms(1300.0), Act::Off(k)));
-        }
-        for (k, v) in vals.iter().enumerate() {
-            acts.push((ms(400.0 + 300.0 * k as f32), Act::Param(param, *v)));
-        }
-        c.check(
-            &format!("{tag}: {label}"),
-            &p,
-            &acts,
-            ms(1700.0),
-            ms(350.0),
-            false,
-        );
+        check_move(c, tag, base, keys, (param, label, vals), 1300.0);
     }
+}
+
+/// One knob moved through its three values at 400, 700 and 1000 ms while `keys` sound (held
+/// until `off_ms`).
+fn check_move(
+    c: &mut Checker,
+    tag: &str,
+    base: &[(u32, f32)],
+    keys: &[u8],
+    (param, label, vals): (u32, &str, [f32; 3]),
+    off_ms: f32,
+) {
+    let mut p = base.to_vec();
+    prepare(&mut p, param);
+    let mut acts = Vec::new();
+    for &k in keys {
+        acts.push((ms(20.0), Act::On(k, 0.9)));
+        acts.push((ms(off_ms), Act::Off(k)));
+    }
+    for (k, v) in vals.iter().enumerate() {
+        acts.push((ms(400.0 + 300.0 * k as f32), Act::Param(param, *v)));
+    }
+    c.check(
+        &format!("{tag}: {label}"),
+        &p,
+        &acts,
+        ms(1700.0),
+        ms(350.0),
+        false,
+    );
 }
 
 /// Every knob moved in jumps while notes sound, on every preset (sustain raised so the plucks
@@ -823,6 +836,21 @@ fn knob_moves_while_sounding_are_click_free() {
     check_moves(&mut c, "probe+res", &res, &[40, 47]);
     check_moves(&mut c, "probe dark saw low", &dark, &[40]);
     check_moves(&mut c, "probe dark saw high", &dark, &[76]);
+    // A cutoff jump sweeps a resonant peak through the harmonics; whether that reads as a burst
+    // depends on where they sit, so the resonant saw is checked across keys and resonances.
+    let jump = MOVES
+        .iter()
+        .find(|m| m.1 == "cutoff jump")
+        .copied()
+        .unwrap();
+    for res_v in [0.5f32, 0.6, 0.7, 0.8] {
+        let mut p = dark.clone();
+        set(&mut p, RES, res_v);
+        for key in (60u8..=88).step_by(2) {
+            let tag = format!("probe dark saw res {res_v} key {key}");
+            check_move(&mut c, &tag, &p, &[key], jump, 1300.0);
+        }
+    }
     c.finish();
 }
 

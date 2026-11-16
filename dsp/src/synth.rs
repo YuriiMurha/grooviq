@@ -14,7 +14,9 @@
 //!   like a note from silence (the old one rings out, or in mono fades out over 3 ms); with slow
 //!   attacks the envelopes go on from their level and the new velocity ramps in; a release never
 //!   falls faster than a 3 ms line; filter type, unison layout, LFO destination and tuning
-//!   changes crossfade or glide over 5 ms; envelope amount and key tracking are smoothed.
+//!   changes crossfade or glide over 5 ms; envelope amount and key tracking are smoothed; the
+//!   cutoff knob glides over 8 ms, up to 20 ms at high resonance; while no voice sounds, changes
+//!   take effect at once.
 //! - Meters: peak levels, voice count, LFO, envelopes of the most recent voice, 256-sample scope.
 
 use crate::api::{Device, MAX_BLOCK, NoteEvent, db_to_gain};
@@ -48,10 +50,13 @@ const XFADE_MS: f32 = 5.0;
 /// 5 ms ramp reads +5.9 dB on the click detector, a 5 ms one-pole -9.4 dB).
 const CUTOFF_MOD_MS: f32 = 5.0;
 /// Smoothing time (one-pole, in log frequency) of the cutoff knob or automation value only: the
-/// filter envelope, key tracking, velocity and LFO move the cutoff unsmoothed. A jump of a
-/// resonant filter's cutoff sweeps its peak through the harmonics (a "zap"); 6 ms read +6.9 dB
-/// on the click detector for a jump on a resonant saw, 8 ms reads +5.1 dB.
+/// filter envelope, key tracking, velocity and LFO move the cutoff unsmoothed. A fast jump of a
+/// resonant filter's cutoff sweeps its peak through the harmonics (a "zap" that reads as a
+/// burst), so the time grows with resonance: CUTOFF_SMOOTH_MS up to resonance 0.3 (every
+/// preset), rising linearly to CUTOFF_SMOOTH_RES_MS at 0.6 and above. On a resonant saw at keys
+/// 60..88 and resonance 0.5..1.0 a constant 8 ms reads up to +14.9 dB, 20 ms at most +5.1 dB.
 const CUTOFF_SMOOTH_MS: f32 = 8.0;
+const CUTOFF_SMOOTH_RES_MS: f32 = 20.0;
 /// An attack whose time is shortened while it runs rises no faster than full scale in this time.
 const SOFT_RISE_MS: f64 = 3.0;
 /// `Bufs::ftype` while a filter type switch crossfades.
@@ -605,6 +610,37 @@ impl Ladder {
 
 // ---------------------------------------------------------------------------------------------
 // Declick ramps
+
+/// The cutoff knob value (log2 Hz): a one-pole like `Smooth`, but its coefficient comes with
+/// each sample (it follows the resonance, see CUTOFF_SMOOTH_MS).
+#[derive(Clone, Copy, Debug)]
+struct CutoffKnob {
+    cur: f32,
+    target: f32,
+}
+
+impl CutoffKnob {
+    fn set(&mut self, v: f32) {
+        self.target = v;
+    }
+
+    fn snap(&mut self) {
+        self.cur = self.target;
+    }
+
+    #[inline(always)]
+    fn next(&mut self, coef: f32) -> f32 {
+        if self.cur != self.target {
+            let d = (self.cur - self.target) * coef;
+            self.cur = if d.abs() < 1.0e-5 * (1.0 + self.target.abs()) {
+                self.target
+            } else {
+                self.target + d
+            };
+        }
+        self.cur
+    }
+}
 
 /// A value that moves to a new target in a straight line over a fixed number of samples (a
 /// target change during a ramp restarts it from where it is). Settles exactly on the target.
@@ -1412,12 +1448,16 @@ pub struct Synth {
     s_lvl2: Smooth,
     s_sub: Smooth,
     s_noise: Smooth,
-    s_cut: Smooth,
+    s_cut: CutoffKnob,
+    /// Cutoff knob smoothing times at low and high resonance (CUTOFF_SMOOTH_MS,
+    /// CUTOFF_SMOOTH_RES_MS).
+    cut_ms: [f32; 2],
     s_res: Smooth,
     s_drive: Smooth,
     s_lfo_amt: Smooth,
     s_master: Smooth,
-    res_cache: (f32, f32, f32),
+    /// Resonance and what follows from it: SVF k, ladder k, cutoff knob smoothing coefficient.
+    res_cache: (f32, f32, f32, f32),
     drive_cache: (f32, f32, f32),
     mode: u8,
     age: u64,
@@ -1486,12 +1526,16 @@ impl Synth {
             s_lvl2: sm(0.0, 8.0),
             s_sub: sm(0.0, 8.0),
             s_noise: sm(0.0, 8.0),
-            s_cut: sm(0.0, CUTOFF_SMOOTH_MS),
+            s_cut: CutoffKnob {
+                cur: 0.0,
+                target: 0.0,
+            },
+            cut_ms: [CUTOFF_SMOOTH_MS, CUTOFF_SMOOTH_RES_MS],
             s_res: sm(0.0, 8.0),
             s_drive: sm(0.0, 8.0),
             s_lfo_amt: sm(0.0, 8.0),
             s_master: sm(0.0, 10.0),
-            res_cache: (f32::NAN, 0.0, 0.0),
+            res_cache: (f32::NAN, 0.0, 0.0, 0.0),
             drive_cache: (f32::NAN, 0.0, 0.0),
             mode: 0,
             age: 0,
@@ -1521,7 +1565,6 @@ impl Synth {
             &mut self.s_lvl2,
             &mut self.s_sub,
             &mut self.s_noise,
-            &mut self.s_cut,
             &mut self.s_res,
             &mut self.s_drive,
             &mut self.s_lfo_amt,
@@ -1531,6 +1574,7 @@ impl Synth {
         ] {
             sm.snap();
         }
+        self.s_cut.snap();
         let ramps = self
             .route
             .iter_mut()
@@ -1677,7 +1721,17 @@ impl Synth {
             b.lvl2[i] = self.s_lvl2.next();
             b.sub[i] = self.s_sub.next();
             b.noise[i] = self.s_noise.next();
-            b.cut[i] = self.s_cut.next() + lfo * amt * 4.0 * r_cut;
+            let res = self.s_res.next();
+            if res != self.res_cache.0 {
+                let q = 0.707 * 35f32.powf(res);
+                let x = ((res - 0.3) / 0.3).clamp(0.0, 1.0);
+                let t = self.cut_ms[0] + (self.cut_ms[1] - self.cut_ms[0]) * x;
+                let coef = (-1000.0 / (t * self.cx.sr).max(1.0e-3)).exp();
+                self.res_cache = (res, 1.0 / q, 4.1 * res, coef);
+            }
+            b.svf_k[i] = self.res_cache.1;
+            b.lad_k[i] = self.res_cache.2;
+            b.cut[i] = self.s_cut.next(self.res_cache.3) + lfo * amt * 4.0 * r_cut;
             b.pitch[i] = lfo * 12.0 * amt * amt * r_pitch;
             b.trem[i] = 1.0 - amt * r_vol * (0.5 - 0.5 * lfo);
             b.env_oct[i] = self.s_env.next();
@@ -1692,13 +1746,6 @@ impl Synth {
             } else {
                 FILTER_XF
             };
-            let res = self.s_res.next();
-            if res != self.res_cache.0 {
-                let q = 0.707 * 35f32.powf(res);
-                self.res_cache = (res, 1.0 / q, 4.1 * res);
-            }
-            b.svf_k[i] = self.res_cache.1;
-            b.lad_k[i] = self.res_cache.2;
             let drive = self.s_drive.next();
             if drive != self.drive_cache.0 {
                 let g = 10.0 * drive * drive;
