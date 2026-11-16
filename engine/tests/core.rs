@@ -49,6 +49,29 @@ fn tone_is_440hz_at_minus_12_dbfs() {
 }
 
 #[test]
+fn reconfigure_keeps_the_pitch_at_a_new_rate() {
+    let (mut c, mut p) = engine(cfg());
+    c.send(tone(true)).unwrap();
+    let mut buf = vec![0f32; 441 * 2];
+    p.process(&mut buf, 2);
+    c.reconfigure(
+        &mut p,
+        EngineConfig {
+            sample_rate: 44_100.0,
+        },
+    );
+    let mut out = Vec::new();
+    for _ in 0..100 {
+        p.process(&mut buf, 2); // 1 s at 44.1 kHz
+        out.extend_from_slice(&buf);
+    }
+    let l = left(&out);
+    let c = upward_crossings(&l[22_050..]);
+    assert!((219..=221).contains(&c), "crossings {c}");
+    assert!((peak(&l[22_050..]) - 0.2512).abs() < 0.002);
+}
+
+#[test]
 fn output_is_identical_for_any_callback_size() {
     let ev = vec![
         (0, tone(true)),
