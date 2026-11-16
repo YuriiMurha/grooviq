@@ -42,3 +42,22 @@ fn compare_rejects_a_changed_render() {
     assert!(compare(&bad, &good).is_err());
     assert!(compare(&good[1..], &good).is_err());
 }
+
+#[test]
+fn compare_rejects_a_different_length() {
+    let good = render(&scenes()[0], 512);
+    // A clean prefix must not pass (zip would truncate), nor a longer render.
+    assert!(compare(&good[..good.len() - 2], &good).is_err());
+    assert!(compare(&good, &good[..good.len() - 2]).is_err());
+    assert!(compare(&[], &good).is_err());
+}
+
+#[test]
+fn compare_rejects_non_finite_samples() {
+    let good = render(&scenes()[0], 512);
+    for bad_value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut bad = good.clone();
+        bad[1000] = bad_value;
+        assert!(compare(&bad, &good).is_err(), "{bad_value} accepted");
+    }
+}
