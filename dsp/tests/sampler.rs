@@ -1684,3 +1684,71 @@ fn block_splitting_never_changes_glides() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Review round 1: key ownership, choked priority, never-evicted fades
+
+#[test]
+fn a_slide_bends_a_held_one_shot_note() {
+    // One-shot mode (the default): key 48 is down, so a slide to 52 bends its voice without a new
+    // attack, exactly as in gate mode.
+    let mut s = configured(&sine_1k(), &[("root", 48.0), ("attack", 20.0)]);
+    let (l, _) = render(&mut s, 24_000, &[on(0, 48, 1.0), slide(9_600, 52, 1.0)]);
+    assert_eq!(s.active_voices(), 1, "the slide moved the held voice");
+    let track = pitch_track(&l, 48.0, 1000.0);
+    let after = key_between(&track, 13_000.0, 23_900.0);
+    assert!((after - 52.0).abs() < 0.01, "slid to {after}");
+    let held = peak(&l[8_000..9_600]);
+    for (i, w) in l[9_600..24_000].chunks(240).enumerate() {
+        assert!(peak(w) >= 0.9 * held, "dip at {}", 9_600 + i * 240);
+    }
+    // Once 48 is up, a slide has nothing held: it starts a note of its own.
+    let (_, _) = render(&mut s, 4_800, &[off(0, 52), slide(2_400, 55, 1.0)]);
+    assert_eq!(s.active_voices(), 2, "a released one-shot is not bent");
+}
+
+#[test]
+fn a_full_mono_stack_keeps_every_note_off_owed() {
+    // 33 overlapping notes on one key: more than the priority stack holds. The oldest 32
+    // note-offs end the oldest 32 notes; the 33rd plays on until its own.
+    for mode in [1.0, 2.0] {
+        let mut s = configured(
+            &dc(),
+            &[("one_shot", 0.0), ("release", 1.0), ("voice_mode", mode)],
+        );
+        let mut events: Vec<NoteEvent> = (0..33).map(|i| on(i * 10, 60, 1.0)).collect();
+        events.extend((0..32).map(|i| off(1_000 + i * 10, 60)));
+        let (l, _) = render(&mut s, 4_800, &events);
+        assert!(
+            (l[4_799] - 1.0).abs() < 1e-6,
+            "mode {mode}: the 33rd note sounds: {}",
+            l[4_799]
+        );
+        let (l, _) = render(&mut s, 4_800, &[off(0, 60)]);
+        assert!(
+            peak(&l[480..]) < 1e-3,
+            "mode {mode}: its own note-off ends it"
+        );
+        assert_eq!(s.active_voices(), 0, "mode {mode}");
+    }
+}
+
+#[test]
+fn a_note_off_finds_its_note_after_the_fade_slots_fill() {
+    // 16 held notes, then 32 steals one frame apart fill every fade slot. The first stolen note
+    // (key 20) still owns its note-off: when it arrives after a new key-20 note started, the new
+    // note plays on. (Every key here plays the DC sample for longer than the test runs.)
+    let mut s = configured(&dc(), &[("one_shot", 0.0), ("release", 1.0)]);
+    let mut events: Vec<NoteEvent> = (0..16).map(|i| on(i, 20 + i as u8, 1.0)).collect();
+    events.extend((0..32).map(|i| on(960 + i, 40 + i as u8, 1.0)));
+    render(&mut s, 4_800, &events);
+    let (l, _) = render(&mut s, 4_800, &[on(0, 20, 0.5), off(100, 20)]);
+    let level = l[4_799];
+    // Whatever else sounds, the new key-40 note (0.5) is part of it: the late note-off left it.
+    let (l2, _) = render(&mut s, 4_800, &[off(0, 20)]);
+    assert!(
+        (level - l2[4_799] - 0.5).abs() < 1e-6,
+        "the new note sounded until its own note-off: {level} then {}",
+        l2[4_799]
+    );
+}
