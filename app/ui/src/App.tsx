@@ -1,4 +1,6 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { errorText, transportPlay, transportStop } from "./api/project";
 import {
   SYSTEM_DEFAULT,
   audioLog,
@@ -13,15 +15,25 @@ import {
   type LogEntry,
   type Output,
 } from "./audio";
+import { HintBar } from "./hint/HintBar";
 import { connectLive } from "./live/client";
 import type { LiveFrame } from "./live/decode";
 import { Meter } from "./meter/Meter";
 import { OutputChip } from "./output/OutputChip";
 import { OutputPopover } from "./output/OutputPopover";
+import { ProjectContext } from "./project/context";
+import { ProjectMenu } from "./project/ProjectMenu";
+import { SaveState } from "./project/SaveState";
+import { isTypingTarget, shortcutFor } from "./project/shortcuts";
+import { useProjectFlows } from "./project/useProjectFlows";
+import { useSession } from "./project/useSession";
 import { Toasts, type Toast } from "./toast/Toasts";
+import { TransportBar } from "./transport/TransportBar";
 
 /** How long a toast stays. */
 const TOAST_MS = 6000;
+/** When no output is known yet, for the latency shift of the position. */
+const FALLBACK_RATE = 48000;
 
 export function App() {
   const [outputs, setOutputs] = useState<Output[]>([]);
@@ -32,6 +44,8 @@ export function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   // From live frames, set only when they change.
   const [tone, setTone] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const playingRef = useRef(false);
   const [latencyFrames, setLatencyFrames] = useState<number | null>(null);
   const latest = useRef<LiveFrame | null>(null);
   const nextToast = useRef(0);
@@ -46,6 +60,79 @@ export function App() {
     setToasts((all) => [...all, { id, message, warn }]);
     setTimeout(() => setToasts((all) => all.filter((t) => t.id !== id)), TOAST_MS);
   }, []);
+
+  const session = useSession(useCallback((message: string) => toast(message, true), [toast]));
+  const { view } = session;
+
+  // A project that is replaced must not go on playing.
+  const stopIfPlaying = useCallback(async () => {
+    if (playingRef.current) {
+      await transportStop().catch(() => {});
+      playingRef.current = false;
+      setPlaying(false);
+    }
+  }, []);
+  const flows = useProjectFlows({
+    view,
+    adopt: session.adopt,
+    enqueue: session.enqueue,
+    toast,
+    stopIfPlaying,
+  });
+  const { perform, modalOpen } = flows;
+
+  const setPlayingNow = useCallback((on: boolean) => {
+    playingRef.current = on;
+    setPlaying(on);
+  }, []);
+  const play = useCallback(() => {
+    transportPlay().then(() => setPlayingNow(true), (e: unknown) => toast(errorText(e), true));
+  }, [setPlayingNow, toast]);
+  const stop = useCallback(() => {
+    transportStop().then(() => setPlayingNow(false), (e: unknown) => toast(errorText(e), true));
+  }, [setPlayingNow, toast]);
+
+  // The window title: "name — Grooviq", with a bullet while there are unsaved changes.
+  const projectName = view?.name;
+  const dirty = view?.dirty;
+  useEffect(() => {
+    if (projectName === undefined) return;
+    const title = `${dirty ? "• " : ""}${projectName} — Grooviq`;
+    document.title = title;
+    try {
+      getCurrentWindow().setTitle(title).catch(() => {});
+    } catch {
+      /* not inside the Tauri shell (a plain browser) */
+    }
+  }, [projectName, dirty]);
+
+  // Shortcuts. They stand aside while a dialog is open.
+  const modalRef = useRef(false);
+  useEffect(() => {
+    modalRef.current = modalOpen;
+  }, [modalOpen]);
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (modalRef.current) return;
+      const action = shortcutFor(e, navigator.platform);
+      if (!action) return;
+      e.preventDefault();
+      if (action === "playStop") (playingRef.current ? stop : play)();
+      else perform(action);
+    };
+    // A focused button presses itself when Space is released: play/stop took that key.
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === " " && !modalRef.current && !isTypingTarget(e.target) && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [perform, play, stop]);
 
   const loadSettings = useCallback(() => {
     audioSettings().then(
@@ -82,6 +169,10 @@ export function App() {
           const before = latest.current;
           latest.current = frame;
           if (before?.tone !== frame.tone) setTone(frame.tone);
+          if (before?.playing !== frame.playing) {
+            playingRef.current = frame.playing;
+            setPlaying(frame.playing);
+          }
           if (before?.outputLatencyFrames !== frame.outputLatencyFrames) {
             setLatencyFrames(frame.outputLatencyFrames);
           }
@@ -125,35 +216,70 @@ export function App() {
     testTone(on).then(() => setTone(on), (e: unknown) => toast(String(e), true));
   };
 
+  const sampleRate = current?.sampleRate ?? FALLBACK_RATE;
+
   return (
-    <div className="app">
-      <header className="toolbar">
-        <span className="wordmark">Grooviq</span>
-        <div className="toolbar-audio">
-          <div className="chip-anchor">
-            <OutputChip output={current} latencyMs={latencyMs} open={open} onToggle={toggleOpen} />
-            {open && (
-              <OutputPopover
-                outputs={outputs}
-                chosen={chosen}
-                guard={guard}
-                log={log}
-                onSelect={select}
-                onGuard={changeGuard}
-                onClose={close}
+    <ProjectContext.Provider value={session.context}>
+      <div className="app">
+        <header className="toolbar">
+          {view && (
+            <div className="toolbar-project">
+              <ProjectMenu name={view.name} platform={navigator.platform} onAction={perform} />
+              <SaveState
+                dirty={view.dirty}
+                untitled={view.path === null}
+                cleanSince={session.cleanSince}
+                autosavedAt={flows.autosavedAt ?? view.autosavedAt}
               />
-            )}
+            </div>
+          )}
+          {view && (
+            <TransportBar
+              view={view}
+              playing={playing}
+              latest={latest}
+              sampleRate={sampleRate}
+              onPlay={play}
+              onStop={stop}
+              onTempo={(bpm) => void session.apply({ kind: "setTempo", bpm })}
+              onSignature={(beats, unit) => void session.apply({ kind: "setTimeSignature", beats, unit })}
+            />
+          )}
+          <div className="toolbar-audio">
+            <div className="chip-anchor">
+              <OutputChip output={current} latencyMs={latencyMs} open={open} onToggle={toggleOpen} />
+              {open && (
+                <OutputPopover
+                  outputs={outputs}
+                  chosen={chosen}
+                  guard={guard}
+                  log={log}
+                  onSelect={select}
+                  onGuard={changeGuard}
+                  onClose={close}
+                />
+              )}
+            </div>
+            <button
+              type="button"
+              className="tone"
+              aria-pressed={tone}
+              data-hint="Plays a steady tone so you can check your output. Nothing else makes sound until you ask."
+              onClick={toggleTone}
+            >
+              Test tone
+            </button>
+            <Meter latest={latest} />
           </div>
-          <button type="button" className="tone" aria-pressed={tone} onClick={toggleTone}>
-            Test tone
-          </button>
-          <Meter latest={latest} />
-        </div>
-      </header>
-      <main className="stage">
-        <p className="hint">Nothing plays until you ask: switch on the test tone to check your output.</p>
-      </main>
-      <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />
-    </div>
+        </header>
+        {/* The channel rack mounts here. */}
+        <main className="stage">
+          <p className="hint">Nothing plays until you ask: press play, or switch on the test tone to check your output.</p>
+        </main>
+        <HintBar />
+        <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />
+        {flows.dialogs}
+      </div>
+    </ProjectContext.Provider>
   );
 }

@@ -7,7 +7,7 @@ export interface Toast {
 /** Messages from `audio-event`, newest last. Warnings use the warning style. */
 export function Toasts({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {
   return (
-    <div className="toasts" role="status" aria-live="polite">
+    <div className="toasts" role="status" aria-label="Messages" aria-live="polite">
       {toasts.map((t) => (
         <div key={t.id} className={`toast${t.warn ? " warn" : ""}`}>
           <span>{t.message}</span>
