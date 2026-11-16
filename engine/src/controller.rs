@@ -148,6 +148,12 @@ impl Controller {
         Arc::clone(&self.live)
     }
 
+    /// The rate the engine runs at (after clamping): the output layer compares it with a
+    /// device's before deciding to reconfigure.
+    pub(crate) fn sample_rate(&self) -> f32 {
+        self.sample_rate
+    }
+
     /// Frees graphs the processor replaced, restarts the graph after a panic and reports what
     /// happened since the previous call. Call it every 250 ms from a control thread.
     pub fn check_health(&mut self) -> Vec<HealthEvent> {

@@ -6,7 +6,9 @@
 //! control thread: it validates and clamps each [`Command`], mirrors the state the commands set,
 //! frees the graphs the processor hands back and rebuilds the graph after a panic.
 //! [`LiveShared`] carries meters and counters from the audio thread to any reader, and
-//! [`render_offline`] drives the same engine faster than real time.
+//! [`render_offline`] drives the same engine faster than real time. [`AudioOutput`] plays the
+//! processor on the output the user expects: it follows the system default, stops playback
+//! rather than move sound from headphones to speakers, and survives devices coming and going.
 //!
 //! Real-time rules for everything [`AudioProcessor::process`] reaches: no allocating or
 //! freeing, no locks, no I/O, no logging. A panic is the one exception (unwinding allocates and
@@ -18,6 +20,7 @@ mod controller;
 mod graph;
 mod live;
 mod offline;
+mod output;
 mod processor;
 
 use std::sync::Arc;
@@ -26,6 +29,10 @@ pub use command::Command;
 pub use controller::{Controller, HealthEvent};
 pub use live::{LiveShared, LiveSnapshot};
 pub use offline::render_offline;
+pub use output::{
+    AudioOutput, AudioSlot, OutputBackend, OutputChoice, OutputEvent, OutputInfo, OutputKind,
+    OutputMonitor, Transport, classify, cpal_backend,
+};
 pub use processor::AudioProcessor;
 
 /// Frames in every internal block. Commands apply at block starts; notes at their exact frame.
