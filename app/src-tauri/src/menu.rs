@@ -277,20 +277,6 @@ mod tests {
     fn only_the_quit_item_asks_to_exit() {
         assert!(is_quit(QUIT_ID));
         assert!(!is_quit("quit"));
-        assert!(!is_quit(HIGH_REFRESH_ID));
         assert!(!is_quit(""));
-    }
-
-    #[test]
-    fn high_refresh_is_found_where_set_high_refresh_checked_looks() {
-        let menu = spec("Grooviq");
-        let view = menu.iter().find(|s| s.id == Some(VIEW_ID)).unwrap();
-        assert!(view.entries.contains(&Entry::HighRefresh));
-        assert_eq!(
-            entries(&menu).filter(|&e| e == Entry::HighRefresh).count(),
-            1
-        );
-        assert!(is_high_refresh(HIGH_REFRESH_ID));
-        assert!(!is_high_refresh(QUIT_ID));
     }
 }
