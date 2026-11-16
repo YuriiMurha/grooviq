@@ -144,11 +144,12 @@ pub fn decode_sample(
     };
     let eof = |e: &Error| matches!(e, Error::IoError(io) if io.kind() == ErrorKind::UnexpectedEof);
     let opened = open_any(bytes, &hint);
-    // An Ogg page that fails its checksum next to the headers stops the reader from opening
-    // the file at all, though the pages after it are fine: open it again without them.
+    // An Ogg page that fails its checksum next to the headers, or whose length field runs past
+    // the end of the file, stops the reader from opening the file at all, though the pages after
+    // it are fine: open it again without them.
     let ogg_fixed;
     let opened = match opened {
-        Err(Error::DecodeError(_)) if bytes.starts_with(b"OggS") => {
+        Err(Error::DecodeError(_) | Error::IoError(_)) if bytes.starts_with(b"OggS") => {
             match without_damaged_ogg_pages(bytes) {
                 Some(fixed) => {
                     ogg_fixed = fixed;
@@ -324,8 +325,10 @@ fn unfinished_wav_header(bytes: &[u8]) -> Option<UnfinishedWav> {
         let after = bytes.len() - sound;
         let finished_riff = riff_size as usize == bytes.len() - 8;
         return match size {
-            // A finished file with no frames in it is merely empty.
+            // A finished file with no frames in it is merely empty, and so is one whose only
+            // bytes after the empty data chunk are metadata chunks (a title, say).
             0 if after == 0 && finished_riff => None,
+            0 if after > 0 && only_metadata_chunks(&bytes[sound..]) => None,
             0 | u32::MAX if after == 0 => Some(UnfinishedWav::NoSound),
             0 | u32::MAX => {
                 let mut fixed = bytes.to_vec();
@@ -340,50 +343,104 @@ fn unfinished_wav_header(bytes: &[u8]) -> Option<UnfinishedWav> {
     None
 }
 
+/// Whether `rest` is a whole number of RIFF chunks with text tags (`LIST`, `id3 `, `bext`...),
+/// none of them `data`: what a finished file may carry after its sound. Raw audio does not
+/// parse as one: its sizes would have to chain exactly to the end, behind four letters.
+fn only_metadata_chunks(mut rest: &[u8]) -> bool {
+    while !rest.is_empty() {
+        let Some(head) = rest.get(..8) else {
+            return false;
+        };
+        let tag_ok = head[..4]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b' ');
+        let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        if !tag_ok || &head[..4] == b"data" || size > rest.len() - 8 {
+            return false;
+        }
+        // Padded to an even size; the pad byte of the last chunk may be missing.
+        rest = &rest[(8 + size + (size & 1)).min(rest.len())..];
+    }
+    true
+}
+
 /// `bytes` (an Ogg stream) with the pages whose checksum fails removed, or `None` when every
-/// page is sound. Bytes between pages are dropped too; a page cut off by the end of the data is
-/// kept as it is.
+/// page is sound or the repair would cost too much (see [`scan_ogg`]).
 fn without_damaged_ogg_pages(bytes: &[u8]) -> Option<Vec<u8>> {
+    scan_ogg(bytes, bytes.len().saturating_mul(4)).repaired
+}
+
+/// The result of [`scan_ogg`].
+struct OggScan {
+    /// The stream without its damaged pages; `None` if nothing was damaged, or the scan gave up.
+    repaired: Option<Vec<u8>>,
+    /// Bytes checksummed (the tests pin the cost on it).
+    #[cfg_attr(not(test), allow(dead_code))]
+    hashed: usize,
+}
+
+/// Walks `bytes` page by page, keeping the pages whose checksum holds. Anything else (a damaged
+/// page, bytes between pages, a capture pattern that is not a page) is dropped. Every length
+/// field here is untrusted: a candidate whose table or body runs past the end of the data is
+/// skipped like any other false match, and kept (as a cut-off tail) only if no sound page
+/// follows it. A page whose checksum fails resumes the search just after its capture pattern,
+/// since the damage may be in its length fields. That could rehash the same bytes for every
+/// false match, so the scan gives up (`repaired: None`) after `max_hashed` bytes.
+fn scan_ogg(bytes: &[u8], max_hashed: usize) -> OggScan {
     const HEADER: usize = 27;
     let mut out = Vec::with_capacity(bytes.len());
-    let (mut at, mut dropped) = (0usize, false);
+    let (mut at, mut dropped, mut hashed) = (0usize, false, 0usize);
+    // Where the first candidate that ran past the end of the data began.
+    let mut tail: Option<usize> = None;
     while at < bytes.len() {
         let Some(page_at) = bytes[at..].windows(4).position(|w| w == b"OggS") else {
-            dropped |= at < bytes.len();
+            dropped = true;
             break;
         };
         dropped |= page_at > 0;
         at += page_at;
-        let Some(segments) = bytes.get(at + HEADER - 1).map(|&n| n as usize) else {
-            out.extend_from_slice(&bytes[at..]);
-            break;
+        let page = bytes
+            .get(at + HEADER - 1)
+            .map(|&n| at + HEADER..at + HEADER + n as usize)
+            .and_then(|table| {
+                let lacing = bytes.get(table.clone())?;
+                let end = table.end + lacing.iter().map(|&s| s as usize).sum::<usize>();
+                bytes.get(at..end)
+            });
+        let Some(page) = page else {
+            tail.get_or_insert(at);
+            at += 4;
+            continue;
         };
-        let table = at + HEADER..at + HEADER + segments;
-        let Some(lacing) = bytes.get(table.clone()) else {
-            out.extend_from_slice(&bytes[at..]);
-            break;
-        };
-        let end = table.end + lacing.iter().map(|&s| s as usize).sum::<usize>();
-        let Some(page) = bytes.get(at..end) else {
-            out.extend_from_slice(&bytes[at..]);
-            break;
-        };
+        if hashed.saturating_add(page.len()) > max_hashed {
+            return OggScan {
+                repaired: None,
+                hashed,
+            };
+        }
+        hashed += page.len();
         // The checksum is taken with its own four bytes zeroed.
         let mut crc = Crc32::new(0);
         crc.process_buf_bytes(&page[..22]);
         crc.process_buf_bytes(&[0; 4]);
         crc.process_buf_bytes(&page[26..]);
         if crc.crc().to_le_bytes() == page[22..26] {
+            // A sound page after an overrunning candidate: that candidate was false.
+            dropped |= tail.take().is_some();
             out.extend_from_slice(page);
-            at = end;
+            at += page.len();
         } else {
             dropped = true;
-            // Resume right after this page's capture pattern, as the reader does: the damage may
-            // be in its length fields, with a good page inside what they claimed.
             at += 4;
         }
     }
-    dropped.then_some(out)
+    if let Some(tail) = tail {
+        out.extend_from_slice(&bytes[tail..]);
+    }
+    OggScan {
+        repaired: dropped.then_some(out),
+        hashed,
+    }
 }
 
 /// Opens a container reader over `bytes`, as a seekable source or as a plain stream.
@@ -416,4 +473,42 @@ fn remaining_frames(format: &mut dyn FormatReader, track: u32) -> u64 {
         }
     }
     frames
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Capture patterns back to back: at every candidate the segment table and body that its
+    /// bytes claim fit inside the file, so each one is checksummed in full and fails.
+    fn dense_capture_patterns(len: usize) -> Vec<u8> {
+        b"OggS".iter().copied().cycle().take(len).collect()
+    }
+
+    #[test]
+    fn the_ogg_repair_scan_checksums_at_most_four_times_the_input() {
+        let bytes = dense_capture_patterns(1 << 20);
+        let cap = bytes.len() * 4;
+        let scan = scan_ogg(&bytes, cap);
+        assert!(scan.repaired.is_none(), "gives up rather than repair");
+        assert!(scan.hashed <= cap, "{} bytes checksummed", scan.hashed);
+        // It really was the cap that stopped it: unlimited, the same input costs far more.
+        let all = scan_ogg(&bytes[..1 << 16], usize::MAX);
+        assert!(all.hashed > 100 * (1 << 16), "{} bytes", all.hashed);
+    }
+
+    #[test]
+    fn the_repair_budget_is_four_times_the_input() {
+        // The same input through the entry point the decoder uses.
+        assert!(without_damaged_ogg_pages(&dense_capture_patterns(1 << 18)).is_none());
+    }
+
+    #[test]
+    fn a_sound_ogg_stream_is_checksummed_once() {
+        let src =
+            std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/blip.ogg")).unwrap();
+        let scan = scan_ogg(&src, src.len() * 4);
+        assert!(scan.repaired.is_none());
+        assert_eq!(scan.hashed, src.len());
+    }
 }

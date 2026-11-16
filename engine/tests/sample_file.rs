@@ -615,3 +615,143 @@ fn a_decoded_buffer_holds_no_spare_capacity() {
         assert_eq!(b.r.capacity(), b.r.len());
     }
 }
+
+// ---- Fix round 1 ----
+
+/// A RIFF `LIST`/`INFO` chunk holding one `INAM` title.
+fn list_info(title: &[u8]) -> Vec<u8> {
+    let mut inam = b"INAM".to_vec();
+    inam.extend_from_slice(&(title.len() as u32).to_le_bytes());
+    inam.extend_from_slice(title);
+    if title.len() % 2 == 1 {
+        inam.push(0);
+    }
+    let mut list = b"LIST".to_vec();
+    list.extend_from_slice(&(4 + inam.len() as u32).to_le_bytes());
+    list.extend_from_slice(b"INFO");
+    list.extend_from_slice(&inam);
+    list
+}
+
+#[test]
+fn a_finished_empty_wav_with_trailing_metadata_is_still_empty() {
+    // Hound's finished empty file (RIFF 36, data 0), then metadata, with the RIFF size updated.
+    // "record" and "recorder" (odd and even sizes) must not be read as sound.
+    for title in [&b"record"[..], b"recorder", b"x"] {
+        let mut bytes = wav_with_sizes(0, 36, 0);
+        let list = list_info(title);
+        bytes.extend_from_slice(&list);
+        let riff = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+        assert_eq!(
+            decode_sample(&bytes, Some("wav"), 600.0),
+            Err(SampleError::Empty),
+            "{}",
+            String::from_utf8_lossy(title)
+        );
+    }
+}
+
+#[test]
+fn a_second_data_chunk_after_an_empty_one_is_sound_not_metadata() {
+    let mut bytes = wav_with_sizes(0, 0, 0);
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&8u32.to_le_bytes());
+    bytes.extend_from_slice(&[0x10; 8]);
+    assert_eq!(decode_sample(&bytes, Some("wav"), 600.0).unwrap().len(), 8);
+}
+
+#[test]
+fn a_wav_header_never_filled_in_still_recovers_sound_that_is_not_chunks() {
+    // The same unfinished header (all sizes zero) with audio after it, including silence.
+    for frames in [3_000usize, 7] {
+        let b = decode_sample(&wav_with_sizes(frames, 0, 0), Some("wav"), 600.0).unwrap();
+        assert_eq!(b.len(), frames);
+    }
+    let mut silent = wav_with_sizes(0, 0, 0);
+    silent.extend_from_slice(&[0; 2_000]);
+    assert_eq!(
+        decode_sample(&silent, Some("wav"), 600.0).unwrap().len(),
+        1_000
+    );
+}
+
+#[test]
+fn an_oversized_ogg_length_field_does_not_hide_the_good_pages_after_it() {
+    let (ogg, pages) = long_ogg(12);
+    let clean = decode_sample(&ogg, Some("ogg"), 600.0).unwrap();
+    // The segment count of the first audio page says 255: its table and body would run past the
+    // end of the file. Eleven intact pages follow.
+    let mut damaged = ogg.clone();
+    damaged[pages[2].0 + 26] = 255;
+    let b = decode_sample(&damaged, Some("ogg"), 600.0).expect("the intact pages after it");
+    assert!(
+        b.len() > clean.len() - 2 * 4_416 && b.len() < clean.len(),
+        "{} of {} frames",
+        b.len(),
+        clean.len()
+    );
+
+    // A false capture pattern inside a damaged body, claiming the same: "OggS", then a
+    // segment count of 255 at its offset 26.
+    let mut damaged = ogg.clone();
+    let (at, len) = pages[2];
+    let fake = at + len - 60;
+    damaged[at + len - 3] ^= 0xff;
+    damaged[fake..fake + 4].copy_from_slice(b"OggS");
+    damaged[fake + 26] = 255;
+    // (its table would start in the next page: make sure that page is long enough to matter)
+    let b = decode_sample(&damaged, Some("ogg"), 600.0).expect("the intact pages after it");
+    assert!(
+        b.len() > clean.len() - 2 * 4_416 && b.len() < clean.len(),
+        "{} of {} frames",
+        b.len(),
+        clean.len()
+    );
+
+    // A file genuinely cut off mid-page, after a damaged first page, still plays what is there.
+    let mut cut = ogg.clone();
+    cut[pages[2].0 + pages[2].1 - 3] ^= 0xff;
+    cut.truncate(cut.len() - 100);
+    let b = decode_sample(&cut, Some("ogg"), 600.0).expect("what is left");
+    assert!(b.len() > 8 * 4_416, "{}", b.len());
+}
+
+#[test]
+fn a_recovered_file_is_held_to_the_length_limit() {
+    // WAV: both ways a header can be unfinished, one second of sound, limit half a second.
+    for (riff, data) in [
+        (0, 0),
+        (u32::MAX, u32::MAX),
+        (36 + 96_000, 0),
+        (0, u32::MAX),
+    ] {
+        let bytes = wav_with_sizes(48_000, riff, data);
+        match decode_sample(&bytes, Some("wav"), 0.5) {
+            Err(SampleError::TooLong { seconds, limit }) => {
+                assert!(
+                    (seconds - 1.0).abs() <= 0.01,
+                    "riff {riff:#x} data {data:#x}: {seconds}"
+                );
+                assert_eq!(limit, 0.5);
+            }
+            other => panic!("riff {riff:#x} data {data:#x}: expected TooLong, got {other:?}"),
+        }
+        assert_eq!(
+            decode_sample(&bytes, Some("wav"), 1.5).unwrap().len(),
+            48_000
+        );
+    }
+
+    // OGG reopened without its damaged page: about 1.2 s of sound against a 0.5 s limit.
+    let (ogg, pages) = long_ogg(12);
+    let mut damaged = ogg.clone();
+    damaged[pages[2].0 + pages[2].1 - 3] ^= 0xff;
+    match decode_sample(&damaged, Some("ogg"), 0.5) {
+        Err(SampleError::TooLong { seconds, limit }) => {
+            assert!(seconds > 1.0, "{seconds}");
+            assert_eq!(limit, 0.5);
+        }
+        other => panic!("expected TooLong, got {other:?}"),
+    }
+}
