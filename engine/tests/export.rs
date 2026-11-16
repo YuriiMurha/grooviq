@@ -504,56 +504,99 @@ fn held_into_the_tail(sample: &Arc<SampleBuf>, step: u32) -> EngineState {
     }
 }
 
+/// Holds the export at its second tail cancel check (the first one, at 0 frames, comes before
+/// any tail is rendered) until the test has set `cancel`: the check that follows must see it.
+/// The wait is bounded, so a broken barrier fails the test instead of hanging CI.
+struct TailGate {
+    reached: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    go: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    timed_out: AtomicBool,
+}
+
+const GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl TailGate {
+    /// Lets a waiting test know the export is over (it never reached the checkpoint).
+    fn close(&self) {
+        self.reached.lock().unwrap().take();
+    }
+}
+
+impl grooviq_engine::PartFiles for TailGate {
+    fn sync(&self, file: &std::fs::File, path: &Path) -> std::io::Result<()> {
+        grooviq_engine::RealFiles.sync(file, path)
+    }
+
+    fn rename(&self, part: &Path, to: &Path) -> std::io::Result<()> {
+        grooviq_engine::RealFiles.rename(part, to)
+    }
+
+    fn tail_checkpoint(&self, tail_frames: u64) {
+        if tail_frames != 4_096 {
+            return;
+        }
+        if let Some(reached) = &*self.reached.lock().unwrap() {
+            let _ = reached.send(());
+        }
+        if self.go.lock().unwrap().recv_timeout(GATE_TIMEOUT).is_err() {
+            self.timed_out.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 #[test]
 fn cancel_during_the_tail_leaves_no_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cancelled_tail.wav");
-    // The export's own hidden part file: whatever starts with this in the folder.
-    let part_len = |dir: &Path| {
-        std::fs::read_dir(dir)
-            .unwrap()
-            .flatten()
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(".cancelled_tail.wav.grooviq-")
-            })
-            // Not `DirEntry::metadata`: on Windows that size is the directory's copy, which
-            // lags behind a file that is still open for writing.
-            .map(|e| std::fs::metadata(e.path()).map_or(0, |m| m.len()))
-            .max()
-            .unwrap_or(0)
-    };
-    // A 60 s one-shot from the first step: the tail runs for up to a minute of audio.
+    // A 60 s one-shot from the first step: it sounds through the whole tail. The tail is capped
+    // at 4 800 frames, so the checkpoint at 4 096 is the LAST cancel check: a cancel set after
+    // it (the race this test used to have) would let the export finish.
     let state = held_into_the_tail(&dc(60.0), 0);
     let options = ExportOptions {
-        max_tail_seconds: 60.0,
+        max_tail_seconds: 0.1,
         ..options(WavFormat::Float32, 1)
     };
-    // Past the pattern part's bytes (8 per frame, plus the header and the write buffer's lag):
-    // the export is in the tail.
-    let threshold = pattern_frames(&state, 1) * 8 + 64 * 1024;
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel();
+    let gate = TailGate {
+        reached: std::sync::Mutex::new(Some(reached_tx)),
+        go: std::sync::Mutex::new(go_rx),
+        timed_out: AtomicBool::new(false),
+    };
     let cancel = AtomicBool::new(false);
-    let finished = AtomicBool::new(false);
-    let mut seen_at = 0;
-    let result = std::thread::scope(|s| {
-        let watcher = s.spawn(|| {
-            while !finished.load(Ordering::Relaxed) {
-                let len = part_len(dir.path());
-                if len > threshold {
-                    cancel.store(true, Ordering::Relaxed);
-                    return len;
-                }
-                std::thread::yield_now();
-            }
-            0
+    let (result, mid_export) = std::thread::scope(|s| {
+        // Waits for the export to be in the tail, sets cancel, then lets it go on.
+        let (cancel_ref, dir_path) = (&cancel, dir.path());
+        let controller = s.spawn(move || {
+            reached_rx.recv_timeout(GATE_TIMEOUT).ok()?;
+            let mid_export = listing(dir_path);
+            cancel_ref.store(true, Ordering::Relaxed);
+            go_tx.send(()).unwrap();
+            Some(mid_export)
         });
-        let result = export_wav(state.clone(), &options, &path, &mut |_| {}, &cancel);
-        finished.store(true, Ordering::Relaxed);
-        seen_at = watcher.join().unwrap();
-        result
+        let result = grooviq_engine::export_wav_with(
+            state.clone(),
+            &options,
+            &path,
+            &mut |_| {},
+            &cancel,
+            &gate,
+        );
+        gate.close();
+        (result, controller.join().unwrap())
     });
-    assert!(seen_at > threshold, "the watcher never saw the tail start");
+    assert!(
+        !gate.timed_out.load(Ordering::Relaxed),
+        "the export waited at the checkpoint and cancel was never set"
+    );
+    let mid_export = mid_export.expect("the export never reached the tail");
+    // The export's own hidden part file is there while it renders, so the empty folder below
+    // means it was removed, not that it never existed.
+    assert_eq!(mid_export.len(), 1, "{mid_export:?}");
+    assert!(
+        mid_export[0].starts_with(".cancelled_tail.wav.grooviq-"),
+        "{mid_export:?}"
+    );
     assert!(matches!(result, Err(ExportError::Cancelled)), "{result:?}");
     assert_eq!(listing(dir.path()), Vec::<String>::new());
 }
