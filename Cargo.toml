@@ -1,5 +1,5 @@
 [workspace]
-members = ["dsp", "engine"]
+members = ["dsp", "engine", "tests/golden"]
 resolver = "3"
 
 [workspace.package]
