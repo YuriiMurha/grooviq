@@ -105,6 +105,50 @@ const GLIDE: usize = 37;
 const VOICE_MODE: usize = 38;
 const MASTER: usize = 39;
 
+/// Parameter ids, in `SPEC` (and `set_param`) order. Append-only.
+pub const PARAM_IDS: [&str; NUM_PARAMS] = [
+    "osc1_shape",
+    "osc1_octave",
+    "osc1_semi",
+    "osc1_fine",
+    "osc1_level",
+    "osc1_unison",
+    "osc1_detune",
+    "osc1_spread",
+    "osc2_shape",
+    "osc2_octave",
+    "osc2_semi",
+    "osc2_fine",
+    "osc2_level",
+    "osc2_unison",
+    "osc2_detune",
+    "osc2_spread",
+    "sub_level",
+    "sub_shape",
+    "noise_level",
+    "filter_type",
+    "filter_cutoff",
+    "filter_res",
+    "filter_drive",
+    "filter_env_amt",
+    "filter_keytrack",
+    "amp_attack",
+    "amp_decay",
+    "amp_sustain",
+    "amp_release",
+    "flt_attack",
+    "flt_decay",
+    "flt_sustain",
+    "flt_release",
+    "lfo_shape",
+    "lfo_rate",
+    "lfo_amount",
+    "lfo_target",
+    "glide",
+    "voice_mode",
+    "master",
+];
+
 /// (min, max, default) for every parameter, in `SPEC` index order.
 pub const SPEC: [(f32, f32, f32); NUM_PARAMS] = [
     (0.0, 3.0, 2.0),         // 0 osc1_shape
@@ -448,9 +492,9 @@ impl EnvCfg {
         const RA: f64 = 0.3;
         const RDR: f64 = 0.001;
         let rate = |ms: f64| (ms * 0.001 * sr as f64).max(1.0);
-        let a_coef = (-((1.0 + RA) / RA).ln() / rate(a_ms as f64)).exp();
-        let d_coef = (-((1.0 + RDR) / RDR).ln() / rate(d_ms as f64)).exp();
-        let r_coef = (-((1.0 + RDR) / RDR).ln() / rate(r_ms as f64)).exp();
+        let a_coef = libm::exp(-libm::log((1.0 + RA) / RA) / rate(a_ms as f64));
+        let d_coef = libm::exp(-libm::log((1.0 + RDR) / RDR) / rate(d_ms as f64));
+        let r_coef = libm::exp(-libm::log((1.0 + RDR) / RDR) / rate(r_ms as f64));
         let sus = sus as f64;
         Self {
             a_coef,
@@ -734,7 +778,7 @@ impl Unison {
             } else {
                 -1.0 + 2.0 * v as f32 / (n - 1) as f32
             };
-            u.ratio[v] = 2f64.powf((pos * cents) as f64 / 1200.0);
+            u.ratio[v] = libm::pow(2.0, (pos * cents) as f64 / 1200.0);
             let pan = pos * spread;
             u.pl[v] = (1.0 - pan).min(1.0) * norm;
             u.pr[v] = (1.0 + pan).min(1.0) * norm;
@@ -898,7 +942,7 @@ fn tune(p: f32, max_semi: f32, cx: &Ctx) -> (f64, (usize, f32)) {
 
 #[inline(always)]
 fn pitch_hz(p: f32) -> f32 {
-    440.0 * ((p - 69.0) * (1.0 / 12.0)).exp2()
+    440.0 * libm::exp2f((p - 69.0) * (1.0 / 12.0))
 }
 
 /// Mip level (and crossfade to the next level) for a pitch in semitones.
@@ -928,7 +972,7 @@ impl Lfo {
     fn next(&mut self) -> f32 {
         let ph = self.phase as f32;
         let raw = match self.shape {
-            0 => (ph * std::f32::consts::TAU).sin(),
+            0 => libm::sinf(ph * std::f32::consts::TAU),
             1 => {
                 if ph < 0.25 {
                     4.0 * ph
@@ -1094,7 +1138,7 @@ struct Voice {
 
 fn vel_curves(vel: f32) -> (f32, f32) {
     let v = vel.clamp(0.0, 1.0);
-    (0.25 + 0.75 * v.powf(1.2), 0.6 + 0.4 * v)
+    (0.25 + 0.75 * libm::powf(v, 1.2), 0.6 + 0.4 * v)
 }
 
 impl Voice {
@@ -1414,8 +1458,8 @@ impl Voice {
             let oct = b.cut[i]
                 + b.keytrack[i] * (self.pitch - 60.0) * (1.0 / 12.0)
                 + fenv * b.env_oct[i] * self.vel_flt;
-            let fc = oct.exp2().clamp(8.0, cx.max_fc);
-            let g = (fc * cx.pi_sr).tan();
+            let fc = libm::exp2f(oct).clamp(8.0, cx.max_fc);
+            let g = libm::tanf(fc * cx.pi_sr);
             let dg = b.drive_g[i];
             let (xl, xr) = if dg > 1.0e-3 {
                 let n = b.drive_n[i];
@@ -1491,7 +1535,7 @@ impl Synth {
         let tables = wavetable::shared();
         // Highest harmonic allowed: aliases (if any) must land above ~18 kHz.
         let limit = (22_000.0f32).min(((sr - 18_000.0) / 1.26).max(0.5 * sr / 1.26));
-        let lam_const = 3.0 * (1024.0 * 440.0 / limit).log2();
+        let lam_const = 3.0 * libm::log2f(1024.0 * 440.0 / limit);
         let cx = Ctx {
             sr,
             inv_sr: 1.0 / sr as f64,
@@ -1523,7 +1567,7 @@ impl Synth {
                 held: 0.0,
                 rng: Rng(0x1234_5678),
                 out: 0.0,
-                coef: 1.0 - (-1.0 / (0.002 * sr)).exp(),
+                coef: 1.0 - libm::expf(-1.0 / (0.002 * sr)),
             },
             route: [xf(1.0), xf(0.0), xf(0.0), xf(0.0)],
             s_env: sm(0.0, CUTOFF_MOD_MS),
@@ -1653,7 +1697,7 @@ impl Synth {
                     w.set(if k == self.ftype as usize { 1.0 } else { 0.0 });
                 }
             }
-            CUTOFF => self.s_cut.set(v.log2()),
+            CUTOFF => self.s_cut.set(libm::log2f(v)),
             RES => self.s_res.set(v),
             DRIVE => self.s_drive.set(v),
             ENV_AMT => self.s_env.set(v * 6.0),
@@ -1735,10 +1779,10 @@ impl Synth {
             b.noise[i] = self.s_noise.next();
             let res = self.s_res.next();
             if res != self.res_cache.0 {
-                let q = 0.707 * 35f32.powf(res);
+                let q = 0.707 * libm::powf(35.0, res);
                 let x = ((res - 0.3) / 0.3).clamp(0.0, 1.0);
                 let t = self.cut_ms[0] + (self.cut_ms[1] - self.cut_ms[0]) * x;
-                let coef = (-1000.0 / (t * self.cx.sr).max(1.0e-3)).exp();
+                let coef = libm::expf(-1000.0 / (t * self.cx.sr).max(1.0e-3));
                 self.res_cache = (res, 1.0 / q, 4.1 * res, coef);
             }
             b.svf_k[i] = self.res_cache.1;
@@ -2503,7 +2547,7 @@ mod tests {
         };
         s.process(&mut l, &mut r, None, &[on]);
         s.set_param(CUTOFF as u32, 12000.0);
-        let (from, to) = (200f32.log2(), 12000f32.log2());
+        let (from, to) = (libm::log2f(200.0), libm::log2f(12000.0));
         for n in 1..48_000 {
             s.process(&mut l, &mut r, None, &[]);
             if (s.s_cut.cur - from) >= 0.95 * (to - from) {

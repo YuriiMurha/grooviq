@@ -22,8 +22,10 @@ fn cfg() -> EngineConfig {
 
 /// A short click with different left and right sides.
 fn click() -> Arc<SampleBuf> {
-    let l: Vec<f32> = (0..200).map(|i| 0.9 * 0.97f32.powi(i)).collect();
-    let r: Vec<f32> = (0..200).map(|i| -0.6 * 0.95f32.powi(i)).collect();
+    let l: Vec<f32> = (0..200).map(|i| 0.9 * libm::powf(0.97, i as f32)).collect();
+    let r: Vec<f32> = (0..200)
+        .map(|i| -0.6 * libm::powf(0.95, i as f32))
+        .collect();
     Arc::new(SampleBuf { rate: SR, l, r })
 }
 
@@ -545,7 +547,7 @@ fn busy() -> (EngineState, Vec<(u64, Command)>) {
         if i % 5 == 0 {
             let m = ChannelMix {
                 volume: 0.2 + 0.04 * i as f32,
-                pan: (i as f32 * 0.37).sin(),
+                pan: libm::sinf(i as f32 * 0.37),
                 mute: i % 15 == 5,
                 solo: i % 20 == 10,
             };

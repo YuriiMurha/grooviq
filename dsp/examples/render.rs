@@ -145,20 +145,20 @@ fn drum_loop() -> (Vec<f32>, Vec<f32>) {
         for kb in [0.0, 1.75, 2.5] {
             let mut ph = 0.0f32;
             add(beat(b0 + kb), beat(1.0), &mut |t| {
-                let f = 48.0 + 110.0 * (-t * 30.0).exp();
+                let f = 48.0 + 110.0 * libm::expf(-t * 30.0);
                 ph += f / SR;
-                (ph * std::f32::consts::TAU).sin() * (-t * 5.0).exp() * 0.8
+                libm::sinf(ph * std::f32::consts::TAU) * libm::expf(-t * 5.0) * 0.8
             });
         }
         for cb in [1.0, 3.0] {
             add(beat(b0 + cb), beat(0.5), &mut |t| {
-                noise() * (-t * 22.0).exp() * 0.35
+                noise() * libm::expf(-t * 22.0) * 0.35
             });
         }
         for h in 0..16 {
             add(beat(b0 + h as f32 * 0.25), beat(0.12), &mut |t| {
                 let x = noise();
-                (x - 0.0) * (-t * 90.0).exp() * 0.12
+                (x - 0.0) * libm::expf(-t * 90.0) * 0.12
             });
         }
     }

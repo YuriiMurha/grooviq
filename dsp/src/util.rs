@@ -60,7 +60,7 @@ impl Smooth {
         Self {
             cur: value,
             target: value,
-            coef: (-1000.0 / (time_ms * rate).max(1.0e-3)).exp(),
+            coef: libm::expf(-1000.0 / (time_ms * rate).max(1.0e-3)),
         }
     }
     #[inline]
@@ -126,7 +126,7 @@ impl Coefs {
     }
     fn w(f: f64, sr: f64) -> (f64, f64) {
         let w0 = 2.0 * PI64 * (f / sr).clamp(1.0e-6, 0.4999);
-        (w0.cos(), w0.sin())
+        (libm::cos(w0), libm::sin(w0))
     }
     pub fn lowpass(f: f64, q: f64, sr: f64) -> Self {
         let (c, s) = Self::w(f, sr);
@@ -165,7 +165,7 @@ impl Coefs {
     pub fn peak(f: f64, q: f64, db: f64, sr: f64) -> Self {
         let (c, s) = Self::w(f, sr);
         let al = s / (2.0 * q.max(0.01));
-        let a = 10f64.powf(db / 40.0);
+        let a = libm::pow(10.0, db / 40.0);
         Self::norm(
             1.0 + al * a,
             -2.0 * c,
@@ -178,7 +178,7 @@ impl Coefs {
     pub fn low_shelf(f: f64, q: f64, db: f64, sr: f64) -> Self {
         let (c, s) = Self::w(f, sr);
         let al = s / (2.0 * q.max(0.01));
-        let a = 10f64.powf(db / 40.0);
+        let a = libm::pow(10.0, db / 40.0);
         let k = 2.0 * a.sqrt() * al;
         Self::norm(
             a * ((a + 1.0) - (a - 1.0) * c + k),
@@ -192,7 +192,7 @@ impl Coefs {
     pub fn high_shelf(f: f64, q: f64, db: f64, sr: f64) -> Self {
         let (c, s) = Self::w(f, sr);
         let al = s / (2.0 * q.max(0.01));
-        let a = 10f64.powf(db / 40.0);
+        let a = libm::pow(10.0, db / 40.0);
         let k = 2.0 * a.sqrt() * al;
         Self::norm(
             a * ((a + 1.0) + (a - 1.0) * c + k),
@@ -236,7 +236,7 @@ pub fn run2(st: &mut [Biquad; 2], c: &Coefs, x: f64) -> f64 {
 
 /// `G = g / (1 + g)` for a TPT one-pole at `fc`.
 pub fn onepole_gain(fc: f32, sr: f32) -> f32 {
-    let g = (std::f32::consts::PI * (fc / sr).clamp(1.0e-6, 0.49)).tan();
+    let g = libm::tanf(std::f32::consts::PI * (fc / sr).clamp(1.0e-6, 0.49));
     g / (1.0 + g)
 }
 
@@ -350,7 +350,7 @@ pub struct PeakMeter {
 
 impl PeakMeter {
     pub fn update(&mut self, block_peak: f32, frames: usize, sr: f32) {
-        let fall = (-(frames as f32) / (0.33 * sr)).exp();
+        let fall = libm::expf(-(frames as f32) / (0.33 * sr));
         let v = self.value * fall;
         self.value = if block_peak.is_finite() && block_peak > v {
             block_peak
@@ -444,7 +444,7 @@ mod tests {
         let mut worst = 0.0f32;
         let mut x = -8.0f32;
         while x < 8.0 {
-            let e = (fast_tanh(x) - x.tanh()).abs();
+            let e = (fast_tanh(x) - libm::tanhf(x)).abs();
             worst = worst.max(e);
             assert!(fast_tanh(x).abs() <= 1.0);
             x += 0.001;

@@ -39,7 +39,7 @@ fn click(len: usize) -> Vec<f32> {
 
 fn sine(rate: f32, hz: f64, len: usize) -> Vec<f32> {
     (0..len)
-        .map(|i| (2.0 * std::f64::consts::PI * hz * i as f64 / rate as f64).sin() as f32)
+        .map(|i| libm::sin(2.0 * std::f64::consts::PI * hz * i as f64 / rate as f64) as f32)
         .collect()
 }
 
@@ -121,7 +121,7 @@ fn pitch(x: &[f32], rate: f32) -> f64 {
 }
 
 fn cents(measured: f64, expected: f64) -> f64 {
-    1200.0 * (measured / expected).log2()
+    1200.0 * libm::log2(measured / expected)
 }
 
 /// Index one past the last non-zero frame.
@@ -189,7 +189,7 @@ fn pitch_is_accurate_within_one_cent() {
         s.set_param(p("fine"), 50.0);
         let (l, _) = render(&mut s, 12_000, &[on(0, key, 1.0)]);
         let semis = key as f64 - 69.0 + 7.0 + 0.5;
-        let expected = 440.0 * 2f64.powf(semis / 12.0);
+        let expected = 440.0 * libm::pow(2.0, semis / 12.0);
         let c = cents(pitch(&l, SR), expected);
         assert!(c.abs() < 1.0, "key {key}: {c} cents off");
     }
@@ -234,10 +234,11 @@ fn reads_between_samples_with_a_cubic() {
     let x = sine(SR, 2_000.0, SR as usize);
     let mut s = sampler(SR, buf(SR, x));
     let (l, _) = render(&mut s, 20_000, &[on(0, 67, 1.0)]);
-    let step = 2f64.powf(7.0 / 12.0);
+    let step = libm::pow(2.0, 7.0 / 12.0);
     let err = (10..20_000)
         .map(|i| {
-            let ideal = (2.0 * std::f64::consts::PI * 2_000.0 * i as f64 * step / SR as f64).sin();
+            let ideal =
+                libm::sin(2.0 * std::f64::consts::PI * 2_000.0 * i as f64 * step / SR as f64);
             (l[i] as f64 - ideal).abs()
         })
         .fold(0.0, f64::max);
@@ -301,7 +302,7 @@ fn one_shot_ignores_note_off_and_gate_mode_releases() {
     let after = 4_800 + 4_800; // 100 ms later
     let level = peak(&l[after..]);
     assert!(
-        20.0 * level.max(1e-12).log10() < -60.0,
+        20.0 * libm::log10f(level.max(1e-12)) < -60.0,
         "100 ms after note-off: {level}"
     );
 }
@@ -329,7 +330,7 @@ fn a_note_off_releases_only_the_oldest_held_voice_on_its_key() {
     );
     // 100 ms after the second note-off: silence.
     let level = peak(&l[12_000 + 4_800..]);
-    assert!(20.0 * level.max(1e-12).log10() < -60.0, "{level}");
+    assert!(20.0 * libm::log10f(level.max(1e-12)) < -60.0, "{level}");
 }
 
 #[test]

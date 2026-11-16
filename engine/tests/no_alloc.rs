@@ -149,7 +149,9 @@ fn every_command_and_channel_layout_is_allocation_free() {
 }
 
 fn tone_sample(len: usize) -> Arc<SampleBuf> {
-    let l: Vec<f32> = (0..len).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+    let l: Vec<f32> = (0..len)
+        .map(|i| libm::sinf(i as f32 * 0.05) * 0.5)
+        .collect();
     Arc::new(SampleBuf {
         rate: SR,
         r: l.clone(),

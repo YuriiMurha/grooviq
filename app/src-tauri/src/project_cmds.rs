@@ -97,6 +97,7 @@ impl ExportRequest {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "display only")]
 fn peak_db(peak: f32) -> f32 {
     if peak > 0.0 && peak.is_finite() {
         (20.0 * peak.log10()).max(PEAK_FLOOR_DB)

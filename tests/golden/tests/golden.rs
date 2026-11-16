@@ -1,4 +1,4 @@
-use grooviq_golden::{compare, render, scenes};
+use grooviq_golden::{compare, compare_exact, render, scenes, synth_preset_scene};
 
 const BLOCK_SIZES: [usize; 2] = [64, 512];
 
@@ -13,7 +13,7 @@ fn each_scene_matches_its_reference() {
             continue;
         }
         let reference = grooviq_golden::read_wav(&path);
-        if let Err(e) = compare(&actual, &reference) {
+        if let Err(e) = compare_exact(&actual, &reference) {
             panic!("scene {}: {e}", scene.name);
         }
     }
@@ -30,6 +30,77 @@ fn each_scene_is_identical_at_block_sizes_64_and_512() {
             scene.name
         );
     }
+}
+
+#[test]
+fn each_synth_preset_matches_its_reference_exactly() {
+    use grooviq_golden::synth_presets::{preset_names, stem};
+    for name in preset_names() {
+        let scene = synth_preset_scene(name);
+        let actual = render(&scene, 512);
+        assert!(
+            actual.iter().any(|v| v.abs() > 1e-3) && actual.iter().all(|v| v.is_finite()),
+            "preset {name} renders silence or NaN"
+        );
+        let path = format!("{}/refs/{}.wav", env!("CARGO_MANIFEST_DIR"), stem(name));
+        if std::env::var("GOLDEN_UPDATE").as_deref() == Ok("1") {
+            grooviq_golden::write_wav(&path, &actual);
+            println!("golden file updated: explain why in the commit message");
+            continue;
+        }
+        let reference = grooviq_golden::read_wav(&path);
+        if let Err(e) = compare_exact(&actual, &reference) {
+            panic!("synth preset {name}: {e}");
+        }
+    }
+}
+
+#[test]
+fn no_two_scenes_share_a_reference_file() {
+    use grooviq_golden::synth_presets::{preset_names, stem};
+    let mut stems: Vec<String> = scenes().iter().map(|s| s.name.to_string()).collect();
+    stems.extend(preset_names().into_iter().map(stem));
+    let mut unique = stems.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        stems.len(),
+        "two scenes write one file: {stems:?}"
+    );
+}
+
+#[test]
+fn the_synth_presets_are_identical_at_block_sizes_64_and_512() {
+    use grooviq_golden::synth_presets::preset_names;
+    for name in preset_names() {
+        let scene = synth_preset_scene(name);
+        let (a, b) = (render(&scene, 64), render(&scene, 512));
+        assert!(
+            compare_exact(&a, &b).is_ok(),
+            "preset {name} differs between callback sizes"
+        );
+    }
+}
+
+#[test]
+fn compare_exact_reports_the_first_differing_frame() {
+    let good = vec![0.5f32, -0.5, 0.25, 0.125, 0.0, 0.0];
+    assert!(compare_exact(&good, &good).is_ok());
+    // A 1-ulp change is far inside `compare`'s tolerance but must fail here.
+    let mut ulp = good.clone();
+    ulp[3] = f32::from_bits(ulp[3].to_bits() + 1);
+    assert!(compare(&ulp, &good).is_ok());
+    let e = compare_exact(&ulp, &good).unwrap_err();
+    assert!(e.contains("frame 1, right"), "{e}");
+    // -0.0 is a different bit pattern; a NaN is not in the reference; lengths must agree.
+    let mut neg_zero = good.clone();
+    neg_zero[4] = -0.0;
+    assert!(compare_exact(&neg_zero, &good).is_err());
+    let mut nan = good.clone();
+    nan[0] = f32::NAN;
+    assert!(compare_exact(&nan, &good).is_err());
+    assert!(compare_exact(&good[..4], &good).is_err());
 }
 
 #[test]

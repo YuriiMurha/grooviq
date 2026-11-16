@@ -214,7 +214,7 @@ mod tests {
     const GAIN: u32 = 12;
 
     fn node(never_skip: bool) -> ChannelNode {
-        let l: Vec<f32> = (0..200).map(|i| 0.9 * 0.97f32.powi(i)).collect();
+        let l: Vec<f32> = (0..200).map(|i| 0.9 * libm::powf(0.97, i as f32)).collect();
         let setup = ChannelSetup {
             id: ChannelId(1),
             sample: Some(Arc::new(SampleBuf {

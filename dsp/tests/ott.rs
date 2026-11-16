@@ -35,18 +35,25 @@ fn run(dev: &mut dyn Device, l: &mut [f32], r: &mut [f32], block: usize) {
 fn sine(freq: f32, n: usize, amp: f32) -> Vec<f32> {
     (0..n)
         .map(|i| {
-            amp * (2.0 * std::f64::consts::PI * freq as f64 * i as f64 / SR as f64).sin() as f32
+            amp * libm::sin(2.0 * std::f64::consts::PI * freq as f64 * i as f64 / SR as f64) as f32
         })
         .collect()
 }
 
 fn db_amp(db: f32) -> f32 {
-    10f32.powf(db / 20.0)
+    libm::powf(10.0, db / 20.0)
 }
 
 fn rms_db(x: &[f32]) -> f32 {
-    let p = x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / x.len() as f64;
-    (10.0 * p.max(1e-24).log10()) as f32
+    let p = x
+        .iter()
+        .map(|v| {
+            let d = *v as f64;
+            d * d
+        })
+        .sum::<f64>()
+        / x.len() as f64;
+    (10.0 * libm::log10(p.max(1e-24))) as f32
 }
 
 /// Level change in dB (RMS of the last half second) of a sine of `freq` at `amp_db` dBFS peak.
@@ -366,7 +373,7 @@ fn highpass4(x: &[f32]) -> Vec<f64> {
     let mut y: Vec<f64> = x.iter().map(|&v| v as f64).collect();
     for q in [0.541_196_100_146_197, 1.306_562_964_876_376_6] {
         let w0 = 2.0 * std::f64::consts::PI * HP_HZ / SR as f64;
-        let (c, s) = (w0.cos(), w0.sin());
+        let (c, s) = (libm::cos(w0), libm::sin(w0));
         let alpha = s / (2.0 * q);
         let a0 = 1.0 + alpha;
         let (b0, b1, b2) = ((1.0 + c) * 0.5 / a0, -(1.0 + c) / a0, (1.0 + c) * 0.5 / a0);
@@ -388,7 +395,7 @@ fn reference_power(l: &[f32], r: &[f32]) -> f64 {
     let w = ((0.01 * SR) as usize).max(1);
     let mut pre = vec![0.0f64; n + 1];
     for i in 0..n {
-        pre[i + 1] = pre[i] + 0.5 * ((l[i] as f64).powi(2) + (r[i] as f64).powi(2));
+        pre[i + 1] = pre[i] + 0.5 * ((l[i] as f64) * (l[i] as f64) + (r[i] as f64) * (r[i] as f64));
     }
     let mut best = 1.0e-30f64;
     let mut i = 0;
@@ -404,7 +411,7 @@ fn reference_power(l: &[f32], r: &[f32]) -> f64 {
 #[allow(clippy::needless_range_loop)]
 fn worst_click(l: &[f32], r: &[f32]) -> (f32, f32, usize) {
     let n = l.len().min(r.len());
-    let floor = (reference_power(l, r) * 10f64.powf(FLOOR_DB / 10.0)).max(1e-20);
+    let floor = (reference_power(l, r) * libm::pow(10.0, FLOOR_DB / 10.0)).max(1e-20);
     let hop = ((HOP_MS * 0.001 * SR).round() as usize).max(1);
     let win = ((WIN_MS * 0.001 * SR).round() as usize).max(2);
     let near = (NEAR_MS / HOP_MS).round() as usize;
@@ -433,7 +440,7 @@ fn worst_click(l: &[f32], r: &[f32]) -> (f32, f32, usize) {
             for k in (j + near).min(w.len())..(j + far + 1).min(w.len()) {
                 ctx = ctx.max(w[k]);
             }
-            let score = (10.0 * ((w[j] + 1e-30) / (ctx + floor)).log10()) as f32;
+            let score = (10.0 * libm::log10((w[j] + 1e-30) / (ctx + floor))) as f32;
             if score > worst.0 {
                 worst = (score, centres[j] as f32 * 1000.0 / SR, ch);
             }
@@ -454,15 +461,15 @@ fn sweep_render(index: u32, block: usize, secs: f32) -> (Vec<f32>, Vec<f32>) {
         .zip(sine(1800.0, n, 0.5))
         .enumerate()
         .map(|(i, (a, b))| {
-            let lfo = (2.0 * std::f64::consts::PI * 1.5 * i as f64 / SR as f64).sin();
-            let amp = 10f64.powf((-33.0 + 27.0 * lfo) / 20.0) as f32;
+            let lfo = libm::sin(2.0 * std::f64::consts::PI * 1.5 * i as f64 / SR as f64);
+            let amp = libm::pow(10.0, (-33.0 + 27.0 * lfo) / 20.0) as f32;
             (a + b) * amp * 0.67
         })
         .collect();
     // a 30 ms fade-in: the onset from silence is the host's business, not the device's
     for (i, v) in l.iter_mut().enumerate().take(SR as usize * 30 / 1000) {
         let t = i as f32 / (SR * 0.03);
-        *v *= 0.5 - 0.5 * (std::f32::consts::PI * t).cos();
+        *v *= 0.5 - 0.5 * libm::cosf(std::f32::consts::PI * t);
     }
     let mut r = l.clone();
     let (lo, hi, def) = SPEC[index as usize];
