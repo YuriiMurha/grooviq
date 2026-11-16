@@ -24,6 +24,10 @@ thread_local! {
 
 /// Whether the calling thread is inside [`AudioProcessor::process`]. A panic hook calls it to
 /// stay silent for a panic the engine catches on the audio thread, where printing is I/O.
+///
+/// This is also true during the off-stream render in `stop_sound` (the guard stop), which
+/// calls [`AudioProcessor::process`] with no stream open, on the thread that looked at the
+/// devices rather than the audio thread, so a panic caught there is silent too.
 pub fn in_audio_callback() -> bool {
     RENDERING.with(Cell::get)
 }
