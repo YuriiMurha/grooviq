@@ -1,10 +1,15 @@
-//! The audio thread never allocates or frees: every `process` call runs inside
-//! `assert_no_alloc`, which aborts this test binary on any allocator call.
+//! The audio thread never allocates, frees, locks or does I/O: every `process` call runs inside
+//! [`realtime`].
+//!
+//! Every platform: `assert_no_alloc` aborts this test binary on any Rust allocator call.
+//! macOS and Linux with `RTSAN_ENABLE=1` set while building (the `rtsan` CI job):
+//! RealtimeSanitizer also stops it on any lock, sleep, file or network access, other blocking
+//! system call, or C allocation, with a stack trace. That build leaves allocations to it too, so
+//! the sanitizer itself must catch them.
 
-#[global_allocator]
-static A: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
+use std::alloc::{GlobalAlloc, Layout, System};
 
-use assert_no_alloc::assert_no_alloc;
+use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use grooviq_engine::{
     AudioOutput, AudioSlot, ChannelId, ChannelMix, ChannelSetup, Command, EngineConfig,
     EngineState, OutputBackend, OutputChoice, OutputInfo, OutputKind, PatternData, SampleBuf,
@@ -16,6 +21,75 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const SR: f32 = 48_000.0;
+
+/// Built with `RTSAN_ENABLE` set: RealtimeSanitizer is linked in and checks [`realtime`].
+const RTSAN: bool = option_env!("RTSAN_ENABLE").is_some();
+
+/// `assert_no_alloc`'s checking allocator, except under RealtimeSanitizer, which sees every
+/// allocation itself (Rust's and C's): two checkers would leave it nothing to prove.
+struct Checked;
+
+// SAFETY: forwards every call unchanged to one of two sound allocators, the same one for a
+// block's whole life (`RTSAN` is a constant).
+unsafe impl GlobalAlloc for Checked {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller's contract, passed on.
+        unsafe {
+            if RTSAN {
+                System.alloc(layout)
+            } else {
+                AllocDisabler.alloc(layout)
+            }
+        }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: as above.
+        unsafe {
+            if RTSAN {
+                System.alloc_zeroed(layout)
+            } else {
+                AllocDisabler.alloc_zeroed(layout)
+            }
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: as above.
+        unsafe {
+            if RTSAN {
+                System.dealloc(ptr, layout)
+            } else {
+                AllocDisabler.dealloc(ptr, layout)
+            }
+        }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: as above.
+        unsafe {
+            if RTSAN {
+                System.realloc(ptr, layout, new_size)
+            } else {
+                AllocDisabler.realloc(ptr, layout, new_size)
+            }
+        }
+    }
+}
+
+#[global_allocator]
+static A: Checked = Checked;
+
+/// Runs `f` as the audio thread does: no allocation, and under RealtimeSanitizer no blocking
+/// call of any kind.
+fn realtime<T>(f: impl FnOnce() -> T) -> T {
+    assert_no_alloc(|| {
+        rtsan_standalone::realtime_enter();
+        let out = f();
+        rtsan_standalone::realtime_exit();
+        out
+    })
+}
 
 /// One fake output that keeps the slot it is opened with.
 struct OneDevice(Arc<Mutex<Option<Arc<AudioSlot>>>>);
@@ -65,14 +139,14 @@ fn the_device_callback_path_is_allocation_free() {
     // What the cpal callback runs: with the processor in the slot, then (below) emptied.
     let mut buf = vec![0f32; 441 * 2];
     for _ in 0..100 {
-        assert_no_alloc(|| {
+        realtime(|| {
             slot.set_output_latency_frames(256);
             slot.process(&mut buf, 2);
         });
     }
     assert!(c.lock().unwrap().live().peak[0] > 0.1, "it rendered sound");
     drop(out);
-    assert_no_alloc(|| slot.process(&mut buf, 2));
+    realtime(|| slot.process(&mut buf, 2));
     assert!(buf.iter().all(|x| *x == 0.0), "an emptied slot is silent");
 }
 
@@ -153,7 +227,7 @@ fn process_never_allocates() {
             })
             .unwrap();
         }
-        assert_no_alloc(|| p.process(&mut buf, 2));
+        realtime(|| p.process(&mut buf, 2));
     }
     assert!(c.live().peak[0] > 0.1, "it rendered sound");
 }
@@ -197,7 +271,7 @@ fn every_command_and_channel_layout_is_allocation_free() {
     ] {
         c.send(cmd).unwrap();
         for channels in [1, 2, 6] {
-            assert_no_alloc(|| p.process(&mut buf, channels));
+            realtime(|| p.process(&mut buf, channels));
         }
     }
 }
@@ -236,7 +310,7 @@ fn channel_messages_never_allocate_on_the_audio_thread() {
     };
     let mut run = |c: &mut grooviq_engine::Controller| {
         for _ in 0..4 {
-            assert_no_alloc(|| p.process(&mut buf, 2));
+            realtime(|| p.process(&mut buf, 2));
         }
         // Frees what the processor handed back, outside the check.
         c.check_health();
@@ -345,7 +419,7 @@ fn sequencing_never_allocates() {
     let mut buf = vec![0f32; 441 * 2];
     let mut run = |c: &mut grooviq_engine::Controller, blocks: usize| {
         for _ in 0..blocks {
-            assert_no_alloc(|| p.process(&mut buf, 2));
+            realtime(|| p.process(&mut buf, 2));
         }
         c.check_health();
     };
@@ -410,7 +484,7 @@ fn messages_queued_before_a_rate_change_never_free_on_the_audio_thread() {
     );
     let mut buf = vec![0f32; 441 * 2];
     for _ in 0..4 {
-        assert_no_alloc(|| p.process(&mut buf, 2));
+        realtime(|| p.process(&mut buf, 2));
     }
     assert!(buf.iter().any(|x| *x != 0.0), "the note plays");
     c.check_health();
