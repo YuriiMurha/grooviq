@@ -457,15 +457,18 @@ mod tests {
         assert!(p.unsent.is_none());
     }
 
-    fn node(id: u32) -> Box<ChannelNode> {
-        let sample = SampleBuf {
+    fn sample() -> Arc<SampleBuf> {
+        Arc::new(SampleBuf {
             rate: SR,
-            l: vec![0.5; 48_000],
-            r: vec![0.5; 48_000],
-        };
+            l: vec![0.5; 4_800],
+            r: vec![0.5; 4_800],
+        })
+    }
+
+    fn node(id: u32) -> Box<ChannelNode> {
         let setup = ChannelSetup {
             id: ChannelId(id),
-            sample: Some(Arc::new(sample)),
+            sample: Some(sample()),
             sampler: Vec::new(),
             mix: ChannelMix::default(),
         }
@@ -487,10 +490,15 @@ mod tests {
                 notes: Vec::new(),
             })
         };
+        let new_sample = sample();
         let msgs = [
             Msg::AddChannel(node(1)),
             Msg::SetPattern(pattern(10)), // the old pattern fills the trash queue
             Msg::SetPattern(pattern(20)), // and this one's is parked
+            Msg::SetSample {
+                channel: ChannelId(1),
+                sample: Some(Arc::clone(&new_sample)),
+            },
             Msg::RemoveChannel(ChannelId(1)),
             Msg::SetPattern(pattern(30)),
         ];
@@ -501,22 +509,92 @@ mod tests {
         p.process(&mut buf, 2);
         assert_eq!(p.graph.pattern().length, 20);
         assert!(p.unsent.is_some());
-        assert_eq!(p.graph.channel_ids(), [ChannelId(1)], "the removal waits");
-        assert_eq!(commands.slots(), QUEUE_CAPACITY - 2);
+        assert_eq!(commands.slots(), QUEUE_CAPACITY - 3, "the new sample waits");
+        assert_eq!(p.graph.channel_ids(), [ChannelId(1)]);
 
-        // Each free lets one more through.
+        // Each free lets one more through: the sample swap, whose old sample is parked...
         assert!(trash.pop().is_ok());
         p.process(&mut buf, 2);
-        assert!(p.graph.channel_ids().is_empty());
+        assert_eq!(commands.slots(), QUEUE_CAPACITY - 2, "the removal waits");
         assert!(matches!(trash.pop(), Ok(Trash::Pattern(_))));
+        // ...the removal, whose node is parked...
+        p.process(&mut buf, 2);
+        assert!(p.graph.channel_ids().is_empty());
+        assert!(matches!(trash.pop(), Ok(Trash::Sample(_))));
+        // ...and the last pattern.
         p.process(&mut buf, 2);
         assert!(matches!(trash.pop(), Ok(Trash::Channel(_))));
+        assert_eq!(Arc::strong_count(&new_sample), 1, "it left with the node");
         assert_eq!(p.graph.pattern().length, 30);
         assert_eq!(commands.slots(), QUEUE_CAPACITY);
         // The last old pattern was parked, and goes once there is room.
         p.process(&mut buf, 2);
         assert!(matches!(trash.pop(), Ok(Trash::Pattern(_))));
         assert!(p.unsent.is_none());
+    }
+
+    #[test]
+    fn what_a_faulted_graph_or_a_missing_channel_cannot_take_comes_back() {
+        // A trash queue with room for everything, so nothing is parked.
+        let (mut commands, commands_rx) = rtrb::RingBuffer::new(QUEUE_CAPACITY);
+        let (trash_tx, mut trash) = rtrb::RingBuffer::new(8);
+        let live = Arc::new(LiveShared::default());
+        let graph = Box::new(Graph::new(SR, 0));
+        let mut p = AudioProcessor::new(SR, graph, commands_rx, trash_tx, live);
+        let held = sample();
+        let mut buf = [0.0; BLOCK * 2];
+        let mut back = |p: &mut AudioProcessor, msg: Msg| {
+            assert!(commands.push(msg).is_ok());
+            p.process(&mut buf, 2);
+            trash.pop().ok()
+        };
+
+        // A healthy graph: a duplicate id and a missing channel give the payload back.
+        assert!(back(&mut p, Msg::AddChannel(node(1))).is_none());
+        let dup = back(&mut p, Msg::AddChannel(node(1)));
+        assert!(matches!(dup, Some(Trash::Channel(_))), "duplicate id");
+        let missing = Msg::SetSample {
+            channel: ChannelId(7),
+            sample: Some(Arc::clone(&held)),
+        };
+        let returned = back(&mut p, missing);
+        assert!(
+            matches!(returned, Some(Trash::Sample(_))),
+            "missing channel"
+        );
+        assert_eq!(
+            Arc::strong_count(&held),
+            2,
+            "alive until the controller frees it"
+        );
+        drop(returned);
+        assert_eq!(Arc::strong_count(&held), 1);
+
+        // A faulted graph takes nothing: every payload comes back.
+        p.fault();
+        let added = back(&mut p, Msg::AddChannel(node(2)));
+        assert!(
+            matches!(added, Some(Trash::Channel(_))),
+            "added while faulted"
+        );
+        let set = Msg::SetSample {
+            channel: ChannelId(1),
+            sample: Some(Arc::clone(&held)),
+        };
+        let returned = back(&mut p, set);
+        assert!(
+            matches!(returned, Some(Trash::Sample(_))),
+            "sample while faulted"
+        );
+        assert_eq!(Arc::strong_count(&held), 2);
+        let pattern = Msg::SetPattern(Box::default());
+        assert!(matches!(back(&mut p, pattern), Some(Trash::Pattern(_))));
+        assert!(back(&mut p, Msg::RemoveChannel(ChannelId(1))).is_none());
+        assert_eq!(
+            p.graph.channel_ids(),
+            [ChannelId(1)],
+            "the faulted graph is untouched"
+        );
     }
 
     #[test]

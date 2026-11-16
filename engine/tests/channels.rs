@@ -216,6 +216,29 @@ fn channels_sum_in_insertion_order() {
         out[0],
         in_order
     );
+
+    // Removing a channel keeps the others in their order (a swap would move the last one up).
+    let gone = dc(0.5);
+    let st = state(vec![
+        channel(1, &a, ChannelMix::default()),
+        channel(9, &gone, ChannelMix::default()),
+        channel(2, &b, ChannelMix::default()),
+        channel(3, &c, ChannelMix::default()),
+    ]);
+    let (mut ctl, mut p) = engine_with(cfg(), st);
+    ctl.remove_channel(ChannelId(9)).unwrap();
+    for id in 1..=3 {
+        ctl.send(note(id, true)).unwrap();
+    }
+    let mut out = vec![0f32; 128 * 2];
+    p.process(&mut out, 2);
+    let swapped = (1.0f32 + -1.0) + 4e-8;
+    assert_ne!(in_order, swapped);
+    assert!(
+        out.iter().all(|x| *x == in_order),
+        "after a removal: {}",
+        out[0]
+    );
 }
 
 #[test]
@@ -286,6 +309,23 @@ fn all_sound_off_fades_channels_out_and_later_notes_play() {
     let ev = [(0, Command::AllSoundOff), (4_800, note(1, true))];
     let l = left(&render(st, &ev, 6_000));
     assert!(l[4_800..].iter().all(|x| *x == 1.0));
+}
+
+#[test]
+fn a_fade_that_outlives_its_voice_ends_before_the_next_note() {
+    // A one-shot that ends by itself 72 frames into the AllSoundOff fade: the channel goes
+    // silent with the fade half done, and the next note must still play in full.
+    let s = click();
+    let st = state(vec![channel(1, &s, ChannelMix::default())]);
+    let ev = [
+        (0, note(1, true)),
+        (128, Command::AllSoundOff),
+        (4_800, note(1, true)),
+    ];
+    let out = render(st, &ev, 6_000);
+    let (l, r) = (left(&out), right(&out));
+    assert_eq!(&l[4_800..5_000], &s.l[..], "left, bit for bit");
+    assert_eq!(&r[4_800..5_000], &s.r[..], "right, bit for bit");
 }
 
 #[test]
