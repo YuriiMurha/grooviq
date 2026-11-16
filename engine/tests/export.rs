@@ -518,7 +518,9 @@ fn cancel_during_the_tail_leaves_no_file() {
                     .to_string_lossy()
                     .starts_with(".cancelled_tail.wav.grooviq-")
             })
-            .map(|e| e.metadata().map_or(0, |m| m.len()))
+            // Not `DirEntry::metadata`: on Windows that size is the directory's copy, which
+            // lags behind a file that is still open for writing.
+            .map(|e| std::fs::metadata(e.path()).map_or(0, |m| m.len()))
             .max()
             .unwrap_or(0)
     };
