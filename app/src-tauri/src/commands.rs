@@ -84,14 +84,15 @@ pub async fn audio_settings(audio: State<'_, Audio>) -> Result<AudioSettings, St
 /// Turns the speaker guard on or off and remembers it.
 #[tauri::command]
 pub async fn audio_set_guard(audio: State<'_, Audio>, on: bool) -> Result<(), String> {
-    audio.output.set_guard(on);
+    // Same as `audio_select`: the switch and the save under one settings lock. `set_guard` is
+    // one atomic store.
+    apply_and_save(&audio, || audio.output.set_guard(on), |s| s.guard = on);
     let message = if on {
         "Speaker guard on: playback stops if sound would move to speakers"
     } else {
         "Speaker guard off"
     };
     lock(&audio.log).push(Level::Info, message);
-    save_settings(&audio, |s| s.guard = on);
     Ok(())
 }
 
@@ -146,12 +147,8 @@ fn send(audio: &Audio, cmd: Command) -> Result<(), String> {
     })
 }
 
-/// Changes the settings and writes them, logging a failure (the change still applies now).
-fn save_settings(audio: &Audio, change: impl FnOnce(&mut settings::Settings)) {
-    apply_and_save(audio, || {}, change);
-}
-
-/// Runs `apply`, then changes the settings and writes them, all under the settings lock.
+/// Runs `apply`, then changes the settings and writes them, all under the settings lock. A
+/// failed save is logged (the change still applies now).
 ///
 /// Lock order: settings, then log (a failed save logs while holding the settings lock). Nothing
 /// takes the settings lock while holding the log lock, and `apply` must not take either.
