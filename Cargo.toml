@@ -11,3 +11,8 @@ repository = "https://github.com/YuriiMurha/grooviq"
 # Keep unwinding (no panic = "abort"): the engine catches panics.
 [profile.release]
 lto = "thin"
+
+# The DSP tests render hundreds of synth scenarios (click detector): optimise the crate in
+# debug builds too. Debug assertions and overflow checks stay on.
+[profile.dev.package.grooviq-dsp]
+opt-level = 2
