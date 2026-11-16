@@ -210,6 +210,8 @@ mod tests {
     use grooviq_dsp::sampler::SPEC;
 
     const SR: f32 = 48_000.0;
+    /// The sampler's gain parameter (dB).
+    const GAIN: u32 = 12;
 
     fn node(never_skip: bool) -> ChannelNode {
         let l: Vec<f32> = (0..200).map(|i| 0.9 * 0.97f32.powi(i)).collect();
@@ -308,6 +310,11 @@ mod tests {
                         n.retarget(false);
                     }
                     141 => assert!(n.push_event(note(0))),
+                    // A gain change while a note sounds; the note ends long before the gain
+                    // settles, and a note after many silent blocks starts at the new gain.
+                    160 => assert!(n.push_event(note(0))),
+                    161 => n.set_param(GAIN, -20.0),
+                    185 => assert!(n.push_event(note(0))),
                     _ => {}
                 }
             }
