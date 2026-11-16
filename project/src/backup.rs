@@ -1,15 +1,16 @@
 //! Rolling backups: a copy of a project file just before it is overwritten.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Copies an existing `target` to `<backups>/<stem>/<stem>-<unix seconds>.grooviq` and deletes
 /// the oldest backups of that project beyond `keep`. Returns the copy, or `None` when `target`
-/// does not exist yet (nothing to back up) or `keep` is 0. Other files in the folder are left
-/// alone. Two backups in one second get consecutive numbers, and a new backup always numbers
-/// above every existing one, so the order never breaks.
+/// does not exist yet (nothing to back up), is byte for byte the newest backup already (saves
+/// that change nothing must not rotate older versions out), or `keep` is 0. Other files in the
+/// folder are left alone. Two backups in one second get consecutive numbers, and a new backup
+/// always numbers above every existing one, so the order never breaks.
 pub fn backup_before_save(
     target: &Path,
     backups: &Path,
@@ -30,7 +31,13 @@ pub fn backup_before_save(
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let newest = existing(&folder, &stem)?.last().map(|&(n, _)| n);
+    let found = existing(&folder, &stem)?;
+    if let Some((_, newest)) = found.last()
+        && same_bytes(target, newest)
+    {
+        return Ok(None);
+    }
+    let newest = found.last().map(|&(n, _)| n);
     let number = newest.map_or(now, |n| now.max(n.saturating_add(1)));
 
     let copy = folder.join(format!("{stem}-{number}.{}", crate::EXTENSION));
@@ -49,6 +56,51 @@ pub fn backup_before_save(
         let _ = fs::remove_file(old);
     }
     Ok(Some(copy))
+}
+
+/// Whether files `a` and `b` hold the same bytes (read in chunks; false if either cannot be
+/// read, so a backup is made).
+fn same_bytes(a: &Path, b: &Path) -> bool {
+    let (Ok(fa), Ok(fb)) = (fs::File::open(a), fs::File::open(b)) else {
+        return false;
+    };
+    let same_len = match (fa.metadata(), fb.metadata()) {
+        (Ok(ma), Ok(mb)) => ma.len() == mb.len(),
+        _ => false,
+    };
+    if !same_len {
+        return false;
+    }
+    let (mut ra, mut rb) = (io::BufReader::new(fa), io::BufReader::new(fb));
+    let (mut ba, mut bb) = (vec![0u8; 64 * 1024], vec![0u8; 64 * 1024]);
+    loop {
+        let Ok(n) = read_full(&mut ra, &mut ba) else {
+            return false;
+        };
+        let Ok(m) = read_full(&mut rb, &mut bb) else {
+            return false;
+        };
+        if n != m || ba[..n] != bb[..m] {
+            return false;
+        }
+        if n == 0 {
+            return true;
+        }
+    }
+}
+
+/// Reads until `buf` is full or the file ends; the count read.
+fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
 }
 
 /// The folder's backups of `stem`, oldest first, as `(number, path)`.

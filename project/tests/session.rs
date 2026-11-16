@@ -569,6 +569,93 @@ fn saving_over_a_file_keeps_a_backup() {
     assert_eq!(load(&path).unwrap().project.bpm, 101.0);
 }
 
+/// The tempos of the backups of `song`, oldest first.
+fn backup_tempos(backups: &Path) -> Vec<f32> {
+    let mut copies: Vec<PathBuf> = std::fs::read_dir(backups.join("song"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    copies.sort();
+    copies
+        .iter()
+        .map(|c| load(c).unwrap().project.bpm)
+        .collect()
+}
+
+/// A session whose `song.grooviq` was saved at 100, then 110 BPM: one backup, of 100.
+fn saved_twice(dir: &Path) -> (Session, PathBuf, PathBuf) {
+    let backups = dir.join("backups");
+    let path = dir.join("song.grooviq");
+    let (mut session, _, _) = rig();
+    let now = Instant::now();
+    session.apply(Edit::SetTempo { bpm: 100.0 }, now).unwrap();
+    session.save(Some(&path), &backups).unwrap();
+    session.apply(Edit::SetTempo { bpm: 110.0 }, now).unwrap();
+    session.save(None, &backups).unwrap();
+    assert_eq!(backup_tempos(&backups), [100.0]);
+    (session, path, backups)
+}
+
+#[test]
+fn saves_that_change_nothing_keep_the_older_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, backups) = saved_twice(dir.path());
+    // Ten more saves of the same project (a held Cmd+S): one backup of 110 at most, and 100
+    // is still there.
+    for _ in 0..10 {
+        session.save(None, &backups).unwrap();
+    }
+    assert_eq!(backup_tempos(&backups), [100.0, 110.0]);
+    assert_eq!(load(&path).unwrap().project.bpm, 110.0);
+}
+
+#[test]
+fn a_failed_save_makes_no_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, backups) = saved_twice(dir.path());
+    // The temp file cannot be created: a folder has its name.
+    std::fs::create_dir(dir.path().join("song.grooviq.tmp")).unwrap();
+    session
+        .apply(Edit::SetTempo { bpm: 120.0 }, Instant::now())
+        .unwrap();
+    for _ in 0..3 {
+        let err = session.save(None, &backups).unwrap_err();
+        assert!(matches!(err, SessionError::Save(_)), "{err}");
+    }
+    assert_eq!(backup_tempos(&backups), [100.0], "no backup rotated");
+    assert_eq!(load(&path).unwrap().project.bpm, 110.0);
+    assert!(session.view().dirty);
+}
+
+#[test]
+fn a_refused_save_makes_no_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, path, backups) = saved_twice(dir.path());
+    // The same file, opened with a channel whose sample bytes were never loaded: `save`
+    // refuses before writing anything.
+    let mut project = load(&path).unwrap().project;
+    project
+        .channels
+        .push(channel(1, "Kick", Some("samples/1-kick.wav")));
+    let loaded = Loaded {
+        project,
+        samples: Default::default(),
+        warnings: vec![],
+    };
+    let decoded = decode_samples(&loaded);
+    let (mut session, _, _) = rig();
+    session.open(&path, loaded, decoded).unwrap();
+    session
+        .apply(Edit::SetTempo { bpm: 120.0 }, Instant::now())
+        .unwrap();
+    for _ in 0..3 {
+        let err = session.save(None, &backups).unwrap_err();
+        assert!(err.to_string().contains("saving would lose it"), "{err}");
+    }
+    assert_eq!(backup_tempos(&backups), [100.0], "no backup rotated");
+    assert_eq!(load(&path).unwrap().project.bpm, 110.0);
+}
+
 #[test]
 fn a_save_error_is_surfaced_unchanged() {
     let dir = tempfile::tempdir().unwrap();

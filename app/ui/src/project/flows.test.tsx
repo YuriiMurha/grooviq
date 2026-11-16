@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiveFrame } from "../live/client";
@@ -314,6 +314,32 @@ describe("save_on_an_untitled_project_asks_for_a_path", () => {
     await user.keyboard("{Control>}{Shift>}S{/Shift}{/Control}");
     await waitFor(() => expect(called("project_save_as")).toHaveLength(1));
     expect(called("project_save_as")[0]?.args).toEqual({ path: "/music/copy.grooviq" });
+  });
+});
+
+describe("a held shortcut", () => {
+  it("a held Mod+S (key repeat) saves once", async () => {
+    await start();
+    const press = (repeat: boolean) =>
+      act(() => {
+        fireEvent.keyDown(window, { key: "s", ctrlKey: true, repeat });
+      });
+    // Each save finishes before the next repeat arrives, as with a real key repeat (~30 ms).
+    const settle = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      });
+    press(false);
+    await settle();
+    for (let i = 0; i < 10; i++) {
+      press(true);
+      await settle();
+    }
+    expect(called("project_save")).toHaveLength(1);
+    // Released and pressed again: a second save.
+    press(false);
+    await settle();
+    expect(called("project_save")).toHaveLength(2);
   });
 });
 

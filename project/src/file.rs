@@ -208,17 +208,36 @@ pub(crate) fn save_with_limits(
     fail_after_temp: bool,
     limits: Limits,
 ) -> io::Result<()> {
+    let staged = stage_save_with_limits(project, samples, path, limits)?;
+    if fail_after_temp {
+        // Dropping the staged file removes the temp file.
+        return Err(io::Error::other(
+            "injected failure after the temp file was written",
+        ));
+    }
+    staged.commit()
+}
+
+/// Writes `project` to a temp file beside `path` without touching `path`: a save that is
+/// refused or fails stops here, before anything (a backup, the file itself) changes.
+/// [`Staged::commit`] puts it in place.
+pub(crate) fn stage_save(
+    project: &Project,
+    samples: &SampleFiles,
+    path: &Path,
+) -> io::Result<Staged> {
+    stage_save_with_limits(project, samples, path, LIMITS)
+}
+
+fn stage_save_with_limits(
+    project: &Project,
+    samples: &SampleFiles,
+    path: &Path,
+    limits: Limits,
+) -> io::Result<Staged> {
     // Everything that can be refused is refused before the first byte is written.
     let (project, entries) = plan(project, samples, limits)?;
-    write_atomic(path, |file| {
-        write_zip(file, &project, &entries)?;
-        if fail_after_temp {
-            return Err(io::Error::other(
-                "injected failure after the temp file was written",
-            ));
-        }
-        Ok(())
-    })
+    stage(path, |file| write_zip(file, &project, &entries))
 }
 
 /// Which samples go in the zip, and the project with each channel's `SampleRef.file` set.
@@ -344,23 +363,47 @@ fn write_zip(file: &mut File, project: &Project, entries: &[Entry]) -> io::Resul
 
 /// Runs `write` against `<path>.tmp`, syncs it and renames it over `path`. The temp file is
 /// removed on any error, and `path` is only ever replaced by a complete file.
-fn write_atomic(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
-    let tmp = temp_path(path);
-    let written = (|| {
-        let mut file = File::create(&tmp)?;
-        write(&mut file)?;
-        file.flush()?;
-        file.sync_all()?;
-        drop(file);
-        // On Windows `rename` replaces an existing file too.
-        fs::rename(&tmp, path)
-    })();
-    if let Err(e) = written {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
+/// A file fully written (and synced) to its temp name beside its final one, not yet in
+/// place. Dropped without [`Staged::commit`], the temp file is removed.
+#[derive(Debug)]
+pub(crate) struct Staged {
+    tmp: PathBuf,
+    path: PathBuf,
+    done: bool,
+}
+
+impl Staged {
+    /// Renames the temp file over the final one (on Windows `rename` replaces an existing
+    /// file too), then syncs the folder.
+    pub(crate) fn commit(mut self) -> io::Result<()> {
+        fs::rename(&self.tmp, &self.path)?;
+        self.done = true;
+        sync_folder(&self.path);
+        Ok(())
     }
-    sync_folder(path);
-    Ok(())
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+/// Writes the temp file for `path` with `write`, flushed and synced.
+fn stage(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<Staged> {
+    // Made first, so a failure below removes the partial temp file.
+    let staged = Staged {
+        tmp: temp_path(path),
+        path: path.to_path_buf(),
+        done: false,
+    };
+    let mut file = File::create(&staged.tmp)?;
+    write(&mut file)?;
+    file.flush()?;
+    file.sync_all()?;
+    Ok(staged)
 }
 
 fn temp_path(path: &Path) -> PathBuf {

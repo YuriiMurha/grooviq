@@ -118,6 +118,8 @@ export function App() {
       const action = shortcutFor(e, navigator.platform);
       if (!action) return;
       e.preventDefault();
+      // A held key repeats: one save (or open, export...) per press, not one per repeat.
+      if (e.repeat) return;
       if (action === "playStop") (playingRef.current ? stop : play)();
       else perform(action);
     };

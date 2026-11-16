@@ -667,6 +667,21 @@ fn backups_keep_the_last_ten() {
     assert!(folder.join("notes.txt").exists());
     assert_eq!(fs::read_dir(&folder).unwrap().count(), 11); // ten backups and the note
 
+    // The same bytes as the newest backup: no copy, nothing pruned.
+    let before: Vec<_> = fs::read_dir(&folder)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(backup_before_save(&target, &backups, 10).unwrap(), None);
+    let after: Vec<_> = fs::read_dir(&folder)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(before.len(), after.len());
+    // Same length, other bytes: a backup.
+    fs::write(&target, [98]).unwrap();
+    assert!(backup_before_save(&target, &backups, 10).unwrap().is_some());
+
     // Another project name has its own folder and its own count.
     let other = dir.path().join("Other.grooviq");
     fs::write(&other, [1]).unwrap();
