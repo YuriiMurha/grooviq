@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Runs only the checks that the changes against origin/main need.
 // `--plan` prints the plan and runs nothing. Any failed, skipped or interrupted check fails the run.
+// Checks run on the working tree, so stage what you checked.
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -34,11 +35,14 @@ function git(args) {
 
 const lines = (text) => text.split("\n").filter(Boolean);
 
-// Committed, staged, unstaged and untracked changes since the merge base with `base`.
+// Committed, staged, unstaged and untracked changes since the merge base with `base`, listed
+// separately: a staged change that the working tree undoes is still in the next commit.
 const mergeBase = git(["merge-base", base, "HEAD"]).trim();
 const changed = [
   ...new Set([
-    ...lines(git(["diff", "--name-only", "--no-renames", mergeBase])),
+    ...lines(git(["diff", "--name-only", "--no-renames", mergeBase, "HEAD"])),
+    ...lines(git(["diff", "--name-only", "--no-renames", "--cached"])),
+    ...lines(git(["diff", "--name-only", "--no-renames"])),
     ...lines(git(["ls-files", "--others", "--exclude-standard"])),
   ]),
 ].sort();
@@ -139,8 +143,14 @@ const step = (name, cmd, args, cwd = root) => steps.push({ name, cmd, args, cwd 
 const uiDir = join(root, "app", "ui");
 const needsUi = ui || workspace || rustCrates.has("grooviq-app");
 
-if (needsUi && !existsSync(join(uiDir, "node_modules")))
-  step("ui install (node_modules missing)", "npm", ["ci", "--no-audit", "--no-fund"], uiDir);
+const manifests = ["app/ui/package.json", "app/ui/package-lock.json"].filter((m) => changed.includes(m));
+if (needsUi && (manifests.length || !existsSync(join(uiDir, "node_modules"))))
+  step(
+    `ui install (${manifests.length ? `${manifests.join(", ")} changed` : "node_modules missing"})`,
+    "npm",
+    ["ci", "--no-audit", "--no-fund"],
+    uiDir,
+  );
 if (ui) {
   step("ui lint", "npm", ["run", "lint"], uiDir);
   step("ui typecheck", "npm", ["run", "typecheck"], uiDir);
