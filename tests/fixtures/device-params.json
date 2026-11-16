@@ -56,6 +56,18 @@
     { "id": "release", "min": 1, "max": 10000, "default": 40 },
     { "id": "gain", "min": -60, "max": 12, "default": 0 },
     { "id": "pan", "min": -1, "max": 1, "default": 0 },
-    { "id": "declick", "min": 0, "max": 1, "default": 1 }
+    { "id": "declick", "min": 0, "max": 1, "default": 1 },
+    { "id": "loop", "min": 0, "max": 1, "default": 0 },
+    { "id": "loop_start", "min": 0, "max": 1, "default": 0 },
+    { "id": "filter_type", "min": 0, "max": 3, "default": 0 },
+    { "id": "cutoff", "min": 20, "max": 20000, "default": 20000 },
+    { "id": "res", "min": 0, "max": 1, "default": 0 },
+    { "id": "filter_env", "min": -1, "max": 1, "default": 0 },
+    { "id": "flt_attack", "min": 0, "max": 5000, "default": 0 },
+    { "id": "flt_decay", "min": 1, "max": 10000, "default": 300 },
+    { "id": "flt_sustain", "min": 0, "max": 1, "default": 0 },
+    { "id": "flt_release", "min": 1, "max": 10000, "default": 40 },
+    { "id": "vel_amp", "min": 0, "max": 1, "default": 1 },
+    { "id": "vel_filter", "min": 0, "max": 1, "default": 0 }
   ]
 }
