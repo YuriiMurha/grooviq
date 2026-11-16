@@ -1,0 +1,27 @@
+name: Bug report
+description: Something does not work or sounds wrong
+labels: ["type: bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Open ...\n2. Press ...\n3. Hear ..."
+  - type: input
+    id: system
+    attributes:
+      label: System
+      placeholder: "macOS 26 on M2, AirPods Pro / Windows 11, Focusrite Scarlett"
+  - type: textarea
+    id: log
+    attributes:
+      label: Audio log
+      description: Copy the entries from the output popover, if any.
+      render: text
