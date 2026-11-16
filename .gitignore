@@ -6,3 +6,4 @@ docs/superpowers/
 docs/evidence/
 tests/golden/out/
 *.local
+.superpowers/
