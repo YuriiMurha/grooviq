@@ -124,6 +124,13 @@ pub fn read_sample_file(path: &Path) -> io::Result<SampleFile> {
 /// [`read_sample_file`] with a lower limit. The limit is enforced on the bytes read, not on the
 /// size the file system reported, so a file that grows while it is read cannot get past it.
 fn read_limited(path: &Path, limit: u64) -> io::Result<SampleFile> {
+    // Look before opening: opening a FIFO for reading blocks until someone writes to it.
+    if !fs::metadata(path)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
     let file = File::open(path)?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(
@@ -374,6 +381,15 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
             continue;
         }
         let shown = sample_ref.path.display();
+        if is_network_or_device_path(&sample_ref.path) {
+            // Never touched: on Windows even a `stat` of a UNC path sends the user's
+            // credentials to the named server.
+            warnings.push(format!(
+                "Channel \"{}\": its sample is not stored in the file and \"{shown}\" is a network or device path, which a project file may not make Grooviq read; the channel is silent until you relink it.",
+                channel.name
+            ));
+            continue;
+        }
         match read_limited(&sample_ref.path, left.min(MAX_SAMPLE_BYTES)) {
             Ok(found) => {
                 left -= found.bytes.len() as u64;
@@ -394,6 +410,14 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
         samples,
         warnings,
     })
+}
+
+/// Whether a path a project file names is a UNC share (`\\server\share`, `//server/share`) or a
+/// Windows device or verbatim path (`\\?\`, `\\.\`). Checked on the text, on every platform, so
+/// a file saved on one system is judged the same on another.
+fn is_network_or_device_path(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text.starts_with("\\\\") || text.starts_with("//")
 }
 
 /// Brings a parsed `project.json` up to [`VERSION`]. Version 1 passes through unchanged; a
@@ -553,6 +577,61 @@ mod tests {
         assert_eq!(read_limited(&file, 11).unwrap().bytes.len(), 11);
         let err = read_limited(&file, 10).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe.wav");
+        if !std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return; // no mkfifo here
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(read_sample_file(&fifo).is_err()));
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(true),
+            "opening a FIFO blocked, or it was read"
+        );
+    }
+
+    #[test]
+    fn network_and_device_paths_in_a_project_are_never_read() {
+        for path in [
+            "\\\\server\\share\\kick.wav",
+            "//server/share/kick.wav",
+            "\\\\?\\C:\\kick.wav",
+            "\\\\.\\pipe\\x",
+        ] {
+            assert!(is_network_or_device_path(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/music/kick.wav",
+            "C:\\music\\kick.wav",
+            "kick.wav",
+            "../kick.wav",
+        ] {
+            assert!(!is_network_or_device_path(Path::new(path)), "{path}");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut p, _) = project_of(1);
+        p.channels[0].sample.as_mut().unwrap().path = PathBuf::from("//server/share/kick.wav");
+        let path = dir.path().join("a.grooviq");
+        save(&p, &SampleFiles::new(), &path).unwrap();
+        let loaded = load(&path).unwrap();
+        assert!(loaded.samples.is_empty());
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(
+            loaded.warnings[0].contains("network or device path"),
+            "{:?}",
+            loaded.warnings
+        );
     }
 
     #[cfg(unix)]
