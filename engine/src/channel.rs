@@ -183,8 +183,10 @@ impl ChannelNode {
             }
         }
         if self.sampler.active_voices() == 0 {
-            // Settles the sampler's output smoothing too, as it would on its own once idle.
-            self.sampler.reset();
+            // Settles the sampler's output smoothing, as it would on its own once idle. Not a
+            // reset: a note that ended before its note-off must still take that note-off, or
+            // it cuts the next hit on the key when a block ends between the two.
+            self.sampler.settle();
             self.idle = true;
         } else {
             self.idle = false;

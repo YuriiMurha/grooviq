@@ -410,6 +410,45 @@ fn a_note_off_booked_before_a_tempo_jump_does_not_cut_a_newer_note() {
 }
 
 #[test]
+fn a_note_off_owed_across_an_idle_block_end_does_not_cut_the_next_hit() {
+    // Gate mode, one key, a sample of 6 390 frames of 0.5 at 120 BPM (25 frames per tick).
+    // Note A (tick 0, two steps) ends by itself after frame 6 389, so the block ending at
+    // 6 400 finishes with nothing sounding; note B (tick 257, frame 6 425) starts in the next
+    // block. A's note-off arrives at frame 12 000, while B sounds: it belongs to A, so B
+    // plays on to its own sample end (frame 12 815).
+    let len = 6_390;
+    let short = Arc::new(SampleBuf {
+        rate: SR,
+        l: vec![0.5; len],
+        r: vec![0.5; len],
+    });
+    let mut gate = exact();
+    gate[ONE_SHOT] = 0.0;
+    let state = EngineState {
+        bpm: 120.0,
+        channels: vec![channel(1, &short, gate)],
+        pattern: PatternData {
+            length: 16 * STEP_TICKS,
+            notes: vec![note(0, 1, 2 * STEP_TICKS), note(257, 1, 4 * STEP_TICKS)],
+        },
+    };
+    let (a_end, b_on, a_off) = (len - 1, 257 * 25, 2 * STEP_TICKS as usize * 25);
+    assert!(
+        block_start(a_end as u64) < block_start(b_on as u64),
+        "a block ends between"
+    );
+    let l = left(&play(state, SR, &[], 13_000));
+    assert_eq!(l[a_end], 0.5, "A sounds to its end");
+    assert!(
+        l[a_end + 1..b_on].iter().all(|&x| x == 0.0),
+        "the gap is silent"
+    );
+    assert_eq!(l[b_on], 0.5, "B starts");
+    assert!(a_off < 12_500 && 12_500 < b_on + len);
+    assert_eq!(l[12_500], 0.5, "A's note-off did not release B");
+}
+
+#[test]
 fn play_loops_stops_emitting_at_the_end() {
     let pat = pattern(16, &steps(&[0, 4, 8, 12]));
     let loop_frames = 96_000; // 16 steps at 120 BPM

@@ -261,6 +261,19 @@ impl Voices {
         self.v = [Voice::OFF; VOICES];
     }
 
+    /// Silences every voice but keeps its key, order and owed note-off, as a voice that ends
+    /// by itself does.
+    fn quiet(&mut self) {
+        for v in &mut self.v {
+            *v = Voice {
+                key: v.key,
+                order: v.order,
+                held: v.held,
+                ..Voice::OFF
+            };
+        }
+    }
+
     fn idle(&self) -> bool {
         self.v.iter().all(|v| v.stage == Stage::Off)
     }
@@ -311,6 +324,15 @@ impl Sampler {
         self.voices.silence();
         self.out = self.c.out;
         std::mem::replace(&mut self.sample, sample)
+    }
+
+    /// Comes to rest once nothing sounds: every voice is silent and the output smoothing sits
+    /// at its target, as after [`Device::reset`]. Unlike a reset, a note that ended before its
+    /// note-off still waits for it, so that late note-off finds it rather than a newer note on
+    /// its key. Never allocates.
+    pub fn settle(&mut self) {
+        self.voices.quiet();
+        self.out = self.c.out;
     }
 
     /// The loaded sample, if any.
