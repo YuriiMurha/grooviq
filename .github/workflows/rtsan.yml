@@ -1,0 +1,34 @@
+name: rtsan
+
+# RealtimeSanitizer over the engine's `no_alloc` tests: the real processor, behind a fake output
+# device as the cpal callback drives it. Any allocation, free, lock, sleep, file or network
+# access or other blocking call on that path fails the job with a stack trace. macOS only:
+# RTSan has no Windows runtime, and the same tests keep `assert_no_alloc` on every platform.
+# Not a required check. Known violations wait in `engine/tests/rtsan.supp`, each with its issue.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "rtsan-${{ github.event.pull_request.number || github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  rtsan:
+    name: rtsan (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rtsan
+      # The build downloads LLVM's prebuilt RTSan runtime (rtsan-standalone-sys, with curl).
+      # Cargo is on PATH here, not in ~/.cargo/bin where the Makefile looks by default.
+      - run: make rtsan CARGO=cargo

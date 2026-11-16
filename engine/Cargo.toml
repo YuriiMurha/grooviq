@@ -40,6 +40,9 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 [dev-dependencies]
 # Without the default `disable_release`, the allocation check also runs in release test builds.
 assert_no_alloc = { version = "1.1", default-features = false }
+# RealtimeSanitizer (Apache-2.0) for the `no_alloc` tests: inert unless `RTSAN_ENABLE` is set
+# while building, which links LLVM's prebuilt runtime (macOS and Linux only).
+rtsan-standalone = "0.3.0"
 tempfile = "3"
 
 [[test]]
