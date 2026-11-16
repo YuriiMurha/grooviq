@@ -50,7 +50,14 @@ test("keeps a frame count above 2^32 exact", () => {
   expect(decodeLive(frame({ frames: max }))!.frames).toBe(max);
 });
 
-test("rejects a wrong length", () => {
-  expect(decodeLive(new ArrayBuffer(31))).toBeNull();
-  expect(decodeLive(new ArrayBuffer(33))).toBeNull();
+test("rejects a wrong length even when the version byte and content are valid", () => {
+  // Both buffers carry the valid v1 fixture bytes, so only the length check can reject them.
+  const valid = new Uint8Array(fixture());
+  expect(valid[0]).toBe(1);
+  expect(decodeLive(valid.slice(0, 31).buffer)).toBeNull();
+  const long = new Uint8Array(33);
+  long.set(valid);
+  expect(decodeLive(long.buffer)).toBeNull();
+  // Control: the same bytes at the right length decode.
+  expect(decodeLive(valid.slice().buffer)).not.toBeNull();
 });

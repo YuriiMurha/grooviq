@@ -70,6 +70,20 @@ test("puts the token in the URL and reconnects with backoff from 250 ms up to 2 
   expect(FakeSocket.all).toHaveLength(waits.length + 2);
 });
 
+test("percent-encodes a token that has URL-special characters", () => {
+  connectLive({ port: 41234, token: "a+b/c=d&e" }, () => {}, { WebSocketImpl });
+  expect(FakeSocket.all[0].url).toBe("ws://127.0.0.1:41234/live?token=a%2Bb%2Fc%3Dd%26e");
+});
+
+test("stopping during the reconnect wait cancels the pending reconnect", () => {
+  const stop = connectLive(endpoint, () => {}, { WebSocketImpl });
+  FakeSocket.all[0].drop(); // arms the 250 ms reconnect timer
+  vi.advanceTimersByTime(100);
+  stop();
+  vi.advanceTimersByTime(10_000);
+  expect(FakeSocket.all).toHaveLength(1);
+});
+
 test("ignores frames with an unknown version", () => {
   const frames: LiveFrame[] = [];
   connectLive(endpoint, (f) => frames.push(f), { WebSocketImpl, backoffMs: [100, 400] });
