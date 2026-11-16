@@ -1791,9 +1791,9 @@ fn saturated(steals: u32) -> (Sampler, Vec<NoteEvent>) {
 
 #[test]
 fn a_choke_during_saturated_stealing_never_cuts_a_fade() {
-    // All 16 voices stolen at once (or twice, filling every fade slot), then a choke 48 frames
-    // later: up to 48 voices fade together, the last 16 where they are. No fade is cut short:
-    // no frame moves by more than all those full-scale fades do together.
+    // All 16 voices stolen at once (or twice), then a choke 48 frames later: up to 64 voices
+    // fade together. No fade is cut short: no frame moves by more than all those full-scale
+    // fades do together.
     for steals in [16u32, 32] {
         let (mut s, mut events) = saturated(0);
         events.extend((0..steals).map(|i| on(4_800, 40 + i as u8, 1.0)));
@@ -1818,11 +1818,56 @@ fn a_choke_during_saturated_stealing_never_cuts_a_fade() {
 
 #[test]
 fn rapid_steals_never_cut_a_fade() {
-    // 48 steals one frame apart: more fades than there are fade slots. None is cut short.
+    // 48 steals one frame apart: 48 fades at once. None is cut short.
     let (mut s, events) = saturated(48);
     let (l, _) = render(&mut s, 9_600, &events);
     let limit = 0.3;
     let step = max_step(&l[4_700..]);
     assert!(step <= limit, "step {step} above {limit}");
     assert_eq!(s.active_voices(), VOICES);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review round 2: a note is never dropped or delayed; 64 fade slots, the quietest replaced
+
+/// Chords of 16 DC notes (keys 40..55), each choked `gap` frames after it starts; the first
+/// sustains 4 800 frames. Returns the sampler and the frame of the last choke.
+fn choked_chords(chords: usize, gap: usize) -> (Sampler, usize) {
+    let mut s = configured(&dc(), &[]);
+    let chord: Vec<NoteEvent> = (0..16).map(|i| on(0, 40 + i as u8, 1.0)).collect();
+    render(&mut s, 4_800, &chord);
+    s.choke();
+    for _ in 1..chords {
+        render(&mut s, gap, &chord);
+        s.choke();
+    }
+    (s, 4_800 + (chords - 1) * gap)
+}
+
+#[test]
+fn three_chokes_do_not_drop_the_next_note() {
+    // Three chords choked one frame apart: the note right after the last choke still plays.
+    let (mut s, _) = choked_chords(3, 1);
+    let (l, _) = render(&mut s, 480, &[on(0, 72, 1.0)]);
+    assert!((l[479] - 1.0).abs() < 1e-6, "the note plays: {}", l[479]);
+}
+
+#[test]
+fn a_full_fade_pool_replaces_only_its_quietest_fades() {
+    // Five chords choked 10 frames apart: the first four fill all 64 fade slots, so the fifth
+    // replaces the first chord's fades (the nearest their end) and nothing else. A note right
+    // after the last choke starts on its frame.
+    let gap = 10;
+    let (mut s, last) = choked_chords(5, gap);
+    let (l, _) = render(&mut s, 480, &[on(0, 72, 1.0)]);
+    // A fade choked at frame `c` plays at gain (FADE - (f - c + 1)) / FADE on frame `f`.
+    let gain = |c: usize| (FADE - (last - c + 1)) as f32 / FADE as f32;
+    let tails: f32 = (1..5).map(|k| 16.0 * gain(4_800 + k * gap)).sum();
+    assert!(
+        (l[0] - (1.0 + tails)).abs() < 1e-3,
+        "first frame {}, expected the new note plus chords 2 to 5: {}",
+        l[0],
+        1.0 + tails
+    );
+    assert!((l[479] - 1.0).abs() < 1e-6, "the note plays on: {}", l[479]);
 }

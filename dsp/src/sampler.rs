@@ -149,11 +149,13 @@ const VEL_FILTER: usize = 26;
 const VOICE_MODE: usize = 27;
 const GLIDE: usize = 28;
 
-/// Slots: VOICES where notes start, then twice as many where voices fade out (stolen, choked or
-/// cut by a mono note): room for a choke of every voice while a full round of steals still
-/// fades. A fade is never cut short; with every slot busy (48 voices sounding), a further
-/// stealing note is dropped and a choked voice fades where it is.
-const SLOTS: usize = 3 * VOICES;
+/// Slots: VOICES where notes start, then FADES where voices fade out (stolen, choked or cut by a
+/// mono note), so a new note always starts on its own frame: it is never dropped or delayed.
+const SLOTS: usize = VOICES + FADES;
+/// Fade slots: four chokes of every voice within 3 ms fit. Overload exception: only when more
+/// than FADES voices fade at once does a new fade replace the one nearest its end (the quietest),
+/// which cuts that fade short.
+const FADES: usize = 4 * VOICES;
 /// Keys held in mono and legato modes, for last-note priority (note-off ownership is tracked
 /// separately, without a bound).
 const STACK: usize = 32;
@@ -602,22 +604,23 @@ impl Voices {
         self.v[i] = v;
     }
 
-    /// Moves a sounding voice out of a note slot into a free fade slot, where it fades out over
-    /// STEAL_FADE_S. False if every fade slot is busy (nothing is moved or cut).
-    fn park(&mut self, mut v: Voice) -> bool {
+    /// Moves a sounding voice out of a note slot into a fade slot, where it fades out over
+    /// STEAL_FADE_S: a free one, or with all FADES in use (the overload exception), the one
+    /// nearest the end of its fade.
+    fn park(&mut self, mut v: Voice) {
         if v.stage == Stage::Off {
-            return true;
+            return;
         }
         if v.fade == 0 {
             v.fade = self.fade;
         }
-        match (VOICES..SLOTS).find(|&j| self.v[j].stage == Stage::Off) {
-            Some(j) => {
-                self.v[j] = v;
-                true
-            }
-            None => false,
-        }
+        let tail = VOICES..SLOTS;
+        let j = tail
+            .clone()
+            .find(|&j| self.v[j].stage == Stage::Off)
+            .or_else(|| tail.min_by_key(|&j| self.v[j].fade))
+            .unwrap_or(VOICES);
+        self.v[j] = v;
     }
 
     /// Whether the note with `ticket` on `key` is held (its note-off has not arrived).
@@ -676,9 +679,7 @@ impl Voices {
                         oldest = i;
                     }
                 }
-                if !self.park(self.v[oldest]) {
-                    return;
-                }
+                self.park(self.v[oldest]);
                 oldest
             }
         };
@@ -733,9 +734,7 @@ impl Voices {
         } else {
             None
         };
-        if !self.park(v) {
-            return;
-        }
+        self.park(v);
         let glide = from.map(|f| (f, ms));
         self.start(0, p, sr, buf, key, ticket, velocity, glide);
         self.mono = true;
@@ -807,19 +806,15 @@ impl Voices {
         self.stack_len = 0;
     }
 
-    /// Every sounding voice fades out over STEAL_FADE_S, in a fade slot or, with none free,
-    /// where it is. Held keys leave the mono priority stack: a note after the choke never
-    /// returns to them (their note-offs still find nothing newer to end).
+    /// Every sounding voice fades out over STEAL_FADE_S in a fade slot, so its note slot is free
+    /// at once. Held keys leave the mono priority stack: a note after the choke never returns
+    /// to them (their note-offs still find nothing newer to end).
     fn choke(&mut self) {
         for i in 0..VOICES {
             let v = self.v[i];
-            if v.stage == Stage::Off {
-                continue;
-            }
-            if self.park(v) {
+            if v.stage != Stage::Off {
+                self.park(v);
                 self.v[i] = Voice::OFF;
-            } else if v.fade == 0 {
-                self.v[i].fade = self.fade;
             }
         }
         self.mono = false;
