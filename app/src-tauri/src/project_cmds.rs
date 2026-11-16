@@ -391,6 +391,16 @@ pub async fn recovery_restore(audio: State<'_, Audio>) -> Result<OpenResult, Str
         )
         .map_err(|e| e.to_string())?;
     lock(&audio.pending_recovery).take();
+    // No longer offered. If the folder refuses, it is offered again next launch: not worth
+    // failing the restore over.
+    if let Some(dir) = lock(&audio.recovery).as_ref()
+        && let Err(e) = dir.restored(&recovery)
+    {
+        lock(&audio.log).push(
+            crate::audio_log::Level::Warn,
+            format!("The restored project stays offered on the next launch: {e}"),
+        );
+    }
     Ok(report)
 }
 

@@ -8,7 +8,10 @@ export interface ShortcutEvent {
   shiftKey: boolean;
   altKey: boolean;
   repeat: boolean;
-  target: EventTarget | { tagName?: string; isContentEditable?: boolean; closest?: unknown } | null;
+  target:
+    | EventTarget
+    | { tagName?: string; type?: string; isContentEditable?: boolean; closest?: unknown }
+    | null;
 }
 
 /** True on macOS, where Mod is Cmd. */
@@ -16,17 +19,23 @@ export function isMac(platform: string): boolean {
   return /^mac/i.test(platform) || /iphone|ipad/i.test(platform);
 }
 
-/** Text goes here, so Space is a space, not play. A button inside a menu or dialog needs Space
- * to press itself. */
+/** Inputs whose type takes typed text (an input with no type is text too). */
+const TEXT_INPUTS = new Set(["", "text", "number", "search", "email", "url", "tel", "password"]);
+
+/** Text goes here, so Space is a space, not play. Only text entry counts: a slider, a select or
+ * a button keeps Space as play/stop. A button inside a menu or dialog needs Space to press
+ * itself. */
 export function isTypingTarget(target: ShortcutEvent["target"]): boolean {
   const el = target as {
     tagName?: string;
+    type?: string;
     isContentEditable?: boolean;
     closest?: (selector: string) => unknown;
   } | null;
   if (!el) return false;
   const tag = (el.tagName ?? "").toUpperCase();
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag === "INPUT" && TEXT_INPUTS.has((el.type ?? "").toLowerCase())) return true;
+  if (tag === "TEXTAREA") return true;
   if (el.isContentEditable) return true;
   return Boolean(
     el.closest?.("[role='menu'], [role='dialog'], [role='alertdialog'], [role='listbox']"),

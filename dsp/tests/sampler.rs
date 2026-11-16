@@ -307,6 +307,57 @@ fn one_shot_ignores_note_off_and_gate_mode_releases() {
 }
 
 #[test]
+fn a_note_off_releases_only_the_oldest_held_voice_on_its_key() {
+    // Two overlapping notes on one key, told apart by velocity: the first note-off releases
+    // the first note only, the second note-off the second.
+    let mut s = sampler(SR, buf(SR, vec![1.0; SR as usize]));
+    s.set_param(p("one_shot"), 0.0);
+    s.set_param(p("release"), 40.0);
+    let events = [
+        on(0, 60, 0.25),
+        on(1_000, 60, 0.5),
+        off(2_000, 60),
+        off(12_000, 60),
+    ];
+    let (l, _) = render(&mut s, 24_000, &events);
+    assert!((l[1_900] - 0.75).abs() < 1e-3, "both sound: {}", l[1_900]);
+    // 100 ms after the first note-off: the first note is gone, the second still held.
+    assert!(
+        (l[11_900] - 0.5).abs() < 1e-3,
+        "the newer note sounds: {}",
+        l[11_900]
+    );
+    // 100 ms after the second note-off: silence.
+    let level = peak(&l[12_000 + 4_800..]);
+    assert!(20.0 * level.max(1e-12).log10() < -60.0, "{level}");
+}
+
+#[test]
+fn a_late_note_off_of_a_finished_voice_leaves_the_newer_note_alone() {
+    // A 100 ms sample: the first note ends by itself at frame 4 800, the second starts at
+    // 4 900, then the first note's note-off arrives (a swung step longer than its sample).
+    // It belongs to the first note: the second plays on.
+    let mut s = sampler(SR, buf(SR, vec![1.0; 4_800]));
+    s.set_param(p("one_shot"), 0.0);
+    s.set_param(p("release"), 1.0);
+    let events = [
+        on(0, 60, 1.0),
+        on(4_900, 60, 1.0),
+        off(5_000, 60),
+        off(9_000, 60),
+    ];
+    let (l, _) = render(&mut s, 12_000, &events);
+    assert_eq!(l[4_850], 0.0, "the first note ended by itself");
+    assert!(
+        (l[6_000] - 1.0).abs() < 1e-6,
+        "the second still sounds: {}",
+        l[6_000]
+    );
+    // Its own note-off (1 ms release) ends it.
+    assert!(peak(&l[9_000 + 480..]) < 1e-3);
+}
+
+#[test]
 fn attack_and_decay_shape_the_level() {
     let dc = vec![1.0; SR as usize];
     let mut s = sampler(SR, buf(SR, dc.clone()));

@@ -44,9 +44,20 @@ describe("shortcutFor", () => {
     expect(
       shortcutFor(key(" ", { target: { ...NOT_TYPING, tagName: "TEXTAREA" } }), "Win32"),
     ).toBeNull();
+    // Only text entry is typing: a select, a slider or a checkbox keeps Space as play/stop.
     expect(
       shortcutFor(key(" ", { target: { ...NOT_TYPING, tagName: "SELECT" } }), "Win32"),
-    ).toBeNull();
+    ).toBe("playStop");
+    for (const type of ["range", "checkbox", "button"]) {
+      expect(
+        shortcutFor(key(" ", { target: { ...NOT_TYPING, tagName: "INPUT", type } }), "Win32"),
+      ).toBe("playStop");
+    }
+    for (const type of ["text", "number", "search", "", "TEXT"]) {
+      expect(
+        shortcutFor(key(" ", { target: { ...NOT_TYPING, tagName: "INPUT", type } }), "Win32"),
+      ).toBeNull();
+    }
     expect(
       shortcutFor(key(" ", { target: { ...NOT_TYPING, isContentEditable: true } }), "Win32"),
     ).toBeNull();

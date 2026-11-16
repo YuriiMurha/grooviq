@@ -14,8 +14,8 @@ interface Props {
   onCommit: (bpm: number) => void;
 }
 
-/** The tempo: type it (Enter or leaving the field sets it, Escape gives up), scroll over it, drag
- * it up or down, or use the arrow keys. Shift makes the steps 0.1. */
+/** The tempo: type it (Enter or leaving the field sets it, and Enter leaves it; Escape gives up),
+ * scroll over it, drag it up or down, or use the arrow keys. Shift makes the steps 0.1. */
 export function BpmField({ bpm, onCommit }: Props) {
   const [draft, setDraft] = useState<string | null>(null);
   // What the tempo is meant to be right now: `bpm` lags a round trip behind drags and scrolls.
@@ -47,6 +47,9 @@ export function BpmField({ bpm, onCommit }: Props) {
     const step = e.shiftKey ? 0.1 : 1;
     if (e.key === "Enter") {
       commitText(e.currentTarget.value);
+      // Done: leave the field, so Space is play/stop again. What was typed is already sent.
+      discard.current = true;
+      e.currentTarget.blur();
     } else if (e.key === "Escape") {
       discard.current = true;
       setDraft(null);

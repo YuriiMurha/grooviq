@@ -293,6 +293,122 @@ fn shortening_the_pattern_mid_play_wraps_cleanly() {
     assert_eq!(got, expected);
 }
 
+/// A pattern of `steps` steps with a one-step note on every step, whose velocity names it:
+/// step `s` plays at `0.25 + s / 100`, so an onset's level says which step it was.
+fn numbered(steps: u32) -> PatternData {
+    PatternData {
+        length: steps * STEP_TICKS,
+        notes: (0..steps)
+            .map(|s| SeqNote {
+                velocity: step_level(s),
+                ..note(s * STEP_TICKS, 1, STEP_TICKS)
+            })
+            .collect(),
+    }
+}
+
+fn step_level(step: u32) -> f32 {
+    0.25 + step as f32 / 100.0
+}
+
+/// Every onset as (frame, step), the step read back from its level.
+fn numbered_onsets(inter: &[f32]) -> Vec<(u64, u32)> {
+    let l = left(inter);
+    onsets(inter)
+        .into_iter()
+        .map(|f| {
+            let step = ((l[f as usize] - 0.25) * 100.0).round() as u32;
+            // One voice at its own level: never two notes on one frame.
+            assert!((l[f as usize] - step_level(step)).abs() < 1e-6, "frame {f}");
+            (f, step)
+        })
+        .collect()
+}
+
+#[test]
+fn changing_the_pattern_length_mid_play_keeps_the_place_in_the_loop() {
+    // 16 steps, then a new length during step 4 of the second or third loop. The place in
+    // the loop (step 4) carries on into the new pattern: step 5 next, on the frame a run
+    // without the swap gives it, every step once, then the new pattern's own wrap.
+    for new_steps in [32u32, 17, 15] {
+        for loop_index in [1u64, 2] {
+            let at_step = 16 * loop_index + 4;
+            // 6 000 frames a step at 120 BPM: 100 frames into step 4, rounded to its block.
+            let swap = block_start(at_step * 6_000 + 100);
+            assert!(swap > at_step * 6_000);
+            let total_steps = at_step + 1 + 2 * u64::from(new_steps);
+            let frames = (total_steps * 6_000) as usize;
+            let script = vec![
+                (0, Action::Send(Command::Play)),
+                (swap, Action::Pattern(numbered(new_steps))),
+            ];
+            let got = numbered_onsets(&drive(clicks(120.0, numbered(16)), &script, frames, 64));
+            let steady = numbered_onsets(&drive(
+                clicks(120.0, numbered(16)),
+                &[(0, Action::Send(Command::Play))],
+                frames,
+                64,
+            ));
+            let expected: Vec<(u64, u32)> = (0..total_steps)
+                .map(|n| {
+                    let step = if n <= at_step {
+                        n % 16
+                    } else {
+                        (4 + n - at_step) % u64::from(new_steps)
+                    };
+                    (n * 6_000, step as u32)
+                })
+                .collect();
+            let case = format!("16 -> {new_steps} steps in loop {}", loop_index + 1);
+            assert_eq!(got, expected, "{case}");
+            // The first onset after the swap is on the frame the unswapped run gives step 5.
+            let next = got.iter().find(|(f, _)| *f >= swap).unwrap();
+            assert_eq!(*next, steady[at_step as usize + 1], "{case}");
+            assert_eq!(next.1, 5, "{case}");
+        }
+    }
+}
+
+#[test]
+fn a_note_off_booked_before_a_tempo_jump_does_not_cut_a_newer_note() {
+    // Gate mode, one key: note A (step 0, one step) books its note-off at frame 6 000 at
+    // 120 BPM. At 400 BPM from frame 3 008, note B (step 1, eight steps) starts at frame
+    // 3 906, before A's note-off arrives. That note-off releases A only: B holds until its
+    // own end (frame 18 306).
+    let mut gate = exact();
+    gate[ONE_SHOT] = 0.0;
+    let state = EngineState {
+        bpm: 120.0,
+        channels: vec![channel(1, &dc(), gate)],
+        pattern: PatternData {
+            length: 16 * STEP_TICKS,
+            notes: vec![note(0, 1, STEP_TICKS), note(STEP_TICKS, 1, 8 * STEP_TICKS)],
+        },
+    };
+    let jump = 3_008;
+    assert_eq!(block_start(jump), jump);
+    // The next loop starts at frame 30 906.
+    let out = play(
+        state,
+        SR,
+        &[(jump, Command::SetTempo { bpm: 400.0 })],
+        30_000,
+    );
+    let l = left(&out);
+    // A and B together, then B alone (A's 40 ms release is far below -60 dB by 15 000).
+    assert!((l[5_000] - 1.0).abs() < 1e-3, "{}", l[5_000]);
+    assert!(
+        (l[15_000] - 0.5).abs() < 1e-3,
+        "B still sounds: {}",
+        l[15_000]
+    );
+    assert!(
+        l[29_999].abs() < 1e-3,
+        "B released at its end: {}",
+        l[29_999]
+    );
+}
+
 #[test]
 fn play_loops_stops_emitting_at_the_end() {
     let pat = pattern(16, &steps(&[0, 4, 8, 12]));

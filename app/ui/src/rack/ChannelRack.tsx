@@ -1,4 +1,4 @@
-import { useCallback, useState, type CSSProperties, type KeyboardEvent, type RefObject } from "react";
+import { useCallback, useRef, useState, type CSSProperties, type KeyboardEvent, type RefObject } from "react";
 import { channelAdd, channelSetSample, errorText, type ChannelView } from "../api/project";
 import type { LiveFrame } from "../live/decode";
 import { useProject } from "../project/context";
@@ -119,9 +119,12 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, createRend
   );
 }
 
-/** The pattern's length in steps: type it, Enter or leaving the field sets it (clamped). */
+/** The pattern's length in steps: type it, Enter or leaving the field sets it (clamped), and
+ * Enter leaves the field so Space is play/stop again. */
 function PatternLength({ steps, onCommit }: { steps: number; onCommit: (steps: number) => void }) {
   const [draft, setDraft] = useState<string | null>(null);
+  // Set when Enter already committed: the blur that follows must not commit again.
+  const committed = useRef(false);
   const commit = (text: string) => {
     setDraft(null);
     const n = Math.round(Number(text.trim()));
@@ -130,8 +133,11 @@ function PatternLength({ steps, onCommit }: { steps: number; onCommit: (steps: n
     if (next !== steps) onCommit(next);
   };
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") commit(e.currentTarget.value);
-    else if (e.key === "Escape") setDraft(null);
+    if (e.key === "Enter") {
+      commit(e.currentTarget.value);
+      committed.current = true;
+      e.currentTarget.blur();
+    } else if (e.key === "Escape") setDraft(null);
   };
   return (
     <label className="chip pattern-length" data-hint="How many steps the pattern has, 1 to 256. A step is a sixteenth.">
@@ -144,7 +150,8 @@ function PatternLength({ steps, onCommit }: { steps: number; onCommit: (steps: n
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={onKeyDown}
         onBlur={(e) => {
-          if (draft !== null) commit(e.currentTarget.value);
+          if (committed.current) committed.current = false;
+          else if (draft !== null) commit(e.currentTarget.value);
         }}
       />
       <span>steps</span>

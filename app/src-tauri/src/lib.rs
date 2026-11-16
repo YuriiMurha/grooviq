@@ -10,6 +10,7 @@ mod audio_log;
 mod commands;
 mod events;
 mod exit;
+mod menu;
 pub mod panic_hook;
 mod project_cmds;
 mod settings;
@@ -61,7 +62,8 @@ pub(crate) struct Audio {
     /// The recovery folder; `None` if it could not be taken (no autosave then). Taken out by a
     /// clean exit.
     recovery: Arc<Mutex<Option<RecoveryDir>>>,
-    /// What the last session left unsaved, until the person restores or discards it.
+    /// The newest project an earlier session left unsaved, until the person restores or
+    /// discards it (undecided, it is offered again on the next launch).
     pending_recovery: Mutex<Option<Recovery>>,
     /// Where backups of overwritten project files go.
     backups: PathBuf,
@@ -200,13 +202,18 @@ fn start_recovery(
     };
     match RecoveryDir::start(&dir.join("recovery")) {
         Ok((recovery, found)) => {
-            if found.is_some() {
+            if !found.is_empty() {
                 lock(log).push(
                     Level::Info,
-                    "The last session ended without saving; its autosave is offered back",
+                    format!(
+                        "An earlier session ended without saving; its autosave is offered back \
+                         ({} waiting)",
+                        found.len()
+                    ),
                 );
             }
-            (Some(recovery), found)
+            // The newest first; the others wait for later launches.
+            (Some(recovery), found.into_iter().next())
         }
         Err(e) => {
             lock(log).push(Level::Warn, format!("Autosave and recovery are off: {e}"));
@@ -323,7 +330,16 @@ fn watch_health(controller: &Mutex<Controller>, log: &Mutex<AudioLog>, app: &App
 /// Runs the app.
 pub fn run() {
     panic_hook::install();
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Cmd+Q through our own Quit item, so it asks about unsaved changes (see `menu`).
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(menu::build).on_menu_event(|app, event| {
+        if menu::is_quit(event.id().as_ref()) {
+            // Raises a preventable `ExitRequested`, held below like a window close.
+            app.exit(0);
+        }
+    });
+    let app = builder
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let audio = start_audio(app.handle());

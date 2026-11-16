@@ -1,0 +1,246 @@
+//! The macOS app menu: Tauri's standard one, except Quit.
+//!
+//! The standard menu's Quit (Cmd+Q) is the native `terminate:` item, and tao 0.37 has no
+//! `applicationShouldTerminate:` handler, so it ends the app at once: no `ExitRequested`, no
+//! "Save changes?". Ours is a plain item that calls `AppHandle::exit`, which raises a
+//! preventable `RunEvent::ExitRequested` (tauri 2.12 `AppHandle::exit` -> `request_exit` ->
+//! `Message::RequestExit` -> `ExitRequested { code: Some(0) }`), so the run loop holds it
+//! like a window close while there are unsaved changes.
+//!
+//! The menu is described as data ([`spec`]) so the tests can check it without a running app;
+//! [`build`] turns the description into Tauri's menu. Other platforms keep no app menu.
+
+// Built on macOS only; the description and its tests are checked everywhere.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
+use tauri::menu::{
+    AboutMetadata, HELP_SUBMENU_ID, Menu, MenuItem, PredefinedMenuItem, Submenu, WINDOW_SUBMENU_ID,
+};
+use tauri::{AppHandle, Runtime};
+
+/// The id of Grooviq's own Quit item.
+pub(crate) const QUIT_ID: &str = "grooviq-quit";
+/// Its shortcut: Cmd+Q on macOS.
+pub(crate) const QUIT_ACCELERATOR: &str = "CmdOrCtrl+Q";
+
+/// One of Tauri's predefined (native) menu items.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Native {
+    About,
+    Services,
+    Hide,
+    HideOthers,
+    ShowAll,
+    /// The native Quit, which skips `ExitRequested`. Never used (see the module docs); named
+    /// so the tests can say it is absent.
+    #[allow(dead_code)]
+    Quit,
+    CloseWindow,
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Fullscreen,
+    Minimize,
+    Maximize,
+}
+
+/// An entry of a submenu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Entry {
+    Native(Native),
+    Separator,
+    /// Grooviq's Quit: [`QUIT_ID`], [`QUIT_ACCELERATOR`].
+    Quit,
+}
+
+/// A submenu: its id (when macOS gives it a role), title and entries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Sub {
+    pub id: Option<&'static str>,
+    pub title: String,
+    pub entries: Vec<Entry>,
+}
+
+/// The menu of an app called `app_name`: Tauri's standard macOS menu (`Menu::default`), with
+/// Show All added and Grooviq's own Quit in place of the native one.
+pub(crate) fn spec(app_name: &str) -> Vec<Sub> {
+    use Entry::{Native as N, Quit, Separator};
+    use Native::*;
+    let sub = |id, title: &str, entries| Sub {
+        id,
+        title: title.to_string(),
+        entries,
+    };
+    vec![
+        sub(
+            None,
+            app_name,
+            vec![
+                N(About),
+                Separator,
+                N(Services),
+                Separator,
+                N(Hide),
+                N(HideOthers),
+                N(ShowAll),
+                Separator,
+                Quit,
+            ],
+        ),
+        sub(None, "File", vec![N(CloseWindow)]),
+        sub(
+            None,
+            "Edit",
+            vec![
+                N(Undo),
+                N(Redo),
+                Separator,
+                N(Cut),
+                N(Copy),
+                N(Paste),
+                N(SelectAll),
+            ],
+        ),
+        sub(None, "View", vec![N(Fullscreen)]),
+        sub(
+            Some(WINDOW_SUBMENU_ID),
+            "Window",
+            vec![N(Minimize), N(Maximize), Separator, N(CloseWindow)],
+        ),
+        sub(Some(HELP_SUBMENU_ID), "Help", vec![]),
+    ]
+}
+
+/// The text of the Quit item.
+pub(crate) fn quit_text(app_name: &str) -> String {
+    format!("Quit {app_name}")
+}
+
+/// Whether a menu event asks to quit.
+pub(crate) fn is_quit(id: &str) -> bool {
+    id == QUIT_ID
+}
+
+/// Builds [`spec`] as the app's menu.
+pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let name = app.package_info().name.clone();
+    let config = app.config();
+    let about = AboutMetadata {
+        name: Some(name.clone()),
+        version: Some(app.package_info().version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+    let menu = Menu::new(app)?;
+    for sub in spec(&name) {
+        let submenu = match sub.id {
+            Some(id) => Submenu::with_id(app, id, &sub.title, true)?,
+            None => Submenu::new(app, &sub.title, true)?,
+        };
+        for entry in sub.entries {
+            match entry {
+                Entry::Separator => submenu.append(&PredefinedMenuItem::separator(app)?)?,
+                Entry::Quit => submenu.append(&MenuItem::with_id(
+                    app,
+                    QUIT_ID,
+                    quit_text(&name),
+                    true,
+                    Some(QUIT_ACCELERATOR),
+                )?)?,
+                Entry::Native(native) => submenu.append(&predefined(app, native, &about)?)?,
+            }
+        }
+        menu.append(&submenu)?;
+    }
+    Ok(menu)
+}
+
+fn predefined<R: Runtime>(
+    app: &AppHandle<R>,
+    native: Native,
+    about: &AboutMetadata<'_>,
+) -> tauri::Result<PredefinedMenuItem<R>> {
+    match native {
+        Native::About => PredefinedMenuItem::about(app, None, Some(about.clone())),
+        Native::Services => PredefinedMenuItem::services(app, None),
+        Native::Hide => PredefinedMenuItem::hide(app, None),
+        Native::HideOthers => PredefinedMenuItem::hide_others(app, None),
+        Native::ShowAll => PredefinedMenuItem::show_all(app, None),
+        Native::Quit => PredefinedMenuItem::quit(app, None),
+        Native::CloseWindow => PredefinedMenuItem::close_window(app, None),
+        Native::Undo => PredefinedMenuItem::undo(app, None),
+        Native::Redo => PredefinedMenuItem::redo(app, None),
+        Native::Cut => PredefinedMenuItem::cut(app, None),
+        Native::Copy => PredefinedMenuItem::copy(app, None),
+        Native::Paste => PredefinedMenuItem::paste(app, None),
+        Native::SelectAll => PredefinedMenuItem::select_all(app, None),
+        Native::Fullscreen => PredefinedMenuItem::fullscreen(app, None),
+        Native::Minimize => PredefinedMenuItem::minimize(app, None),
+        Native::Maximize => PredefinedMenuItem::maximize(app, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries(menu: &[Sub]) -> impl Iterator<Item = Entry> + '_ {
+        menu.iter().flat_map(|s| s.entries.iter().copied())
+    }
+
+    #[test]
+    fn cmd_q_is_our_own_quit_and_the_native_one_is_gone() {
+        let menu = spec("Grooviq");
+        assert!(
+            !entries(&menu).any(|e| e == Entry::Native(Native::Quit)),
+            "the native Quit ends the app without asking"
+        );
+        assert_eq!(entries(&menu).filter(|&e| e == Entry::Quit).count(), 1);
+        // Last in the app menu, as on every Mac app.
+        assert_eq!(menu[0].title, "Grooviq");
+        assert_eq!(menu[0].entries.last(), Some(&Entry::Quit));
+        assert_eq!(QUIT_ACCELERATOR, "CmdOrCtrl+Q");
+        assert_eq!(quit_text("Grooviq"), "Quit Grooviq");
+    }
+
+    #[test]
+    fn the_standard_items_stay() {
+        let menu = spec("Grooviq");
+        for native in [
+            Native::About,
+            Native::Hide,
+            Native::HideOthers,
+            Native::ShowAll,
+        ] {
+            assert!(
+                menu[0].entries.contains(&Entry::Native(native)),
+                "{native:?}"
+            );
+        }
+        // Text fields keep copy and paste.
+        let edit = menu.iter().find(|s| s.title == "Edit").unwrap();
+        for native in [
+            Native::Undo,
+            Native::Redo,
+            Native::Cut,
+            Native::Copy,
+            Native::Paste,
+            Native::SelectAll,
+        ] {
+            assert!(edit.entries.contains(&Entry::Native(native)), "{native:?}");
+        }
+        let window = menu.iter().find(|s| s.title == "Window").unwrap();
+        assert_eq!(window.id, Some(WINDOW_SUBMENU_ID));
+    }
+
+    #[test]
+    fn only_the_quit_item_asks_to_exit() {
+        assert!(is_quit(QUIT_ID));
+        assert!(!is_quit("quit"));
+        assert!(!is_quit(""));
+    }
+}
