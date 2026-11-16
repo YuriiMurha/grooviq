@@ -8,7 +8,8 @@
 #   QA_HOME=<dir>  reuse this folder (kept afterwards), e.g. to relaunch after a Force Quit.
 #   APP=<path>     the .app to run (default: the release build).
 #
-# Runs in the foreground until the app quits; a folder it made itself is removed then.
+# Runs in the foreground until the app quits; a folder it made itself is removed then. INT or
+# TERM to this script stops the app first.
 set -eu
 
 app=${APP:-target/release/bundle/macos/Grooviq.app}
@@ -32,7 +33,18 @@ cleanup() {
 		rm -rf "$home"
 	fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
 
 echo "Silent QA run: $app (GROOVIQ_AUDIO=null), home $home"
-GROOVIQ_AUDIO=null HOME="$home" CFFIXED_USER_HOME="$home" "$app/Contents/MacOS/$exe"
+GROOVIQ_AUDIO=null HOME="$home" CFFIXED_USER_HOME="$home" "$app/Contents/MacOS/$exe" &
+child=$!
+# Ctrl+C or a kill of this script ends the app too (a background child ignores SIGINT), and
+# the folder is cleaned only once the app is gone.
+trap 'kill -TERM "$child" 2>/dev/null' INT TERM
+status=0
+wait "$child" || status=$?
+# A trapped signal interrupts `wait` before the app has ended: wait for the app itself.
+while kill -0 "$child" 2>/dev/null; do
+	wait "$child" || status=$?
+done
+exit "$status"

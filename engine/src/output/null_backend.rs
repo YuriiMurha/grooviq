@@ -113,3 +113,80 @@ pub fn run_silent(slot: &AudioSlot, quit: &AtomicBool, rate: u32) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{EngineConfig, LiveShared, engine};
+    use std::time::Instant;
+
+    /// A slot that keeps its processor whatever the backend does, so any callback after
+    /// `close` shows as frames rendered.
+    fn slot() -> (Arc<AudioSlot>, Arc<LiveShared>, crate::Controller) {
+        let (c, p) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        let live = c.live_shared();
+        let slot = Arc::new(AudioSlot::new(Arc::clone(&live)));
+        slot.put(p);
+        (slot, live, c)
+    }
+
+    fn wait_for_frames(live: &LiveShared, more_than: u64) {
+        let start = Instant::now();
+        while live.snapshot().frames <= more_than {
+            assert!(start.elapsed() < Duration::from_secs(5), "no callbacks");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Frames rendered over `wait`, with nothing else touching the slot.
+    fn frames_over(live: &LiveShared, wait: Duration) -> u64 {
+        let before = live.snapshot().frames;
+        thread::sleep(wait);
+        live.snapshot().frames - before
+    }
+
+    #[test]
+    fn once_close_returns_no_callback_runs() {
+        let (slot, live, _c) = slot();
+        let mut backend = null_backend();
+        let info = backend.outputs().remove(0);
+        backend.open(&info, Arc::clone(&slot)).unwrap();
+        wait_for_frames(&live, 0);
+        backend.close();
+        assert_eq!(frames_over(&live, Duration::from_millis(40)), 0);
+        // Closing again is harmless.
+        backend.close();
+    }
+
+    #[test]
+    fn opening_again_replaces_the_stream_rather_than_adding_one() {
+        let (slot, live, _c) = slot();
+        let mut backend = null_backend();
+        let info = backend.outputs().remove(0);
+        backend.open(&info, Arc::clone(&slot)).unwrap();
+        backend.open(&info, Arc::clone(&slot)).unwrap();
+        backend.open(&info, Arc::clone(&slot)).unwrap();
+        wait_for_frames(&live, 0);
+        // One stream: about 48 000 frames a second, not two or three times that.
+        let rendered = frames_over(&live, Duration::from_millis(500));
+        assert!(rendered < 24_000 + 2_048, "{rendered} frames in 0.5 s");
+        drop(backend);
+        assert_eq!(
+            frames_over(&live, Duration::from_millis(40)),
+            0,
+            "Drop closes"
+        );
+    }
+
+    #[test]
+    fn a_device_it_does_not_have_is_refused() {
+        let (slot, live, _c) = slot();
+        let mut backend = null_backend();
+        let mut info = backend.outputs().remove(0);
+        info.id = "speakers".into();
+        assert!(backend.open(&info, slot).is_err());
+        assert_eq!(frames_over(&live, Duration::from_millis(40)), 0);
+    }
+}

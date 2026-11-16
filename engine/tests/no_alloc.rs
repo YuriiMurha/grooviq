@@ -13,7 +13,7 @@ use grooviq_engine::{
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SR: f32 = 48_000.0;
 
@@ -98,19 +98,31 @@ fn the_silent_output_loop_is_allocation_free() {
     );
     let slot = opened.lock().unwrap().clone().expect("the device opened");
     // The loop the silent backend runs on its own thread, here on this one: paced callbacks
-    // until told to quit, 50 ms from now.
+    // until told to quit, once the stopper has seen 8 of them (or after 10 s, so a loop that
+    // renders nothing fails below instead of hanging).
+    let live = c.lock().unwrap().live_shared();
+    let start = live.snapshot().frames;
     let quit = Arc::new(AtomicBool::new(false));
     let stopper = thread::spawn({
-        let quit = Arc::clone(&quit);
+        let (quit, live) = (Arc::clone(&quit), Arc::clone(&live));
         move || {
-            thread::sleep(Duration::from_millis(50));
+            let since = Instant::now();
+            while live.snapshot().frames < start + 8 * 256
+                && since.elapsed() < Duration::from_secs(10)
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
             quit.store(true, Ordering::Release);
         }
     });
     assert_no_alloc(|| run_silent(&slot, &quit, 48_000));
     stopper.join().unwrap();
     let live = c.lock().unwrap().live();
-    assert!(live.frames >= 1_024, "it rendered: {} frames", live.frames);
+    assert!(
+        live.frames >= start + 8 * 256,
+        "it rendered: {} frames",
+        live.frames - start
+    );
     assert!(live.peak[0] > 0.1, "it rendered sound");
     drop(out);
 }
