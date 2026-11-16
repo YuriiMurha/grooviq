@@ -1,4 +1,4 @@
-//! DSP: built-in synth and effects. Parameter ranges live in each device module's `SPEC` table;
+//! DSP: built-in synth, sampler and effects. Parameter ranges live in each device module's `SPEC` table;
 //! the index there is the `set_param` index here.
 //!
 //! Rules for every device:
@@ -21,6 +21,7 @@ pub mod eq;
 pub mod limiter;
 pub mod ott;
 pub mod reverb;
+pub mod sampler;
 pub mod synth;
 pub mod utility;
 
@@ -29,6 +30,7 @@ pub mod utility;
 pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
     Some(match id {
         "synth" => &synth::SPEC,
+        "sampler" => &sampler::SPEC,
         "eq" => &eq::SPEC,
         "comp" => &comp::SPEC,
         "limiter" => &limiter::SPEC,
@@ -41,11 +43,13 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
     })
 }
 
-/// Creates a device by its `id` ("synth", "eq", "comp", "limiter", "drive",
-/// "reverb", "delay", "ott", "utility"). The sampler lives in the `core` crate.
+/// Creates a device by its `id` ("synth", "sampler", "eq", "comp", "limiter", "drive",
+/// "reverb", "delay", "ott", "utility"). A sampler made here has no sample: it stays silent
+/// until the owner of the concrete [`sampler::Sampler`] calls `set_sample`.
 pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
     Some(match id {
         "synth" => Box::new(synth::Synth::new(sample_rate)),
+        "sampler" => Box::new(sampler::Sampler::new(sample_rate)),
         "eq" => Box::new(eq::Eq::new(sample_rate)),
         "comp" => Box::new(comp::Comp::new(sample_rate)),
         "limiter" => Box::new(limiter::Limiter::new(sample_rate)),

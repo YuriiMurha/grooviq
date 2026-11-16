@@ -9,6 +9,8 @@
 //! [`render_offline`] drives the same engine faster than real time. [`AudioOutput`] plays the
 //! processor on the output the user expects: it follows the system default, stops playback
 //! rather than move sound from headphones to speakers, and survives devices coming and going.
+//! [`decode_sample`] and [`load_sample`] turn sample files into [`SampleBuf`]s (on a control
+//! thread) for the sampler.
 //!
 //! Real-time rules for everything [`AudioProcessor::process`] reaches: no allocating or
 //! freeing, no locks, no I/O, no logging. A panic is the one exception (unwinding allocates and
@@ -22,12 +24,14 @@ mod live;
 mod offline;
 mod output;
 mod processor;
+mod sample_file;
 mod stream;
 
 use std::sync::Arc;
 
 pub use command::Command;
 pub use controller::{Controller, HealthEvent};
+pub use grooviq_dsp::sampler::SampleBuf;
 pub use live::{LIVE_LEN, LIVE_VERSION, LiveShared, LiveSnapshot, decode_live, encode_live};
 pub use offline::render_offline;
 pub use output::{
@@ -35,6 +39,9 @@ pub use output::{
     OutputMonitor, Transport, classify, cpal_backend,
 };
 pub use processor::{AudioProcessor, in_audio_callback};
+pub use sample_file::{
+    MAX_SAMPLE_SECONDS, SampleError, decode_sample, load_sample, load_sample_with_limit,
+};
 pub use stream::{StreamServer, start_stream};
 
 /// Frames in every internal block. Commands apply at block starts; notes at their exact frame.

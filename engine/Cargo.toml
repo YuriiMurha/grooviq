@@ -20,6 +20,9 @@ grooviq-dsp = { path = "../dsp" }
 rtrb = "0.3"
 getrandom = "0.4"
 tungstenite = "0.30"
+# Sample files (MPL-2.0): only the containers and codecs a sampler opens, plus ID3 tags so an
+# MP3 with large cover art (past the probe's 1 MB byte scan) still opens.
+symphonia = { version = "0.6", default-features = false, features = ["wav", "aiff", "pcm", "flac", "mp3", "ogg", "vorbis", "id3v1", "id3v2"] }
 
 # An output's transport type (Bluetooth, built-in, HDMI...), which cpal does not expose, and the
 # thread CoreAudio notifies on (`AudioHardwareDeprecated` holds kAudioHardwarePropertyRunLoop):
@@ -31,6 +34,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 [dev-dependencies]
 # Without the default `disable_release`, the allocation check also runs in release test builds.
 assert_no_alloc = { version = "1.1", default-features = false }
+hound = "3"
 
 [[test]]
 name = "panic"
