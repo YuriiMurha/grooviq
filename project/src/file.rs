@@ -235,6 +235,9 @@ fn stage_save_with_limits(
     path: &Path,
     limits: Limits,
 ) -> io::Result<Staged> {
+    // A crash's leftover, if it is old enough; best effort (the temp file is truncated below
+    // anyway when this save goes through).
+    let _ = grooviq_engine::remove_stale_sibling(path, ".tmp");
     // Everything that can be refused is refused before the first byte is written.
     let (project, entries) = plan(project, samples, limits)?;
     stage(path, |file| write_zip(file, &project, &entries))
@@ -407,15 +410,13 @@ fn stage(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Re
 }
 
 fn temp_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".tmp");
-    PathBuf::from(name)
+    grooviq_engine::sibling(path, ".tmp")
 }
 
 /// Syncs the folder so the rename itself survives a power cut. Best effort: some file systems
 /// refuse to sync a folder, and the file is already in place.
 #[cfg(unix)]
-fn sync_folder(path: &Path) {
+pub(crate) fn sync_folder(path: &Path) {
     let folder = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -426,7 +427,7 @@ fn sync_folder(path: &Path) {
 }
 
 #[cfg(not(unix))]
-fn sync_folder(_path: &Path) {}
+pub(crate) fn sync_folder(_path: &Path) {}
 
 /// Opens a project: reads `project.json`, migrates it to this version, validates it and finds
 /// each channel's sample bytes (see [`Loaded`]).
@@ -830,6 +831,40 @@ mod tests {
         // At the cap exactly is fine.
         let (p, samples) = with_sizes(&[10, 10]);
         save_with_limits(&p, &samples, &path, false, limits).unwrap();
+    }
+
+    fn age(path: &Path, seconds: u64) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(seconds))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_save_clears_a_stale_temp_file_of_its_own_and_only_that() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let tmp = dir.path().join("a.grooviq.tmp");
+        let other = dir.path().join("b.grooviq.tmp");
+        let (p, samples) = with_sizes(&[6]);
+        let limits = Limits {
+            sample: 5,
+            total: 100,
+        };
+        // A refused save writes nothing itself, so a temp file left by a crash would stay.
+        fs::write(&tmp, b"crash leftover").unwrap();
+        fs::write(&other, b"another project's").unwrap();
+        age(&other, 3600);
+
+        // A fresh one may be a save still running: untouched.
+        save_with_limits(&p, &samples, &path, false, limits).unwrap_err();
+        assert_eq!(fs::read(&tmp).unwrap(), b"crash leftover");
+        // Ten minutes and a bit: a crash's.
+        age(&tmp, 11 * 60);
+        save_with_limits(&p, &samples, &path, false, limits).unwrap_err();
+        assert_eq!(leftovers(dir.path()), vec!["b.grooviq.tmp"]);
     }
 
     #[test]

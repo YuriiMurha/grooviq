@@ -556,11 +556,12 @@ fn saving_over_a_file_keeps_a_backup() {
     let now = Instant::now();
     session.apply(Edit::SetTempo { bpm: 100.0 }, now).unwrap();
     session.save(Some(&path), &backups).unwrap();
-    assert!(!backups.join("song").exists(), "nothing to back up yet");
+    let folder = grooviq_project::backup_folder(&path, &backups).unwrap();
+    assert!(!folder.exists(), "nothing to back up yet");
 
     session.apply(Edit::SetTempo { bpm: 101.0 }, now).unwrap();
     session.save(None, &backups).unwrap();
-    let copies: Vec<PathBuf> = std::fs::read_dir(backups.join("song"))
+    let copies: Vec<PathBuf> = std::fs::read_dir(&folder)
         .unwrap()
         .map(|e| e.unwrap().path())
         .collect();
@@ -569,9 +570,10 @@ fn saving_over_a_file_keeps_a_backup() {
     assert_eq!(load(&path).unwrap().project.bpm, 101.0);
 }
 
-/// The tempos of the backups of `song`, oldest first.
-fn backup_tempos(backups: &Path) -> Vec<f32> {
-    let mut copies: Vec<PathBuf> = std::fs::read_dir(backups.join("song"))
+/// The tempos of the backups of the project at `project`, oldest first.
+fn backup_tempos(project: &Path, backups: &Path) -> Vec<f32> {
+    let folder = grooviq_project::backup_folder(project, backups).unwrap();
+    let mut copies: Vec<PathBuf> = std::fs::read_dir(folder)
         .unwrap()
         .map(|e| e.unwrap().path())
         .collect();
@@ -592,7 +594,7 @@ fn saved_twice(dir: &Path) -> (Session, PathBuf, PathBuf) {
     session.save(Some(&path), &backups).unwrap();
     session.apply(Edit::SetTempo { bpm: 110.0 }, now).unwrap();
     session.save(None, &backups).unwrap();
-    assert_eq!(backup_tempos(&backups), [100.0]);
+    assert_eq!(backup_tempos(&path, &backups), [100.0]);
     (session, path, backups)
 }
 
@@ -605,7 +607,7 @@ fn saves_that_change_nothing_keep_the_older_backups() {
     for _ in 0..10 {
         session.save(None, &backups).unwrap();
     }
-    assert_eq!(backup_tempos(&backups), [100.0, 110.0]);
+    assert_eq!(backup_tempos(&path, &backups), [100.0, 110.0]);
     assert_eq!(load(&path).unwrap().project.bpm, 110.0);
 }
 
@@ -622,7 +624,7 @@ fn a_failed_save_makes_no_backup() {
         let err = session.save(None, &backups).unwrap_err();
         assert!(matches!(err, SessionError::Save(_)), "{err}");
     }
-    assert_eq!(backup_tempos(&backups), [100.0], "no backup rotated");
+    assert_eq!(backup_tempos(&path, &backups), [100.0], "no backup rotated");
     assert_eq!(load(&path).unwrap().project.bpm, 110.0);
     assert!(session.view().dirty);
 }
@@ -652,7 +654,7 @@ fn a_refused_save_makes_no_backup() {
         let err = session.save(None, &backups).unwrap_err();
         assert!(err.to_string().contains("saving would lose it"), "{err}");
     }
-    assert_eq!(backup_tempos(&backups), [100.0], "no backup rotated");
+    assert_eq!(backup_tempos(&path, &backups), [100.0], "no backup rotated");
     assert_eq!(load(&path).unwrap().project.bpm, 110.0);
 }
 
@@ -791,7 +793,7 @@ fn the_view_shows_the_last_autosave_time() {
     session.apply(Edit::SetTempo { bpm: 100.0 }, t0).unwrap();
     assert_eq!(session.view().autosaved_at, None);
     session.autosave_snapshot(t0 + AUTOSAVE_PERIOD).unwrap();
-    session.autosaved(1_700_000_000);
+    assert!(session.autosaved(session.generation(), 1_700_000_000));
     assert_eq!(session.view().autosaved_at, Some(1_700_000_000));
 }
 
@@ -847,6 +849,76 @@ fn loaded_with_a_missing_sample() -> Loaded {
         samples,
         warnings: vec!["Channel \"Snare\": its sample is not in the project file.".into()],
     }
+}
+
+#[test]
+fn a_sample_shared_by_channels_is_decoded_once_and_shared() {
+    let mut project = Project::new();
+    project.next_id = 6;
+    for (id, name) in [(1, "Kick"), (2, "Kick 2"), (3, "Kick 3"), (4, "Snare")] {
+        project
+            .channels
+            .push(channel(id, name, Some(&format!("samples/{id}-x.wav"))));
+    }
+    // Two copies of the same bytes (not the same allocation), one more through the same
+    // allocation, and a different sound.
+    let shared = Arc::new(wav_bytes(4_800));
+    let file = |bytes: &Arc<Vec<u8>>| SampleFile {
+        name: "kick.wav".into(),
+        bytes: Arc::clone(bytes),
+    };
+    let mut samples = std::collections::HashMap::new();
+    samples.insert(1, file(&shared));
+    samples.insert(2, file(&Arc::new(wav_bytes(4_800))));
+    samples.insert(3, file(&shared));
+    samples.insert(4, file(&Arc::new(wav_bytes(2_400))));
+    let loaded = Loaded {
+        project,
+        samples,
+        warnings: Vec::new(),
+    };
+
+    let decoded = decode_samples(&loaded);
+    assert!(decoded.missing.is_empty() && decoded.warnings.is_empty());
+    let (a, b, c, d) = (
+        &decoded.samples[&1],
+        &decoded.samples[&2],
+        &decoded.samples[&3],
+        &decoded.samples[&4],
+    );
+    assert!(Arc::ptr_eq(a, b), "equal bytes: one buffer");
+    assert!(Arc::ptr_eq(a, c), "the same bytes: one buffer");
+    assert!(!Arc::ptr_eq(a, d), "different bytes: their own buffer");
+    assert_eq!(a.l.len() * 2, d.l.len() * 4);
+}
+
+#[test]
+fn a_shared_sample_that_does_not_decode_warns_for_each_channel() {
+    let mut project = Project::new();
+    project.next_id = 3;
+    project
+        .channels
+        .push(channel(1, "Hat", Some("samples/1-h")));
+    project
+        .channels
+        .push(channel(2, "Hat 2", Some("samples/1-h")));
+    let bad = || SampleFile {
+        name: "hat.wav".into(),
+        bytes: Arc::new(b"not a sound".to_vec()),
+    };
+    let mut samples = std::collections::HashMap::new();
+    samples.insert(1, bad());
+    samples.insert(2, bad());
+    let loaded = Loaded {
+        project,
+        samples,
+        warnings: Vec::new(),
+    };
+    let decoded = decode_samples(&loaded);
+    assert_eq!(decoded.missing.len(), 2);
+    assert_eq!(decoded.warnings.len(), 2);
+    assert!(decoded.warnings[0].contains("\"Hat\""));
+    assert!(decoded.warnings[1].contains("\"Hat 2\""));
 }
 
 #[test]

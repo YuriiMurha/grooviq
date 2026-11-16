@@ -1,6 +1,12 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { errorText, transportPlay, transportStop } from "./api/project";
+import {
+  errorText,
+  onAutosaveDisabled,
+  onAutosaveFailed,
+  transportPlay,
+  transportStop,
+} from "./api/project";
 import {
   SYSTEM_DEFAULT,
   audioLog,
@@ -159,6 +165,16 @@ export function App() {
       unlisten.then((stop) => stop());
     };
   }, [refresh, loadSettings, toast]);
+
+  // Autosave trouble the person must hear of: the backend says each once.
+  useEffect(() => {
+    const failed = onAutosaveFailed((message) => toast(message, true));
+    const disabled = onAutosaveDisabled((message) => toast(message, true));
+    return () => {
+      failed.then((stop) => stop());
+      disabled.then((stop) => stop());
+    };
+  }, [toast]);
 
   // The live stream: meters read `latest` every animation frame; the rest becomes state only
   // when it changes.

@@ -577,3 +577,103 @@ fn full_scale_is_not_clipped() {
     let (_, samples) = read_i32(&path);
     assert_eq!(samples.iter().max(), Some(&8_388_607));
 }
+
+/// Sets `path`'s modification time `age` in the past.
+fn backdate(path: &Path, age: std::time::Duration) {
+    // A folder cannot be opened for writing; a read handle sets its time on Unix.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .or_else(|_| std::fs::File::open(path))
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now() - age)
+        .unwrap();
+}
+
+#[test]
+fn a_fresh_part_file_is_never_truncated_and_the_export_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    let part = part_of(&path);
+    // Another export of this file is writing it (or crashed a moment ago).
+    std::fs::write(&part, b"someone else's half file").unwrap();
+
+    let result = export(&groove(), &options(WavFormat::Pcm24, 1), &path);
+    let Err(ExportError::Io(e)) = result else {
+        panic!("expected an Io error, got {result:?}");
+    };
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+    let message = ExportError::Io(e).to_string();
+    assert!(message.contains("mix.wav.part"), "{message}");
+    // Neither touched nor deleted by the failed export; no WAV appeared.
+    assert_eq!(std::fs::read(&part).unwrap(), b"someone else's half file");
+    assert_eq!(
+        listing(dir.path()),
+        vec!["mix.wav.part".to_string()],
+        "the failed export left something else behind"
+    );
+}
+
+#[test]
+fn a_stale_part_file_is_cleared_and_the_export_goes_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    let part = part_of(&path);
+    std::fs::write(&part, b"left by a crash").unwrap();
+    backdate(&part, std::time::Duration::from_secs(11 * 60));
+
+    export(&groove(), &options(WavFormat::Pcm24, 1), &path).unwrap();
+    assert_eq!(listing(dir.path()), vec!["mix.wav".to_string()]);
+    let (spec, samples) = read_i32(&path);
+    assert_eq!(spec.channels, 2);
+    assert!(!samples.is_empty());
+}
+
+#[test]
+fn a_part_file_just_under_ten_minutes_old_still_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    let part = part_of(&path);
+    std::fs::write(&part, b"recent").unwrap();
+    backdate(&part, std::time::Duration::from_secs(9 * 60));
+
+    let result = export(&groove(), &options(WavFormat::Pcm24, 1), &path);
+    assert!(matches!(result, Err(ExportError::Io(_))), "{result:?}");
+    assert_eq!(std::fs::read(&part).unwrap(), b"recent");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stale_part_that_is_not_a_regular_file_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    let part = part_of(&path);
+    // Whatever sits at that name is not something an export wrote.
+    std::fs::create_dir(&part).unwrap();
+    std::fs::write(part.join("keep"), b"mine").unwrap();
+    backdate(&part, std::time::Duration::from_secs(60 * 60));
+
+    let result = export(&groove(), &options(WavFormat::Pcm24, 1), &path);
+    assert!(matches!(result, Err(ExportError::Io(_))), "{result:?}");
+    assert_eq!(std::fs::read(part.join("keep")).unwrap(), b"mine");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_old_part_symlink_is_never_followed_or_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    let target = dir.path().join("precious.txt");
+    std::fs::write(&target, b"precious").unwrap();
+    // What the link points at is old: a check that follows links would call it stale.
+    backdate(&target, std::time::Duration::from_secs(60 * 60));
+    std::os::unix::fs::symlink(&target, part_of(&path)).unwrap();
+    let result = export(&groove(), &options(WavFormat::Pcm24, 1), &path);
+    assert!(matches!(result, Err(ExportError::Io(_))), "{result:?}");
+    assert_eq!(std::fs::read(&target).unwrap(), b"precious");
+    assert!(
+        std::fs::symlink_metadata(part_of(&path))
+            .unwrap()
+            .is_symlink()
+    );
+}

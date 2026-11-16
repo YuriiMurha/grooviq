@@ -5,8 +5,41 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Copies an existing `target` to `<backups>/<stem>/<stem>-<unix seconds>.grooviq` and deletes
-/// the oldest backups of that project beyond `keep`. Returns the copy, or `None` when `target`
+/// The folder in `backups` that holds `target`'s backups: `<stem>-<8 hex>`, the hex being a
+/// short stable hash of the folder `target` lives in, so two `song.grooviq` in different folders
+/// never share (and never prune) each other's backups. Folders named after the stem alone, from
+/// earlier versions, are not used and not touched.
+pub fn backup_folder(target: &Path, backups: &Path) -> io::Result<PathBuf> {
+    let stem = target
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "the project has no file name")
+        })?;
+    let parent = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    // Resolved when the folder exists (`a/../a`, a symlink, `/tmp` for `/private/tmp`), so one
+    // folder has one hash however it is spelled; else made absolute.
+    let parent = fs::canonicalize(parent).or_else(|_| std::path::absolute(parent))?;
+    Ok(backups.join(format!("{stem}-{:08x}", short_hash(&parent))))
+}
+
+/// 32 bits of FNV-1a over the path's bytes: stable across runs and versions (the standard
+/// library's hashers promise neither).
+fn short_hash(path: &Path) -> u32 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in path.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    // Fold the halves so every byte of the path reaches all 32 bits.
+    ((hash >> 32) ^ hash) as u32
+}
+
+/// Copies an existing `target` to `<backups>/<stem>-<hash>/<stem>-<unix seconds>.grooviq` (see
+/// [`backup_folder`]) and deletes the oldest backups of that project beyond `keep`. Returns the copy, or `None` when `target`
 /// does not exist yet (nothing to back up), is byte for byte the newest backup already (saves
 /// that change nothing must not rotate older versions out), or `keep` is 0. Other files in the
 /// folder are left alone. Two backups in one second get consecutive numbers, and a new backup
@@ -19,13 +52,11 @@ pub fn backup_before_save(
     if keep == 0 || !target.is_file() {
         return Ok(None);
     }
+    let folder = backup_folder(target, backups)?;
     let stem = target
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "the project has no file name")
-        })?;
-    let folder = backups.join(&stem);
+        .unwrap_or_default();
     fs::create_dir_all(&folder)?;
 
     let now = SystemTime::now()

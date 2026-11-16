@@ -29,6 +29,7 @@ mod command;
 mod controller;
 mod export;
 mod graph;
+mod leftover;
 mod live;
 mod offline;
 mod output;
@@ -45,6 +46,7 @@ pub use command::Command;
 pub use controller::{ControlError, Controller, HealthEvent};
 pub use export::{ExportError, ExportOptions, ExportReport, WavFormat, export_wav};
 pub use grooviq_dsp::sampler::SampleBuf;
+pub use leftover::{STALE_AFTER, remove_stale_sibling, sibling};
 pub use live::{LIVE_LEN, LIVE_VERSION, LiveShared, LiveSnapshot, decode_live, encode_live};
 pub use offline::{render_offline, render_offline_with};
 pub use output::{

@@ -632,7 +632,7 @@ fn backups_keep_the_last_ten() {
         assert_eq!(fs::read(&copy).unwrap(), vec![i]);
         made.push(copy);
     }
-    let folder = backups.join("Song");
+    let folder = grooviq_project::backup_folder(&target, &backups).unwrap();
     let mut kept: Vec<PathBuf> = fs::read_dir(&folder)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -686,7 +686,9 @@ fn backups_keep_the_last_ten() {
     let other = dir.path().join("Other.grooviq");
     fs::write(&other, [1]).unwrap();
     backup_before_save(&other, &backups, 10).unwrap();
-    assert_eq!(fs::read_dir(backups.join("Other")).unwrap().count(), 1);
+    let other_folder = grooviq_project::backup_folder(&other, &backups).unwrap();
+    assert_ne!(other_folder, folder);
+    assert_eq!(fs::read_dir(other_folder).unwrap().count(), 1);
 }
 
 /// A project of channels whose zip has no sample entries: each is `(name, path)`, and says it was

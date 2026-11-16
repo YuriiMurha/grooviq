@@ -145,6 +145,16 @@ export function onAutosaved(handler: (unixSeconds: number) => void): Promise<Unl
   return listen<number>("project-autosaved", (e) => handler(e.payload));
 }
 
+/** An autosave could not be written. Sent once per distinct error until one succeeds. */
+export function onAutosaveFailed(handler: (message: string) => void): Promise<UnlistenFn> {
+  return listen<string>("autosave-failed", (e) => handler(e.payload));
+}
+
+/** Autosave is off in this copy of the app (another one is running). Sent once. */
+export function onAutosaveDisabled(handler: (message: string) => void): Promise<UnlistenFn> {
+  return listen<string>("autosave-disabled", (e) => handler(e.payload));
+}
+
 /** The window was closed, or the app was asked to quit, with unsaved changes. */
 export function onCloseRequested(handler: () => void): Promise<UnlistenFn> {
   return listen<null>("close-requested", () => handler());
