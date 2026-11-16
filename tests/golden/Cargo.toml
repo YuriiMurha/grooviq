@@ -14,4 +14,6 @@ name = "grooviq_golden"
 [dependencies]
 grooviq-dsp = { path = "../../dsp" }
 grooviq-engine = { path = "../../engine" }
+grooviq-project = { path = "../../project" }
 hound = "3"
+libm = "0.2"

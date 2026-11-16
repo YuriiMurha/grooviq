@@ -8,7 +8,8 @@
 //! processor hands back and rebuilds the graph after a panic. [`engine_with`] starts from a
 //! given state.
 //! [`LiveShared`] carries meters and counters from the audio thread to any reader, and
-//! [`render_offline`] drives the same engine faster than real time. [`AudioOutput`] plays the
+//! [`render_offline`] drives the same engine faster than real time, and [`export_wav`] writes
+//! a pattern to a WAV file with an engine of its own. [`AudioOutput`] plays the
 //! processor on the output the user expects: it follows the system default, stops playback
 //! rather than move sound from headphones to speakers, and survives devices coming and going.
 //! [`decode_sample`] and [`load_sample`] turn sample files into [`SampleBuf`]s (on a control
@@ -26,6 +27,7 @@
 mod channel;
 mod command;
 mod controller;
+mod export;
 mod graph;
 mod live;
 mod offline;
@@ -41,6 +43,7 @@ use std::sync::Arc;
 
 pub use command::Command;
 pub use controller::{ControlError, Controller, HealthEvent};
+pub use export::{ExportError, ExportOptions, ExportReport, WavFormat, export_wav};
 pub use grooviq_dsp::sampler::SampleBuf;
 pub use live::{LIVE_LEN, LIVE_VERSION, LiveShared, LiveSnapshot, decode_live, encode_live};
 pub use offline::{render_offline, render_offline_with};

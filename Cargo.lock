@@ -1330,10 +1330,12 @@ dependencies = [
  "getrandom 0.4.3",
  "grooviq-dsp",
  "hound",
+ "libm",
  "objc2-core-audio",
  "objc2-core-foundation",
  "rtrb",
  "symphonia",
+ "tempfile",
  "tungstenite",
 ]
 
@@ -1343,7 +1345,9 @@ version = "0.1.0"
 dependencies = [
  "grooviq-dsp",
  "grooviq-engine",
+ "grooviq-project",
  "hound",
+ "libm",
 ]
 
 [[package]]
