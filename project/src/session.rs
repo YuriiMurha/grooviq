@@ -14,7 +14,7 @@
 
 use crate::backup::backup_before_save;
 use crate::compile::{compile_pattern, engine_state, sampler_values};
-use crate::file::{Loaded, SampleFiles, stage_save};
+use crate::file::{Loaded, SampleFiles, stage_save_faulty};
 use crate::model::{
     BPM, Channel, DEFAULT_KEY, DEFAULT_VELOCITY, EXTENSION, MAX_STEPS, Note, Pattern, Project,
     SampleRef, TimeSignature, VOLUME,
@@ -184,8 +184,19 @@ pub struct DecodedSamples {
 /// Decodes the embedded sample bytes of every channel (and nothing from disk). Slow: call it
 /// before taking the session's lock. Bytes that fail to decode count as missing, with the
 /// decoder's message.
+///
+/// Channels that hold the same bytes (the same allocation, or equal contents with the same file
+/// extension) are decoded once and share one buffer: a kick used on four channels costs one
+/// decode and one copy in memory. Each channel still gets its own warning if they fail.
 pub fn decode_samples(loaded: &Loaded) -> DecodedSamples {
+    /// One distinct sound seen so far, and what decoding it gave.
+    struct Seen<'a> {
+        bytes: &'a Arc<Vec<u8>>,
+        extension: Option<&'a str>,
+        result: Result<Arc<SampleBuf>, String>,
+    }
     let mut out = DecodedSamples::default();
+    let mut seen: Vec<Seen<'_>> = Vec::new();
     for channel in &loaded.project.channels {
         if channel.sample.is_none() {
             continue;
@@ -196,9 +207,24 @@ pub fn decode_samples(loaded: &Loaded) -> DecodedSamples {
             continue;
         };
         let extension = Path::new(&file.name).extension().and_then(|e| e.to_str());
-        match decode_sample(&file.bytes, extension, MAX_SAMPLE_SECONDS) {
+        let known = seen.iter().position(|s| {
+            s.extension == extension
+                && (Arc::ptr_eq(s.bytes, &file.bytes) || **s.bytes == *file.bytes)
+        });
+        let at = known.unwrap_or_else(|| {
+            let result = decode_sample(&file.bytes, extension, MAX_SAMPLE_SECONDS)
+                .map(Arc::new)
+                .map_err(|e| e.to_string());
+            seen.push(Seen {
+                bytes: &file.bytes,
+                extension,
+                result,
+            });
+            seen.len() - 1
+        });
+        match &seen[at].result {
             Ok(buf) => {
-                out.samples.insert(channel.id, Arc::new(buf));
+                out.samples.insert(channel.id, Arc::clone(buf));
             }
             Err(e) => {
                 out.missing.insert(channel.id);
@@ -295,8 +321,19 @@ impl SaveJob {
     /// refused or fails before that point makes no backup, so it never rotates an older one
     /// out. Run it without the session's lock.
     pub fn write(&self, backups: &Path) -> Result<(), SessionError> {
-        let staged =
-            stage_save(&self.project, &self.samples, &self.path).map_err(SessionError::Save)?;
+        self.write_faulty(backups, |_| Ok(()))
+    }
+
+    /// [`Self::write`], with `fault` run on the temp file after the zip is written into it: the
+    /// test hook for "the disk fails while the save is staged". Not part of the API.
+    #[doc(hidden)]
+    pub fn write_faulty(
+        &self,
+        backups: &Path,
+        fault: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+    ) -> Result<(), SessionError> {
+        let staged = stage_save_faulty(&self.project, &self.samples, &self.path, fault)
+            .map_err(SessionError::Save)?;
         // On an error here the staged file is dropped, and the old file stays as it was.
         backup_before_save(&self.path, backups, MAX_BACKUPS).map_err(SessionError::Backup)?;
         staged.commit().map_err(SessionError::Save)
@@ -944,9 +981,21 @@ impl Session {
         Some((self.project.clone(), self.files.clone(), self.path.clone()))
     }
 
-    /// Records that the autosave taken last was written at `unix_seconds`.
-    pub fn autosaved(&mut self, unix_seconds: u64) {
+    /// Counts projects: opening, starting a new one or restoring one moves it on. Read it
+    /// together with [`Self::autosave_snapshot`] to know which project a snapshot is of.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Records that an autosave of the project at `generation` was written at `unix_seconds`.
+    /// Returns false, recording nothing, if another project was opened or started meanwhile:
+    /// that autosave holds the old project, and the caller must remove it.
+    pub fn autosaved(&mut self, generation: u64, unix_seconds: u64) -> bool {
+        if generation != self.generation {
+            return false;
+        }
         self.autosaved_at = Some(unix_seconds);
+        true
     }
 
     /// Records that the autosave taken last could not be written: it is tried again after

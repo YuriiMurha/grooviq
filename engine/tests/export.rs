@@ -508,7 +508,22 @@ fn held_into_the_tail(sample: &Arc<SampleBuf>, step: u32) -> EngineState {
 fn cancel_during_the_tail_leaves_no_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cancelled_tail.wav");
-    let part = part_of(&path);
+    // The export's own hidden part file: whatever starts with this in the folder.
+    let part_len = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".cancelled_tail.wav.grooviq-")
+            })
+            // Not `DirEntry::metadata`: on Windows that size is the directory's copy, which
+            // lags behind a file that is still open for writing.
+            .map(|e| std::fs::metadata(e.path()).map_or(0, |m| m.len()))
+            .max()
+            .unwrap_or(0)
+    };
     // A 60 s one-shot from the first step: the tail runs for up to a minute of audio.
     let state = held_into_the_tail(&dc(60.0), 0);
     let options = ExportOptions {
@@ -524,7 +539,7 @@ fn cancel_during_the_tail_leaves_no_file() {
     let result = std::thread::scope(|s| {
         let watcher = s.spawn(|| {
             while !finished.load(Ordering::Relaxed) {
-                let len = std::fs::metadata(&part).map_or(0, |m| m.len());
+                let len = part_len(dir.path());
                 if len > threshold {
                     cancel.store(true, Ordering::Relaxed);
                     return len;
@@ -576,4 +591,291 @@ fn full_scale_is_not_clipped() {
     assert_eq!(report.peak, 1.0);
     let (_, samples) = read_i32(&path);
     assert_eq!(samples.iter().max(), Some(&8_388_607));
+}
+
+/// Sets `path`'s modification time `age` in the past.
+fn backdate(path: &Path, age: std::time::Duration) {
+    // A folder cannot be opened for writing; a read handle sets its time on Unix.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .or_else(|_| std::fs::File::open(path))
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now() - age)
+        .unwrap();
+}
+
+const HOUR: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// The hidden part files an export of `mix.wav` leaves in `dir`.
+fn owned_parts(dir: &Path) -> Vec<String> {
+    listing(dir)
+        .into_iter()
+        .filter(|n| n.starts_with(".mix.wav.grooviq-") && n.ends_with(".part"))
+        .collect()
+}
+
+#[test]
+fn a_part_file_that_is_not_ours_is_never_touched_however_old() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    // The person's own notes, named like a part file, an hour old: not ours to delete.
+    let theirs = part_of(&path);
+    std::fs::write(&theirs, b"my notes").unwrap();
+    backdate(&theirs, HOUR);
+
+    export(&groove(), &options(WavFormat::Pcm24, 1), &path).unwrap();
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"my notes");
+    assert_eq!(
+        listing(dir.path()),
+        vec!["mix.wav".to_string(), "mix.wav.part".to_string()]
+    );
+    assert!(read_i32(&path).1.len() > 100, "the export is a real file");
+}
+
+#[test]
+fn a_plain_part_file_does_not_stop_an_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    let part = part_of(&path);
+    // Fresh: maybe someone else's, maybe a crashed older version's. Either way, left alone.
+    std::fs::write(&part, b"in use?").unwrap();
+    export(&groove(), &options(WavFormat::Pcm24, 1), &path).unwrap();
+    assert_eq!(std::fs::read(&part).unwrap(), b"in use?");
+    // And a failed export does not delete it either.
+    let failed = export_wav(
+        groove(),
+        &options(WavFormat::Pcm24, 4),
+        &path,
+        &mut |_| {},
+        &AtomicBool::new(true),
+    );
+    assert!(matches!(failed, Err(ExportError::Cancelled)));
+    assert_eq!(std::fs::read(&part).unwrap(), b"in use?");
+}
+
+#[test]
+fn an_old_part_file_of_a_dead_export_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    // An export that died: its part file is still there, and nobody holds its lock.
+    let dead = grooviq_engine::create_owned_temp(&path, ".part").unwrap();
+    let dead_path = dead.path.clone();
+    drop(dead.file);
+    backdate(&dead_path, HOUR);
+    // Younger than ten minutes: kept (it may be a writer between two syscalls).
+    let young = grooviq_engine::create_owned_temp(&path, ".part").unwrap();
+    let young_path = young.path.clone();
+    drop(young.file);
+
+    export(&groove(), &options(WavFormat::Pcm24, 1), &path).unwrap();
+    assert!(!dead_path.exists());
+    assert!(young_path.exists());
+}
+
+#[test]
+fn an_old_part_file_whose_export_is_still_running_is_kept_and_not_written_into() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    // Another export, stalled for an hour but alive: it holds its lock.
+    let live = grooviq_engine::create_owned_temp(&path, ".part").unwrap();
+    backdate(&live.path, HOUR);
+
+    export(&groove(), &options(WavFormat::Pcm24, 1), &path).unwrap();
+    assert!(live.path.exists(), "a live writer's file was removed");
+    assert_eq!(
+        live.file.metadata().unwrap().len(),
+        0,
+        "it was written into"
+    );
+    // It can still finish its own work.
+    drop(live.file);
+    assert_eq!(owned_parts(dir.path()).len(), 1);
+}
+
+#[test]
+fn two_exports_of_one_file_do_not_delete_each_others_part_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    let results: Vec<_> = std::thread::scope(|scope| {
+        let runs: Vec<_> = (0..2)
+            .map(|_| scope.spawn(|| export(&groove(), &options(WavFormat::Pcm24, 8), &path)))
+            .collect();
+        runs.into_iter().map(|run| run.join().unwrap()).collect()
+    });
+    // Each one wrote a whole file of its own and renamed it: both finish.
+    for result in &results {
+        assert!(result.is_ok(), "{results:?}");
+    }
+    assert_eq!(listing(dir.path()), vec!["mix.wav".to_string()]);
+    let (_, samples) = read_i32(&path);
+    assert_eq!(
+        samples.len() as u64,
+        results[0].as_ref().unwrap().frames * 2
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_part_symlink_is_never_followed_or_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    let target = dir.path().join("precious.txt");
+    std::fs::write(&target, b"precious").unwrap();
+    backdate(&target, HOUR);
+    std::os::unix::fs::symlink(&target, part_of(&path)).unwrap();
+    export(&groove(), &options(WavFormat::Pcm24, 1), &path).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"precious");
+    assert!(
+        std::fs::symlink_metadata(part_of(&path))
+            .unwrap()
+            .is_symlink()
+    );
+}
+
+/// Records what an export does to its part file, and checks the file at each step.
+struct Recorder {
+    events: std::sync::Mutex<Vec<&'static str>>,
+    fail_sync: bool,
+}
+
+impl Recorder {
+    fn new(fail_sync: bool) -> Self {
+        Self {
+            events: std::sync::Mutex::new(Vec::new()),
+            fail_sync,
+        }
+    }
+
+    fn events(&self) -> Vec<&'static str> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl grooviq_engine::PartFiles for Recorder {
+    fn sync(&self, file: &std::fs::File, _path: &Path) -> std::io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        self.events.lock().unwrap().push("sync");
+        // Everything is already in the file: flushed out of the buffer, header finalized
+        // (24-bit stereo: hound's 68-byte extensible header and 3 bytes a sample). Syncing
+        // earlier would put only part of it on disk. Read it through the export's own handle:
+        // the file is locked, and Windows refuses a second handle even to read.
+        let mut handle = file;
+        let at = handle.stream_position()?;
+        handle.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        handle.read_to_end(&mut bytes)?;
+        handle.seek(SeekFrom::Start(at))?;
+        let reader =
+            hound::WavReader::new(std::io::Cursor::new(&bytes)).expect("a whole WAV at sync time");
+        assert!(reader.len() > 0, "the header was not finalized");
+        assert_eq!(
+            bytes.len() as u64,
+            68 + u64::from(reader.len()) * 3,
+            "bytes were still buffered"
+        );
+        if self.fail_sync {
+            return Err(std::io::Error::other("injected: the disk refused to sync"));
+        }
+        file.sync_all()
+    }
+
+    fn rename(&self, part: &Path, to: &Path) -> std::io::Result<()> {
+        let events = self.events();
+        assert_eq!(events, ["sync"], "renamed before the bytes were synced");
+        self.events.lock().unwrap().push("rename");
+        std::fs::rename(part, to)
+    }
+}
+
+fn export_through(
+    files: &Recorder,
+    path: &Path,
+) -> Result<grooviq_engine::ExportReport, ExportError> {
+    grooviq_engine::export_wav_with(
+        groove(),
+        &options(WavFormat::Pcm24, 1),
+        path,
+        &mut |_| {},
+        &AtomicBool::new(false),
+        files,
+    )
+}
+
+#[test]
+fn an_export_syncs_the_finished_file_and_only_then_renames_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    let files = Recorder::new(false);
+    export_through(&files, &path).unwrap();
+    assert_eq!(files.events(), ["sync", "rename"]);
+    assert_eq!(listing(dir.path()), vec!["mix.wav".to_string()]);
+}
+
+#[test]
+fn a_failed_sync_keeps_the_destination_and_removes_only_its_own_part_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mix.wav");
+    std::fs::write(&path, b"the previous export").unwrap();
+    // Neighbours that are not this export's: a plain part file, and another running export's.
+    std::fs::write(part_of(&path), b"someone's notes").unwrap();
+    let other = grooviq_engine::create_owned_temp(&path, ".part").unwrap();
+    let other_name = other
+        .path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let files = Recorder::new(true);
+    let result = export_through(&files, &path);
+    let Err(ExportError::Io(e)) = result else {
+        panic!("expected an Io error, got {result:?}");
+    };
+    assert!(e.to_string().contains("refused to sync"), "{e}");
+    assert_eq!(files.events(), ["sync"], "it renamed after a failed sync");
+    assert_eq!(std::fs::read(&path).unwrap(), b"the previous export");
+    assert_eq!(std::fs::read(part_of(&path)).unwrap(), b"someone's notes");
+    // Sorted, and a leading dot sorts first.
+    assert_eq!(
+        listing(dir.path()),
+        vec![
+            other_name,
+            "mix.wav".to_string(),
+            "mix.wav.part".to_string()
+        ],
+        "only this export's own part file goes"
+    );
+    drop(other);
+}
+
+/// A handle the OS cannot sync: a pipe on Unix (`fsync` refuses special files), a read-only file
+/// on Windows (`FlushFileBuffers` needs write access).
+fn unsyncable_handle(dir: &Path) -> std::fs::File {
+    #[cfg(unix)]
+    {
+        let _ = dir;
+        let (_reader, writer) = std::io::pipe().unwrap();
+        // Keeping only the write end open is fine for `fsync`.
+        std::fs::File::from(std::os::fd::OwnedFd::from(writer))
+    }
+    #[cfg(not(unix))]
+    {
+        let path = dir.join("read-only.bin");
+        std::fs::write(&path, b"x").unwrap();
+        std::fs::File::open(&path).unwrap()
+    }
+}
+
+#[test]
+fn the_real_adapter_reports_a_sync_the_os_refuses() {
+    use grooviq_engine::PartFiles;
+    let dir = tempfile::tempdir().unwrap();
+    let file = unsyncable_handle(dir.path());
+    // Proves the handle is one `sync_all` refuses; otherwise this test proves nothing.
+    assert!(file.sync_all().is_err(), "the fixture can be synced");
+    // The production adapter hands the file to the OS and passes its answer on. An adapter that
+    // returned Ok without syncing would hide a disk that never got the bytes.
+    let result = grooviq_engine::RealFiles.sync(&file, &dir.path().join("mix.wav.part"));
+    assert!(result.is_err(), "the real adapter did not sync");
 }

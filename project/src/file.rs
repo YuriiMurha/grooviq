@@ -221,12 +221,16 @@ pub(crate) fn save_with_limits(
 /// Writes `project` to a temp file beside `path` without touching `path`: a save that is
 /// refused or fails stops here, before anything (a backup, the file itself) changes.
 /// [`Staged::commit`] puts it in place.
-pub(crate) fn stage_save(
+///
+/// `fault` runs on the temp file once the zip is written into it and before
+/// it is synced: the test seam for "the disk fails while a save is staged". Not part of the API.
+pub(crate) fn stage_save_faulty(
     project: &Project,
     samples: &SampleFiles,
     path: &Path,
+    fault: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> io::Result<Staged> {
-    stage_save_with_limits(project, samples, path, LIMITS)
+    stage_save_with_limits_and_fault(project, samples, path, LIMITS, fault)
 }
 
 fn stage_save_with_limits(
@@ -235,9 +239,24 @@ fn stage_save_with_limits(
     path: &Path,
     limits: Limits,
 ) -> io::Result<Staged> {
+    stage_save_with_limits_and_fault(project, samples, path, limits, |_| Ok(()))
+}
+
+fn stage_save_with_limits_and_fault(
+    project: &Project,
+    samples: &SampleFiles,
+    path: &Path,
+    limits: Limits,
+    fault: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<Staged> {
+    // Temp files of saves that died (and only those: see `leftover`); best effort.
+    let _ = grooviq_engine::remove_stale_owned(path, ".tmp");
     // Everything that can be refused is refused before the first byte is written.
     let (project, entries) = plan(project, samples, limits)?;
-    stage(path, |file| write_zip(file, &project, &entries))
+    stage(path, |file| {
+        write_zip(file, &project, &entries)?;
+        fault(file)
+    })
 }
 
 /// Which samples go in the zip, and the project with each channel's `SampleRef.file` set.
@@ -361,14 +380,15 @@ fn write_zip(file: &mut File, project: &Project, entries: &[Entry]) -> io::Resul
     zip.finish()?.flush()
 }
 
-/// Runs `write` against `<path>.tmp`, syncs it and renames it over `path`. The temp file is
-/// removed on any error, and `path` is only ever replaced by a complete file.
 /// A file fully written (and synced) to its temp name beside its final one, not yet in
 /// place. Dropped without [`Staged::commit`], the temp file is removed.
 #[derive(Debug)]
 pub(crate) struct Staged {
     tmp: PathBuf,
     path: PathBuf,
+    /// Held (and locked: see `leftover`) until the rename or the drop, so a cleanup elsewhere
+    /// can tell this temp file has a live writer. Never closed early: a lock goes with its handle.
+    _lock: File,
     done: bool,
 }
 
@@ -391,31 +411,29 @@ impl Drop for Staged {
     }
 }
 
-/// Writes the temp file for `path` with `write`, flushed and synced.
+/// Writes the temp file for `path` with `write`, flushed and synced. The temp file has a name
+/// of its own (`.<name>.grooviq-<pid>-<random>.tmp`), so it can never be a file of the
+/// person's or another save's.
 fn stage(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<Staged> {
+    let grooviq_engine::OwnedTemp { file, path: tmp } =
+        grooviq_engine::create_owned_temp(path, ".tmp")?;
     // Made first, so a failure below removes the partial temp file.
-    let staged = Staged {
-        tmp: temp_path(path),
+    let mut staged = Staged {
+        tmp,
         path: path.to_path_buf(),
+        _lock: file,
         done: false,
     };
-    let mut file = File::create(&staged.tmp)?;
-    write(&mut file)?;
-    file.flush()?;
-    file.sync_all()?;
+    write(&mut staged._lock)?;
+    staged._lock.flush()?;
+    staged._lock.sync_all()?;
     Ok(staged)
-}
-
-fn temp_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".tmp");
-    PathBuf::from(name)
 }
 
 /// Syncs the folder so the rename itself survives a power cut. Best effort: some file systems
 /// refuse to sync a folder, and the file is already in place.
 #[cfg(unix)]
-fn sync_folder(path: &Path) {
+pub(crate) fn sync_folder(path: &Path) {
     let folder = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -426,7 +444,7 @@ fn sync_folder(path: &Path) {
 }
 
 #[cfg(not(unix))]
-fn sync_folder(_path: &Path) {}
+pub(crate) fn sync_folder(_path: &Path) {}
 
 /// Opens a project: reads `project.json`, migrates it to this version, validates it and finds
 /// each channel's sample bytes (see [`Loaded`]).
@@ -830,6 +848,73 @@ mod tests {
         // At the cap exactly is fine.
         let (p, samples) = with_sizes(&[10, 10]);
         save_with_limits(&p, &samples, &path, false, limits).unwrap();
+    }
+
+    fn age(path: &Path, seconds: u64) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(seconds))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_save_never_touches_a_tmp_file_that_is_not_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let (p, samples) = with_sizes(&[6]);
+        let refuse = Limits {
+            sample: 5,
+            total: 100,
+        };
+        // The person's files, named like temp files, a day old.
+        let theirs = ["a.grooviq.tmp", "b.grooviq.tmp"];
+        for name in theirs {
+            let file = dir.path().join(name);
+            fs::write(&file, b"mine").unwrap();
+            age(&file, 86_400);
+        }
+        // A refused save, then one that goes through: neither removes them.
+        save_with_limits(&p, &samples, &path, false, refuse).unwrap_err();
+        assert_eq!(leftovers(dir.path()), theirs);
+        save(&p, &samples, &path).unwrap();
+        assert_eq!(
+            leftovers(dir.path()),
+            ["a.grooviq", "a.grooviq.tmp", "b.grooviq.tmp"]
+        );
+        assert_eq!(fs::read(dir.path().join("a.grooviq.tmp")).unwrap(), b"mine");
+    }
+
+    #[test]
+    fn a_save_clears_the_old_temp_file_of_a_dead_save_but_not_a_live_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let (p, samples) = with_sizes(&[6]);
+        let refuse = Limits {
+            sample: 5,
+            total: 100,
+        };
+        let owned = |old: bool| {
+            let temp = grooviq_engine::create_owned_temp(&path, ".tmp").unwrap();
+            if old {
+                age(&temp.path, 11 * 60);
+            }
+            temp
+        };
+        let dead = owned(true);
+        let dead_path = dead.path.clone();
+        drop(dead.file); // that save's process died: its lock is gone
+        let live = owned(true); // a save in another copy, stalled but alive
+        let young = owned(false);
+        let young_path = young.path.clone();
+        drop(young.file);
+
+        // A refused save writes nothing itself, so only its cleanup runs.
+        save_with_limits(&p, &samples, &path, false, refuse).unwrap_err();
+        assert!(!dead_path.exists(), "dead and old: removed");
+        assert!(live.path.exists(), "a live writer's file was removed");
+        assert!(young_path.exists(), "young: kept");
     }
 
     #[test]

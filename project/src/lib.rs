@@ -9,10 +9,12 @@
 //! * [`session`]: the open project, its edits kept in step with the engine, dirty state and
 //!   when to autosave.
 //! * [`recovery`]: the autosave file and crash recovery on the next launch.
+//! * [`autosave`]: one tick of the autosave clock, from the session to the recovery folder.
 //!
 //! The file code works on bytes and never decodes a sample; the session decodes embedded
 //! samples ([`decode_samples`]) for the engine.
 
+pub mod autosave;
 pub mod backup;
 pub mod compile;
 pub mod file;
@@ -20,7 +22,7 @@ pub mod model;
 pub mod recovery;
 pub mod session;
 
-pub use backup::backup_before_save;
+pub use backup::{backup_before_save, backup_folder};
 pub use compile::{compile_pattern, engine_state, sampler_values};
 #[doc(hidden)]
 pub use file::save_with;
