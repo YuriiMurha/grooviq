@@ -1,5 +1,5 @@
 # Repeatable commands. `make help` lists them. macOS or Linux shell.
-.PHONY: help hooks ui-install fmt check check-changed golden-update build-app install-app qa-ui qa-app
+.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan build-app install-app qa-ui
 
 # rustup installs cargo into ~/.cargo/bin, which is often not on PATH.
 export PATH := $(HOME)/.cargo/bin:$(PATH)
@@ -36,6 +36,9 @@ qa-ui: ui-install ## Playwright on the web build with the mock engine (WebKit an
 
 golden-update: ## Rewrite the golden reference WAVs on purpose; say why in the PR
 	GOLDEN_UPDATE=1 $(CARGO) test -p grooviq-golden
+
+rtsan: ## The no_alloc tests under RealtimeSanitizer (macOS/Linux; downloads LLVM's runtime once)
+	RTSAN_ENABLE=1 RTSAN_OPTIONS=suppressions=$(CURDIR)/engine/tests/rtsan.supp $(CARGO) test -p grooviq-engine --all-features --test no_alloc
 
 build-app: ui-install ## Build the release Grooviq.app (no .dmg) into target/release/bundle/macos
 	npm --prefix $(UI) run tauri build -- --bundles app
