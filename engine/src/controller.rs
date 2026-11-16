@@ -8,6 +8,7 @@ use crate::graph::Graph;
 use crate::live::{LiveShared, LiveSnapshot};
 use crate::processor::AudioProcessor;
 use rtrb::{Consumer, Producer};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 /// What [`Controller::check_health`] found since its previous call.
@@ -37,6 +38,25 @@ struct ToneState {
     gain_db: f32,
 }
 
+impl Default for ToneState {
+    fn default() -> Self {
+        Self {
+            on: false,
+            hz: 440.0,
+            gain_db: -12.0,
+        }
+    }
+}
+
+/// Every synth parameter at its default.
+fn synth_defaults() -> Vec<f32> {
+    grooviq_dsp::param_spec("synth")
+        .unwrap_or_default()
+        .iter()
+        .map(|&(_, _, default)| default)
+        .collect()
+}
+
 /// Sends commands to the [`AudioProcessor`] and watches its health. Created by
 /// [`crate::engine`].
 pub struct Controller {
@@ -56,6 +76,9 @@ pub struct Controller {
     /// A restart happened that `check_health` has not reported yet.
     restart_owed: bool,
     seen_guard_hits: u32,
+    /// Test switch: replaying the state panics, as a device bug in `set_param` would.
+    #[cfg(test)]
+    replay_panics: bool,
 }
 
 impl Controller {
@@ -65,26 +88,19 @@ impl Controller {
         trash: Consumer<Box<Graph>>,
         live: Arc<LiveShared>,
     ) -> Self {
-        let synth = grooviq_dsp::param_spec("synth")
-            .unwrap_or_default()
-            .iter()
-            .map(|&(_, _, default)| default)
-            .collect();
         Self {
             commands,
             trash,
             live,
             sample_rate,
-            tone: ToneState {
-                on: false,
-                hz: 440.0,
-                gain_db: -12.0,
-            },
-            synth,
+            tone: ToneState::default(),
+            synth: synth_defaults(),
             generation: 0,
             seen_faults: 0,
             restart_owed: false,
             seen_guard_hits: 0,
+            #[cfg(test)]
+            replay_panics: false,
         }
     }
 
@@ -140,11 +156,8 @@ impl Controller {
         if live.faults != self.seen_faults {
             // The processor stays silent until it gets a fresh graph. If the queue is full,
             // the next call tries again.
-            if self
-                .commands
-                .push(Msg::ReplaceGraph(self.build_graph()))
-                .is_ok()
-            {
+            let graph = self.build_graph();
+            if self.commands.push(Msg::ReplaceGraph(graph)).is_ok() {
                 self.seen_faults = live.faults;
                 self.restart_owed = true;
             }
@@ -178,14 +191,32 @@ impl Controller {
             self.seen_faults = faults;
             self.restart_owed = true;
         }
-        processor.restart(self.sample_rate, self.build_graph());
+        let graph = self.build_graph();
+        processor.restart(self.sample_rate, graph);
         self.free_trash();
     }
 
     /// A graph for the current sample rate and generation, in the state the queued commands
-    /// lead to.
-    pub(crate) fn build_graph(&self) -> Box<Graph> {
+    /// lead to. If replaying that state panics (a device bug in `set_param`), the graph keeps
+    /// its default parameters and the state is reset to match, so a restart still happens, the
+    /// panic stays off the caller (and any mutex it holds), and it cannot recur.
+    pub(crate) fn build_graph(&mut self) -> Box<Graph> {
+        match catch_unwind(AssertUnwindSafe(|| self.replay())) {
+            Ok(graph) => graph,
+            Err(_) => {
+                self.tone = ToneState::default();
+                self.synth = synth_defaults();
+                Box::new(Graph::new(self.sample_rate, self.generation))
+            }
+        }
+    }
+
+    fn replay(&self) -> Box<Graph> {
         let mut graph = Box::new(Graph::new(self.sample_rate, self.generation));
+        #[cfg(test)]
+        if self.replay_panics {
+            panic!("replaying the controller's state panicked (test switch)");
+        }
         let ToneState { on, hz, gain_db } = self.tone;
         graph.set_tone(on, hz, gain_db);
         for (index, &value) in (0u32..).zip(&self.synth) {
@@ -245,6 +276,31 @@ mod tests {
         assert_eq!(c.commands.slots(), free - 1, "one replacement queued");
         assert!(c.check_health().is_empty());
         assert_eq!(c.commands.slots(), free - 1, "and no second one");
+    }
+
+    #[test]
+    fn a_rebuild_that_panics_falls_back_to_defaults_and_still_restarts() {
+        let (mut c, mut p) = controller();
+        let tone = Command::TestTone {
+            on: true,
+            hz: 440.0,
+            gain_db: -12.0,
+        };
+        c.send(tone).unwrap();
+        let cutoff = Command::SetSynthParam {
+            index: 20,
+            value: 300.0,
+        };
+        c.send(cutoff).unwrap();
+        c.replay_panics = true;
+        pretend(&c, 1, 0);
+        assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 1 }]);
+        // The replacement plays with default parameters, and the state now says so too.
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        assert!(!c.live().tone);
+        assert!(!c.tone.on);
+        let default_cutoff = grooviq_dsp::param_spec("synth").unwrap()[20].2;
+        assert_eq!(c.synth[20], default_cutoff);
     }
 
     #[test]

@@ -1,6 +1,10 @@
 //! The audio graph: a sine test tone and the synth, mixed into the master bus. After each node,
 //! a NaN guard silences and resets a node whose block holds NaN or infinity, so one bad device
-//! cannot poison the mix. Everything here runs on the audio thread except `Graph::new`.
+//! cannot poison the mix.
+//!
+//! The controller builds a graph on its own thread: `Graph::new`, then the setters to replay
+//! its state. Once the graph is handed to the processor, everything here runs on the audio
+//! thread.
 
 use crate::BLOCK;
 use grooviq_dsp::{Device, NoteEvent, db_to_gain};

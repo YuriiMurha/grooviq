@@ -70,7 +70,7 @@ pub fn engine(config: EngineConfig) -> (Controller, AudioProcessor) {
     let (commands, commands_rx) = rtrb::RingBuffer::new(QUEUE_CAPACITY);
     let (trash_tx, trash) = rtrb::RingBuffer::new(TRASH_CAPACITY);
     let live = Arc::new(LiveShared::default());
-    let controller = Controller::new(sample_rate, commands, trash, Arc::clone(&live));
+    let mut controller = Controller::new(sample_rate, commands, trash, Arc::clone(&live));
     let graph = controller.build_graph();
     let processor = AudioProcessor::new(sample_rate, graph, commands_rx, trash_tx, live);
     (controller, processor)
