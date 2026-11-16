@@ -5,6 +5,7 @@
 //! before and to apply the result after. Lock order: session, then controller (inside the
 //! session's own calls); nothing takes the session's lock while holding the controller's.
 
+use crate::autosave_notice::AutosaveStatus;
 use crate::{Audio, lock};
 use grooviq_engine::{
     Command, ExportOptions, MAX_SAMPLE_SECONDS, SampleBuf, WavFormat, decode_sample, export_wav,
@@ -370,6 +371,14 @@ pub async fn project_export(
 pub async fn project_export_cancel(audio: State<'_, Audio>) -> Result<(), String> {
     audio.export_cancel.store(true, Ordering::Release);
     Ok(())
+}
+
+/// What the person is owed about autosave: `{ disabled, failure }`, sentences or `null`. The
+/// UI asks once its listeners are attached: a notice raised before that is kept for it here
+/// (`autosave-failed` carries later failures only).
+#[tauri::command]
+pub async fn autosave_status(audio: State<'_, Audio>) -> Result<AutosaveStatus, String> {
+    Ok(lock(&audio.autosave).clone())
 }
 
 /// The project the last session left unsaved, if any.

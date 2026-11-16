@@ -611,18 +611,30 @@ fn saves_that_change_nothing_keep_the_older_backups() {
     assert_eq!(load(&path).unwrap().project.bpm, 110.0);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_failed_save_makes_no_backup() {
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let (mut session, path, backups) = saved_twice(dir.path());
-    // The temp file cannot be created: a folder has its name.
-    std::fs::create_dir(dir.path().join("song.grooviq.tmp")).unwrap();
     session
         .apply(Edit::SetTempo { bpm: 120.0 }, Instant::now())
         .unwrap();
+    // The temp file cannot be created: the project's folder takes no new files.
+    let open = std::fs::metadata(dir.path()).unwrap().permissions();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let mut errors = Vec::new();
     for _ in 0..3 {
-        let err = session.save(None, &backups).unwrap_err();
-        assert!(matches!(err, SessionError::Save(_)), "{err}");
+        errors.push(session.save(None, &backups));
+    }
+    std::fs::set_permissions(dir.path(), open).unwrap();
+    for result in errors {
+        // (A process allowed to write anywhere, such as root, would save: not a failure case.)
+        if let Err(err) = result {
+            assert!(matches!(err, SessionError::Save(_)), "{err}");
+        } else {
+            return;
+        }
     }
     assert_eq!(backup_tempos(&path, &backups), [100.0], "no backup rotated");
     assert_eq!(load(&path).unwrap().project.bpm, 110.0);

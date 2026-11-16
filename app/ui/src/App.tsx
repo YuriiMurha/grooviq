@@ -1,8 +1,8 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  autosaveStatus,
   errorText,
-  onAutosaveDisabled,
   onAutosaveFailed,
   transportPlay,
   transportStop,
@@ -166,13 +166,29 @@ export function App() {
     };
   }, [refresh, loadSettings, toast]);
 
-  // Autosave trouble the person must hear of: the backend says each once.
+  // Autosave trouble the person must hear of. Listen first, then ask what already happened
+  // (a copy running without autosave, a failure before the listener was there); a failure told
+  // by both is shown once.
   useEffect(() => {
-    const failed = onAutosaveFailed((message) => toast(message, true));
-    const disabled = onAutosaveDisabled((message) => toast(message, true));
+    let cancelled = false;
+    let lastEvent: string | null = null;
+    const listening = onAutosaveFailed((message) => {
+      lastEvent = message;
+      toast(message, true);
+    });
+    listening
+      .then(() => autosaveStatus())
+      .then(
+        (status) => {
+          if (cancelled) return;
+          if (status.disabled) toast(status.disabled, true);
+          if (status.failure && status.failure !== lastEvent) toast(status.failure, true);
+        },
+        () => {},
+      );
     return () => {
-      failed.then((stop) => stop());
-      disabled.then((stop) => stop());
+      cancelled = true;
+      listening.then((stop) => stop());
     };
   }, [toast]);
 

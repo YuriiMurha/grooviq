@@ -145,14 +145,20 @@ export function onAutosaved(handler: (unixSeconds: number) => void): Promise<Unl
   return listen<number>("project-autosaved", (e) => handler(e.payload));
 }
 
-/** An autosave could not be written. Sent once per distinct error until one succeeds. */
-export function onAutosaveFailed(handler: (message: string) => void): Promise<UnlistenFn> {
-  return listen<string>("autosave-failed", (e) => handler(e.payload));
+/** What the person is owed about autosave, kept by the backend until asked for. */
+export interface AutosaveStatus {
+  /** Why autosave is off in this copy for good (another Grooviq is running), or `null`. */
+  disabled: string | null;
+  /** The failing autosave going on now, or `null`. */
+  failure: string | null;
 }
 
-/** Autosave is off in this copy of the app (another one is running). Sent once. */
-export function onAutosaveDisabled(handler: (message: string) => void): Promise<UnlistenFn> {
-  return listen<string>("autosave-disabled", (e) => handler(e.payload));
+export const autosaveStatus = () => invoke<AutosaveStatus>("autosave_status");
+
+/** An autosave failed with an error not announced since the last success. Later failures only:
+ * ask `autosaveStatus` for what happened before listening. */
+export function onAutosaveFailed(handler: (message: string) => void): Promise<UnlistenFn> {
+  return listen<string>("autosave-failed", (e) => handler(e.payload));
 }
 
 /** The window was closed, or the app was asked to quit, with unsaved changes. */

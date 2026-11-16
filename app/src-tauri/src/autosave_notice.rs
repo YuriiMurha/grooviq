@@ -1,40 +1,56 @@
 //! What the person is told about autosave. Pure of Tauri, so the rules are tested here; the
-//! autosave thread and `start_audio` only emit what these return.
+//! autosave thread and `start_audio` only record and emit what these return.
+//!
+//! The state is retained ([`AutosaveStatus`]) and the UI asks for it with `autosave_status`
+//! once its listeners are attached, so a notice raised before the UI was ready is not lost. The
+//! `autosave-failed` event only carries later changes.
 
+use serde::Serialize;
+use std::collections::HashSet;
 use std::io;
 
-/// Emitted with a sentence when an autosave could not be written.
+/// Emitted with a sentence when an autosave fails with an error not announced since the last
+/// success.
 pub(crate) const FAILED_EVENT: &str = "autosave-failed";
-/// Emitted once, with a sentence, when this copy of the app runs without autosave because
-/// another one holds the recovery folder.
-pub(crate) const DISABLED_EVENT: &str = "autosave-disabled";
 
-/// Tells of a failing autosave once per distinct error: a disk that stays full fails every
-/// minute, and one toast a minute is noise. A success (the trouble is over) re-arms it, so the
-/// next failure is told again.
-#[derive(Debug, Default)]
-pub(crate) struct FailureNotice {
-    told: Option<String>,
+/// What the UI is owed about autosave. `{ disabled, failure }` as JSON.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub(crate) struct AutosaveStatus {
+    /// Why autosave is off in this copy for good (another Grooviq holds the recovery folder).
+    pub(crate) disabled: Option<String>,
+    /// The latest failing autosave's sentence, until an autosave succeeds.
+    pub(crate) failure: Option<String>,
+    /// The distinct errors already announced since the last success.
+    #[serde(skip)]
+    told: HashSet<String>,
 }
 
-impl FailureNotice {
-    /// The sentence to show for this failure, or `None` if the person was already told of this
-    /// very error since the last success.
+impl AutosaveStatus {
+    /// Autosave never started here: `disabled` is the sentence for the person.
+    pub(crate) fn off(disabled: Option<String>) -> Self {
+        Self {
+            disabled,
+            ..Self::default()
+        }
+    }
+
+    /// An autosave failed. The status keeps the sentence; the return value is `Some` only the
+    /// first time this error comes up since the last success: a disk that stays full fails every
+    /// minute, and one toast a minute is noise (and an error that comes back after another is
+    /// still the same trouble).
     pub(crate) fn failed(&mut self, error: &io::Error) -> Option<String> {
         let reason = error.to_string();
-        if self.told.as_deref() == Some(reason.as_str()) {
-            return None;
-        }
         let message = format!(
             "Autosave is failing: {reason}. Your changes are not being backed up; save the project to keep them."
         );
-        self.told = Some(reason);
-        Some(message)
+        self.failure = Some(message.clone());
+        self.told.insert(reason).then_some(message)
     }
 
-    /// An autosave was written.
+    /// An autosave was written: the trouble is over, and the next failure is told again.
     pub(crate) fn succeeded(&mut self) {
-        self.told = None;
+        self.failure = None;
+        self.told.clear();
     }
 }
 
@@ -55,30 +71,61 @@ mod tests {
         io::Error::other(text)
     }
 
+    const FULL: &str = "no space left on device";
+    const DENIED: &str = "permission denied";
+
     #[test]
     fn a_repeating_error_is_told_once() {
-        let mut notice = FailureNotice::default();
-        assert!(notice.failed(&error("no space left on device")).is_some());
+        let mut status = AutosaveStatus::default();
+        assert!(status.failed(&error(FULL)).is_some());
         for _ in 0..5 {
-            assert_eq!(notice.failed(&error("no space left on device")), None);
+            assert_eq!(status.failed(&error(FULL)), None);
         }
     }
 
     #[test]
-    fn a_different_error_is_told_again() {
-        let mut notice = FailureNotice::default();
-        assert!(notice.failed(&error("no space left on device")).is_some());
-        assert!(notice.failed(&error("permission denied")).is_some());
-        // And back to the first: it is a change too.
-        assert!(notice.failed(&error("no space left on device")).is_some());
+    fn a_new_error_is_told_and_an_old_one_coming_back_is_not() {
+        let mut status = AutosaveStatus::default();
+        assert!(status.failed(&error(FULL)).is_some());
+        assert!(status.failed(&error(DENIED)).is_some());
+        // Back and forth with no autosave in between: both already told.
+        assert_eq!(status.failed(&error(FULL)), None);
+        assert_eq!(status.failed(&error(DENIED)), None);
+        assert_eq!(status.failed(&error(FULL)), None);
     }
 
     #[test]
-    fn a_success_re_arms_the_notice() {
-        let mut notice = FailureNotice::default();
-        assert!(notice.failed(&error("no space left on device")).is_some());
-        notice.succeeded();
-        assert!(notice.failed(&error("no space left on device")).is_some());
+    fn a_success_re_arms_every_error() {
+        let mut status = AutosaveStatus::default();
+        assert!(status.failed(&error(FULL)).is_some());
+        assert!(status.failed(&error(DENIED)).is_some());
+        status.succeeded();
+        assert!(status.failed(&error(FULL)).is_some());
+        assert!(status.failed(&error(DENIED)).is_some());
+    }
+
+    #[test]
+    fn the_status_keeps_the_latest_failure_even_when_it_is_not_told_again() {
+        let mut status = AutosaveStatus::default();
+        let first = status.failed(&error(FULL)).unwrap();
+        assert_eq!(status.failure.as_deref(), Some(first.as_str()));
+        let second = status.failed(&error(DENIED)).unwrap();
+        // The UI that asks now is owed the failure that is going on now.
+        assert_eq!(status.failure.as_deref(), Some(second.as_str()));
+        assert_eq!(status.failed(&error(FULL)), None);
+        assert_eq!(status.failure.as_deref(), Some(first.as_str()));
+        status.succeeded();
+        assert_eq!(status.failure, None);
+    }
+
+    #[test]
+    fn a_disabled_copy_keeps_saying_so_however_often_it_is_asked() {
+        let held = io::Error::new(io::ErrorKind::WouldBlock, "another Grooviq is running");
+        let status = AutosaveStatus::off(disabled_notice(&held));
+        assert!(status.disabled.is_some());
+        // Asking is reading: nothing is consumed.
+        assert_eq!(status.clone().disabled, status.disabled);
+        assert_eq!(AutosaveStatus::off(None).disabled, None);
     }
 
     #[test]

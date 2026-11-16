@@ -314,11 +314,58 @@ fn a_crash_between_the_autosave_and_its_metadata_never_mixes_the_pair() {
     );
     let (session, _) = RecoveryDir::start(dir.path()).unwrap();
     write(&session, 100.0, Some(&a));
-    // Another project's autosave dies half way.
+    // Another project's autosave dies half way: its file is whole, its metadata never came.
     crash_between_the_two_writes(&session, 140.0, Some(&b));
     drop(session);
-    // The old pair, whole: project A with A's path. Never 140 BPM labelled A, or 100 labelled B.
-    assert_eq!(offered(dir.path()), [(100.0, Some(a))]);
+    // Project A keeps A's path. The newer snapshot is kept too, as an untitled recovery: never
+    // 140 BPM labelled A, never 100 labelled B, and never lost. Newest first.
+    assert_eq!(offered(dir.path()), [(140.0, None), (100.0, Some(a))]);
+}
+
+#[test]
+fn a_crash_while_recovery_starts_keeps_the_newer_snapshot_newer() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let a = PathBuf::from("/music/a.grooviq");
+    let (session, _) = RecoveryDir::start(root).unwrap();
+    write(&session, 100.0, Some(&a));
+    crash_between_the_two_writes(&session, 140.0, None);
+    drop(session);
+    // The state a launch that died half way through setting aside leaves: the older project
+    // (A) already pending, the newer one still an autosave, the metadata naming nothing.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::rename(
+        root.join("autosave-1.grooviq"),
+        root.join(format!("pending-{now}.grooviq")),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(format!("pending-{now}.json")),
+        r#"{"original":"/music/a.grooviq","savedAt":1700000000}"#,
+    )
+    .unwrap();
+    assert!(root.join("autosave-2.grooviq").is_file());
+    // The older one must not turn into the newest just because it was moved first.
+    assert_eq!(offered(root), [(140.0, None), (100.0, Some(a))]);
+}
+
+#[test]
+fn a_superseded_leftover_autosave_is_not_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let a = PathBuf::from("/music/a.grooviq");
+    let (session, _) = RecoveryDir::start(root).unwrap();
+    write(&session, 100.0, Some(&a));
+    let old = std::fs::read(root.join("autosave-1.grooviq")).unwrap();
+    write(&session, 120.0, Some(&a));
+    // The old file's removal failed after the commit: an older copy of the same project.
+    std::fs::write(root.join("autosave-1.grooviq"), old).unwrap();
+    drop(session);
+    assert_eq!(offered(root), [(120.0, Some(a))]);
+    assert!(autosave_files(root).is_empty());
 }
 
 #[test]
@@ -445,4 +492,48 @@ fn a_metadata_file_cannot_name_a_file_outside_the_autosaves() {
         drop(session);
     }
     assert_eq!(std::fs::read(&victim).unwrap(), b"the person's project");
+}
+
+/// The autosave file `autosave.json` names.
+fn named_by_the_metadata(root: &Path) -> String {
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("autosave.json")).unwrap()).unwrap();
+    meta["file"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn a_running_session_keeps_one_autosave_file_and_the_metadata_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (session, _) = RecoveryDir::start(dir.path()).unwrap();
+    for n in 0..6 {
+        write(&session, 100.0 + n as f32, None);
+        // Right after each write, before any restart sweeps anything.
+        let files = autosave_files(dir.path());
+        assert_eq!(files.len(), 1, "write {n}: {files:?}");
+        assert_eq!(named_by_the_metadata(dir.path()), files[0]);
+    }
+    drop(session);
+    assert_eq!(offered(dir.path()), [(105.0, None)]);
+}
+
+#[test]
+fn a_clean_exit_after_many_writes_leaves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (session, _) = RecoveryDir::start(dir.path()).unwrap();
+    for n in 0..20 {
+        write(&session, 100.0 + n as f32, None);
+    }
+    session.clean_exit().unwrap();
+    assert_eq!(names(dir.path()), Vec::<String>::new());
+}
+
+#[test]
+fn clearing_after_many_writes_leaves_no_autosave_and_no_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let (session, _) = RecoveryDir::start(dir.path()).unwrap();
+    for n in 0..4 {
+        write(&session, 100.0 + n as f32, None);
+    }
+    session.clear_autosave().unwrap();
+    assert_eq!(names(dir.path()), ["session.lock"]);
 }

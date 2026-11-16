@@ -5,14 +5,14 @@
 //! written with integer and basic IEEE arithmetic only, so one state gives the same bytes on
 //! every platform.
 
-use crate::leftover::{remove_stale_sibling, sibling};
+use crate::leftover::{create_owned_temp, remove_stale_owned};
 use crate::{
     AudioProcessor, BLOCK, Command, EngineConfig, EngineState, engine_with, ticks_to_frames,
 };
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, BufWriter};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The largest 24-bit sample.
@@ -117,13 +117,13 @@ impl From<hound::Error> for ExportError {
 /// An engine of its own at `options.sample_rate` plays the pattern from frame 0
 /// ([`Command::PlayLoops`]) for `ticks_to_frames(loops * length)` frames. The tail follows in
 /// 64-frame blocks until 0.1 s of blocks in a row peak at most 1e-5, or `max_tail_seconds`
-/// have passed; the silent blocks at the end are cut. The file is written to `<path>.part`,
-/// synced, and renamed to `path` when complete; on an error or a cancel the `.part` file is
-/// deleted.
+/// have passed; the silent blocks at the end are cut. The file is written to a hidden part
+/// file of its own beside `path` (`.<name>.grooviq-<pid>-<random>.part`, created new and locked
+/// while this export runs), synced, and renamed to `path` when complete; on an error or a
+/// cancel that part file is deleted.
 ///
-/// A `.part` file already there is never truncated: one older than ten minutes is a crash's
-/// leftover and is removed first, a younger one may be another export still writing it, and the
-/// export then fails with `AlreadyExists` (and leaves that file alone).
+/// Only part files of this naming, ten minutes old and whose writer is gone (nobody holds the
+/// lock) are removed at the start; a file named `<path>.part` or anything else is never touched.
 ///
 /// `progress` gets 0..1 over the pattern part (never decreasing) and 1.0 once, when the file is
 /// complete. `cancel` is checked between chunks of 4 096 frames.
@@ -138,52 +138,70 @@ pub fn export_wav(
     progress: &mut dyn FnMut(f32),
     cancel: &AtomicBool,
 ) -> Result<ExportReport, ExportError> {
+    export_wav_with(state, options, path, progress, cancel, &RealFiles)
+}
+
+/// The two file operations that make an export durable, as a seam for tests: the real ones
+/// ([`RealFiles`]) sync to disk and rename; a test's record the order they are called in, or
+/// fail. Not part of the API.
+#[doc(hidden)]
+pub trait PartFiles {
+    /// Puts the part file's bytes on disk (`path` is its name).
+    fn sync(&self, file: &File, path: &Path) -> io::Result<()>;
+    /// Gives the part file its final name.
+    fn rename(&self, part: &Path, to: &Path) -> io::Result<()>;
+}
+
+/// What the app uses.
+#[doc(hidden)]
+pub struct RealFiles;
+
+impl PartFiles for RealFiles {
+    fn sync(&self, file: &File, _path: &Path) -> io::Result<()> {
+        file.sync_all()
+    }
+
+    fn rename(&self, part: &Path, to: &Path) -> io::Result<()> {
+        fs::rename(part, to)
+    }
+}
+
+/// [`export_wav`] through `files`: the test seam. Not part of the API.
+#[doc(hidden)]
+pub fn export_wav_with(
+    state: EngineState,
+    options: &ExportOptions,
+    path: &Path,
+    progress: &mut dyn FnMut(f32),
+    cancel: &AtomicBool,
+    files: &dyn PartFiles,
+) -> Result<ExportReport, ExportError> {
     if cancel.load(Ordering::Relaxed) {
         return Err(ExportError::Cancelled);
     }
-    let part = part_path(path);
-    // Best effort: if it cannot be removed, creating the part file below says so.
-    let _ = remove_stale_sibling(path, ".part");
-    let file = create_part(&part)?;
+    // Leftovers of writers that died, never anything else (see `leftover`); best effort.
+    let _ = remove_stale_owned(path, ".part");
+    // A name of our own, locked while this export writes: no other export, and no cleanup, can
+    // take it, and an old file of the same name in the folder is none of our business.
+    let part = create_owned_temp(path, ".part")?;
     // From here the part file is ours, and goes on any error.
-    let result = write_part(state, options, &file, progress, cancel)
+    let result = write_part(state, options, &part.file, progress, cancel)
         .and_then(|report| {
             // On disk before it takes the final name: a power cut must not leave a complete
             // name on a file whose bytes never landed.
-            file.sync_all()?;
+            files.sync(&part.file, &part.path)?;
             Ok(report)
         })
-        .and_then(|report| fs::rename(&part, path).map(|()| report).map_err(Into::into));
+        .and_then(|report| {
+            files
+                .rename(&part.path, path)
+                .map(|()| report)
+                .map_err(Into::into)
+        });
     if result.is_err() {
-        let _ = fs::remove_file(&part);
+        let _ = fs::remove_file(&part.path);
     }
     result
-}
-
-/// `<path>.part`: the whole file name with `.part` added, next to the target.
-fn part_path(path: &Path) -> PathBuf {
-    sibling(path, ".part")
-}
-
-/// Creates the part file, failing if the name is taken.
-fn create_part(part: &Path) -> Result<File, ExportError> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(part)
-        .map_err(|e| {
-            if e.kind() == io::ErrorKind::AlreadyExists {
-                ExportError::Io(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!(
-                        "{} is already there: another export may be writing it. Try again in a few minutes",
-                        part.display()
-                    ),
-                ))
-            } else {
-                e.into()
-            }
-        })
 }
 
 /// Renders and writes the whole file to `part` (the caller syncs it).
@@ -338,13 +356,5 @@ mod tests {
         assert_eq!(pcm24(0.5), 4_194_304);
         assert_eq!(pcm24(-0.5), -4_194_304);
         assert_eq!(pcm24(f32::NAN), 0);
-    }
-
-    #[test]
-    fn the_part_file_sits_next_to_the_target() {
-        assert_eq!(
-            part_path(Path::new("out/beat.wav")),
-            Path::new("out/beat.wav.part")
-        );
     }
 }

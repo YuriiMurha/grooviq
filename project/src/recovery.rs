@@ -9,9 +9,10 @@
 //!
 //! The autosave and its metadata are one pair, and the pair changes in one step: each autosave
 //! is written to a new file name, and the rename of `autosave.json` (which names that file) is
-//! the commit. A crash before it leaves the old pair whole and a stray file that the next launch
-//! removes; a crash after it leaves the new pair whole. A path is never paired with another
-//! project's bytes.
+//! the commit. A crash before it leaves the old pair whole, plus the new snapshot's file if it
+//! was complete; a crash after it leaves the new pair whole. A path is never paired with another
+//! project's bytes, and a complete newer snapshot is never thrown away: the next launch offers
+//! the old pair with its path and the newer snapshot untitled, newest first.
 //!
 //! A pending project stays on disk, and is offered on every launch (newest first), until the
 //! person restores it (it becomes `recovered-<n>.grooviq`, of which the newest
@@ -184,8 +185,12 @@ impl RecoveryDir {
             written: AtomicU64::new(0),
         };
 
-        if leftover && let Some((autosave, meta)) = dir.autosave_pair() {
-            dir.set_aside(&autosave, meta)?;
+        if leftover {
+            // Oldest first: the pending numbers grow in the order they are set aside, so the
+            // newer work stays the newer one even if this launch dies half way.
+            for (autosave, meta) in dir.recoverable() {
+                dir.set_aside(&autosave, meta)?;
+            }
         }
         // Whatever is left (an unfinished write, a metadata file without its autosave) belongs
         // to no one now.
@@ -197,25 +202,51 @@ impl RecoveryDir {
         Ok((dir, pending))
     }
 
-    /// The autosave a crash left, with its metadata: the file `autosave.json` names, if both
-    /// are there. With no such pair (a crash before the very first metadata, or a metadata
-    /// left behind), the newest autosave file alone, to be offered untitled: its work is kept,
-    /// and no path is claimed for it.
-    fn autosave_pair(&self) -> Option<(PathBuf, Option<Meta>)> {
-        let meta = read_meta(&self.root.join(META));
-        if let Some(meta) = meta {
-            let name = meta.file.as_deref().unwrap_or(LEGACY_AUTOSAVE);
+    /// What a crash left to offer, oldest first, each with its metadata if it has any:
+    ///
+    /// * the autosave `autosave.json` names, if both are there: the last committed pair, with
+    ///   its original path;
+    /// * the newest autosave file newer than that (a write that finished its file and died
+    ///   before its metadata), untitled: the work is kept, and no path is claimed for it, since
+    ///   the metadata that is there describes another snapshot. With no committed pair at all
+    ///   (a crash before the very first metadata, or a metadata left behind), the newest
+    ///   autosave file alone, likewise untitled.
+    ///
+    /// Older leftovers (a removal that failed after a commit) are superseded copies: not offered.
+    fn recoverable(&self) -> Vec<(PathBuf, Option<Meta>)> {
+        let files = self.numbered(AUTOSAVE);
+        let legacy = self.root.join(LEGACY_AUTOSAVE);
+        // The committed pair, as `(number, file, metadata)`; the legacy name counts as number 0.
+        let committed = read_meta(&self.root.join(META)).and_then(|meta| {
+            let name = meta
+                .file
+                .clone()
+                .unwrap_or_else(|| LEGACY_AUTOSAVE.to_owned());
             // Only ever a file of ours in this folder, whatever the metadata says.
-            if is_autosave_name(name) && self.root.join(name).is_file() {
-                return Some((self.root.join(name), Some(meta)));
+            if !is_autosave_name(&name) || !self.root.join(&name).is_file() {
+                return None;
             }
-        }
-        let newest = self
-            .numbered(AUTOSAVE)
-            .pop()
+            let number = files
+                .iter()
+                .find(|(_, path)| path.file_name().is_some_and(|n| n == name.as_str()))
+                .map_or(0, |(n, _)| *n);
+            Some((number, self.root.join(&name), meta))
+        });
+        let floor = committed.as_ref().map(|(n, ..)| *n);
+        let newer = files
+            .into_iter()
+            .rfind(|(n, _)| floor.is_none_or(|floor| *n > floor))
             .map(|(_, path)| path)
-            .or_else(|| Some(self.root.join(LEGACY_AUTOSAVE)).filter(|p| p.is_file()))?;
-        Some((newest, None))
+            // Only an earlier version's file, and nothing numbered or committed.
+            .or_else(|| (committed.is_none() && legacy.is_file()).then_some(legacy));
+        let mut out = Vec::new();
+        if let Some((_, path, meta)) = committed {
+            out.push((path, Some(meta)));
+        }
+        if let Some(path) = newer {
+            out.push((path, None));
+        }
+        out
     }
 
     /// Removes every autosave file but `keep` (a file name). Never the metadata.
