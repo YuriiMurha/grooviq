@@ -161,3 +161,19 @@ test.describe("grid keys and the right button (check 11)", () => {
     await expect.poll(() => mock.view().then((v) => v.pattern.cells["3"][5])).toBeLessThan(0.8);
   });
 });
+
+test.describe("a new pixel ratio (check 3, moving between screens)", () => {
+  test.use({ seed: { project: project(KIT, { 1: [0] }), files: soundsFor(KIT) } });
+
+  test("the grid redraws at the new ratio without a window resize", async ({ app, browserName }) => {
+    test.skip(browserName !== "chromium", "changes the ratio through the Chrome DevTools Protocol");
+    // #117: the grid only re-reads the ratio on `resize`. Remove this once fixed.
+    test.fail(true, "#117");
+    const backing = () => grid(app).evaluate((c: HTMLCanvasElement) => c.width / c.clientWidth);
+    expect(await backing()).toBeCloseTo(1);
+    const cdp = await app.context().newCDPSession(app);
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 2, mobile: false });
+    await expect.poll(() => app.evaluate(() => window.devicePixelRatio)).toBe(2);
+    await expect.poll(backing, { timeout: 2000 }).toBeCloseTo(2);
+  });
+});
