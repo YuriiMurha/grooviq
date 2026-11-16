@@ -1326,8 +1326,18 @@ impl Voice {
 
             let aenv = self.amp.next(&cx.amp) as f32;
             if self.amp.stage == Stage::Idle {
-                self.active = false;
-                return;
+                // The note has ended. A note waiting for this voice (it was stolen while the old
+                // note released) starts now, from the next sample: nothing is left to fade.
+                match self.pending.take() {
+                    Some(p) => {
+                        self.start(p, cx, age);
+                        continue;
+                    }
+                    None => {
+                        self.active = false;
+                        return;
+                    }
+                }
             }
             let fenv = self.flt.next(&cx.flt) as f32;
 
@@ -2340,6 +2350,134 @@ mod tests {
                 .fold(0.0f32, f32::max);
             assert!(diff == 0.0, "{name}: loaded while silent differs by {diff}");
         }
+    }
+
+    /// The probe patch of the click tests: sines, open filter, full sustain, 300 ms release.
+    fn probe(s: &mut Synth) {
+        for (i, v) in [
+            (OSC1_SHAPE, 0.0),
+            (OSC1_LEVEL, 0.6),
+            (OSC2_SHAPE, 0.0),
+            (OSC2_OCT, 1.0),
+            (OSC2_LEVEL, 0.3),
+            (FILTER_TYPE, 0.0),
+            (CUTOFF, 20000.0),
+            (RES, 0.0),
+            (ENV_AMT, 0.0),
+            (KEYTRACK, 0.0),
+            (AMP_A, 5.0),
+            (AMP_S, 1.0),
+            (AMP_R, 300.0),
+            (MASTER, -6.0),
+        ] {
+            s.set_param(i as u32, v);
+        }
+    }
+
+    /// Renders `notes` (frame, key, on) in 128-frame blocks after `setup`.
+    fn play(setup: &dyn Fn(&mut Synth), notes: &[(usize, u8, bool)], n: usize) -> Vec<f32> {
+        let mut s = Synth::new(48_000.0);
+        setup(&mut s);
+        let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+        let mut c = 0;
+        while c < n {
+            let e = (c + MAX_BLOCK).min(n);
+            let ev: Vec<NoteEvent> = notes
+                .iter()
+                .filter(|x| x.0 >= c && x.0 < e)
+                .map(|&(t, key, on)| NoteEvent {
+                    offset: (t - c) as u32,
+                    key,
+                    velocity: 0.9,
+                    on,
+                    slide: false,
+                })
+                .collect();
+            s.process(&mut l[c..e], &mut r[c..e], None, &ev);
+            c = e;
+        }
+        l
+    }
+
+    fn rms(x: &[f32]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+    }
+
+    /// A note that steals a released voice sounds even when that voice's release ends before the
+    /// steal fade does (it used to be dropped: the voice went idle with the note still pending).
+    /// Poly: 16 held notes, the first released at 500 ms (idle at about 800 ms), a 17th note
+    /// around 800 ms. Mono: the same note on the mono voice while every other slot still rings,
+    /// so the old note cannot be handed off and fades out first.
+    #[test]
+    fn a_stolen_note_sounds_when_the_old_note_ends_during_the_fade() {
+        let ms = |t: f32| (t * 48.0) as usize;
+        let mut missing = Vec::new();
+        for mono in [false, true] {
+            for at in [790.0f32, 798.0, 799.0, 799.5] {
+                let mut notes: Vec<(usize, u8, bool)> = (0..16)
+                    .map(|k| (ms(10.0) + k * 37, 40 + k as u8, true))
+                    .collect();
+                notes.push((ms(500.0), 40, false));
+                if !mono {
+                    for k in 1..16 {
+                        notes.push((ms(1300.0), 40 + k as u8, false));
+                    }
+                }
+                let n = ms(1100.0);
+                let render = |notes: &[(usize, u8, bool)]| {
+                    if mono {
+                        play_mono(notes, Some(ms(at)), n)
+                    } else {
+                        play(&probe, notes, n)
+                    }
+                };
+                let without = render(&notes);
+                let mut with = notes.clone();
+                with.push((ms(at), 80, true));
+                let with = render(&with);
+                let d: Vec<f32> = (ms(at + 10.0)..ms(at + 200.0))
+                    .map(|i| with[i] - without[i])
+                    .collect();
+                if rms(&d) <= 0.05 {
+                    let mode = if mono { "mono" } else { "poly" };
+                    missing.push(format!("{mode} at {at} ms (rms {})", rms(&d)));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "missing notes: {}", missing.join(", "));
+    }
+
+    /// Mono variant of `play`: 16 poly notes, all released when the mode switches to mono at
+    /// 700 ms (they ring until about 1000 ms, the first one ends at about 800 ms), then the
+    /// mono note at `at`.
+    fn play_mono(notes: &[(usize, u8, bool)], at: Option<usize>, n: usize) -> Vec<f32> {
+        let mut s = Synth::new(48_000.0);
+        probe(&mut s);
+        let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+        let switch = 700 * 48;
+        let mut c = 0;
+        while c < n {
+            if c == switch {
+                s.set_param(VOICE_MODE as u32, 1.0);
+            }
+            let e = (c + MAX_BLOCK)
+                .min(n)
+                .min(if c < switch { switch } else { n });
+            let ev: Vec<NoteEvent> = notes
+                .iter()
+                .filter(|x| x.0 >= c && x.0 < e && (x.0 < switch || Some(x.0) == at))
+                .map(|&(t, key, on)| NoteEvent {
+                    offset: (t - c) as u32,
+                    key,
+                    velocity: 0.9,
+                    on,
+                    slide: false,
+                })
+                .collect();
+            s.process(&mut l[c..e], &mut r[c..e], None, &ev);
+            c = e;
+        }
+        l
     }
 
     #[test]
