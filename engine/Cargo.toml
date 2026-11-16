@@ -18,6 +18,8 @@ test-hooks = []
 cpal = "0.18.2"
 grooviq-dsp = { path = "../dsp" }
 rtrb = "0.3"
+getrandom = "0.4"
+tungstenite = "0.30"
 
 # An output's transport type (Bluetooth, built-in, HDMI...), which cpal does not expose, and the
 # thread CoreAudio notifies on (`AudioHardwareDeprecated` holds kAudioHardwarePropertyRunLoop):
