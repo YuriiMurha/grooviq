@@ -904,6 +904,11 @@ fn filters_shape_the_spectrum() {
         ("vel_filter", 1.0),
     ]);
     assert_eq!(bypass, dry, "filter_type 0 is bit-identical to no filter");
+
+    // Resonance lifts the low-pass response at the cutoff (Q 0.707 to Q 20).
+    let resonant = play(&[("filter_type", 1.0), ("cutoff", 1_000.0), ("res", 1.0)]);
+    let lift = gain_db(&resonant, &dry, 1_000.0) - gain_db(&lp, &dry, 1_000.0);
+    assert!(lift >= 12.0, "res 1 vs 0 at the cutoff: {lift} dB");
 }
 
 #[test]
@@ -958,6 +963,38 @@ fn the_filter_envelope_sweeps_the_cutoff() {
         db >= 12.0,
         "above 2 kHz, before note-off vs 100 ms after: {db} dB"
     );
+}
+
+#[test]
+fn the_filter_envelope_attack_opens_the_cutoff_over_its_time() {
+    // A 200 ms filter attack (the amp attack stays 0): the cutoff climbs from 200 Hz towards
+    // 12.8 kHz over the whole attack, then holds at full envelope (sustain 1).
+    let x = white(SR as usize, 0x6C07_8965);
+    let mut s = configured(
+        &x,
+        &[
+            ("filter_type", 1.0),
+            ("cutoff", 200.0),
+            ("filter_env", 1.0),
+            ("flt_attack", 200.0),
+            ("flt_sustain", 1.0),
+        ],
+    );
+    let (l, _) = render(&mut s, 20_000, &[on(0, 60, 1.0)]);
+    let mut dry = configured(&x, &[]);
+    let (d, _) = render(&mut dry, 20_000, &[on(0, 60, 1.0)]);
+    let window = 480; // 10 ms
+    let bright = |at: usize| {
+        band_energy(&l[at..at + window], 2_000.0, 20_000.0)
+            / band_energy(&d[at..at + window], 2_000.0, 20_000.0)
+    };
+    let db = |a: f64, b: f64| 10.0 * libm::log10(a / b);
+    let (start, middle, end) = (bright(0), bright(4_560), bright(14_400));
+    let opens = db(end, start);
+    assert!(opens >= 12.0, "300 ms vs the first 10 ms: {opens} dB");
+    // Halfway through (95..105 ms) the cutoff is still on its way up.
+    let rising = db(end, middle);
+    assert!(rising >= 6.0, "300 ms vs 100 ms: {rising} dB");
 }
 
 #[test]
@@ -1137,6 +1174,61 @@ fn block_splitting_never_changes_the_output() {
     let reference = play(1);
     assert!(peak(&reference.0) > 0.01);
     for block in [7, 64, 128] {
-        assert!(play(block) == reference, "block {block}");
+        assert!(same_bits(&play(block), &reference), "block {block}");
+    }
+}
+
+/// Both renders hold the same bits in every sample of both channels.
+fn same_bits(a: &(Vec<f32>, Vec<f32>), b: &(Vec<f32>, Vec<f32>)) -> bool {
+    let bits = |x: &[f32]| x.iter().map(|v| v.to_bits()).collect::<Vec<u32>>();
+    bits(&a.0) == bits(&b.0) && bits(&a.1) == bits(&b.1)
+}
+
+#[test]
+fn block_splitting_never_changes_a_loop_across_its_seams() {
+    // A 1 000-frame source looped for 12 000 frames or more: dozens of wraps in each direction, at
+    // pitches that read between samples, through each filter type, then released.
+    let x = noise(1_000);
+    let events = [
+        on(0, 55, 1.0),
+        on(5, 60, 0.7),
+        on(11, 67, 0.9),
+        off(12_000, 55),
+        off(13_000, 60),
+        off(14_000, 67),
+    ];
+    for reverse in [0.0, 1.0] {
+        for loop_start in [0.0, 0.5, 1.0] {
+            for filter in [0.0, 1.0, 2.0, 3.0] {
+                let params = [
+                    ("declick", 1.0),
+                    ("loop", 1.0),
+                    ("loop_start", loop_start),
+                    ("reverse", reverse),
+                    ("filter_type", filter),
+                    ("cutoff", 1_500.0),
+                    ("res", 0.8),
+                    ("filter_env", 0.5),
+                    ("flt_decay", 200.0),
+                ];
+                let play = |block: usize| {
+                    let mut s = configured(&x, &params);
+                    let out = render_split(&mut s, 20_000, &events, block, &[]);
+                    assert_eq!(s.active_voices(), 0, "released by the end");
+                    out
+                };
+                let reference = play(1);
+                let what = format!("reverse {reverse}, loop_start {loop_start}, filter {filter}");
+                // A one-frame loop is DC, which the high- and band-pass remove.
+                let dc_removed = loop_start == 1.0 && filter >= 2.0;
+                assert!(
+                    dc_removed || peak(&reference.0[10_000..12_000]) > 0.01,
+                    "{what}: still looping at 11 000 frames"
+                );
+                for block in [7, 64, 128] {
+                    assert!(same_bits(&play(block), &reference), "{what}: block {block}");
+                }
+            }
+        }
     }
 }
