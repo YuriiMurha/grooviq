@@ -787,3 +787,41 @@ fn a_recovered_file_is_held_to_the_length_limit() {
         other => panic!("expected TooLong, got {other:?}"),
     }
 }
+
+// ---- Fix round 3 ----
+
+#[test]
+fn a_riff_size_within_a_pad_byte_of_the_file_is_finished() {
+    // An empty data chunk, then ten bytes (five frames' worth, if they were sound). The RIFF size
+    // may be one byte off the file length minus 8 either way (a trailing pad byte too many, or a
+    // final pad counted but not written): finished, so empty. Anything else is unfinished and
+    // the ten bytes are sound.
+    for (off, finished) in [(10i64, false), (9, true), (8, true), (7, true), (6, false)] {
+        let mut bytes = wav_with_sizes(0, 0, 0);
+        bytes.extend_from_slice(&[0x10; 10]);
+        let riff = bytes.len() as i64 - off;
+        bytes[4..8].copy_from_slice(&(riff as u32).to_le_bytes());
+        let got = decode_sample(&bytes, Some("wav"), 600.0);
+        if finished {
+            assert_eq!(got, Err(SampleError::Empty), "RIFF = length - {off}");
+        } else {
+            assert_eq!(got.unwrap().len(), 5, "RIFF = length - {off}");
+        }
+    }
+}
+
+#[test]
+fn a_final_metadata_chunk_whose_pad_byte_was_counted_but_not_written_is_empty() {
+    // iXML of 3 bytes ("abc") needs a pad byte; this writer counted it in the RIFF size (48) but
+    // did not write it, so the file is 55 bytes long.
+    let mut bytes = wav_with_sizes(0, 36, 0);
+    bytes.extend_from_slice(b"iXML");
+    bytes.extend_from_slice(&3u32.to_le_bytes());
+    bytes.extend_from_slice(b"abc");
+    assert_eq!(bytes.len(), 55);
+    bytes[4..8].copy_from_slice(&48u32.to_le_bytes());
+    assert_eq!(
+        decode_sample(&bytes, Some("wav"), 600.0),
+        Err(SampleError::Empty)
+    );
+}

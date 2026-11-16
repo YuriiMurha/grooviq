@@ -305,8 +305,8 @@ enum UnfinishedWav {
 }
 
 /// A WAV recorder that stops before it can come back to fill in its header leaves a RIFF size
-/// of 0 (never filled in), 0xFFFF_FFFF (streamed) or more than the file holds, and a data chunk
-/// size of 0 or 0xFFFF_FFFF. Other tools read such a file to its end; this returns the file with
+/// of 0 (never filled in), 0xFFFF_FFFF (streamed) or one that does not match the file, and a
+/// data chunk size of 0 or 0xFFFF_FFFF. Other tools read such a file to its end; this returns the file with
 /// the sizes made true so the reader does the same. `None` when this is not a WAV, or its header
 /// is finished: a writer that backpatched the RIFF size also backpatched the data size, so a
 /// data size of 0 there is an empty recording, whatever metadata follows it.
@@ -315,8 +315,11 @@ fn unfinished_wav_header(bytes: &[u8]) -> Option<UnfinishedWav> {
         return None;
     }
     let riff_size = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
-    // 0xFFFF_FFFF (streamed) is past the end of any file this reads.
-    let riff_unfinished = riff_size == 0 || u64::from(riff_size) + 8 > bytes.len() as u64;
+    // Finished: the RIFF size is the file length minus 8, give or take a pad byte (one too many
+    // written after the last chunk, or the last chunk's pad counted but not written). 0,
+    // 0xFFFF_FFFF (streamed) and anything else further off is an unfinished header.
+    let off = bytes.len() as i64 - 8 - i64::from(riff_size);
+    let riff_unfinished = !(-1..=1).contains(&off);
     let mut at = 12usize;
     while let Some(chunk) = bytes.get(at..at + 8) {
         let size = u32::from_le_bytes(chunk[4..8].try_into().ok()?);
