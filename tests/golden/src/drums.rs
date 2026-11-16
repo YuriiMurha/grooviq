@@ -14,6 +14,8 @@ use grooviq_project::{Channel, Note, Pattern, Project, SampleFiles, SampleRef, r
 pub const KIT: [&str; 4] = ["kick.wav", "snare.wav", "hat.wav", "clap.wav"];
 /// Loops the export plays.
 pub const LOOPS: u32 = 2;
+/// The hat step whose note lasts half a step (see [`drums_4ch_project`]).
+pub const HALF_HAT_STEP: u32 = 6;
 
 /// `tests/golden/samples`.
 pub fn kit_dir() -> PathBuf {
@@ -59,7 +61,9 @@ fn channel(id: u32, name: &str, file: &str, sampler: &[(&str, f32)]) -> Channel 
 /// * Kick (`kick.wav`): steps 0, 3, 8, 10 at velocity 1.
 /// * Snare (`snare.wav`, tune -1, pan -0.2): steps 4, 12 at 0.9.
 /// * Hat (`hat.wav`, one-shot off, release 30 ms, volume 0.7, pan 0.3): every step, 0.9 on even
-///   steps and 0.5 on odd ones.
+///   steps and 0.5 on odd ones. The step-6 hat is half a step long, so its note-off arrives
+///   while it still sounds; it is the only note that reaches the sampler's release stage (the
+///   other hats end before their note-offs), which keeps that maths in the reference.
 /// * Clap (`clap.wav`, reverse on, pan -0.25): step 12 at 0.8.
 ///
 /// # Panics
@@ -77,7 +81,13 @@ pub fn drums_4ch_project(samples_dir: &Path) -> (Project, SampleFiles) {
 
     let mut notes: Vec<Note> = [0, 3, 8, 10].iter().map(|&s| hit(kick, s, 1.0)).collect();
     notes.extend([4, 12].iter().map(|&s| hit(snare, s, 0.9)));
-    notes.extend((0..16).map(|s| hit(hat, s, if s % 2 == 0 { 0.9 } else { 0.5 })));
+    notes.extend((0..16).map(|s| {
+        let mut note = hit(hat, s, if s % 2 == 0 { 0.9 } else { 0.5 });
+        if s == HALF_HAT_STEP {
+            note.length = grooviq_engine::STEP_TICKS / 2;
+        }
+        note
+    }));
     notes.push(hit(clap, 12, 0.8));
 
     let project = Project {
