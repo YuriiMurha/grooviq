@@ -547,7 +547,7 @@ fn stop_releases_held_notes_and_rewinds() {
     assert_eq!(l[stop as usize - 1], 0.5, "held until the stop");
     // The release falls by e every quarter of its time: -60 dB takes ln(1000) / 4 of it.
     let release = (f64::from(release_ms) * 0.001 * f64::from(SR)) as usize;
-    let to_60db = (release as f64 * 1_000f64.ln() / 4.0).ceil() as usize;
+    let to_60db = (release as f64 * libm::log(1_000.0) / 4.0).ceil() as usize;
     let quiet = stop as usize + to_60db + BLOCK;
     assert!(
         l[quiet..again as usize].iter().all(|x| x.abs() < 0.5e-3),
@@ -702,7 +702,7 @@ fn play_loops_while_playing_releases_and_restarts_from_tick_0() {
     // The held note is released and the pattern's first note starts again at once: one voice
     // once the old one has faded, not two.
     let release = (f64::from(release_ms) * 0.001 * f64::from(SR)) as usize;
-    let settled = restart as usize + (release as f64 * 1_000f64.ln() / 4.0).ceil() as usize;
+    let settled = restart as usize + (release as f64 * libm::log(1_000.0) / 4.0).ceil() as usize;
     assert!(l[restart as usize - 1] == 0.5);
     assert!(
         l[settled + BLOCK..].iter().all(|x| (x - 0.5).abs() < 1e-3),

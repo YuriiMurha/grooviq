@@ -54,7 +54,7 @@ fn highpass4(x: &[f32], sr: f32) -> Vec<f64> {
     let mut y: Vec<f64> = x.iter().map(|&v| v as f64).collect();
     for q in [0.541_196_100_146_197, 1.306_562_964_876_376_6] {
         let w0 = 2.0 * std::f64::consts::PI * HP_HZ / sr as f64;
-        let (c, s) = (w0.cos(), w0.sin());
+        let (c, s) = (libm::cos(w0), libm::sin(w0));
         let alpha = s / (2.0 * q);
         let a0 = 1.0 + alpha;
         let (b0, b1, b2) = ((1.0 + c) * 0.5 / a0, -(1.0 + c) / a0, (1.0 + c) * 0.5 / a0);
@@ -77,7 +77,7 @@ fn reference_power(l: &[f32], r: &[f32], sr: f32) -> f64 {
     let w = ((0.01 * sr) as usize).max(1);
     let mut pre = vec![0.0f64; n + 1];
     for i in 0..n {
-        pre[i + 1] = pre[i] + 0.5 * ((l[i] as f64).powi(2) + (r[i] as f64).powi(2));
+        pre[i + 1] = pre[i] + 0.5 * ((l[i] as f64) * (l[i] as f64) + (r[i] as f64) * (r[i] as f64));
     }
     let mut best = 1.0e-30f64;
     let mut i = 0;
@@ -94,7 +94,7 @@ fn reference_power(l: &[f32], r: &[f32], sr: f32) -> f64 {
 fn scan(l: &[f32], r: &[f32], sr: f32, min_score_db: f32) -> Vec<Click> {
     let n = l.len().min(r.len());
     // (an absolute minimum, -200 dB, so digital silence scores very low instead of -inf or NaN)
-    let floor = (reference_power(l, r, sr) * 10f64.powf(FLOOR_DB / 10.0)).max(1e-20);
+    let floor = (reference_power(l, r, sr) * libm::pow(10.0, FLOOR_DB / 10.0)).max(1e-20);
     let hop = ((HOP_MS * 0.001 * sr).round() as usize).max(1);
     let win = ((WIN_MS * 0.001 * sr).round() as usize).max(2);
     let near = (NEAR_MS / HOP_MS).round() as usize;
@@ -123,13 +123,13 @@ fn scan(l: &[f32], r: &[f32], sr: f32, min_score_db: f32) -> Vec<Click> {
             for k in (j + near).min(w.len())..(j + far + 1).min(w.len()) {
                 ctx = ctx.max(w[k]);
             }
-            let score = (10.0 * ((w[j] + 1e-30) / (ctx + floor)).log10()) as f32;
+            let score = (10.0 * libm::log10((w[j] + 1e-30) / (ctx + floor))) as f32;
             if score > min_score_db {
                 let c = Click {
                     at: centres[j],
                     ch,
                     score_db: score,
-                    level_db: (10.0 * ((w[j] + 1e-30) / (floor * 1e6)).log10()) as f32,
+                    level_db: (10.0 * libm::log10((w[j] + 1e-30) / (floor * 1e6))) as f32,
                 };
                 match out.last_mut() {
                     Some(p) if p.ch == ch && c.at - p.at < (0.005 * sr) as usize => {
@@ -461,11 +461,11 @@ fn sine_with(f: f32, n: usize, amp: impl Fn(usize) -> f32) -> (Vec<f32>, Vec<f32
     let l: Vec<f32> = (0..n)
         .map(|i| {
             let w = if i < fade {
-                0.5 - 0.5 * (std::f32::consts::PI * i as f32 / fade as f32).cos()
+                0.5 - 0.5 * libm::cosf(std::f32::consts::PI * i as f32 / fade as f32)
             } else {
                 1.0
             };
-            w * amp(i) * (std::f32::consts::TAU * f * i as f32 / SR).sin()
+            w * amp(i) * libm::sinf(std::f32::consts::TAU * f * i as f32 / SR)
         })
         .collect();
     (l.clone(), l)

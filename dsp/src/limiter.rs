@@ -147,7 +147,7 @@ impl Device for Limiter {
         match index {
             0 => self.gain.set(db_to_gain(v)),
             1 => self.ceil = db_to_gain(v),
-            _ => self.rel = (-1.0 / (v * 0.001 * self.sr)).exp(),
+            _ => self.rel = libm::expf(-1.0 / (v * 0.001 * self.sr)),
         }
         if self.fresh {
             self.gain.snap();

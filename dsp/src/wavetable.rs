@@ -20,7 +20,7 @@ pub struct Wavetables {
 
 /// Number of harmonics kept at mip level `level`.
 pub fn harmonics(level: usize) -> usize {
-    ((1024.0 * 2f64.powf(-(level as f64) / 3.0)).floor() as usize).clamp(1, TABLE_LEN / 2 - 1)
+    ((1024.0 * libm::pow(2.0, -(level as f64) / 3.0)).floor() as usize).clamp(1, TABLE_LEN / 2 - 1)
 }
 
 /// Sine-series coefficient of harmonic `k` for `shape`. All shapes have a positive fundamental

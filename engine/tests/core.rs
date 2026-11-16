@@ -412,7 +412,7 @@ fn the_peak_meter_attacks_instantly_and_releases_over_about_300_ms() {
     let mut buf = vec![0f32; 14_400 * 2]; // 300 ms of silence after a 5 ms fade
     p.process(&mut buf, 2);
     let ratio = c.live().peak[0] / held[0];
-    assert!((ratio - (-1f32).exp()).abs() < 0.05, "ratio {ratio}");
+    assert!((ratio - libm::expf(-1.0)).abs() < 0.05, "ratio {ratio}");
     // The processor's writes leave the output layer's field alone.
     assert_eq!(c.live().output_latency_frames, 7_680);
 }

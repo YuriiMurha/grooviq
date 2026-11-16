@@ -1,4 +1,4 @@
-use grooviq_golden::{compare, render, scenes};
+use grooviq_golden::{compare, compare_exact, render, scenes, synth_preset_scene};
 
 const BLOCK_SIZES: [usize; 2] = [64, 512];
 
@@ -13,7 +13,7 @@ fn each_scene_matches_its_reference() {
             continue;
         }
         let reference = grooviq_golden::read_wav(&path);
-        if let Err(e) = compare(&actual, &reference) {
+        if let Err(e) = compare_exact(&actual, &reference) {
             panic!("scene {}: {e}", scene.name);
         }
     }
@@ -30,6 +30,108 @@ fn each_scene_is_identical_at_block_sizes_64_and_512() {
             scene.name
         );
     }
+}
+
+/// "Init" and every factory preset, straight from the synth: the audio tests below do not go
+/// through the library's own `preset_names()`, so a helper that drops a preset cannot drop coverage.
+fn every_preset() -> impl Iterator<Item = &'static str> {
+    std::iter::once("Init").chain(grooviq_dsp::synth::PRESETS)
+}
+
+#[test]
+fn the_preset_list_covers_init_and_every_factory_preset() {
+    let expected: Vec<&str> = every_preset().collect();
+    assert_eq!(expected.len(), 1 + grooviq_dsp::synth::PRESETS.len());
+    assert_eq!(grooviq_golden::synth_presets::preset_names(), expected);
+}
+
+#[test]
+fn each_synth_preset_matches_its_reference_exactly() {
+    use grooviq_golden::synth_presets::stem;
+    for name in every_preset() {
+        let scene = synth_preset_scene(name);
+        let actual = render(&scene, 512);
+        assert!(
+            actual.iter().any(|v| v.abs() > 1e-3) && actual.iter().all(|v| v.is_finite()),
+            "preset {name} renders silence or NaN"
+        );
+        let path = format!("{}/refs/{}.wav", env!("CARGO_MANIFEST_DIR"), stem(name));
+        if std::env::var("GOLDEN_UPDATE").as_deref() == Ok("1") {
+            grooviq_golden::write_wav(&path, &actual);
+            println!("golden file updated: explain why in the commit message");
+            continue;
+        }
+        let reference = grooviq_golden::read_wav(&path);
+        if let Err(e) = compare_exact(&actual, &reference) {
+            panic!("synth preset {name}: {e}");
+        }
+    }
+}
+
+#[test]
+fn no_two_scenes_share_a_reference_file() {
+    use grooviq_golden::synth_presets::stem;
+    let mut stems: Vec<String> = scenes().iter().map(|s| s.name.to_string()).collect();
+    stems.extend(every_preset().map(stem));
+    let mut unique = stems.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        stems.len(),
+        "two scenes write one file: {stems:?}"
+    );
+}
+
+#[test]
+fn the_synth_presets_are_identical_at_block_sizes_64_and_512() {
+    for name in every_preset() {
+        let scene = synth_preset_scene(name);
+        let (a, b) = (render(&scene, 64), render(&scene, 512));
+        assert!(
+            compare_exact(&a, &b).is_ok(),
+            "preset {name} differs between callback sizes"
+        );
+    }
+}
+
+#[test]
+fn compare_exact_reports_the_first_differing_frame() {
+    let good = vec![0.5f32, -0.5, 0.25, 0.125, 0.0, 0.0];
+    assert!(compare_exact(&good, &good).is_ok());
+    // A 1-ulp change is far inside `compare`'s tolerance but must fail here.
+    let mut ulp = good.clone();
+    ulp[3] = f32::from_bits(ulp[3].to_bits() + 1);
+    assert!(compare(&ulp, &good).is_ok());
+    let e = compare_exact(&ulp, &good).unwrap_err();
+    assert!(e.contains("frame 1, right"), "{e}");
+    // -0.0 is a different bit pattern; a NaN is not in the reference; lengths must agree.
+    let mut neg_zero = good.clone();
+    neg_zero[4] = -0.0;
+    assert!(compare_exact(&neg_zero, &good).is_err());
+    let mut nan = good.clone();
+    nan[0] = f32::NAN;
+    assert!(compare_exact(&nan, &good).is_err());
+    assert!(compare_exact(&good[..4], &good).is_err());
+}
+
+#[test]
+fn compare_exact_compares_nan_payloads_bit_for_bit() {
+    let nan = |bits: u32| {
+        let mut v = vec![0.5f32, -0.5, 0.25, 0.125];
+        v[2] = f32::from_bits(bits);
+        v
+    };
+    let quiet = nan(0x7fc0_0000);
+    // The same NaN bits are equal (a NaN never equals itself under `==`, bits do).
+    assert!(compare_exact(&quiet, &nan(0x7fc0_0000)).is_ok());
+    // A different payload or sign bit is a different render.
+    assert!(compare_exact(&quiet, &nan(0x7fc0_0001)).is_err());
+    assert!(compare_exact(&nan(0x7fc0_0001), &nan(0x7fc0_0002)).is_err());
+    assert!(compare_exact(&quiet, &nan(0xffc0_0000)).is_err());
+    // A NaN against a finite sample, both ways.
+    assert!(compare_exact(&quiet, &[0.5, -0.5, 0.25, 0.125]).is_err());
+    assert!(compare_exact(&[0.5, -0.5, 0.25, 0.125], &quiet).is_err());
 }
 
 #[test]

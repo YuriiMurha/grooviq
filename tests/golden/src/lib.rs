@@ -10,8 +10,10 @@ use grooviq_engine::{Command, EngineConfig, render_offline};
 
 pub mod devices;
 pub mod drums;
+pub mod synth_presets;
 
 pub use drums::{KIT, LOOPS, decode_samples, drums_4ch_project, kit_dir};
+pub use synth_presets::synth_preset_scene;
 
 /// Sample rate of every scene and reference file.
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -95,6 +97,32 @@ pub fn compare(actual: &[f32], reference: &[f32]) -> Result<(), String> {
         None => Ok(()),
         Some((i, diff)) => Err(format!(
             "max difference {diff} at sample {i} exceeds {TOLERANCE}"
+        )),
+    }
+}
+
+/// Bit equality: same length and every sample has the same bits (so a NaN or a -0.0 that the
+/// reference does not have fails). Reports the first differing frame.
+pub fn compare_exact(actual: &[f32], reference: &[f32]) -> Result<(), String> {
+    if actual.len() != reference.len() {
+        return Err(format!(
+            "length differs: {} samples rendered, {} in the reference",
+            actual.len(),
+            reference.len()
+        ));
+    }
+    match actual
+        .iter()
+        .zip(reference)
+        .position(|(a, r)| a.to_bits() != r.to_bits())
+    {
+        None => Ok(()),
+        Some(i) => Err(format!(
+            "frame {}, {}: {:e} rendered vs {:e} in the reference (not bit-identical)",
+            i / 2,
+            if i % 2 == 0 { "left" } else { "right" },
+            actual[i],
+            reference[i]
         )),
     }
 }
