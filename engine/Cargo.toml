@@ -15,7 +15,9 @@ name = "grooviq_engine"
 test-hooks = []
 
 [dependencies]
-cpal = "0.18.2"
+# `realtime` promotes the WASAPI output thread (MMCSS "Audio", else time-critical priority).
+# CoreAudio already runs its I/O thread real-time: on macOS the feature adds no code or crate.
+cpal = { version = "0.18.2", features = ["realtime"] }
 grooviq-dsp = { path = "../dsp" }
 rtrb = "0.3"
 # Pure-Rust maths: the same bits on every platform (clippy.toml bans the std methods).
