@@ -71,6 +71,28 @@ fn project() -> (Project, SampleFiles) {
     (p, samples)
 }
 
+/// A tiny valid mono 16-bit WAV (`frames` frames of a ramp), built by hand.
+fn wav_bytes(frames: u32) -> Vec<u8> {
+    let data = frames * 2;
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    b.extend_from_slice(&1u16.to_le_bytes()); // mono
+    b.extend_from_slice(&44_100u32.to_le_bytes());
+    b.extend_from_slice(&88_200u32.to_le_bytes());
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data.to_le_bytes());
+    for i in 0..frames {
+        b.extend_from_slice(&((i as i16) * 100).to_le_bytes());
+    }
+    b
+}
+
 fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut zip = ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, bytes) in entries {
@@ -566,7 +588,7 @@ fn a_project_opens_after_its_original_samples_are_deleted() {
 #[test]
 fn a_missing_entry_falls_back_to_the_original_path_then_to_no_sample() {
     let dir = tempfile::tempdir().unwrap();
-    let on_disk = write(dir.path(), "kick.wav", b"disk bytes");
+    let on_disk = write(dir.path(), "kick.wav", &wav_bytes(32));
     let gone = dir.path().join("gone.wav");
     let json = format!(
         r#"{{"format":"grooviq-project","version":1,"name":"x","bpm":140,
@@ -601,10 +623,10 @@ fn a_missing_entry_falls_back_to_the_original_path_then_to_no_sample() {
             ),
         ]
     );
-    assert_eq!(*loaded.samples[&1].bytes, b"disk bytes".to_vec());
+    assert_eq!(*loaded.samples[&1].bytes, wav_bytes(32));
     assert_eq!(loaded.samples[&1].name, "kick.wav");
     assert!(!loaded.samples.contains_key(&2));
-    assert_eq!(*loaded.samples[&3].bytes, b"disk bytes".to_vec());
+    assert_eq!(*loaded.samples[&3].bytes, wav_bytes(32));
     // The channel keeps its reference, so the person can relink it.
     assert_eq!(
         loaded.project.channels[1].sample.as_ref().unwrap().path,
@@ -694,4 +716,50 @@ fn backups_keep_the_last_ten() {
     fs::write(&other, [1]).unwrap();
     backup_before_save(&other, &backups, 10).unwrap();
     assert_eq!(fs::read_dir(backups.join("Other")).unwrap().count(), 1);
+}
+
+#[test]
+fn the_disk_fallback_only_reads_audio_that_decodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = write(dir.path(), "notes.txt", b"just some text, not a sound");
+    let fake = write(dir.path(), "fake.wav", b"just some text, renamed to .wav");
+    let real = write(dir.path(), "REAL.WAV", &wav_bytes(32)); // the extension's case does not matter
+    let mut p = Project::new();
+    p.channels = vec![
+        channel(1, "Text", Some(text.to_str().unwrap())),
+        channel(2, "Fake", Some(fake.to_str().unwrap())),
+        channel(3, "Real", Some(real.to_str().unwrap())),
+    ];
+    p.next_id = 4;
+    let path = dir.path().join("a.grooviq");
+    save(&p, &SampleFiles::new(), &path).unwrap(); // no copies: every channel needs the fallback
+
+    let loaded = load(&path).unwrap();
+    assert_eq!(loaded.samples.keys().copied().collect::<Vec<_>>(), vec![3]);
+    assert_eq!(*loaded.samples[&3].bytes, wav_bytes(32));
+    assert_eq!(loaded.warnings.len(), 3, "{:#?}", loaded.warnings);
+    assert_eq!(
+        loaded.warnings[0],
+        format!(
+            "Channel \"Text\": its sample is not stored in the file and \"{}\" was not used: only WAV, AIFF, FLAC, MP3 and OGG files are read from a path; the channel is silent until you relink it.",
+            text.display()
+        )
+    );
+    assert!(
+        loaded.warnings[1].starts_with(&format!(
+            "Channel \"Fake\": its sample is not stored in the file and \"{}\" was not used: ",
+            fake.display()
+        )),
+        "{}",
+        loaded.warnings[1]
+    );
+    assert!(loaded.warnings[1].ends_with("; the channel is silent until you relink it."));
+    assert!(
+        loaded.warnings[2].contains("read") && loaded.warnings[2].contains("from disk instead")
+    );
+
+    // Nothing that failed can be written back: only the audio is embedded on the next save.
+    let again = dir.path().join("again.grooviq");
+    save(&loaded.project, &loaded.samples, &again).unwrap();
+    assert_eq!(names(&again), vec!["project.json", "samples/1-REAL.WAV"]);
 }

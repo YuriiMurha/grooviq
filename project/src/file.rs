@@ -390,7 +390,7 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
             ));
             continue;
         }
-        match read_limited(&sample_ref.path, left.min(MAX_SAMPLE_BYTES)) {
+        match read_fallback(&sample_ref.path, left.min(MAX_SAMPLE_BYTES)) {
             Ok(found) => {
                 left -= found.bytes.len() as u64;
                 warnings.push(format!(
@@ -399,9 +399,14 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
                 ));
                 samples.insert(channel.id, found);
             }
-            Err(_) => warnings.push(format!(
+            Err(Fallback::Unreadable) => warnings.push(format!(
                 "Channel \"{}\": its sample is not stored in the file and \"{shown}\" could not be read; the channel is silent until you relink it.",
                 channel.name
+            )),
+            Err(Fallback::Refused(why)) => warnings.push(format!(
+                "Channel \"{}\": its sample is not stored in the file and \"{shown}\" was not used: {}; the channel is silent until you relink it.",
+                channel.name,
+                why.trim_end_matches('.')
             )),
         }
     }
@@ -410,6 +415,39 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
         samples,
         warnings,
     })
+}
+
+/// Extensions a project-named path may have for the disk fallback.
+const FALLBACK_EXTENSIONS: [&str; 6] = ["wav", "aif", "aiff", "flac", "mp3", "ogg"];
+
+/// Why the disk fallback did not give a sample.
+enum Fallback {
+    /// The file could not be read (missing, not a regular file, over the limit, ...).
+    Unreadable,
+    /// It was not used, for this reason (a sentence the person can read).
+    Refused(String),
+}
+
+/// A project file may name any path on the person's disk, so the fallback reads one only if it
+/// looks like a sample (a known audio extension), passes the file guards of [`read_limited`] and
+/// then actually decodes as audio. Bytes that do not decode are dropped here, so they can never
+/// be kept and written into a project on the next save.
+fn read_fallback(path: &Path, limit: u64) -> Result<SampleFile, Fallback> {
+    let extension = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .filter(|e| FALLBACK_EXTENSIONS.contains(&e.as_str()))
+        .ok_or_else(|| {
+            Fallback::Refused("only WAV, AIFF, FLAC, MP3 and OGG files are read from a path".into())
+        })?;
+    let file = read_limited(path, limit).map_err(|_| Fallback::Unreadable)?;
+    grooviq_engine::decode_sample(
+        &file.bytes,
+        Some(&extension),
+        grooviq_engine::MAX_SAMPLE_SECONDS,
+    )
+    .map_err(|e| Fallback::Refused(e.to_string()))?;
+    Ok(file)
 }
 
 /// Whether a path a project file names is a UNC share (`\\server\share`), a Windows device or
@@ -509,6 +547,28 @@ fn zip_error(e: ZipError) -> LoadError {
 mod tests {
     use super::*;
     use crate::model::{Channel, SampleRef};
+
+    /// A tiny valid mono 16-bit WAV (`frames` frames of a ramp), built by hand.
+    fn wav_bytes(frames: u32) -> Vec<u8> {
+        let data = frames * 2;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        b.extend_from_slice(&1u16.to_le_bytes()); // mono
+        b.extend_from_slice(&44_100u32.to_le_bytes());
+        b.extend_from_slice(&88_200u32.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&data.to_le_bytes());
+        for i in 0..frames {
+            b.extend_from_slice(&((i as i16) * 100).to_le_bytes());
+        }
+        b
+    }
 
     fn project_of(n: u32) -> (Project, SampleFiles) {
         let mut p = Project::new();
@@ -673,12 +733,12 @@ mod tests {
         let (mut p, _) = project_of(2);
         for (i, c) in p.channels.iter_mut().enumerate() {
             let on_disk = dir.path().join(format!("{i}.wav"));
-            fs::write(&on_disk, [1u8; 6]).unwrap();
+            fs::write(&on_disk, wav_bytes(10)).unwrap();
             c.sample.as_mut().unwrap().path = on_disk;
         }
         let path = dir.path().join("a.grooviq");
         save(&p, &SampleFiles::new(), &path).unwrap(); // no copies: both read from disk
-        let loaded = load_with_budget(&path, 8).unwrap();
+        let loaded = load_with_budget(&path, 100).unwrap();
         assert_eq!(loaded.samples.len(), 1, "{:?}", loaded.warnings);
         assert_eq!(loaded.warnings.len(), 2); // "read from disk" for one, "could not be read" for the other
     }
