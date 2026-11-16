@@ -300,3 +300,58 @@ fn synth_a_re_struck_key_keeps_its_priority() {
         assert_eq!(voices(&s), 0.0, "mode {mode}: released");
     }
 }
+
+/// Chords of 16 notes (keys 40..55), each choked `gap` frames after it starts; the first
+/// sustains 4 800 frames.
+fn choked_synth_chords(chords: usize, gap: usize) -> Synth {
+    let mut s = sine_synth();
+    let chord: Vec<NoteEvent> = (0..16).map(|i| on(0, 40 + i, false)).collect();
+    render(&mut s, 4_800, &chord);
+    s.choke();
+    for _ in 1..chords {
+        render(&mut s, gap, &chord);
+        s.choke();
+    }
+    s
+}
+
+#[test]
+fn synth_three_chokes_do_not_delay_the_next_note() {
+    // Three chords choked one frame apart: the note right after the last choke sounds from its
+    // own frame, as on a fresh synth.
+    let mut s = choked_synth_chords(3, 1);
+    let with_note = render(&mut s, 4_800, &[on(0, 72, false)]);
+    let mut fresh = sine_synth();
+    let alone = render(&mut fresh, 4_800, &[on(0, 72, false)]);
+    assert!(alone[FADE].abs() > 0.01);
+    for k in FADE..4_800 {
+        assert!(
+            (with_note[k] - alone[k]).abs() < 1e-6,
+            "frame {k}: {} vs {}",
+            with_note[k],
+            alone[k]
+        );
+    }
+}
+
+#[test]
+fn synth_a_full_fade_pool_replaces_only_its_quietest_fades() {
+    // Five chords choked 10 frames apart: the first four fill all 64 fade slots, so the fifth
+    // replaces the first chord's fades (the nearest their end). Just after the first chord's
+    // fades would have ended, chords 2 to 5 still fade (64) beside the new note; and the new
+    // note sounds as on a fresh synth.
+    let mut s = choked_synth_chords(5, 10);
+    let with_note = render(&mut s, FADE + 5 - 40, &[on(0, 72, false)]);
+    assert_eq!(
+        voices(&s),
+        65.0,
+        "the first chord's fades were the ones replaced"
+    );
+    let rest = render(&mut s, 4_800, &[]);
+    let mut fresh = sine_synth();
+    let alone = render(&mut fresh, FADE + 5 - 40 + 4_800, &[on(0, 72, false)]);
+    let all: Vec<f32> = with_note.into_iter().chain(rest).collect();
+    for k in FADE..all.len() {
+        assert!((all[k] - alone[k]).abs() < 1e-6, "frame {k}");
+    }
+}
