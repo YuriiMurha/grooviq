@@ -2,7 +2,7 @@
 
 use crate::channel::ChannelNode;
 use crate::graph::Graph;
-use crate::state::{ChannelId, ChannelMix, PatternData};
+use crate::state::{BPM_RANGE, ChannelId, ChannelMix, PatternData};
 use grooviq_dsp::sampler::SampleBuf;
 use std::sync::Arc;
 
@@ -17,12 +17,21 @@ const TONE_DB: (f32, f32) = (-60.0, 0.0);
 /// non-finite values, unknown keys or parameter indices, and channels that do not exist.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
-    /// Starts the transport.
+    /// Plays the pattern from tick 0, looping forever, from the start of its block. A no-op
+    /// while playing.
     Play,
-    /// Stops the transport.
+    /// Plays the pattern from tick 0 (also while playing) for `loops` loops: no note starts at
+    /// or after tick `loops * length`; the transport keeps running so their note-offs land.
+    /// `loops` 0 is rejected.
+    PlayLoops { loops: u32 },
+    /// Stops the transport: every pending sequenced note-off goes out at the start of its
+    /// block, and the position rewinds to tick 0.
     Stop,
-    /// Fades the tone and every synth voice out over 5 ms (the synth resets after the fade) and
-    /// stops the transport.
+    /// Sets the tempo, clamped to [`BPM_RANGE`]. Applies at the start of its block: the tick
+    /// reached there stays put and later steps follow the new tempo.
+    SetTempo { bpm: f32 },
+    /// Fades the tone, every synth voice and every channel out over 5 ms (each device resets
+    /// after the fade) and stops the transport.
     AllSoundOff,
     /// Switches the sine test tone; `hz` is clamped to 20..=20000 and `gain_db` to -60..=0.
     /// Every change ramps over 5 ms.
@@ -69,6 +78,10 @@ impl Command {
                     gain_db: gain_db.clamp(TONE_DB.0, TONE_DB.1),
                 })
             }
+            Self::SetTempo { bpm } => bpm.is_finite().then(|| Self::SetTempo {
+                bpm: bpm.clamp(BPM_RANGE.0, BPM_RANGE.1),
+            }),
+            Self::PlayLoops { loops } => (loops > 0).then_some(self),
             Self::Note { key, velocity, on } => {
                 (key <= 127 && velocity.is_finite()).then(|| Self::Note {
                     key,
@@ -227,6 +240,16 @@ mod tests {
         }
         assert_eq!(param(spec.len() as u32, 0.0), None);
         assert_eq!(Command::Play.clamped(), Some(Command::Play));
+        let tempo = |bpm| Command::SetTempo { bpm }.clamped();
+        let tempo_ok = |bpm| Some(Command::SetTempo { bpm });
+        assert_eq!(tempo(1_000.0), tempo_ok(400.0));
+        assert_eq!(tempo(-5.0), tempo_ok(20.0));
+        assert_eq!(tempo(128.5), tempo_ok(128.5));
+        assert_eq!(tempo(f32::NAN), None);
+        assert_eq!(tempo(f32::INFINITY), None);
+        assert_eq!(Command::PlayLoops { loops: 0 }.clamped(), None);
+        let two = Command::PlayLoops { loops: 2 };
+        assert_eq!(two.clamped(), Some(two));
 
         let id = ChannelId(3);
         let mix = |volume, pan| {

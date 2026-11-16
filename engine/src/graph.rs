@@ -1,7 +1,8 @@
 //! The audio graph: a sine test tone, the synth and the sampler channels (in insertion order),
 //! mixed into the master bus. After each node, a NaN guard silences and resets a node whose
 //! block holds NaN or infinity, so one bad device cannot poison the mix. The graph also holds
-//! the pattern the sequencer plays.
+//! the pattern and the sequencer that plays it into the channels, so a rebuilt graph replays
+//! the pattern from where the transport is.
 //!
 //! The controller builds a graph on its own thread: `Graph::new`, then the setters to replay
 //! its state. Once the graph is handed to the processor, everything here runs on the audio
@@ -9,7 +10,9 @@
 
 use crate::BLOCK;
 use crate::channel::ChannelNode;
+use crate::sequencer::{Delivery, Sequencer};
 use crate::state::{ChannelId, ChannelMix, MAX_CHANNELS, PatternData};
+use crate::transport::TransportClock;
 use grooviq_dsp::sampler::SampleBuf;
 use grooviq_dsp::{Device, NoteEvent, db_to_gain};
 use std::f64::consts::TAU;
@@ -30,6 +33,7 @@ pub(crate) struct Graph {
     )]
     channels: Vec<Box<ChannelNode>>,
     pattern: Box<PatternData>,
+    sequencer: Sequencer,
     /// The block of the node being rendered, checked by the guard before it joins the master.
     node_l: [f32; BLOCK],
     node_r: [f32; BLOCK],
@@ -51,6 +55,7 @@ impl Graph {
             synth: SynthNode::new(sample_rate, ramp_len),
             channels: Vec::with_capacity(MAX_CHANNELS),
             pattern: Box::new(PatternData::default()),
+            sequencer: Sequencer::new(),
             node_l: [0.0; BLOCK],
             node_r: [0.0; BLOCK],
         }
@@ -115,10 +120,12 @@ impl Graph {
         None
     }
 
-    /// Takes a channel out, keeping the others in order; the caller frees it elsewhere.
+    /// Takes a channel out, keeping the others in order (its pending note-offs go with it);
+    /// the caller frees it elsewhere.
     pub(crate) fn remove_channel(&mut self, id: ChannelId) -> Option<Box<ChannelNode>> {
         let index = self.channels.iter().position(|c| c.id() == id)?;
         let node = self.channels.remove(index);
+        self.sequencer.forget_channel(id);
         self.retarget();
         Some(node)
     }
@@ -165,9 +172,39 @@ impl Graph {
         }
     }
 
-    /// Swaps in a pattern and returns the old one, to be freed elsewhere.
+    /// Swaps in a pattern and returns the old one, to be freed elsewhere. Playback goes on at
+    /// the same tick, in the new pattern (notes already sounding end as booked).
     pub(crate) fn set_pattern(&mut self, pattern: Box<PatternData>) -> Box<PatternData> {
+        self.sequencer.reseek();
         std::mem::replace(&mut self.pattern, pattern)
+    }
+
+    /// The transport started: the sequencer finds its place again.
+    pub(crate) fn transport_started(&mut self) {
+        self.sequencer.reseek();
+    }
+
+    /// The transport stopped: every pending note-off goes out at the next block's start.
+    pub(crate) fn transport_stopped(&mut self) {
+        self.sequencer.stop();
+    }
+
+    /// Queues into the channels the sequenced notes of the block that starts at frame `f0`
+    /// (call it before [`Self::render`]).
+    pub(crate) fn sequence(&mut self, clock: &TransportClock, f0: u64) {
+        let channels = &mut self.channels;
+        self.sequencer.run(&self.pattern, clock, f0, |id, event| {
+            match channels.iter_mut().find(|c| c.id() == id) {
+                None => Delivery::NoChannel,
+                Some(channel) => {
+                    if channel.push_event(event) {
+                        Delivery::Taken
+                    } else {
+                        Delivery::Full
+                    }
+                }
+            }
+        });
     }
 
     #[cfg(test)]
