@@ -6,8 +6,9 @@ static A: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
 use assert_no_alloc::assert_no_alloc;
 use grooviq_engine::{
-    AudioOutput, AudioSlot, Command, EngineConfig, OutputBackend, OutputChoice, OutputInfo,
-    OutputKind, engine,
+    AudioOutput, AudioSlot, ChannelId, ChannelMix, ChannelSetup, Command, EngineConfig,
+    EngineState, OutputBackend, OutputChoice, OutputInfo, OutputKind, PatternData, SampleBuf,
+    SeqNote, engine, engine_with,
 };
 use std::sync::{Arc, Mutex};
 
@@ -145,4 +146,96 @@ fn every_command_and_channel_layout_is_allocation_free() {
             assert_no_alloc(|| p.process(&mut buf, channels));
         }
     }
+}
+
+fn tone_sample(len: usize) -> Arc<SampleBuf> {
+    let l: Vec<f32> = (0..len).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+    Arc::new(SampleBuf {
+        rate: SR,
+        r: l.clone(),
+        l,
+    })
+}
+
+#[test]
+fn channel_messages_never_allocate_on_the_audio_thread() {
+    let setup = |id, sample: &Arc<SampleBuf>| ChannelSetup {
+        id: ChannelId(id),
+        sample: Some(Arc::clone(sample)),
+        sampler: Vec::new(),
+        mix: ChannelMix::default(),
+    };
+    let (a, b) = (tone_sample(48_000), tone_sample(4_800));
+    let state = EngineState {
+        channels: vec![setup(1, &a), setup(2, &b)],
+        ..EngineState::default()
+    };
+    let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
+    let mut buf = vec![0f32; 441 * 2];
+    let note = |id, on| Command::ChannelNote {
+        channel: ChannelId(id),
+        key: 60,
+        velocity: 0.9,
+        on,
+    };
+    let mut run = |c: &mut grooviq_engine::Controller| {
+        for _ in 0..4 {
+            assert_no_alloc(|| p.process(&mut buf, 2));
+        }
+        // Frees what the processor handed back, outside the check.
+        c.check_health();
+    };
+    c.send(note(1, true)).unwrap();
+    c.send(note(2, true)).unwrap();
+    run(&mut c);
+    let solo = ChannelMix {
+        volume: 1.5,
+        pan: -0.4,
+        mute: false,
+        solo: true,
+    };
+    c.send(Command::SetChannelMix {
+        channel: ChannelId(2),
+        mix: solo,
+    })
+    .unwrap();
+    c.send(Command::SetSamplerParam {
+        channel: ChannelId(1),
+        index: 1,
+        value: 7.0,
+    })
+    .unwrap();
+    run(&mut c);
+    c.add_channel(setup(3, &a)).unwrap();
+    c.send(note(3, true)).unwrap();
+    run(&mut c);
+    c.set_channel_sample(ChannelId(1), Some(tone_sample(9_000)))
+        .unwrap();
+    c.set_channel_sample(ChannelId(3), None).unwrap();
+    c.send(note(1, true)).unwrap();
+    run(&mut c);
+    c.set_pattern(PatternData {
+        length: 3_840,
+        notes: vec![SeqNote {
+            tick: 0,
+            channel: ChannelId(1),
+            key: 60,
+            velocity: 0.8,
+            length: 240,
+        }],
+    })
+    .unwrap();
+    c.send(Command::AllSoundOff).unwrap();
+    run(&mut c);
+    c.remove_channel(ChannelId(2)).unwrap();
+    c.send(note(1, false)).unwrap();
+    run(&mut c);
+    c.load_state(EngineState::default()).unwrap();
+    run(&mut c);
+    assert_eq!(
+        Arc::strong_count(&a),
+        1,
+        "every node came back and was freed"
+    );
+    assert_eq!(Arc::strong_count(&b), 1);
 }

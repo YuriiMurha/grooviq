@@ -584,9 +584,9 @@ mod tests {
             gain_db: -12.0,
         };
         c.send(tone).unwrap();
-        // Six restarts at once: four fill the trash queue, the fifth's old graph is parked,
-        // and the sixth waits in the queue, with AllSoundOff behind it.
-        c.queue_restarts(6);
+        // Restarts at once: the first ones fill the trash queue, the next one's old graph is
+        // parked, and the last waits in the queue, with AllSoundOff behind it.
+        c.queue_restarts(crate::TRASH_CAPACITY + 2);
         let stopped = c.send(Command::AllSoundOff).is_ok();
         assert!(stopped);
         silence(&mut c, &mut p, stopped);

@@ -1,12 +1,15 @@
-//! The control-thread half: validates commands, mirrors the state they set, frees what the
-//! processor hands back and rebuilds the graph after a panic. May allocate and block; never
-//! call it from the audio thread.
+//! The control-thread half: validates commands, mirrors the state they set, builds channels,
+//! frees what the processor hands back and rebuilds the graph after a panic. May allocate and
+//! block; never call it from the audio thread.
 
-use crate::command::{Command, Msg};
-use crate::graph::Graph;
+use crate::channel::ChannelNode;
+use crate::command::{Command, Msg, Trash};
+use crate::graph::{Graph, ramp_len};
 use crate::live::{LiveShared, LiveSnapshot};
 use crate::processor::AudioProcessor;
+use crate::state::{ChannelId, ChannelSetup, EngineState, MAX_CHANNELS, PatternData};
 use crate::{EngineConfig, QUEUE_CAPACITY};
+use grooviq_dsp::sampler::SampleBuf;
 use rtrb::{Consumer, Producer};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -22,14 +25,34 @@ pub enum HealthEvent {
     DeviceSilenced { total: u32 },
 }
 
-/// Why a command was not queued.
+/// Why a command or a change was refused. Nothing is queued or changed when it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SendError {
-    /// A value was not finite, or a key or parameter index does not exist.
+pub enum ControlError {
+    /// A value was not finite, or a key, parameter index or pattern length is out of range.
     Rejected,
     /// The queue had no room.
     Full,
+    /// No channel has that id.
+    UnknownChannel,
+    /// A channel with that id exists already.
+    ChannelExists,
+    /// The engine already holds [`MAX_CHANNELS`] channels.
+    TooManyChannels,
 }
+
+impl std::fmt::Display for ControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Rejected => "a value is out of range or not a number",
+            Self::Full => "the engine's command queue is full",
+            Self::UnknownChannel => "no channel has that id",
+            Self::ChannelExists => "a channel with that id exists already",
+            Self::TooManyChannels => "the engine holds as many channels as it can",
+        })
+    }
+}
+
+impl std::error::Error for ControlError {}
 
 /// The test tone as last set.
 #[derive(Clone, Copy, Debug)]
@@ -58,16 +81,25 @@ fn synth_defaults() -> Vec<f32> {
         .collect()
 }
 
-/// Sends commands to the [`AudioProcessor`] and watches its health. Created by
-/// [`crate::engine`].
+/// Every sampler parameter at its default.
+fn sampler_defaults() -> Vec<f32> {
+    grooviq_dsp::sampler::SPEC
+        .iter()
+        .map(|&(_, _, default)| default)
+        .collect()
+}
+
+/// Sends commands to the [`AudioProcessor`], adds and removes its channels and watches its
+/// health. Created by [`crate::engine`] or [`crate::engine_with`].
 pub struct Controller {
     commands: Producer<Msg>,
-    trash: Consumer<Box<Graph>>,
+    trash: Consumer<Trash>,
     live: Arc<LiveShared>,
     sample_rate: f32,
     /// The state the queued commands lead to, to rebuild the graph from.
     tone: ToneState,
     synth: Vec<f32>,
+    state: EngineState,
     /// Counts `reconfigure` calls. Every graph carries the generation it was built in, and the
     /// processor drops a replacement from an earlier one.
     generation: u64,
@@ -77,17 +109,18 @@ pub struct Controller {
     /// A restart happened that `check_health` has not reported yet.
     restart_owed: bool,
     seen_guard_hits: u32,
-    /// Test switch: replaying the state panics, as a device bug in `set_param` would.
+    /// Test switch: this many replays of the state panic, as a device bug in `set_param` would.
     #[cfg(test)]
-    replay_panics: bool,
+    replay_panics: std::cell::Cell<u32>,
 }
 
 impl Controller {
     pub(crate) fn new(
         sample_rate: f32,
         commands: Producer<Msg>,
-        trash: Consumer<Box<Graph>>,
+        trash: Consumer<Trash>,
         live: Arc<LiveShared>,
+        state: EngineState,
     ) -> Self {
         Self {
             commands,
@@ -96,31 +129,140 @@ impl Controller {
             sample_rate,
             tone: ToneState::default(),
             synth: synth_defaults(),
+            state,
             generation: 0,
             seen_faults: 0,
             restart_owed: false,
             seen_guard_hits: 0,
             #[cfg(test)]
-            replay_panics: false,
+            replay_panics: std::cell::Cell::new(0),
         }
     }
 
     /// Queues `cmd` for the next block, with its values clamped into range. Gives it back if
-    /// it is rejected (a value not finite, an unknown key or parameter index) or the queue is
-    /// full.
+    /// it is rejected (a value not finite, an unknown key, parameter index or channel) or the
+    /// queue is full.
     pub fn send(&mut self, cmd: Command) -> Result<(), Command> {
         self.send_at(0, cmd).map_err(|_| cmd)
     }
 
     /// Queues `cmd` for the block that contains frame `due` (0: the next block). The processor
     /// holds back everything behind a command that is not due yet, so send in frame order.
-    pub(crate) fn send_at(&mut self, due: u64, cmd: Command) -> Result<(), SendError> {
-        let cmd = cmd.clamped().ok_or(SendError::Rejected)?;
+    pub(crate) fn send_at(&mut self, due: u64, cmd: Command) -> Result<(), ControlError> {
+        let cmd = cmd.clamped().ok_or(ControlError::Rejected)?;
+        if let Some(id) = cmd.channel()
+            && self.state.channel(id).is_none()
+        {
+            return Err(ControlError::UnknownChannel);
+        }
         self.commands
             .push(Msg::Command { due, cmd })
-            .map_err(|_| SendError::Full)?;
+            .map_err(|_| ControlError::Full)?;
         self.mirror(cmd);
         Ok(())
+    }
+
+    /// The state the queued commands and changes lead to.
+    pub fn state(&self) -> &EngineState {
+        &self.state
+    }
+
+    /// Adds a channel after the others, at its mix from the first frame (no fade-in). Values
+    /// are clamped, missing sampler parameters take their defaults and extra ones are
+    /// dropped.
+    pub fn add_channel(&mut self, setup: ChannelSetup) -> Result<(), ControlError> {
+        if self.state.channel(setup.id).is_some() {
+            return Err(ControlError::ChannelExists);
+        }
+        if self.state.channels.len() >= MAX_CHANNELS {
+            return Err(ControlError::TooManyChannels);
+        }
+        let setup = setup.checked()?;
+        let any_solo = self.state.any_solo();
+        let sample_rate = self.sample_rate;
+        // A device bug in `set_param` must not unwind into the caller (and a mutex it holds).
+        let node = catch_unwind(AssertUnwindSafe(|| {
+            Box::new(ChannelNode::new(
+                sample_rate,
+                ramp_len(sample_rate),
+                &setup,
+                any_solo,
+            ))
+        }))
+        .map_err(|_| ControlError::Rejected)?;
+        self.push(Msg::AddChannel(node))?;
+        self.state.channels.push(setup);
+        Ok(())
+    }
+
+    /// Removes a channel, cutting its notes. The processor hands it back to be freed here.
+    pub fn remove_channel(&mut self, id: ChannelId) -> Result<(), ControlError> {
+        let index = self.channel_index(id)?;
+        self.push(Msg::RemoveChannel(id))?;
+        self.state.channels.remove(index);
+        Ok(())
+    }
+
+    /// Gives a channel a new sample (or none), silencing its notes. The processor hands the
+    /// old one back to be freed here.
+    pub fn set_channel_sample(
+        &mut self,
+        id: ChannelId,
+        sample: Option<Arc<SampleBuf>>,
+    ) -> Result<(), ControlError> {
+        let index = self.channel_index(id)?;
+        self.push(Msg::SetSample {
+            channel: id,
+            sample: sample.clone(),
+        })?;
+        self.state.channels[index].sample = sample;
+        Ok(())
+    }
+
+    /// Replaces the pattern. Velocities are clamped and notes sorted by tick, then channel;
+    /// a length outside 1 tick..=256 steps, a key above 127 or a velocity that is not a number
+    /// is `Rejected`.
+    pub fn set_pattern(&mut self, pattern: PatternData) -> Result<(), ControlError> {
+        let pattern = pattern.checked()?;
+        self.push(Msg::SetPattern(Box::new(pattern.clone())))?;
+        self.state.pattern = pattern;
+        Ok(())
+    }
+
+    /// Replaces the whole state: stops the transport, then swaps in one graph built from
+    /// `state` (cutting every note; the test tone and the synth keep their settings). Checked
+    /// like [`Self::add_channel`] and [`Self::set_pattern`], and refused as a whole
+    /// (`ChannelExists` for two channels with one id, `TooManyChannels` for more than
+    /// [`MAX_CHANNELS`], `Rejected` for a value that is not finite).
+    pub fn load_state(&mut self, state: EngineState) -> Result<(), ControlError> {
+        let state = state.checked()?;
+        if self.commands.slots() < 2 {
+            return Err(ControlError::Full);
+        }
+        // The old state (and the samples only it held) is freed here, on this thread.
+        let _old = std::mem::replace(&mut self.state, state);
+        let graph = self.build_graph();
+        // Only this thread pushes, and the queue had room for both.
+        let stop = Msg::Command {
+            due: 0,
+            cmd: Command::Stop,
+        };
+        let queued =
+            self.commands.push(stop).is_ok() && self.push(Msg::ReplaceGraph(graph)).is_ok();
+        debug_assert!(queued);
+        Ok(())
+    }
+
+    fn channel_index(&self, id: ChannelId) -> Result<usize, ControlError> {
+        self.state
+            .channels
+            .iter()
+            .position(|c| c.id == id)
+            .ok_or(ControlError::UnknownChannel)
+    }
+
+    fn push(&mut self, msg: Msg) -> Result<(), ControlError> {
+        self.commands.push(msg).map_err(|_| ControlError::Full)
     }
 
     /// Sends a factory preset as `SetSynthParam` for every synth parameter. False if the name
@@ -205,24 +347,34 @@ impl Controller {
     }
 
     /// A graph for the current sample rate and generation, in the state the queued commands
-    /// lead to. If replaying that state panics (a device bug in `set_param`), the graph keeps
-    /// its default parameters and the state is reset to match, so a restart still happens, the
-    /// panic stays off the caller (and any mutex it holds), and it cannot recur.
+    /// lead to. If replaying that state panics (a device bug in `set_param`), it is replayed
+    /// again with every device parameter at its default (channels, samples, mix and pattern
+    /// kept); if that panics too, without the channels. The state is reset to match, so a
+    /// restart still happens, the panic stays off the caller (and any mutex it holds), and it
+    /// cannot recur.
     pub(crate) fn build_graph(&mut self) -> Box<Graph> {
-        match catch_unwind(AssertUnwindSafe(|| self.replay())) {
-            Ok(graph) => graph,
-            Err(_) => {
-                self.tone = ToneState::default();
-                self.synth = synth_defaults();
-                Box::new(Graph::new(self.sample_rate, self.generation))
-            }
+        if let Ok(graph) = catch_unwind(AssertUnwindSafe(|| self.replay())) {
+            return graph;
         }
+        self.tone = ToneState::default();
+        self.synth = synth_defaults();
+        for channel in &mut self.state.channels {
+            channel.sampler = sampler_defaults();
+        }
+        if let Ok(graph) = catch_unwind(AssertUnwindSafe(|| self.replay())) {
+            return graph;
+        }
+        self.state.channels.clear();
+        let mut graph = Box::new(Graph::new(self.sample_rate, self.generation));
+        graph.set_pattern(Box::new(self.state.pattern.clone()));
+        graph
     }
 
     fn replay(&self) -> Box<Graph> {
         let mut graph = Box::new(Graph::new(self.sample_rate, self.generation));
         #[cfg(test)]
-        if self.replay_panics {
+        if self.replay_panics.get() > 0 {
+            self.replay_panics.set(self.replay_panics.get() - 1);
             panic!("replaying the controller's state panicked (test switch)");
         }
         let ToneState { on, hz, gain_db } = self.tone;
@@ -230,6 +382,21 @@ impl Controller {
         for (index, &value) in (0u32..).zip(&self.synth) {
             graph.set_synth_param(index, value);
         }
+        let any_solo = self.state.any_solo();
+        let ramp_len = ramp_len(self.sample_rate);
+        for setup in &self.state.channels {
+            let node = Box::new(ChannelNode::new(
+                self.sample_rate,
+                ramp_len,
+                setup,
+                any_solo,
+            ));
+            let refused = graph.add_channel(node);
+            debug_assert!(refused.is_none(), "the state holds valid channels only");
+        }
+        graph.set_pattern(Box::new(self.state.pattern.clone()));
+        // Every channel starts at its mix: nothing ramps in a fresh graph.
+        graph.settle();
         graph
     }
 
@@ -242,11 +409,29 @@ impl Controller {
                     *param = value;
                 }
             }
+            Command::SetChannelMix { channel, mix } => {
+                if let Some(c) = self.state.channel_mut(channel) {
+                    c.mix = mix;
+                }
+            }
+            Command::SetSamplerParam {
+                channel,
+                index,
+                value,
+            } => {
+                if let Some(param) = self
+                    .state
+                    .channel_mut(channel)
+                    .and_then(|c| c.sampler.get_mut(index as usize))
+                {
+                    *param = value;
+                }
+            }
             _ => {}
         }
     }
 
-    /// Frees the graphs the processor replaced. The output layer also calls it while it runs
+    /// Frees what the processor handed back (graphs, channels, samples, patterns). The output layer also calls it while it runs
     /// the processor itself, so a restart waiting for room in the trash queue can go through.
     pub(crate) fn free_trash(&mut self) {
         while self.trash.pop().is_ok() {}
@@ -316,7 +501,7 @@ mod tests {
             value: 300.0,
         };
         c.send(cutoff).unwrap();
-        c.replay_panics = true;
+        c.replay_panics.set(u32::MAX);
         pretend(&c, 1, 0);
         assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 1 }]);
         // The replacement plays with default parameters, and the state now says so too.
@@ -348,9 +533,116 @@ mod tests {
         );
         p.process(&mut [0.0; crate::BLOCK * 2], 2);
         // The queued graph came back unused; the one reconfigure built (tone on) plays.
-        let returned = c.trash.pop().expect("a graph handed back");
+        let Ok(Trash::Graph(returned)) = c.trash.pop() else {
+            panic!("a graph handed back");
+        };
         assert!(!returned.tone_on());
         assert!(c.live().tone);
+    }
+
+    fn setup(id: u32) -> ChannelSetup {
+        ChannelSetup {
+            id: ChannelId(id),
+            sample: None,
+            sampler: Vec::new(),
+            mix: crate::ChannelMix::default(),
+        }
+    }
+
+    #[test]
+    fn refused_channel_calls_queue_and_change_nothing() {
+        let (mut c, _p) = controller();
+        c.add_channel(setup(1)).unwrap();
+        let free = c.commands.slots();
+        let before = c.state.clone();
+        let note = Command::ChannelNote {
+            channel: ChannelId(2),
+            key: 60,
+            velocity: 1.0,
+            on: true,
+        };
+        assert_eq!(c.send_at(0, note), Err(ControlError::UnknownChannel));
+        assert_eq!(
+            c.remove_channel(ChannelId(2)),
+            Err(ControlError::UnknownChannel)
+        );
+        assert_eq!(
+            c.set_channel_sample(ChannelId(2), None),
+            Err(ControlError::UnknownChannel)
+        );
+        assert_eq!(c.add_channel(setup(1)), Err(ControlError::ChannelExists));
+        let nan = ChannelSetup {
+            sampler: vec![f32::NAN],
+            ..setup(2)
+        };
+        assert_eq!(c.add_channel(nan), Err(ControlError::Rejected));
+        let empty = PatternData {
+            length: 0,
+            notes: Vec::new(),
+        };
+        assert_eq!(c.set_pattern(empty), Err(ControlError::Rejected));
+        let dup = EngineState {
+            channels: vec![setup(3), setup(3)],
+            ..EngineState::default()
+        };
+        assert_eq!(c.load_state(dup), Err(ControlError::ChannelExists));
+        assert_eq!(c.commands.slots(), free, "nothing queued");
+        assert_eq!(c.state, before, "nothing changed");
+
+        // A full queue: every change is refused whole.
+        while c.commands.slots() > 1 {
+            c.send(Command::Play).unwrap();
+        }
+        assert_eq!(
+            c.load_state(EngineState::default()),
+            Err(ControlError::Full)
+        );
+        c.send(Command::Play).unwrap();
+        assert_eq!(c.add_channel(setup(2)), Err(ControlError::Full));
+        assert_eq!(c.remove_channel(ChannelId(1)), Err(ControlError::Full));
+        assert_eq!(
+            c.set_pattern(PatternData::default()),
+            Err(ControlError::Full)
+        );
+        assert_eq!(c.state, before, "nothing changed");
+    }
+
+    #[test]
+    fn a_rebuild_that_panics_once_keeps_the_channels_with_default_sampler_params() {
+        let (mut c, mut p) = controller();
+        c.add_channel(setup(1)).unwrap();
+        c.add_channel(setup(2)).unwrap();
+        let tune = Command::SetSamplerParam {
+            channel: ChannelId(2),
+            index: 1,
+            value: 5.0,
+        };
+        c.send(tune).unwrap();
+        c.set_pattern(PatternData {
+            length: 7,
+            notes: Vec::new(),
+        })
+        .unwrap();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        c.replay_panics.set(1);
+        pretend(&c, 1, 0);
+        assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 1 }]);
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        let defaults = sampler_defaults();
+        assert!(c.state.channels.iter().all(|ch| ch.sampler == defaults));
+        assert_eq!(c.state.channels.len(), 2);
+        // The graph the state builds holds both channels and the pattern.
+        let graph = c.build_graph();
+        assert_eq!(graph.channel_ids(), [ChannelId(1), ChannelId(2)]);
+        assert_eq!(graph.pattern().length, 7);
+
+        // Panicking twice leaves no channels, but keeps the pattern.
+        c.replay_panics.set(2);
+        pretend(&c, 2, 0);
+        assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 2 }]);
+        assert!(c.state.channels.is_empty());
+        assert_eq!(c.state.pattern.length, 7);
+        assert!(c.send(tune).is_err());
     }
 
     #[test]
