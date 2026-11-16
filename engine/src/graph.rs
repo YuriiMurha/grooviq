@@ -409,7 +409,7 @@ impl ToneNode {
                 self.phase = 0.0;
                 0.0
             } else {
-                let s = (self.phase * TAU).sin() as f32 * level;
+                let s = libm::sin(self.phase * TAU) as f32 * level;
                 self.phase = (self.phase + self.step).fract();
                 s
             };

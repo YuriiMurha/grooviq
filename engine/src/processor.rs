@@ -462,7 +462,7 @@ impl AudioProcessor {
 
 /// Per-block meter decay factor for `sample_rate`.
 fn meter_release(sample_rate: f32) -> f32 {
-    (-(BLOCK as f32) / (METER_RELEASE_SECONDS * sample_rate)).exp()
+    libm::expf(-(BLOCK as f32) / (METER_RELEASE_SECONDS * sample_rate))
 }
 
 #[cfg(test)]

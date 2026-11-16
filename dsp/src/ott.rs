@@ -228,7 +228,7 @@ impl Ott {
             level_meter: [-120.0; 3],
         };
         for b in 0..3 {
-            o.bands[b].ms_coef = 1.0 - (-1.0 / (RMS_MS[b] * 0.001 * sr)).exp();
+            o.bands[b].ms_coef = 1.0 - libm::expf(-1.0 / (RMS_MS[b] * 0.001 * sr));
         }
         for (i, s) in SPEC.iter().enumerate() {
             o.set_param(i as u32, s.2);
@@ -237,18 +237,18 @@ impl Ott {
     }
 
     fn update_times(&mut self) {
-        let mult = 10f32.powf(1.6 * (self.time - 0.5));
+        let mult = libm::powf(10.0, 1.6 * (self.time - 0.5));
         for b in 0..3 {
-            self.bands[b].att = (-1.0 / (ATT_MS[b] * mult * 0.001 * self.sr)).exp();
-            self.bands[b].rel = (-1.0 / (REL_MS[b] * mult * 0.001 * self.sr)).exp();
+            self.bands[b].att = libm::expf(-1.0 / (ATT_MS[b] * mult * 0.001 * self.sr));
+            self.bands[b].rel = libm::expf(-1.0 / (REL_MS[b] * mult * 0.001 * self.sr));
         }
     }
 
     fn update_xover(&mut self) {
         let sr = self.sr as f64;
         let q = std::f64::consts::FRAC_1_SQRT_2;
-        let lo = (self.x_lo.next().exp2() as f64).min(0.45 * sr);
-        let hi = (self.x_hi.next().exp2() as f64)
+        let lo = (libm::exp2f(self.x_lo.next()) as f64).min(0.45 * sr);
+        let hi = (libm::exp2f(self.x_hi.next()) as f64)
             .min(0.45 * sr)
             .max(lo * 1.5);
         self.c_lp1 = Coefs::lowpass(lo, q, sr);
@@ -309,8 +309,8 @@ impl Device for Ott {
                 self.update_amounts();
             }
             4..=6 => self.band_g[(index - 4) as usize].set(db_to_gain(v)),
-            7 => self.x_lo.set(v.log2()),
-            8 => self.x_hi.set(v.log2()),
+            7 => self.x_lo.set(libm::log2f(v)),
+            8 => self.x_hi.set(libm::log2f(v)),
             9 => self.out.set(db_to_gain(v)),
             10 => self.input.set(db_to_gain(v)),
             11..=13 => {
@@ -355,7 +355,7 @@ impl Device for Ott {
                 d.ms = flush(d.ms + (pk * pk - d.ms) * d.ms_coef);
                 let lvl = pk.max((2.0 * d.ms).sqrt());
                 let lvl_db = if lvl > 1.0e-9 {
-                    20.0 * lvl.log10()
+                    20.0 * libm::log10f(lvl)
                 } else {
                     -180.0
                 };
@@ -369,7 +369,7 @@ impl Device for Ott {
                     d.g_db = 0.0;
                 }
                 lvl_max[b] = lvl_max[b].max(lvl_db);
-                let g = 1.0 + depth * (10f32.powf(d.g_db * 0.05) - 1.0);
+                let g = 1.0 + depth * (libm::powf(10.0, d.g_db * 0.05) - 1.0);
                 let k = g * self.band_g[b].next();
                 yl += xl * k;
                 yr += xr * k;

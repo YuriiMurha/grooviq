@@ -16,10 +16,10 @@ impl Fft {
         assert!(n.is_power_of_two() && n >= 2);
         let bits = n.trailing_zeros();
         let cos = (0..n / 2)
-            .map(|k| (2.0 * PI * k as f64 / n as f64).cos())
+            .map(|k| libm::cos(2.0 * PI * k as f64 / n as f64))
             .collect();
         let sin = (0..n / 2)
-            .map(|k| (2.0 * PI * k as f64 / n as f64).sin())
+            .map(|k| libm::sin(2.0 * PI * k as f64 / n as f64))
             .collect();
         let rev = (0..n as u32)
             .map(|i| i.reverse_bits() >> (32 - bits))
@@ -74,7 +74,7 @@ mod tests {
         let n = 64;
         let f = Fft::new(n);
         let mut re: Vec<f64> = (0..n)
-            .map(|i| (2.0 * PI * 5.0 * i as f64 / n as f64).cos())
+            .map(|i| libm::cos(2.0 * PI * 5.0 * i as f64 / n as f64))
             .collect();
         let mut im = vec![0.0; n];
         f.run(&mut re, &mut im, false);

@@ -215,7 +215,9 @@ fn a_fault_cleared_by_reconfigure_is_reported_but_never_restarts_the_new_graph()
 #[test]
 fn a_panic_restart_restores_channels_samples_and_mix() {
     silence_injected_panics();
-    let l: Vec<f32> = (0..2_000).map(|i| (i as f32 * 0.03).sin() * 0.7).collect();
+    let l: Vec<f32> = (0..2_000)
+        .map(|i| libm::sinf(i as f32 * 0.03) * 0.7)
+        .collect();
     let r: Vec<f32> = l.iter().map(|x| -0.5 * x).collect();
     let first = Arc::new(SampleBuf {
         rate: SR,

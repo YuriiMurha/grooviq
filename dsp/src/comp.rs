@@ -59,7 +59,7 @@ impl Comp {
             hpf_c: Coefs::IDENTITY,
             hpf: [Biquad::default(); 2],
             ms: 0.0,
-            ms_coef: 1.0 - (-1.0 / (0.010 * sr)).exp(),
+            ms_coef: 1.0 - libm::expf(-1.0 / (0.010 * sr)),
             gr: 0.0,
             fresh: true,
             in_m: PeakMeter::default(),
@@ -73,7 +73,7 @@ impl Comp {
     }
 
     fn coef(ms: f32, sr: f32) -> f32 {
-        (-1.0 / (ms * 0.001 * sr).max(1.0e-3)).exp()
+        libm::expf(-1.0 / (ms * 0.001 * sr).max(1.0e-3))
     }
 
     /// Static curve: gain change in dB (<= 0) for a detector level in dB.
@@ -147,7 +147,7 @@ impl Device for Comp {
             self.ms = flush(self.ms + (pk * pk - self.ms) * self.ms_coef);
             let lvl = pk.max((2.0 * self.ms).sqrt());
             let lvl_db = if lvl > 1.0e-9 {
-                20.0 * lvl.log10()
+                20.0 * libm::log10f(lvl)
             } else {
                 -180.0
             };
@@ -158,7 +158,7 @@ impl Device for Comp {
                 self.gr = 0.0;
             }
             gr_min = gr_min.min(self.gr);
-            let g = 10f32.powf((self.gr + self.makeup.next()) * 0.05);
+            let g = libm::powf(10.0, (self.gr + self.makeup.next()) * 0.05);
             let mix = self.mix.next();
             let k = 1.0 - mix + mix * g;
             l[i] = xl * k;

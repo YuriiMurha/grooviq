@@ -66,7 +66,7 @@ impl Utility {
             c_lr: 0.0,
             c_ll: 0.0,
             c_rr: 0.0,
-            corr_coef: 1.0 - (-1.0 / (0.15 * sr)).exp(),
+            corr_coef: 1.0 - libm::expf(-1.0 / (0.15 * sr)),
         };
         for (i, s) in SPEC.iter().enumerate() {
             u.set_param(i as u32, s.2);
@@ -75,7 +75,7 @@ impl Utility {
     }
 
     fn update_filters(&mut self) {
-        let f = (self.mono_f.next().exp2() as f64).min(0.45 * self.sr as f64);
+        let f = (libm::exp2f(self.mono_f.next()) as f64).min(0.45 * self.sr as f64);
         let q = std::f64::consts::FRAC_1_SQRT_2;
         self.c_hp = Coefs::highpass(f, q, self.sr as f64);
         self.c_ap = Coefs::allpass(f, q, self.sr as f64);
@@ -107,14 +107,16 @@ impl Device for Utility {
             1 => {
                 // balance: 0 dB at centre, sine/cosine taper on the side being turned down
                 let a = (v + 1.0) * std::f32::consts::FRAC_PI_4;
-                self.gl.set((std::f32::consts::SQRT_2 * a.cos()).min(1.0));
-                self.gr.set((std::f32::consts::SQRT_2 * a.sin()).min(1.0));
+                self.gl
+                    .set((std::f32::consts::SQRT_2 * libm::cosf(a)).min(1.0));
+                self.gr
+                    .set((std::f32::consts::SQRT_2 * libm::sinf(a)).min(1.0));
             }
             2 => self.width.set(v),
             3 => {
                 if v >= 1.0 {
                     self.mono_on.set(1.0);
-                    self.mono_f.set(v.max(10.0).log2());
+                    self.mono_f.set(libm::log2f(v.max(10.0)));
                 } else {
                     self.mono_on.set(0.0);
                 }
