@@ -238,18 +238,37 @@ fn more_than_256_grouped_note_ons_in_a_block_never_panic() {
     events.push(hit(64 + 40, 3));
     events.push(hit(64 + 10, 4));
     events.push(hit(64 + 30, 4));
-    let channels = vec![
-        hat(1, 1, 1.0),
-        hat(2, 1, 1.0),
-        hat(3, 1, 1.0),
-        hat(4, 1, -1.0),
-    ];
-    let out = render(channels, &events, 1_024);
+    let channels = || {
+        vec![
+            hat(1, 1, 1.0),
+            hat(2, 1, 1.0),
+            hat(3, 1, 1.0),
+            hat(4, 1, -1.0),
+        ]
+    };
+    let out = render(channels(), &events, 1_024);
     assert!(out.iter().all(|x| x.is_finite()));
     let l = left(&out);
     assert!(l[..64].iter().all(|&x| x == OPEN));
     // Every cut note has faded by 64 + 20 + 144; only the note struck at offset 30 is left.
     assert!(l[64 + 20 + FADE..].iter().all(|&x| x == OPEN), "{}", l[300]);
+
+    // Entry 257 plays: on the right, the render without it differs by exactly its note (0.5
+    // through a hard-right pan) from its frame on, and by nothing before.
+    let without: Vec<(u64, Command)> = events
+        .iter()
+        .copied()
+        .filter(|e| *e != hit(104, 3))
+        .collect();
+    assert_eq!(without.len(), events.len() - 1);
+    let reference = render(channels(), &without, 1_024);
+    let (r, r_ref) = (right(&out), right(&reference));
+    assert!(r[..104] == r_ref[..104]);
+    assert!(
+        (104..1_024).all(|i| r[i] == r_ref[i] + OPEN),
+        "entry 257 sounds"
+    );
+    assert!(left(&reference) == l, "and cuts nothing");
 }
 
 #[test]
