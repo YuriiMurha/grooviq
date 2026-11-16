@@ -2,11 +2,11 @@
 //! processor hands back and rebuilds the graph after a panic. May allocate and block; never
 //! call it from the audio thread.
 
-use crate::EngineConfig;
 use crate::command::{Command, Msg};
 use crate::graph::Graph;
 use crate::live::{LiveShared, LiveSnapshot};
 use crate::processor::AudioProcessor;
+use crate::{EngineConfig, QUEUE_CAPACITY};
 use rtrb::{Consumer, Producer};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -148,6 +148,12 @@ impl Controller {
         Arc::clone(&self.live)
     }
 
+    /// The rate the engine runs at (after clamping): the output layer compares it with a
+    /// device's before deciding to reconfigure.
+    pub(crate) fn sample_rate(&self) -> f32 {
+        self.sample_rate
+    }
+
     /// Frees graphs the processor replaced, restarts the graph after a panic and reports what
     /// happened since the previous call. Call it every 250 ms from a control thread.
     pub fn check_health(&mut self) -> Vec<HealthEvent> {
@@ -240,8 +246,24 @@ impl Controller {
         }
     }
 
-    fn free_trash(&mut self) {
+    /// Frees the graphs the processor replaced. The output layer also calls it while it runs
+    /// the processor itself, so a restart waiting for room in the trash queue can go through.
+    pub(crate) fn free_trash(&mut self) {
         while self.trash.pop().is_ok() {}
+    }
+
+    /// Every queued command has reached the processor.
+    pub(crate) fn commands_drained(&self) -> bool {
+        self.commands.slots() == QUEUE_CAPACITY
+    }
+
+    /// Test helper: queues `n` graph replacements, as `n` restarts would.
+    #[cfg(test)]
+    pub(crate) fn queue_restarts(&mut self, n: usize) {
+        for _ in 0..n {
+            let graph = self.build_graph();
+            assert!(self.commands.push(Msg::ReplaceGraph(graph)).is_ok());
+        }
     }
 }
 

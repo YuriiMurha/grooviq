@@ -15,8 +15,16 @@ name = "grooviq_engine"
 test-hooks = []
 
 [dependencies]
+cpal = "0.18.2"
 grooviq-dsp = { path = "../dsp" }
 rtrb = "0.3"
+
+# An output's transport type (Bluetooth, built-in, HDMI...), which cpal does not expose, and the
+# thread CoreAudio notifies on (`AudioHardwareDeprecated` holds kAudioHardwarePropertyRunLoop):
+# the same CoreAudio bindings cpal itself uses, with features it enables too, so no new crates.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware", "AudioHardwareDeprecated"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }
 
 [dev-dependencies]
 # Without the default `disable_release`, the allocation check also runs in release test builds.
