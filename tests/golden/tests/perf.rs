@@ -7,6 +7,8 @@ use grooviq_golden::perf::{hash, measure, perf_scenes};
 
 /// About a second, a whole number of blocks at every size.
 const FRAMES: usize = 192 * 256;
+/// Timed repetitions: more than one, so each repetition's numbers are checked separately.
+const REPS: usize = 2;
 
 #[test]
 fn the_timed_render_matches_the_offline_render_at_every_block_size() {
@@ -22,15 +24,28 @@ fn the_timed_render_matches_the_offline_render_at_every_block_size() {
             scene.name
         );
         for block in [64, 128, 256] {
-            let m = measure(&scene, block, FRAMES, 1).unwrap();
+            let m = measure(&scene, block, FRAMES, REPS).unwrap();
             assert_eq!(
                 m.hash,
                 hash(&reference),
                 "{} at {block} frames differs from the offline render",
                 scene.name
             );
-            assert_eq!(m.block_ns.len(), FRAMES / block);
-            assert_eq!(m.speed.len(), 1);
+            assert_eq!(m.block_ns.len(), REPS * FRAMES / block);
+            assert_eq!(m.speed.len(), REPS);
+            // Each repetition's speed is its audio time over the sum of its own block times.
+            let audio = FRAMES as f64 / f64::from(SAMPLE_RATE);
+            for (rep, times) in m.block_ns.chunks(FRAMES / block).enumerate() {
+                let total: u64 = times.iter().sum();
+                assert!(total > 0, "{} rep {rep}: no time recorded", scene.name);
+                let expected = audio / (total as f64 * 1e-9);
+                assert!(
+                    (m.speed[rep] - expected).abs() <= 1e-9 * expected,
+                    "{} rep {rep}: speed {} but its blocks give {expected}",
+                    scene.name,
+                    m.speed[rep]
+                );
+            }
         }
     }
 }

@@ -204,7 +204,7 @@ impl Measurement {
             scene: self.scene,
             block: self.block,
             deadline_ns: self.block as f64 / f64::from(SAMPLE_RATE) * 1e9,
-            speed_median: speed.get(speed.len() / 2).copied().unwrap_or(0.0),
+            speed_median: median(&speed),
             speed_worst: speed.first().copied().unwrap_or(0.0),
             p50_ns: percentile(&times, 0.5),
             p99_ns: percentile(&times, 0.99),
@@ -212,6 +212,17 @@ impl Measurement {
             max_ns: times.last().copied().unwrap_or(0),
             hash: self.hash,
         }
+    }
+}
+
+/// The median of `sorted` (ascending): the middle value, or the mean of the two middle ones;
+/// 0 for an empty slice.
+pub fn median(sorted: &[f64]) -> f64 {
+    let n = sorted.len();
+    match n {
+        0 => 0.0,
+        _ if n % 2 == 1 => sorted[n / 2],
+        _ => (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0,
     }
 }
 
@@ -265,6 +276,15 @@ mod tests {
         assert_eq!(percentile(&v, 0.0), 1);
         assert_eq!(percentile(&[7], 0.999), 7);
         assert_eq!(percentile(&[], 0.5), 0);
+    }
+
+    #[test]
+    fn median_averages_the_middle_pair_of_an_even_count() {
+        assert_eq!(median(&[10.0, 100.0]), 55.0);
+        assert_eq!(median(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+        assert_eq!(median(&[1.0, 2.0, 9.0]), 2.0);
+        assert_eq!(median(&[7.0]), 7.0);
+        assert_eq!(median(&[]), 0.0);
     }
 
     #[test]
