@@ -229,11 +229,10 @@ impl Voices {
     /// Ends one note: the oldest on `key` whose note-off has not arrived, which releases it
     /// if it still sounds. A note-off belongs to one note-on, so a newer hit on the same key
     /// keeps sounding (a swung note that overlaps the next one, or a note-off booked before
-    /// a tempo change), also when the older voice already ended by itself.
+    /// a tempo change), also when the older voice already ended by itself. In one-shot mode the
+    /// note plays on, but the note-off is still its own: a gate note that is owed it when
+    /// one-shot is switched on takes it, so it never ends a later note.
     fn note_off(&mut self, p: &[f32; 15], key: u8) {
-        if p[ONE_SHOT] >= 0.5 {
-            return;
-        }
         let mut oldest: Option<usize> = None;
         for (i, v) in self.v.iter().enumerate() {
             if v.key == key && v.held && oldest.is_none_or(|o| v.order < self.v[o].order) {
@@ -243,7 +242,8 @@ impl Voices {
         if let Some(i) = oldest {
             let v = &mut self.v[i];
             v.held = false;
-            if matches!(v.stage, Stage::Attack | Stage::Decay | Stage::Sustain) {
+            let gate = p[ONE_SHOT] < 0.5;
+            if gate && matches!(v.stage, Stage::Attack | Stage::Decay | Stage::Sustain) {
                 v.stage = Stage::Release;
             }
         }
@@ -259,6 +259,19 @@ impl Voices {
 
     fn silence(&mut self) {
         self.v = [Voice::OFF; VOICES];
+    }
+
+    /// Silences every voice but keeps its key, order and owed note-off, as a voice that ends
+    /// by itself does.
+    fn quiet(&mut self) {
+        for v in &mut self.v {
+            *v = Voice {
+                key: v.key,
+                order: v.order,
+                held: v.held,
+                ..Voice::OFF
+            };
+        }
     }
 
     fn idle(&self) -> bool {
@@ -311,6 +324,15 @@ impl Sampler {
         self.voices.silence();
         self.out = self.c.out;
         std::mem::replace(&mut self.sample, sample)
+    }
+
+    /// Comes to rest once nothing sounds: every voice is silent and the output smoothing sits
+    /// at its target, as after [`Device::reset`]. Unlike a reset, a note that ended before its
+    /// note-off still waits for it, so that late note-off finds it rather than a newer note on
+    /// its key. Never allocates.
+    pub fn settle(&mut self) {
+        self.voices.quiet();
+        self.out = self.c.out;
     }
 
     /// The loaded sample, if any.

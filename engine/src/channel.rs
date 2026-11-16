@@ -183,8 +183,10 @@ impl ChannelNode {
             }
         }
         if self.sampler.active_voices() == 0 {
-            // Settles the sampler's output smoothing too, as it would on its own once idle.
-            self.sampler.reset();
+            // Settles the sampler's output smoothing, as it would on its own once idle. Not a
+            // reset: a note that ended before its note-off must still take that note-off, or
+            // it cuts the next hit on the key when a block ends between the two.
+            self.sampler.settle();
             self.idle = true;
         } else {
             self.idle = false;
@@ -208,6 +210,8 @@ mod tests {
     use grooviq_dsp::sampler::SPEC;
 
     const SR: f32 = 48_000.0;
+    /// The sampler's gain parameter (dB).
+    const GAIN: u32 = 12;
 
     fn node(never_skip: bool) -> ChannelNode {
         let l: Vec<f32> = (0..200).map(|i| 0.9 * 0.97f32.powi(i)).collect();
@@ -306,6 +310,11 @@ mod tests {
                         n.retarget(false);
                     }
                     141 => assert!(n.push_event(note(0))),
+                    // A gain change while a note sounds; the note ends long before the gain
+                    // settles, and a note after many silent blocks starts at the new gain.
+                    160 => assert!(n.push_event(note(0))),
+                    161 => n.set_param(GAIN, -20.0),
+                    185 => assert!(n.push_event(note(0))),
                     _ => {}
                 }
             }
