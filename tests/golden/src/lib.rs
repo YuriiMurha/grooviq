@@ -8,6 +8,8 @@ use std::path::Path;
 use grooviq_dsp::synth::preset;
 use grooviq_engine::{Command, EngineConfig, render_offline};
 
+pub mod devices;
+
 /// Sample rate of every scene and reference file.
 pub const SAMPLE_RATE: u32 = 48_000;
 /// Largest allowed absolute difference between a render and its reference.
