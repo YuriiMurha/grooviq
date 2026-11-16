@@ -10,6 +10,13 @@
 //! - One global LFO (sine/triangle/saw/square/random) -> cutoff, pitch, shape or volume.
 //! - 16-voice poly with click-free voice stealing (3 ms fade), mono and legato modes with a
 //!   last-note-priority stack, linear-in-pitch glide and FL-style slide notes.
+//! - Click-free playing and tweaking: a retrigger with fast attacks starts the note from scratch
+//!   like a note from silence (the old one rings out, or in mono fades out over 3 ms); with slow
+//!   attacks the envelopes go on from their level and the new velocity ramps in; a release never
+//!   falls faster than a 3 ms line; filter type, unison layout, LFO destination and tuning
+//!   changes crossfade or glide over 5 ms; envelope amount and key tracking are smoothed; the
+//!   cutoff knob glides over 8 ms, up to 20 ms at high resonance; while no voice sounds, changes
+//!   take effect at once.
 //! - Meters: peak levels, voice count, LFO, envelopes of the most recent voice, 256-sample scope.
 
 use crate::api::{Device, MAX_BLOCK, NoteEvent, db_to_gain};
@@ -22,6 +29,40 @@ const MAX_UNI: usize = 7;
 const SCOPE_LEN: usize = 256;
 const STEAL_FADE_MS: f32 = 3.0;
 const DEFAULT_SLIDE_MS: f32 = 60.0;
+/// Declick floor: a release never falls faster than a straight line from the level it started
+/// at to zero over this time. Releases longer than about 21 ms reach it only from a quiet start
+/// (below -53 dB for a 30 ms release, -70 dB for 90 ms, -83 dB for 300 ms): the exponential
+/// aims below zero, so near zero it falls by a fixed step that the start-scaled line undercuts.
+const MIN_RELEASE_MS: f64 = 3.0;
+/// A new velocity on a voice restarted in place ramps in over this time.
+const VEL_RAMP_MS: f32 = 3.0;
+/// A retrigger (a re-struck key in poly mode, a new note on the sounding voice in mono and
+/// legato modes) restarts the sounding voice's envelopes from their current level (no dip) only
+/// when every attack that moves is at least this long: its steepest rise, from zero, is then no
+/// faster than full scale in 3 ms (3 ms x ln(1.3 / 0.3) x 1.3 = 5.7 ms), which is click-free from
+/// any level. With faster attacks the new note starts from scratch instead, like a note from
+/// silence, while the old one rings out (poly) or fades out over STEAL_FADE_MS (mono, legato).
+const IN_PLACE_ATTACK_MS: f32 = 6.0;
+/// Crossfade / glide time (linear) for knob moves that would otherwise step the sound: filter
+/// type, unison layout, LFO destination and tuning.
+const XFADE_MS: f32 = 5.0;
+/// Smoothing time (one-pole, like the cutoff knob's own) of the filter envelope amount and key
+/// tracking. Both move the cutoff; a linear ramp's constant speed and abrupt stop excite a
+/// resonant filter far more than a one-pole's decelerating approach (on a resonant sine patch a
+/// 5 ms ramp reads +5.9 dB on the click detector, a 5 ms one-pole -9.4 dB).
+const CUTOFF_MOD_MS: f32 = 5.0;
+/// Smoothing time (one-pole, in log frequency) of the cutoff knob or automation value only: the
+/// filter envelope, key tracking, velocity and LFO move the cutoff unsmoothed. A fast jump of a
+/// resonant filter's cutoff sweeps its peak through the harmonics (a "zap" that reads as a
+/// burst), so the time grows with resonance: CUTOFF_SMOOTH_MS up to resonance 0.3 (every
+/// preset), rising linearly to CUTOFF_SMOOTH_RES_MS at 0.6 and above. On a resonant saw at keys
+/// 60..88 and resonance 0.5..1.0 a constant 8 ms reads up to +14.9 dB, 20 ms at most +5.1 dB.
+const CUTOFF_SMOOTH_MS: f32 = 8.0;
+const CUTOFF_SMOOTH_RES_MS: f32 = 20.0;
+/// An attack whose time is shortened while it runs rises no faster than full scale in this time.
+const SOFT_RISE_MS: f64 = 3.0;
+/// `Bufs::ftype` while a filter type switch crossfades.
+const FILTER_XF: u8 = u8::MAX;
 
 const OSC1_SHAPE: usize = 0;
 const OSC1_OCT: usize = 1;
@@ -396,16 +437,20 @@ struct EnvCfg {
     sus: f64,
     r_coef: f64,
     r_base: f64,
+    /// Largest per-sample fall of a release, as a fraction of the level it started from.
+    rel_k: f64,
+    /// Largest per-sample rise of a softened attack.
+    rise: f64,
 }
 
 impl EnvCfg {
     fn new(a_ms: f32, d_ms: f32, sus: f32, r_ms: f32, sr: f32) -> Self {
         const RA: f64 = 0.3;
         const RDR: f64 = 0.001;
-        let rate = |ms: f32| ((ms as f64) * 0.001 * sr as f64).max(1.0);
-        let a_coef = (-((1.0 + RA) / RA).ln() / rate(a_ms)).exp();
-        let d_coef = (-((1.0 + RDR) / RDR).ln() / rate(d_ms)).exp();
-        let r_coef = (-((1.0 + RDR) / RDR).ln() / rate(r_ms)).exp();
+        let rate = |ms: f64| (ms * 0.001 * sr as f64).max(1.0);
+        let a_coef = (-((1.0 + RA) / RA).ln() / rate(a_ms as f64)).exp();
+        let d_coef = (-((1.0 + RDR) / RDR).ln() / rate(d_ms as f64)).exp();
+        let r_coef = (-((1.0 + RDR) / RDR).ln() / rate(r_ms as f64)).exp();
         let sus = sus as f64;
         Self {
             a_coef,
@@ -415,6 +460,8 @@ impl EnvCfg {
             sus,
             r_coef,
             r_base: -RDR * (1.0 - r_coef),
+            rel_k: 1.0 / rate(MIN_RELEASE_MS),
+            rise: 1.0 / rate(SOFT_RISE_MS),
         }
     }
 }
@@ -423,23 +470,44 @@ impl EnvCfg {
 struct Env {
     stage: Stage,
     v: f64,
+    /// Level the release started from (scales the declick floor).
+    rel_from: f64,
+    /// The attack's time changed while it ran: it rises no faster than SOFT_RISE_MS.
+    soft: bool,
 }
 
 impl Env {
     const IDLE: Self = Self {
         stage: Stage::Idle,
         v: 0.0,
+        rel_from: 0.0,
+        soft: false,
     };
+
+    fn soften(&mut self) {
+        if self.stage == Stage::Attack {
+            self.soft = true;
+        }
+    }
+
+    fn release(&mut self) {
+        if self.stage != Stage::Idle {
+            self.stage = Stage::Release;
+            self.rel_from = self.v;
+        }
+    }
 
     #[inline(always)]
     fn next(&mut self, c: &EnvCfg) -> f64 {
         match self.stage {
             Stage::Idle => {}
             Stage::Attack => {
-                self.v = c.a_base + self.v * c.a_coef;
+                let v = c.a_base + self.v * c.a_coef;
+                self.v = if self.soft { v.min(self.v + c.rise) } else { v };
                 if self.v >= 1.0 {
                     self.v = 1.0;
                     self.stage = Stage::Decay;
+                    self.soft = false;
                 }
             }
             Stage::Decay => {
@@ -456,7 +524,10 @@ impl Env {
                 }
             }
             Stage::Release => {
-                self.v = c.r_base + self.v * c.r_coef;
+                // exponential, but never steeper than the declick floor: a release of a few ms
+                // starts as steeply as a fade of a fraction of a ms otherwise (a click)
+                let floor = self.v - self.rel_from * c.rel_k;
+                self.v = (c.r_base + self.v * c.r_coef).max(floor);
                 if self.v <= 0.0 {
                     self.v = 0.0;
                     self.stage = Stage::Idle;
@@ -540,9 +611,102 @@ impl Ladder {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Declick ramps
+
+/// The cutoff knob value (log2 Hz): a one-pole like `Smooth`, but its coefficient comes with
+/// each sample (it follows the resonance, see CUTOFF_SMOOTH_MS).
+#[derive(Clone, Copy, Debug)]
+struct CutoffKnob {
+    cur: f32,
+    target: f32,
+}
+
+impl CutoffKnob {
+    fn set(&mut self, v: f32) {
+        self.target = v;
+    }
+
+    fn snap(&mut self) {
+        self.cur = self.target;
+    }
+
+    #[inline(always)]
+    fn next(&mut self, coef: f32) -> f32 {
+        if self.cur != self.target {
+            let d = (self.cur - self.target) * coef;
+            self.cur = if d.abs() < 1.0e-5 * (1.0 + self.target.abs()) {
+                self.target
+            } else {
+                self.target + d
+            };
+        }
+        self.cur
+    }
+}
+
+/// A value that moves to a new target in a straight line over a fixed number of samples (a
+/// target change during a ramp restarts it from where it is). Settles exactly on the target.
+#[derive(Clone, Copy, Debug)]
+struct Ramp {
+    cur: f32,
+    target: f32,
+    step: f32,
+    left: u32,
+    len: u32,
+}
+
+impl Ramp {
+    fn new(v: f32, len: u32) -> Self {
+        Self {
+            cur: v,
+            target: v,
+            step: 0.0,
+            left: 0,
+            len: len.max(1),
+        }
+    }
+
+    fn set(&mut self, v: f32) {
+        if v != self.target {
+            self.restart(self.cur, v);
+        }
+    }
+
+    /// Jumps to `from` (only where nothing is heard yet, e.g. a crossfade position), then ramps.
+    fn restart(&mut self, from: f32, to: f32) {
+        self.cur = from;
+        self.target = to;
+        self.left = self.len;
+        self.step = (to - from) / self.len as f32;
+    }
+
+    fn snap(&mut self) {
+        self.cur = self.target;
+        self.left = 0;
+    }
+
+    fn settled(&self) -> bool {
+        self.left == 0
+    }
+
+    #[inline(always)]
+    fn next(&mut self) -> f32 {
+        if self.left > 0 {
+            self.left -= 1;
+            self.cur = if self.left == 0 {
+                self.target
+            } else {
+                self.cur + self.step
+            };
+        }
+        self.cur
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Oscillator helpers
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Unison {
     n: usize,
     ratio: [f64; MAX_UNI],
@@ -580,8 +744,59 @@ impl Unison {
     }
 }
 
+/// A unison layout plus a crossfade from the gains heard before it: a voice count or spread
+/// change moves each unison voice's gain over XFADE_MS instead of stepping it (added voices fade
+/// in, removed ones fade out at their old detune). Detune changes apply at once: a small,
+/// phase-continuous pitch change.
+#[derive(Clone, Copy, Debug)]
+struct UniState {
+    /// The layout the knobs ask for (the gains once the crossfade is over).
+    to: Unison,
+    /// Gains when the crossfade started, and how many of them are non-zero.
+    from_l: [f32; MAX_UNI],
+    from_r: [f32; MAX_UNI],
+    from_n: usize,
+    /// Detune ratios: the layout's, and the old ones of voices fading out.
+    ratio: [f64; MAX_UNI],
+}
+
+impl UniState {
+    fn new(u: Unison) -> Self {
+        Self {
+            to: u,
+            from_l: u.pl,
+            from_r: u.pr,
+            from_n: u.n,
+            ratio: u.ratio,
+        }
+    }
+
+    /// Starts a crossfade to `u` from the gains heard at crossfade position `x` (1 = settled).
+    fn retarget(&mut self, u: Unison, x: f32) {
+        let mut from_n = 0;
+        for v in 0..MAX_UNI {
+            if x >= 1.0 {
+                self.from_l[v] = self.to.pl[v];
+                self.from_r[v] = self.to.pr[v];
+            } else {
+                self.from_l[v] += (self.to.pl[v] - self.from_l[v]) * x;
+                self.from_r[v] += (self.to.pr[v] - self.from_r[v]) * x;
+            }
+            if self.from_l[v] != 0.0 || self.from_r[v] != 0.0 {
+                from_n = v + 1;
+            }
+            if v < u.n {
+                self.ratio[v] = u.ratio[v];
+            }
+        }
+        self.from_n = from_n;
+        self.to = u;
+    }
+}
+
 /// Start phases for unison voices (fixed so renders are repeatable; voice 0 of a single-voice
-/// oscillator always starts at phase 0 for consistent, click-free attacks).
+/// oscillator always starts at phase 0 for consistent, click-free attacks). Voices beyond the
+/// current count get their phases too, so raising the count later fades in decorrelated voices.
 const UNI_PHASE: [f64; MAX_UNI] = [0.0, 0.613, 0.287, 0.871, 0.142, 0.459, 0.734];
 
 /// Shape morph position: table pair (k, k + 1) and blend.
@@ -632,6 +847,7 @@ fn wt_read(t: &Wavetables, m: Morph, lv: (usize, f32), phase: f64) -> f32 {
     acc
 }
 
+/// Sums the unison voices of one oscillator; `x` is the layout crossfade position (1 = settled).
 #[inline(always)]
 fn osc_unison(
     t: &Wavetables,
@@ -639,21 +855,45 @@ fn osc_unison(
     lv: (usize, f32),
     ph: &mut [f64; MAX_UNI],
     inc: f64,
-    u: &Unison,
+    u: &UniState,
+    x: f32,
 ) -> (f32, f32) {
     let (mut l, mut r) = (0.0, 0.0);
-    for v in 0..u.n {
-        let p = ph[v];
-        let s = wt_read(t, m, lv, p);
-        let mut np = p + inc * u.ratio[v];
-        if np >= 1.0 {
-            np -= 1.0;
+    if x >= 1.0 {
+        for v in 0..u.to.n {
+            let p = ph[v];
+            let s = wt_read(t, m, lv, p);
+            let mut np = p + inc * u.ratio[v];
+            if np >= 1.0 {
+                np -= 1.0;
+            }
+            ph[v] = np;
+            l += s * u.to.pl[v];
+            r += s * u.to.pr[v];
         }
-        ph[v] = np;
-        l += s * u.pl[v];
-        r += s * u.pr[v];
+    } else {
+        for v in 0..u.to.n.max(u.from_n) {
+            let p = ph[v];
+            let s = wt_read(t, m, lv, p);
+            let mut np = p + inc * u.ratio[v];
+            if np >= 1.0 {
+                np -= 1.0;
+            }
+            ph[v] = np;
+            l += s * (u.from_l[v] + (u.to.pl[v] - u.from_l[v]) * x);
+            r += s * (u.from_r[v] + (u.to.pr[v] - u.from_r[v]) * x);
+        }
     }
     (l, r)
+}
+
+/// Phase increment and mip level for an oscillator at pitch `p` (semitones).
+#[inline(always)]
+fn tune(p: f32, max_semi: f32, cx: &Ctx) -> (f64, (usize, f32)) {
+    (
+        (pitch_hz(p) as f64 * cx.inv_sr).min(0.45),
+        level_for(p + max_semi, cx.lam_const),
+    )
 }
 
 #[inline(always)]
@@ -747,6 +987,18 @@ struct Bufs {
     pitch: [f32; MAX_BLOCK],
     trem: [f32; MAX_BLOCK],
     master: [f32; MAX_BLOCK],
+    /// Filter envelope depth in octaves.
+    env_oct: [f32; MAX_BLOCK],
+    keytrack: [f32; MAX_BLOCK],
+    /// Oscillator tuning offsets in semitones.
+    off1: [f32; MAX_BLOCK],
+    off2: [f32; MAX_BLOCK],
+    /// Unison layout crossfade positions (1 = settled).
+    uxf1: [f32; MAX_BLOCK],
+    uxf2: [f32; MAX_BLOCK],
+    /// Filter type (`FILTER_XF` while a type switch crossfades, with the weights in `fw`).
+    ftype: [u8; MAX_BLOCK],
+    fw: [[f32; 4]; MAX_BLOCK],
 }
 
 impl Bufs {
@@ -767,6 +1019,14 @@ impl Bufs {
             pitch: z,
             trem: z,
             master: z,
+            env_oct: z,
+            keytrack: z,
+            off1: z,
+            off2: z,
+            uxf1: z,
+            uxf2: z,
+            ftype: [0; MAX_BLOCK],
+            fw: [[0.0; 4]; MAX_BLOCK],
         }
     }
 }
@@ -780,16 +1040,13 @@ struct Ctx {
     max_fc: f32,
     amp: EnvCfg,
     flt: EnvCfg,
-    uni1: Unison,
-    uni2: Unison,
-    off1: f32,
-    off2: f32,
-    ftype: u8,
+    uni1: UniState,
+    uni2: UniState,
     sub_square: bool,
-    keytrack: f32,
-    env_oct: f32,
     lam_const: f32,
     fade_step: f32,
+    /// VEL_RAMP_MS in samples.
+    vel_ramp: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -799,6 +1056,11 @@ struct Voice {
     key: u8,
     vel_amp: f32,
     vel_flt: f32,
+    /// After an in-place retrigger the velocity gains ramp to `vel_to` by `vel_step` per sample
+    /// for `vel_left` more samples (0 = settled).
+    vel_to: (f32, f32),
+    vel_step: (f32, f32),
+    vel_left: u32,
     age: u64,
     pitch: f32,
     target: f32,
@@ -810,10 +1072,17 @@ struct Voice {
     ph_sub: f64,
     svf: [Svf; 2],
     lad: [Ladder; 2],
+    /// Whether each filter ran on the last sample (its state is current). One that comes back
+    /// in during a filter type crossfade is first seeded from its input.
+    svf_live: bool,
+    lad_live: bool,
     fade: f32,
     fading: bool,
     pending: Option<Pending>,
     rng: Rng,
+    /// Pitches the cached increments and mip levels were computed for (NaN = stale).
+    last_p1: f32,
+    last_p2: f32,
     last_pm: f32,
     inc1: f64,
     inc2: f64,
@@ -836,6 +1105,9 @@ impl Voice {
             key: 60,
             vel_amp: 1.0,
             vel_flt: 1.0,
+            vel_to: (1.0, 1.0),
+            vel_step: (0.0, 0.0),
+            vel_left: 0,
             age: 0,
             pitch: 60.0,
             target: 60.0,
@@ -847,10 +1119,14 @@ impl Voice {
             ph_sub: 0.0,
             svf: [Svf::default(); 2],
             lad: [Ladder::default(); 2],
+            svf_live: true,
+            lad_live: true,
             fade: 1.0,
             fading: false,
             pending: None,
             rng: Rng(seed),
+            last_p1: f32::NAN,
+            last_p2: f32::NAN,
             last_pm: f32::NAN,
             inc1: 0.0,
             inc2: 0.0,
@@ -877,6 +1153,7 @@ impl Voice {
         self.gate = p.gate;
         self.key = p.key;
         (self.vel_amp, self.vel_flt) = vel_curves(p.vel);
+        self.vel_left = 0;
         self.age = age;
         self.pitch = p.from.unwrap_or(p.key as f32);
         self.glide_to(
@@ -886,64 +1163,118 @@ impl Voice {
         );
         self.amp = Env {
             stage: Stage::Attack,
-            v: 0.0,
+            ..Env::IDLE
         };
-        self.flt = Env {
-            stage: Stage::Attack,
-            v: 0.0,
-        };
+        self.flt = self.amp;
         if !p.gate {
-            self.amp.stage = Stage::Release;
-            self.flt.stage = Stage::Release;
+            self.amp.release();
+            self.flt.release();
         }
         for v in 0..MAX_UNI {
-            self.ph1[v] = if cx.uni1.n > 1 { UNI_PHASE[v] } else { 0.0 };
-            self.ph2[v] = if cx.uni2.n > 1 {
-                UNI_PHASE[(v + 3) % MAX_UNI]
-            } else {
+            self.ph1[v] = UNI_PHASE[v];
+            self.ph2[v] = if v == 0 && cx.uni2.to.n == 1 {
                 0.0
+            } else {
+                UNI_PHASE[(v + 3) % MAX_UNI]
             };
         }
         self.ph_sub = 0.0;
         self.svf = [Svf::default(); 2];
         self.lad = [Ladder::default(); 2];
+        self.svf_live = true;
+        self.lad_live = true;
         self.fade = 1.0;
         self.fading = false;
         self.pending = None;
+        self.invalidate_pitch();
+    }
+
+    fn invalidate_pitch(&mut self) {
+        self.last_p1 = f32::NAN;
+        self.last_p2 = f32::NAN;
         self.last_pm = f32::NAN;
     }
 
-    /// Restart the envelopes from their current level (no phase reset, no click).
-    fn retrigger(&mut self, key: u8, vel: f32, age: u64) {
+    /// Restarts the envelopes from their current level without touching phases or filters. Only
+    /// for attacks slow enough to rise from any level without a click (IN_PLACE_ATTACK_MS). The
+    /// new velocity ramps in over VEL_RAMP_MS: a velocity step on a sounding voice is a click.
+    fn retrigger(&mut self, key: u8, vel: f32, age: u64, cx: &Ctx) {
         self.gate = true;
         self.key = key;
-        (self.vel_amp, self.vel_flt) = vel_curves(vel);
         self.age = age;
+        let to = vel_curves(vel);
+        let n = cx.vel_ramp.max(1);
+        self.vel_to = to;
+        self.vel_step = (
+            (to.0 - self.vel_amp) / n as f32,
+            (to.1 - self.vel_flt) / n as f32,
+        );
+        self.vel_left = n;
         self.amp.stage = Stage::Attack;
         self.flt.stage = Stage::Attack;
     }
 
     fn release(&mut self) {
         self.gate = false;
-        if self.amp.stage != Stage::Idle {
-            self.amp.stage = Stage::Release;
-        }
-        if self.flt.stage != Stage::Idle {
-            self.flt.stage = Stage::Release;
-        }
+        self.amp.release();
+        self.flt.release();
     }
 
-    fn update_pitch(&mut self, pm: f32, cx: &Ctx) {
-        self.last_pm = pm;
-        let p1 = pm + cx.off1;
-        self.inc1 = (pitch_hz(p1) as f64 * cx.inv_sr).min(0.45);
-        self.lv1 = level_for(p1 + cx.uni1.max_semi, cx.lam_const);
-        let p2 = pm + cx.off2;
-        self.inc2 = (pitch_hz(p2) as f64 * cx.inv_sr).min(0.45);
-        self.lv2 = level_for(p2 + cx.uni2.max_semi, cx.lam_const);
-        let ps = pm - 12.0;
-        self.inc_sub = (pitch_hz(ps) as f64 * cx.inv_sr).min(0.45);
-        self.lv_sub = level_for(ps, cx.lam_const);
+    /// Both channels through the filter (`ft` from `Bufs::ftype`): the type's own output, or
+    /// while a type switch crossfades, the outputs mixed by the weights `w` (LP12, LP24, HP, BP).
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn filter(
+        &mut self,
+        ft: u8,
+        w: &[f32; 4],
+        xl: f32,
+        xr: f32,
+        g: f32,
+        svf_k: f32,
+        lad_k: f32,
+    ) -> (f32, f32) {
+        let lad = ft == 1 || (ft == FILTER_XF && w[1] > 0.0);
+        let svf = ft != 1 && (ft != FILTER_XF || w[0] > 0.0 || w[2] > 0.0 || w[3] > 0.0);
+        // A filter that was idle has a stale state: seed it with the state a long-settled filter
+        // has for a constant input equal to this sample (it then rings out nothing): SVF band 0,
+        // low = x; every ladder stage at the loop's DC level x / (1 + k).
+        if lad && !self.lad_live {
+            let k1 = 1.0 + lad_k;
+            self.lad = [Ladder { s: [xl / k1; 4] }, Ladder { s: [xr / k1; 4] }];
+        }
+        if svf && !self.svf_live {
+            self.svf = [Svf { ic1: 0.0, ic2: xl }, Svf { ic1: 0.0, ic2: xr }];
+        }
+        self.lad_live = lad;
+        self.svf_live = svf;
+        let (mut yl, mut yr) = (0.0, 0.0);
+        let mut ladder = (0.0, 0.0);
+        if lad {
+            let gg = g / (1.0 + g);
+            ladder = (
+                self.lad[0].run(xl, gg, lad_k),
+                self.lad[1].run(xr, gg, lad_k),
+            );
+            if ft == 1 {
+                return ladder;
+            }
+        }
+        if svf {
+            let co = SvfCoefs::new(g, svf_k);
+            let a = self.svf[0].run(xl, &co);
+            let c = self.svf[1].run(xr, &co);
+            match ft {
+                0 => return (a.0, c.0),
+                2 => return (a.2, c.2),
+                3 => return (a.1 * co.k, c.1 * co.k),
+                _ => {
+                    yl = w[0] * a.0 + w[2] * a.2 + w[3] * a.1 * co.k;
+                    yr = w[0] * c.0 + w[2] * c.2 + w[3] * c.1 * co.k;
+                }
+            }
+        }
+        (yl + w[1] * ladder.0, yr + w[1] * ladder.1)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -976,6 +1307,16 @@ impl Voice {
                 }
             }
 
+            if self.vel_left > 0 {
+                self.vel_left -= 1;
+                if self.vel_left == 0 {
+                    (self.vel_amp, self.vel_flt) = self.vel_to;
+                } else {
+                    self.vel_amp += self.vel_step.0;
+                    self.vel_flt += self.vel_step.1;
+                }
+            }
+
             if self.pitch != self.target {
                 let d = self.target - self.pitch;
                 if self.glide_step <= 0.0 || d.abs() <= self.glide_step {
@@ -987,14 +1328,35 @@ impl Voice {
 
             let aenv = self.amp.next(&cx.amp) as f32;
             if self.amp.stage == Stage::Idle {
-                self.active = false;
-                return;
+                // The note has ended. A note waiting for this voice (it was stolen while the old
+                // note released) starts now, from the next sample: nothing is left to fade.
+                match self.pending.take() {
+                    Some(p) => {
+                        self.start(p, cx, age);
+                        continue;
+                    }
+                    None => {
+                        self.active = false;
+                        return;
+                    }
+                }
             }
             let fenv = self.flt.next(&cx.flt) as f32;
 
             let pm = self.pitch + b.pitch[i];
+            let p1 = pm + b.off1[i];
+            if p1 != self.last_p1 {
+                self.last_p1 = p1;
+                (self.inc1, self.lv1) = tune(p1, cx.uni1.to.max_semi, cx);
+            }
+            let p2 = pm + b.off2[i];
+            if p2 != self.last_p2 {
+                self.last_p2 = p2;
+                (self.inc2, self.lv2) = tune(p2, cx.uni2.to.max_semi, cx);
+            }
             if pm != self.last_pm {
-                self.update_pitch(pm, cx);
+                self.last_pm = pm;
+                (self.inc_sub, self.lv_sub) = tune(pm - 12.0, 0.0, cx);
             }
 
             let (mut sl, mut sr) = (0.0f32, 0.0f32);
@@ -1007,6 +1369,7 @@ impl Voice {
                     &mut self.ph1,
                     self.inc1,
                     &cx.uni1,
+                    b.uxf1[i],
                 );
                 sl += a * lv1;
                 sr += c * lv1;
@@ -1020,6 +1383,7 @@ impl Voice {
                     &mut self.ph2,
                     self.inc2,
                     &cx.uni2,
+                    b.uxf2[i],
                 );
                 sl += a * lv2;
                 sr += c * lv2;
@@ -1048,8 +1412,8 @@ impl Voice {
 
             // filter
             let oct = b.cut[i]
-                + cx.keytrack * (self.pitch - 60.0) * (1.0 / 12.0)
-                + fenv * cx.env_oct * self.vel_flt;
+                + b.keytrack[i] * (self.pitch - 60.0) * (1.0 / 12.0)
+                + fenv * b.env_oct[i] * self.vel_flt;
             let fc = oct.exp2().clamp(8.0, cx.max_fc);
             let g = (fc * cx.pi_sr).tan();
             let dg = b.drive_g[i];
@@ -1059,20 +1423,7 @@ impl Voice {
             } else {
                 (sl, sr)
             };
-            let (yl, yr) = if cx.ftype == 1 {
-                let gg = g / (1.0 + g);
-                let k = b.lad_k[i];
-                (self.lad[0].run(xl, gg, k), self.lad[1].run(xr, gg, k))
-            } else {
-                let co = SvfCoefs::new(g, b.svf_k[i]);
-                let a = self.svf[0].run(xl, &co);
-                let c = self.svf[1].run(xr, &co);
-                match cx.ftype {
-                    0 => (a.0, c.0),
-                    2 => (a.2, c.2),
-                    _ => (a.1 * co.k, c.1 * co.k),
-                }
-            };
+            let (yl, yr) = self.filter(b.ftype[i], &b.fw[i], xl, xr, g, b.svf_k[i], b.lad_k[i]);
             let amp = aenv * self.vel_amp * b.trem[i] * fade;
             out_l[i] += yl * amp;
             out_r[i] += yr * amp;
@@ -1090,19 +1441,35 @@ pub struct Synth {
     voices: [Voice; NUM_VOICES],
     b: Bufs,
     lfo: Lfo,
-    lfo_target: u8,
+    /// LFO routing weights (cutoff, pitch, shape, volume): the target's ramps to 1, the others
+    /// to 0, so changing the destination crossfades instead of jumping.
+    route: [Ramp; 4],
+    /// Filter envelope depth (octaves) and key tracking, smoothed like the cutoff.
+    s_env: Smooth,
+    s_kt: Smooth,
+    /// Tuning offsets (semitones), ramped.
+    r_off: [Ramp; 2],
+    /// Unison layout crossfade positions (0 -> 1).
+    uxf: [Ramp; 2],
+    /// Filter type and the output weights (LP12, LP24, HP, BP) that crossfade a type switch.
+    ftype: u8,
+    fw: [Ramp; 4],
     s_shape1: Smooth,
     s_shape2: Smooth,
     s_lvl1: Smooth,
     s_lvl2: Smooth,
     s_sub: Smooth,
     s_noise: Smooth,
-    s_cut: Smooth,
+    s_cut: CutoffKnob,
+    /// Cutoff knob smoothing times at low and high resonance (CUTOFF_SMOOTH_MS,
+    /// CUTOFF_SMOOTH_RES_MS).
+    cut_ms: [f32; 2],
     s_res: Smooth,
     s_drive: Smooth,
     s_lfo_amt: Smooth,
     s_master: Smooth,
-    res_cache: (f32, f32, f32),
+    /// Resonance and what follows from it: SVF k, ladder k, cutoff knob smoothing coefficient.
+    res_cache: (f32, f32, f32, f32),
     drive_cache: (f32, f32, f32),
     mode: u8,
     age: u64,
@@ -1132,18 +1499,15 @@ impl Synth {
             max_fc: (0.45 * sr).min(22_000.0),
             amp: EnvCfg::default(),
             flt: EnvCfg::default(),
-            uni1: Unison::new(1, 0.0, 0.0),
-            uni2: Unison::new(1, 0.0, 0.0),
-            off1: 0.0,
-            off2: 0.0,
-            ftype: 0,
+            uni1: UniState::new(Unison::new(1, 0.0, 0.0)),
+            uni2: UniState::new(Unison::new(1, 0.0, 0.0)),
             sub_square: false,
-            keytrack: 0.5,
-            env_oct: 0.0,
             lam_const,
             fade_step: 1.0 / (STEAL_FADE_MS * 0.001 * sr),
+            vel_ramp: (VEL_RAMP_MS * 0.001 * sr).round() as u32,
         };
         let sm = |v: f32, ms: f32| Smooth::new(v, ms, sr);
+        let xf = |v: f32| Ramp::new(v, (XFADE_MS * 0.001 * sr).round() as u32);
         let mut s = Self {
             cx,
             tables,
@@ -1161,19 +1525,29 @@ impl Synth {
                 out: 0.0,
                 coef: 1.0 - (-1.0 / (0.002 * sr)).exp(),
             },
-            lfo_target: 0,
+            route: [xf(1.0), xf(0.0), xf(0.0), xf(0.0)],
+            s_env: sm(0.0, CUTOFF_MOD_MS),
+            s_kt: sm(0.0, CUTOFF_MOD_MS),
+            r_off: [xf(0.0); 2],
+            uxf: [xf(1.0); 2],
+            ftype: 0,
+            fw: [xf(1.0), xf(0.0), xf(0.0), xf(0.0)],
             s_shape1: sm(0.0, 8.0),
             s_shape2: sm(0.0, 8.0),
             s_lvl1: sm(0.0, 8.0),
             s_lvl2: sm(0.0, 8.0),
             s_sub: sm(0.0, 8.0),
             s_noise: sm(0.0, 8.0),
-            s_cut: sm(0.0, 6.0),
+            s_cut: CutoffKnob {
+                cur: 0.0,
+                target: 0.0,
+            },
+            cut_ms: [CUTOFF_SMOOTH_MS, CUTOFF_SMOOTH_RES_MS],
             s_res: sm(0.0, 8.0),
             s_drive: sm(0.0, 8.0),
             s_lfo_amt: sm(0.0, 8.0),
             s_master: sm(0.0, 10.0),
-            res_cache: (f32::NAN, 0.0, 0.0),
+            res_cache: (f32::NAN, 0.0, 0.0, 0.0),
             drive_cache: (f32::NAN, 0.0, 0.0),
             mode: 0,
             age: 0,
@@ -1203,13 +1577,38 @@ impl Synth {
             &mut self.s_lvl2,
             &mut self.s_sub,
             &mut self.s_noise,
-            &mut self.s_cut,
             &mut self.s_res,
             &mut self.s_drive,
             &mut self.s_lfo_amt,
             &mut self.s_master,
+            &mut self.s_env,
+            &mut self.s_kt,
         ] {
             sm.snap();
+        }
+        self.s_cut.snap();
+        let ramps = self
+            .route
+            .iter_mut()
+            .chain(&mut self.r_off)
+            .chain(&mut self.fw);
+        for r in ramps.chain(&mut self.uxf) {
+            r.snap();
+        }
+        self.cx.uni1 = UniState::new(self.cx.uni1.to);
+        self.cx.uni2 = UniState::new(self.cx.uni2.to);
+    }
+
+    /// Crossfades unison layout `k` (0 = osc 1) to `u`.
+    fn set_unison(&mut self, k: usize, u: Unison) {
+        let uni = if k == 0 {
+            &mut self.cx.uni1
+        } else {
+            &mut self.cx.uni2
+        };
+        if u != uni.to {
+            uni.retarget(u, self.uxf[k].cur);
+            self.uxf[k].restart(0.0, 1.0);
         }
     }
 
@@ -1224,34 +1623,41 @@ impl Synth {
             SUB_LEVEL => self.s_sub.set(v),
             NOISE_LEVEL => self.s_noise.set(v),
             OSC1_OCT | OSC1_SEMI | OSC1_FINE => {
-                self.cx.off1 =
-                    self.p[OSC1_OCT] * 12.0 + self.p[OSC1_SEMI] + self.p[OSC1_FINE] * 0.01;
+                self.r_off[0]
+                    .set(self.p[OSC1_OCT] * 12.0 + self.p[OSC1_SEMI] + self.p[OSC1_FINE] * 0.01);
             }
             OSC2_OCT | OSC2_SEMI | OSC2_FINE => {
-                self.cx.off2 =
-                    self.p[OSC2_OCT] * 12.0 + self.p[OSC2_SEMI] + self.p[OSC2_FINE] * 0.01;
+                self.r_off[1]
+                    .set(self.p[OSC2_OCT] * 12.0 + self.p[OSC2_SEMI] + self.p[OSC2_FINE] * 0.01);
             }
             OSC1_UNI | OSC1_DETUNE | OSC1_SPREAD => {
-                self.cx.uni1 = Unison::new(
+                let u = Unison::new(
                     self.p[OSC1_UNI] as usize,
                     self.p[OSC1_DETUNE],
                     self.p[OSC1_SPREAD],
                 );
+                self.set_unison(0, u);
             }
             OSC2_UNI | OSC2_DETUNE | OSC2_SPREAD => {
-                self.cx.uni2 = Unison::new(
+                let u = Unison::new(
                     self.p[OSC2_UNI] as usize,
                     self.p[OSC2_DETUNE],
                     self.p[OSC2_SPREAD],
                 );
+                self.set_unison(1, u);
             }
             SUB_SHAPE => self.cx.sub_square = v >= 0.5,
-            FILTER_TYPE => self.cx.ftype = v as u8,
+            FILTER_TYPE => {
+                self.ftype = v as u8;
+                for (k, w) in self.fw.iter_mut().enumerate() {
+                    w.set(if k == self.ftype as usize { 1.0 } else { 0.0 });
+                }
+            }
             CUTOFF => self.s_cut.set(v.log2()),
             RES => self.s_res.set(v),
             DRIVE => self.s_drive.set(v),
-            ENV_AMT => self.cx.env_oct = v * 6.0,
-            KEYTRACK => self.cx.keytrack = v,
+            ENV_AMT => self.s_env.set(v * 6.0),
+            KEYTRACK => self.s_kt.set(v),
             AMP_A | AMP_D | AMP_S | AMP_R => {
                 self.cx.amp = EnvCfg::new(
                     self.p[AMP_A],
@@ -1260,6 +1666,12 @@ impl Synth {
                     self.p[AMP_R],
                     sr,
                 );
+                // a shorter attack must not snap a running attack to the top
+                if i == AMP_A {
+                    for vc in self.voices.iter_mut() {
+                        vc.amp.soften();
+                    }
+                }
             }
             FLT_A | FLT_D | FLT_S | FLT_R => {
                 self.cx.flt = EnvCfg::new(
@@ -1269,11 +1681,20 @@ impl Synth {
                     self.p[FLT_R],
                     sr,
                 );
+                if i == FLT_A {
+                    for vc in self.voices.iter_mut() {
+                        vc.flt.soften();
+                    }
+                }
             }
             LFO_SHAPE => self.lfo.shape = v as u8,
             LFO_RATE => self.lfo.inc = v as f64 / sr as f64,
             LFO_AMOUNT => self.s_lfo_amt.set(v),
-            LFO_TARGET => self.lfo_target = v as u8,
+            LFO_TARGET => {
+                for (k, r) in self.route.iter_mut().enumerate() {
+                    r.set(if k == v as usize { 1.0 } else { 0.0 });
+                }
+            }
             GLIDE => {}
             VOICE_MODE => {
                 let m = v as u8;
@@ -1291,21 +1712,10 @@ impl Synth {
             MASTER => self.s_master.set(db_to_gain(v)),
             _ => {}
         }
-        if matches!(
-            i,
-            OSC1_OCT
-                | OSC1_SEMI
-                | OSC1_FINE
-                | OSC2_OCT
-                | OSC2_SEMI
-                | OSC2_FINE
-                | OSC1_UNI
-                | OSC1_DETUNE
-                | OSC2_UNI
-                | OSC2_DETUNE
-        ) {
+        // the mip level depends on the widest unison detune
+        if matches!(i, OSC1_UNI | OSC1_DETUNE | OSC2_UNI | OSC2_DETUNE) {
             for vc in self.voices.iter_mut() {
-                vc.last_pm = f32::NAN;
+                vc.invalidate_pitch();
             }
         }
     }
@@ -1315,28 +1725,39 @@ impl Synth {
         for i in 0..n {
             let lfo = self.lfo.next();
             let amt = self.s_lfo_amt.next();
-            let lt = self.lfo_target;
-            let mod_shape = if lt == 2 { lfo * amt * 1.5 } else { 0.0 };
+            let [r_cut, r_pitch, r_shape, r_vol] = self.route.each_mut().map(|r| r.next());
+            let mod_shape = lfo * amt * 1.5 * r_shape;
             b.shape1[i] = (self.s_shape1.next() + mod_shape).clamp(0.0, 3.0);
             b.shape2[i] = (self.s_shape2.next() + mod_shape).clamp(0.0, 3.0);
             b.lvl1[i] = self.s_lvl1.next();
             b.lvl2[i] = self.s_lvl2.next();
             b.sub[i] = self.s_sub.next();
             b.noise[i] = self.s_noise.next();
-            b.cut[i] = self.s_cut.next() + if lt == 0 { lfo * amt * 4.0 } else { 0.0 };
-            b.pitch[i] = if lt == 1 { lfo * 12.0 * amt * amt } else { 0.0 };
-            b.trem[i] = if lt == 3 {
-                1.0 - amt * (0.5 - 0.5 * lfo)
-            } else {
-                1.0
-            };
             let res = self.s_res.next();
             if res != self.res_cache.0 {
                 let q = 0.707 * 35f32.powf(res);
-                self.res_cache = (res, 1.0 / q, 4.1 * res);
+                let x = ((res - 0.3) / 0.3).clamp(0.0, 1.0);
+                let t = self.cut_ms[0] + (self.cut_ms[1] - self.cut_ms[0]) * x;
+                let coef = (-1000.0 / (t * self.cx.sr).max(1.0e-3)).exp();
+                self.res_cache = (res, 1.0 / q, 4.1 * res, coef);
             }
             b.svf_k[i] = self.res_cache.1;
             b.lad_k[i] = self.res_cache.2;
+            b.cut[i] = self.s_cut.next(self.res_cache.3) + lfo * amt * 4.0 * r_cut;
+            b.pitch[i] = lfo * 12.0 * amt * amt * r_pitch;
+            b.trem[i] = 1.0 - amt * r_vol * (0.5 - 0.5 * lfo);
+            b.env_oct[i] = self.s_env.next();
+            b.keytrack[i] = self.s_kt.next();
+            b.off1[i] = self.r_off[0].next();
+            b.off2[i] = self.r_off[1].next();
+            b.uxf1[i] = self.uxf[0].next();
+            b.uxf2[i] = self.uxf[1].next();
+            b.fw[i] = self.fw.each_mut().map(|w| w.next());
+            b.ftype[i] = if self.fw.iter().all(Ramp::settled) {
+                self.ftype
+            } else {
+                FILTER_XF
+            };
             let drive = self.s_drive.next();
             if drive != self.drive_cache.0 {
                 let g = 10.0 * drive * drive;
@@ -1425,15 +1846,32 @@ impl Synth {
             from,
             glide_ms: self.slide_ms(),
         };
-        // same key still sounding: restart its envelopes in place (click-free)
+        // Re-striking a key that still sounds: with slow attacks its envelopes go on from where
+        // they are (as before; the new velocity ramps in). With fast attacks, restarting it in
+        // place would jump its level mid-cycle, so the old note rings out (released if still
+        // held, cancelled if it is still waiting for a stolen voice) and the new one gets a voice
+        // of its own, with the same attack as any note.
         if !slide
-            && let Some(i) = (0..NUM_VOICES).find(|&i| {
-                self.voices[i].active && !self.voices[i].fading && self.voices[i].key == key
-            })
+            && self.retrigger_in_place()
+            && let Some(i) = (0..NUM_VOICES)
+                .filter(|&i| {
+                    let v = &self.voices[i];
+                    v.active && !v.fading && v.key == key
+                })
+                .max_by_key(|&i| self.voices[i].age)
         {
-            self.voices[i].retrigger(key, vel, age);
+            let cx = self.cx;
+            self.voices[i].retrigger(key, vel, age, &cx);
             self.last_voice = i;
             return;
+        }
+        for v in self.voices.iter_mut() {
+            if v.active && v.gate && !v.fading && v.key == key {
+                v.release();
+            }
+            if let Some(p) = v.pending.as_mut().filter(|p| p.key == key) {
+                p.gate = false;
+            }
         }
         if let Some(i) = (0..NUM_VOICES).find(|&i| !self.voices[i].active) {
             let cx = self.cx;
@@ -1498,40 +1936,89 @@ impl Synth {
         let glide = self.glide_ms();
         let slide_ms = self.slide_ms();
         let last = self.last_pitch;
+        let in_place = self.retrigger_in_place();
         let cx = self.cx;
-        let v = &mut self.voices[0];
         self.last_voice = 0;
-        if v.active && v.gate && !v.fading {
-            let ms = if slide { slide_ms } else { glide };
+        let v = &self.voices[0];
+        let sounding = v.active && !v.fading;
+        let held = sounding && v.gate;
+        let ms = if slide { slide_ms } else { glide };
+        if held && (legato || slide) {
+            // legato / slide: the held note moves to the new key without a new attack
+            let v = &mut self.voices[0];
             v.glide_to(key as f32, ms, cx.sr);
-            if legato || slide {
-                v.key = key;
-                v.age = age;
-            } else {
-                v.retrigger(key, vel, age);
-            }
-        } else if v.active && !v.fading {
-            // still ringing out: retrigger without resetting phases
-            let glide_now = slide || (!legato && glide > 0.0);
-            let ms = if slide { slide_ms } else { glide };
-            v.retrigger(key, vel, age);
-            v.glide_to(key as f32, if glide_now { ms } else { 0.0 }, cx.sr);
-        } else {
-            let glide_now = slide || (!legato && glide > 0.0);
-            let from = if glide_now { last } else { None };
-            let pend = Pending {
-                key,
-                vel,
-                gate: true,
-                from,
-                glide_ms: if slide { slide_ms } else { glide },
-            };
-            if v.active && v.fading {
-                v.pending = Some(pend);
-            } else {
-                v.start(pend, &cx, age);
-            }
+            v.key = key;
+            v.age = age;
+            return;
         }
+        // A retrigger glides from a held note; after a release, legato mode only glides on
+        // slide notes.
+        let glide_now = slide || (!legato && glide > 0.0);
+        let ms = if held || glide_now { ms } else { 0.0 };
+        if sounding && in_place {
+            // slow attacks: the envelopes go on from where they are (no dip, no click)
+            let v = &mut self.voices[0];
+            v.retrigger(key, vel, age, &cx);
+            v.glide_to(key as f32, ms, cx.sr);
+            return;
+        }
+        let from = if sounding {
+            (ms > 0.0).then_some(v.pitch)
+        } else if glide_now {
+            last
+        } else {
+            None
+        };
+        let pend = Pending {
+            key,
+            vel,
+            gate: true,
+            from,
+            glide_ms: ms,
+        };
+        // Fast attacks: the note starts from scratch, with the same attack as a note from
+        // silence (restarting a sounding voice's attack mid-cycle is a click), while the old note
+        // fades out in a slot of its own. With no free slot it fades out first, like a steal.
+        if sounding && !self.hand_off_mono() {
+            let v = &mut self.voices[0];
+            v.fading = true;
+            v.fade = 1.0;
+            v.gate = false;
+            v.pending = Some(pend);
+            return;
+        }
+        let v = &mut self.voices[0];
+        if v.active && v.fading {
+            v.pending = Some(pend);
+        } else {
+            v.start(pend, &cx, age);
+        }
+    }
+
+    /// Whether a retrigger may restart the sounding voice's envelopes in place: the amp attack,
+    /// and the filter attack when it moves the cutoff, are slow enough (IN_PLACE_ATTACK_MS).
+    fn retrigger_in_place(&self) -> bool {
+        self.p[AMP_A] >= IN_PLACE_ATTACK_MS
+            && (self.p[FLT_A] >= IN_PLACE_ATTACK_MS || self.p[ENV_AMT] == 0.0)
+    }
+
+    /// Moves the sounding mono voice to a free slot, where it fades out over STEAL_FADE_MS, so
+    /// the mono voice can start the next note at once. False if no slot is free.
+    fn hand_off_mono(&mut self) -> bool {
+        let Some(j) = (1..NUM_VOICES).find(|&j| !self.voices[j].active) else {
+            return false;
+        };
+        // (the copy keeps its own noise generator, so the two notes' noise is not correlated)
+        let rng = self.voices[j].rng;
+        self.voices[j] = Voice {
+            gate: false,
+            fading: true,
+            fade: 1.0,
+            pending: None,
+            rng,
+            ..self.voices[0]
+        };
+        true
     }
 
     fn mono_off(&mut self, key: u8) {
@@ -1585,7 +2072,9 @@ impl Device for Synth {
         }
         self.p[i] = v;
         self.apply(i);
-        if self.fresh {
+        // Before the first block, or while no voice sounds, there is nothing to declick: the
+        // change takes effect at once (a preset loaded between notes must not ramp in).
+        if self.fresh || self.voices.iter().all(|v| !v.active) {
             self.snap_all();
         }
     }
@@ -1672,5 +2161,459 @@ impl Device for Synth {
             *o = self.scope[(self.scope_pos + SCOPE_LEN - n + j) % SCOPE_LEN];
         }
         n
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    enum Ev {
+        On(u8, f32, bool),
+        Off(u8),
+        Param(usize, f32),
+    }
+
+    /// A busy 0.8 s: poly re-strikes and steals, mono hand-offs and in-place retriggers, legato
+    /// slides, and knob moves (some during a running crossfade) at frames that line up with no
+    /// block size.
+    fn script() -> Vec<(usize, Ev)> {
+        let mut ev = vec![(0, Ev::Param(VOICE_MODE, 0.0))];
+        for k in 0..24 {
+            let t = 101 + k * 503;
+            ev.push((
+                t,
+                Ev::On(40 + (k % 9) as u8 * 3, 0.3 + 0.03 * k as f32, false),
+            ));
+            ev.push((t + 1777, Ev::Off(40 + (k % 9) as u8 * 3)));
+        }
+        for (t, i, v) in [
+            (2003, FILTER_TYPE, 1.0),
+            (2111, FILTER_TYPE, 2.0),
+            (2190, FILTER_TYPE, 3.0),
+            (3001, OSC1_UNI, 7.0),
+            (3077, OSC1_UNI, 2.0),
+            (3333, LFO_AMOUNT, 0.7),
+            (3500, LFO_TARGET, 3.0),
+            (3561, LFO_TARGET, 1.0),
+            (4003, ENV_AMT, -0.8),
+            (4400, KEYTRACK, 1.0),
+            (4999, OSC2_OCT, 2.0),
+            (5013, OSC1_SEMI, -7.0),
+            (6007, AMP_A, 900.0),
+            (6050, AMP_A, 0.5),
+            (7001, FILTER_TYPE, 0.0),
+            (7003, OSC2_UNI, 5.0),
+            (9001, OSC1_UNI, 6.0),
+            (5_557, CUTOFF, 300.0),
+            (8_191, CUTOFF, 9000.0),
+            (8_250, RES, 0.8),
+            (10_007, CUTOFF, 700.0),
+            (10_101, OSC1_UNI, 3.0),
+        ] {
+            ev.push((t, Ev::Param(i, v)));
+        }
+        ev.push((14_001, Ev::Param(VOICE_MODE, 1.0)));
+        for k in 0..10 {
+            let t = 14_100 + k * 1301;
+            ev.push((
+                t,
+                Ev::On(50 + (k % 4) as u8 * 5, 0.25 + 0.07 * k as f32, false),
+            ));
+            ev.push((t + 1500 + (k % 3) * 400, Ev::Off(50 + (k % 4) as u8 * 5)));
+        }
+        // slow attacks: mono retriggers in place
+        ev.push((22_000, Ev::Param(AMP_A, 30.0)));
+        ev.push((22_000, Ev::Param(FLT_A, 30.0)));
+        for k in 0..5 {
+            let t = 22_101 + k * 997;
+            ev.push((t, Ev::On(60 + k as u8, 1.0 - 0.15 * k as f32, false)));
+            ev.push((t + 1200, Ev::Off(60 + k as u8)));
+        }
+        ev.push((28_003, Ev::Param(VOICE_MODE, 2.0)));
+        ev.push((28_003, Ev::Param(GLIDE, 40.0)));
+        ev.push((28_100, Ev::On(45, 0.9, false)));
+        ev.push((29_377, Ev::On(52, 0.6, true)));
+        ev.push((30_001, Ev::Off(45)));
+        ev.push((31_555, Ev::On(57, 0.8, false)));
+        ev.push((32_900, Ev::Off(52)));
+        ev.push((33_000, Ev::Off(57)));
+        ev.push((33_700, Ev::On(57, 0.4, false)));
+        ev.push((36_000, Ev::Off(57)));
+        ev.sort_by_key(|e| e.0);
+        ev
+    }
+
+    fn render(blocks: &mut dyn FnMut() -> usize) -> (Vec<f32>, Vec<f32>) {
+        let mut s = Synth::new(48_000.0);
+        for (i, v) in preset("Pluck").unwrap() {
+            s.set_param(i, v);
+        }
+        s.set_param(NOISE_LEVEL as u32, 0.05);
+        let ev = script();
+        let params: Vec<(usize, usize, f32)> = ev
+            .iter()
+            .filter_map(|&(t, x)| match x {
+                Ev::Param(p, v) => Some((t, p, v)),
+                _ => None,
+            })
+            .collect();
+        let notes: Vec<(usize, NoteEvent)> = ev
+            .iter()
+            .filter_map(|&(t, x)| {
+                let (key, velocity, on, slide) = match x {
+                    Ev::On(key, vel, slide) => (key, vel, true, slide),
+                    Ev::Off(key) => (key, 0.0, false, false),
+                    Ev::Param(..) => return None,
+                };
+                Some((
+                    t,
+                    NoteEvent {
+                        offset: 0,
+                        key,
+                        velocity,
+                        on,
+                        slide,
+                    },
+                ))
+            })
+            .collect();
+        let n = 40_000;
+        let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+        let (mut i, mut pi) = (0, 0);
+        while i < n {
+            while pi < params.len() && params[pi].0 <= i {
+                s.set_param(params[pi].1 as u32, params[pi].2);
+                pi += 1;
+            }
+            // blocks split where a parameter moves (it applies between blocks)
+            let mut e = (i + blocks().clamp(1, MAX_BLOCK)).min(n);
+            if pi < params.len() {
+                e = e.min(params[pi].0);
+            }
+            let block: Vec<NoteEvent> = notes
+                .iter()
+                .filter(|(t, _)| *t >= i && *t < e)
+                .map(|&(t, x)| NoteEvent {
+                    offset: (t - i) as u32,
+                    ..x
+                })
+                .collect();
+            s.process(&mut l[i..e], &mut r[i..e], None, &block);
+            i = e;
+        }
+        (l, r)
+    }
+
+    /// A preset loaded while the engine runs but no note sounds takes effect at once: the first
+    /// note after it sounds exactly as on a synth that had the preset from the start. (These
+    /// presets leave the LFO rate and shape at their defaults, so its phase matches too.)
+    #[test]
+    fn a_preset_loaded_while_silent_does_not_ramp_in() {
+        for name in ["Pluck", "Bell Keys", "808 Glide"] {
+            let silent = 4_800;
+            let render = |load_first: bool| {
+                let mut s = Synth::new(48_000.0);
+                let load = |s: &mut Synth| {
+                    for (i, v) in preset(name).unwrap() {
+                        s.set_param(i, v);
+                    }
+                };
+                if load_first {
+                    load(&mut s);
+                }
+                let (mut l, mut r) = (vec![0.0f32; silent + 24_000], vec![0.0f32; silent + 24_000]);
+                let mut c = 0;
+                while c < l.len() {
+                    if c == silent && !load_first {
+                        load(&mut s);
+                    }
+                    let e = (c + MAX_BLOCK).min(l.len()).min(if c < silent {
+                        silent
+                    } else {
+                        usize::MAX
+                    });
+                    let on = NoteEvent {
+                        offset: 0,
+                        key: 48,
+                        velocity: 0.9,
+                        on: true,
+                        slide: false,
+                    };
+                    let ev: &[NoteEvent] = if c == silent { &[on] } else { &[] };
+                    s.process(&mut l[c..e], &mut r[c..e], None, ev);
+                    c = e;
+                }
+                (l, r)
+            };
+            let (a, b) = (render(true), render(false));
+            assert!(
+                a.0[silent..].iter().any(|v| v.abs() > 0.01),
+                "{name}: the note does not sound"
+            );
+            let diff = (0..a.0.len())
+                .map(|i| (a.0[i] - b.0[i]).abs().max((a.1[i] - b.1[i]).abs()))
+                .fold(0.0f32, f32::max);
+            assert!(diff == 0.0, "{name}: loaded while silent differs by {diff}");
+        }
+    }
+
+    /// The probe patch of the click tests: sines, open filter, full sustain, 300 ms release.
+    fn probe(s: &mut Synth) {
+        for (i, v) in [
+            (OSC1_SHAPE, 0.0),
+            (OSC1_LEVEL, 0.6),
+            (OSC2_SHAPE, 0.0),
+            (OSC2_OCT, 1.0),
+            (OSC2_LEVEL, 0.3),
+            (FILTER_TYPE, 0.0),
+            (CUTOFF, 20000.0),
+            (RES, 0.0),
+            (ENV_AMT, 0.0),
+            (KEYTRACK, 0.0),
+            (AMP_A, 5.0),
+            (AMP_S, 1.0),
+            (AMP_R, 300.0),
+            (MASTER, -6.0),
+        ] {
+            s.set_param(i as u32, v);
+        }
+    }
+
+    /// Renders `notes` (frame, key, on) in 128-frame blocks after `setup`.
+    fn play(setup: &dyn Fn(&mut Synth), notes: &[(usize, u8, bool)], n: usize) -> Vec<f32> {
+        let mut s = Synth::new(48_000.0);
+        setup(&mut s);
+        let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+        let mut c = 0;
+        while c < n {
+            let e = (c + MAX_BLOCK).min(n);
+            let ev: Vec<NoteEvent> = notes
+                .iter()
+                .filter(|x| x.0 >= c && x.0 < e)
+                .map(|&(t, key, on)| NoteEvent {
+                    offset: (t - c) as u32,
+                    key,
+                    velocity: 0.9,
+                    on,
+                    slide: false,
+                })
+                .collect();
+            s.process(&mut l[c..e], &mut r[c..e], None, &ev);
+            c = e;
+        }
+        l
+    }
+
+    fn rms(x: &[f32]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+    }
+
+    /// A note that steals a released voice sounds even when that voice's release ends before the
+    /// steal fade does (it used to be dropped: the voice went idle with the note still pending).
+    /// Poly: 16 held notes, the first released at 500 ms (idle at about 800 ms), a 17th note
+    /// around 800 ms. Mono: the same note on the mono voice while every other slot still rings,
+    /// so the old note cannot be handed off and fades out first.
+    #[test]
+    fn a_stolen_note_sounds_when_the_old_note_ends_during_the_fade() {
+        let ms = |t: f32| (t * 48.0) as usize;
+        let mut missing = Vec::new();
+        for mono in [false, true] {
+            for at in [790.0f32, 798.0, 799.0, 799.5] {
+                let mut notes: Vec<(usize, u8, bool)> = (0..16)
+                    .map(|k| (ms(10.0) + k * 37, 40 + k as u8, true))
+                    .collect();
+                notes.push((ms(500.0), 40, false));
+                if !mono {
+                    for k in 1..16 {
+                        notes.push((ms(1300.0), 40 + k as u8, false));
+                    }
+                }
+                let n = ms(1100.0);
+                let render = |notes: &[(usize, u8, bool)]| {
+                    if mono {
+                        play_mono(notes, Some(ms(at)), n)
+                    } else {
+                        play(&probe, notes, n)
+                    }
+                };
+                let without = render(&notes);
+                let mut with = notes.clone();
+                with.push((ms(at), 80, true));
+                let with = render(&with);
+                let d: Vec<f32> = (ms(at + 10.0)..ms(at + 200.0))
+                    .map(|i| with[i] - without[i])
+                    .collect();
+                if rms(&d) <= 0.05 {
+                    let mode = if mono { "mono" } else { "poly" };
+                    missing.push(format!("{mode} at {at} ms (rms {})", rms(&d)));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "missing notes: {}", missing.join(", "));
+    }
+
+    /// Mono variant of `play`: 16 poly notes, all released when the mode switches to mono at
+    /// 700 ms (they ring until about 1000 ms, the first one ends at about 800 ms), then the
+    /// mono note at `at`.
+    fn play_mono(notes: &[(usize, u8, bool)], at: Option<usize>, n: usize) -> Vec<f32> {
+        let mut s = Synth::new(48_000.0);
+        probe(&mut s);
+        let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+        let switch = 700 * 48;
+        let mut c = 0;
+        while c < n {
+            if c == switch {
+                s.set_param(VOICE_MODE as u32, 1.0);
+            }
+            let e = (c + MAX_BLOCK)
+                .min(n)
+                .min(if c < switch { switch } else { n });
+            let ev: Vec<NoteEvent> = notes
+                .iter()
+                .filter(|x| x.0 >= c && x.0 < e && (x.0 < switch || Some(x.0) == at))
+                .map(|&(t, key, on)| NoteEvent {
+                    offset: (t - c) as u32,
+                    key,
+                    velocity: 0.9,
+                    on,
+                    slide: false,
+                })
+                .collect();
+            s.process(&mut l[c..e], &mut r[c..e], None, &ev);
+            c = e;
+        }
+        l
+    }
+
+    /// Steps the cutoff knob while a note sounds and returns how long its smoothed value takes
+    /// to cover 95% of the step (in log frequency).
+    fn cutoff_settle_ms(res: f32) -> f32 {
+        let mut s = Synth::new(48_000.0);
+        s.set_param(RES as u32, res);
+        s.set_param(CUTOFF as u32, 200.0);
+        let (mut l, mut r) = ([0.0f32; 1], [0.0f32; 1]);
+        let on = NoteEvent {
+            offset: 0,
+            key: 60,
+            velocity: 1.0,
+            on: true,
+            slide: false,
+        };
+        s.process(&mut l, &mut r, None, &[on]);
+        s.set_param(CUTOFF as u32, 12000.0);
+        let (from, to) = (200f32.log2(), 12000f32.log2());
+        for n in 1..48_000 {
+            s.process(&mut l, &mut r, None, &[]);
+            if (s.s_cut.cur - from) >= 0.95 * (to - from) {
+                return n as f32 / 48.0;
+            }
+        }
+        f32::INFINITY
+    }
+
+    /// The cutoff knob glides with a one-pole of 8 ms at low resonance and 20 ms at the most
+    /// (documented at CUTOFF_SMOOTH_MS): 95% of a step within 3 time constants, 24 / 60 ms.
+    #[test]
+    fn cutoff_knob_settles_within_its_documented_time() {
+        let low = cutoff_settle_ms(0.0);
+        let high = cutoff_settle_ms(1.0);
+        assert!(
+            low <= 25.0,
+            "res 0: 95% after {low} ms (8 ms one-pole: 24 ms)"
+        );
+        assert!(
+            high <= 61.0,
+            "res 1: 95% after {high} ms (20 ms one-pole: 60 ms)"
+        );
+    }
+
+    /// Only the knob value is smoothed: with the knob still, a resonant patch whose cutoff moves
+    /// by LFO, filter envelope, key tracking and velocity sounds exactly the same as with the
+    /// knob smoothing switched off.
+    #[test]
+    fn cutoff_knob_smoothing_leaves_modulation_alone() {
+        let render = |cut_ms: [f32; 2]| {
+            let mut s = Synth::new(48_000.0);
+            s.cut_ms = cut_ms;
+            for (i, v) in [
+                (OSC1_SHAPE, 2.0),
+                (CUTOFF, 900.0),
+                (RES, 0.7),
+                (ENV_AMT, 0.8),
+                (KEYTRACK, 1.0),
+                (FLT_A, 0.5),
+                (FLT_D, 120.0),
+                (FLT_S, 0.2),
+                (LFO_SHAPE, 3.0),
+                (LFO_RATE, 7.0),
+                (LFO_AMOUNT, 0.8),
+                (LFO_TARGET, 0.0),
+            ] {
+                s.set_param(i as u32, v);
+            }
+            let n = 24_000;
+            let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+            let mut c = 0;
+            while c < n {
+                let e = (c + MAX_BLOCK).min(n);
+                let mut ev = Vec::new();
+                for (t, key, vel) in [(100, 48u8, 1.0f32), (9_000, 67, 0.3)] {
+                    if t >= c && t < e {
+                        ev.push(NoteEvent {
+                            offset: (t - c) as u32,
+                            key,
+                            velocity: vel,
+                            on: true,
+                            slide: false,
+                        });
+                    }
+                }
+                s.process(&mut l[c..e], &mut r[c..e], None, &ev);
+                c = e;
+            }
+            l
+        };
+        let smoothed = render([CUTOFF_SMOOTH_MS, CUTOFF_SMOOTH_RES_MS]);
+        let instant = render([0.0, 0.0]);
+        assert!(rms(&smoothed) > 0.01, "silent render");
+        let diff = (0..smoothed.len())
+            .map(|i| (smoothed[i] - instant[i]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            diff == 0.0,
+            "the knob smoothing changed the modulated sound by {diff}"
+        );
+    }
+
+    #[test]
+    fn output_is_independent_of_block_size() {
+        let reference = render(&mut || MAX_BLOCK);
+        assert!(reference.0.iter().any(|v| v.abs() > 0.01), "silent render");
+        let mut seed = 0x2545_F491u32;
+        let mut random = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            1 + seed as usize % MAX_BLOCK
+        };
+        for (label, out) in [
+            ("37", render(&mut || 37)),
+            ("1", render(&mut || 1)),
+            ("random", render(&mut random)),
+        ] {
+            let diff = (0..reference.0.len())
+                .map(|i| {
+                    (out.0[i] - reference.0[i])
+                        .abs()
+                        .max((out.1[i] - reference.1[i]).abs())
+                })
+                .fold(0.0f32, f32::max);
+            assert!(
+                diff == 0.0,
+                "blocks of {label} frames differ from 128 by {diff}"
+            );
+        }
     }
 }
