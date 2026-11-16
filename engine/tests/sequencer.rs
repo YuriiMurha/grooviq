@@ -51,12 +51,12 @@ fn exact() -> Vec<f32> {
 }
 
 fn channel(id: u32, sample: &Arc<SampleBuf>, sampler: Vec<f32>) -> ChannelSetup {
-    ChannelSetup {
-        id: ChannelId(id),
-        sample: Some(Arc::clone(sample)),
+    ChannelSetup::sampler(
+        ChannelId(id),
+        Some(Arc::clone(sample)),
         sampler,
-        mix: ChannelMix::default(),
-    }
+        ChannelMix::default(),
+    )
 }
 
 fn note(tick: u32, channel: u32, length: u32) -> SeqNote {
@@ -66,6 +66,7 @@ fn note(tick: u32, channel: u32, length: u32) -> SeqNote {
         key: 60,
         velocity: 1.0,
         length,
+        slide: false,
     }
 }
 

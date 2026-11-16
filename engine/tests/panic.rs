@@ -226,12 +226,12 @@ fn a_panic_restart_restores_channels_samples_and_mix() {
     });
     let sample = Arc::new(SampleBuf { rate: SR, l, r });
     let state = EngineState {
-        channels: vec![ChannelSetup {
-            id: ChannelId(4),
-            sample: Some(Arc::clone(&first)),
-            sampler: Vec::new(),
-            mix: ChannelMix::default(),
-        }],
+        channels: vec![ChannelSetup::sampler(
+            ChannelId(4),
+            Some(Arc::clone(&first)),
+            Vec::new(),
+            ChannelMix::default(),
+        )],
         ..EngineState::default()
     };
     let swap = |c: &mut grooviq_engine::Controller| {
@@ -310,4 +310,83 @@ fn a_panic_restart_restores_channels_samples_and_mix() {
     c.check_health();
     assert_eq!(Arc::strong_count(&sample), 5);
     assert_eq!(Arc::strong_count(&first), 2);
+}
+
+#[test]
+fn a_panic_restart_restores_synth_channels() {
+    silence_injected_panics();
+    let mut reese: Vec<f32> = grooviq_dsp::synth::SPEC.iter().map(|s| s.2).collect();
+    for (index, value) in grooviq_dsp::synth::preset("Reese").unwrap() {
+        reese[index as usize] = value;
+    }
+    let state = EngineState {
+        channels: vec![
+            ChannelSetup::synth(ChannelId(2), reese, ChannelMix::default()),
+            ChannelSetup::synth(ChannelId(3), Vec::new(), ChannelMix::default()),
+        ],
+        ..EngineState::default()
+    };
+    // Changed after creation, so only the controller's mirror carries them into the rebuild:
+    // a cutoff and a release on channel 2, and both channels in choke group 5.
+    let setup = [
+        Command::SetChannelParam {
+            channel: ChannelId(2),
+            index: 20,
+            value: 700.0,
+        },
+        Command::SetChannelParam {
+            channel: ChannelId(2),
+            index: 28,
+            value: 900.0,
+        },
+        Command::SetChoke {
+            channel: ChannelId(2),
+            group: 5,
+        },
+        Command::SetChoke {
+            channel: ChannelId(3),
+            group: 5,
+        },
+    ];
+    let note = |channel, key| Command::ChannelNote {
+        channel: ChannelId(channel),
+        key,
+        velocity: 0.9,
+        on: true,
+    };
+    let mut buf = vec![0f32; 1024 * 2];
+    // Channel 2 sounds, then channel 3 chokes it.
+    let play = |c: &mut grooviq_engine::Controller, p: &mut grooviq_engine::AudioProcessor| {
+        c.send(note(2, 40)).unwrap();
+        let mut out = vec![0f32; 4096 * 2];
+        p.process(&mut out[..2048 * 2], 2);
+        c.send(note(3, 64)).unwrap();
+        p.process(&mut out[2048 * 2..], 2);
+        out
+    };
+
+    let (mut rc, mut rp) = engine_with(cfg(), state.clone());
+    for cmd in setup {
+        rc.send(cmd).unwrap();
+    }
+    rp.process(&mut buf, 2);
+    let expected = play(&mut rc, &mut rp);
+    assert!(peak(&expected[..2048 * 2]) > 0.05, "the note is audible");
+
+    let (mut c, mut p) = engine_with(cfg(), state);
+    for cmd in setup {
+        c.send(cmd).unwrap();
+    }
+    c.send(Command::InjectPanic).unwrap();
+    p.process(&mut buf, 2);
+    assert!(
+        c.check_health()
+            .contains(&HealthEvent::Restarted { faults: 1 })
+    );
+    p.process(&mut buf, 2);
+    let actual = play(&mut c, &mut p);
+    assert!(
+        actual == expected,
+        "the rebuilt synth channels play like the originals"
+    );
 }

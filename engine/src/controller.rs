@@ -7,7 +7,9 @@ use crate::command::{Command, Msg, Trash, rebuilt_queue};
 use crate::graph::{Graph, ramp_len};
 use crate::live::{LiveShared, LiveSnapshot};
 use crate::processor::AudioProcessor;
-use crate::state::{ChannelId, ChannelSetup, EngineState, MAX_CHANNELS, PatternData};
+use crate::state::{
+    ChannelId, ChannelSetup, EngineState, Instrument, InstrumentKind, MAX_CHANNELS, PatternData,
+};
 use crate::{EngineConfig, QUEUE_CAPACITY};
 use grooviq_dsp::sampler::SampleBuf;
 use rtrb::{Consumer, Producer};
@@ -38,6 +40,9 @@ pub enum ControlError {
     ChannelExists,
     /// The engine already holds [`MAX_CHANNELS`] channels.
     TooManyChannels,
+    /// The channel's instrument has no such thing (a sample or a sampler parameter for a synth
+    /// channel).
+    WrongInstrument,
 }
 
 impl std::fmt::Display for ControlError {
@@ -48,6 +53,7 @@ impl std::fmt::Display for ControlError {
             Self::UnknownChannel => "no channel has that id",
             Self::ChannelExists => "a channel with that id exists already",
             Self::TooManyChannels => "the engine holds as many channels as it can",
+            Self::WrongInstrument => "the channel's instrument has no such setting",
         })
     }
 }
@@ -76,14 +82,6 @@ impl Default for ToneState {
 fn synth_defaults() -> Vec<f32> {
     grooviq_dsp::param_spec("synth")
         .unwrap_or_default()
-        .iter()
-        .map(|&(_, _, default)| default)
-        .collect()
-}
-
-/// Every sampler parameter at its default.
-fn sampler_defaults() -> Vec<f32> {
-    grooviq_dsp::sampler::SPEC
         .iter()
         .map(|&(_, _, default)| default)
         .collect()
@@ -149,11 +147,27 @@ impl Controller {
     /// Queues `cmd` for the block that contains frame `due` (0: the next block). The processor
     /// holds back everything behind a command that is not due yet, so send in frame order.
     pub(crate) fn send_at(&mut self, due: u64, cmd: Command) -> Result<(), ControlError> {
-        let cmd = cmd.clamped().ok_or(ControlError::Rejected)?;
-        if let Some(id) = cmd.channel()
-            && self.state.channel(id).is_none()
-        {
-            return Err(ControlError::UnknownChannel);
+        let mut cmd = cmd.clamped().ok_or(ControlError::Rejected)?;
+        if let Some(id) = cmd.channel() {
+            let kind = self
+                .state
+                .channel(id)
+                .ok_or(ControlError::UnknownChannel)?
+                .instrument
+                .kind();
+            match &mut cmd {
+                Command::SetSamplerParam { .. } if kind != InstrumentKind::Sampler => {
+                    return Err(ControlError::WrongInstrument);
+                }
+                Command::SetChannelParam { index, value, .. } => {
+                    let &(min, max, _) = usize::try_from(*index)
+                        .ok()
+                        .and_then(|i| kind.spec().get(i))
+                        .ok_or(ControlError::Rejected)?;
+                    *value = value.clamp(min, max);
+                }
+                _ => {}
+            }
         }
         self.commands
             .push(Msg::Command { due, cmd })
@@ -168,8 +182,8 @@ impl Controller {
     }
 
     /// Adds a channel after the others, at its mix from the first frame (no fade-in). Values
-    /// are clamped, missing sampler parameters take their defaults and extra ones are
-    /// dropped.
+    /// are clamped, missing instrument parameters take their defaults and extra ones are
+    /// dropped; a choke group past [`crate::MAX_CHOKE_GROUP`] is `Rejected`.
     pub fn add_channel(&mut self, setup: ChannelSetup) -> Result<(), ControlError> {
         if self.state.channel(setup.id).is_some() {
             return Err(ControlError::ChannelExists);
@@ -203,19 +217,25 @@ impl Controller {
         Ok(())
     }
 
-    /// Gives a channel a new sample (or none), silencing its notes. The processor hands the
-    /// old one back to be freed here.
+    /// Gives a sampler channel a new sample (or none), silencing its notes. The processor hands
+    /// the old one back to be freed here. A synth channel is `WrongInstrument`.
     pub fn set_channel_sample(
         &mut self,
         id: ChannelId,
         sample: Option<Arc<SampleBuf>>,
     ) -> Result<(), ControlError> {
         let index = self.channel_index(id)?;
+        if self.state.channels[index].instrument.kind() != InstrumentKind::Sampler {
+            return Err(ControlError::WrongInstrument);
+        }
         self.push(Msg::SetSample {
             channel: id,
             sample: sample.clone(),
         })?;
-        self.state.channels[index].sample = sample;
+        if let Instrument::Sampler { sample: held, .. } = &mut self.state.channels[index].instrument
+        {
+            *held = sample;
+        }
         Ok(())
     }
 
@@ -373,7 +393,7 @@ impl Controller {
         self.tone = ToneState::default();
         self.synth = synth_defaults();
         for channel in &mut self.state.channels {
-            channel.sampler = sampler_defaults();
+            channel.instrument.reset_params();
         }
         if let Ok(graph) = catch_unwind(AssertUnwindSafe(|| self.replay())) {
             return graph;
@@ -429,7 +449,13 @@ impl Controller {
                     c.mix = mix;
                 }
             }
+            // `send_at` let these through for a channel whose instrument has the parameter.
             Command::SetSamplerParam {
+                channel,
+                index,
+                value,
+            }
+            | Command::SetChannelParam {
                 channel,
                 index,
                 value,
@@ -437,9 +463,14 @@ impl Controller {
                 if let Some(param) = self
                     .state
                     .channel_mut(channel)
-                    .and_then(|c| c.sampler.get_mut(index as usize))
+                    .and_then(|c| c.instrument.params_mut().get_mut(index as usize))
                 {
                     *param = value;
+                }
+            }
+            Command::SetChoke { channel, group } => {
+                if let Some(c) = self.state.channel_mut(channel) {
+                    c.choke = group;
                 }
             }
             _ => {}
@@ -554,12 +585,12 @@ mod tests {
     }
 
     fn setup(id: u32) -> ChannelSetup {
-        ChannelSetup {
-            id: ChannelId(id),
-            sample: None,
-            sampler: Vec::new(),
-            mix: crate::ChannelMix::default(),
-        }
+        ChannelSetup::sampler(
+            ChannelId(id),
+            None,
+            Vec::new(),
+            crate::ChannelMix::default(),
+        )
     }
 
     #[test]
@@ -584,10 +615,12 @@ mod tests {
             Err(ControlError::UnknownChannel)
         );
         assert_eq!(c.add_channel(setup(1)), Err(ControlError::ChannelExists));
-        let nan = ChannelSetup {
-            sampler: vec![f32::NAN],
-            ..setup(2)
-        };
+        let nan = ChannelSetup::sampler(
+            ChannelId(2),
+            None,
+            vec![f32::NAN],
+            crate::ChannelMix::default(),
+        );
         assert_eq!(c.add_channel(nan), Err(ControlError::Rejected));
         let empty = PatternData {
             length: 0,
@@ -642,8 +675,13 @@ mod tests {
         pretend(&c, 1, 0);
         assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 1 }]);
         p.process(&mut [0.0; crate::BLOCK * 2], 2);
-        let defaults = sampler_defaults();
-        assert!(c.state.channels.iter().all(|ch| ch.sampler == defaults));
+        let defaults: Vec<f32> = grooviq_dsp::sampler::SPEC.iter().map(|s| s.2).collect();
+        assert!(
+            c.state
+                .channels
+                .iter()
+                .all(|ch| ch.instrument.params() == defaults)
+        );
         assert_eq!(c.state.channels.len(), 2);
         // The graph the state builds holds both channels and the pattern.
         let graph = c.build_graph();

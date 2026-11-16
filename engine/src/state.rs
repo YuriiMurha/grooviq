@@ -3,7 +3,8 @@
 //! [`crate::engine_with`] starts from it.
 
 use crate::controller::ControlError;
-use grooviq_dsp::sampler::{SPEC, SampleBuf};
+use grooviq_dsp::sampler::SampleBuf;
+use grooviq_dsp::{sampler, synth};
 use std::sync::Arc;
 
 /// Ticks per quarter note.
@@ -22,6 +23,8 @@ pub const BPM_RANGE: (f32, f32) = (20.0, 400.0);
 const DEFAULT_BPM: f32 = 140.0;
 /// Channel volume range (linear gain).
 const VOLUME: (f32, f32) = (0.0, 2.0);
+/// The highest choke group; group 0 is none.
+pub const MAX_CHOKE_GROUP: u8 = 16;
 
 /// Names a channel. Stable for the channel's life; never reused while it exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -79,27 +82,127 @@ impl ChannelMix {
     }
 }
 
+/// Which instrument a channel holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstrumentKind {
+    Sampler,
+    Synth,
+}
+
+impl InstrumentKind {
+    /// `(min, max, default)` of every parameter, indexed like the device's `set_param`.
+    pub fn spec(self) -> &'static [(f32, f32, f32)] {
+        match self {
+            Self::Sampler => &sampler::SPEC,
+            Self::Synth => &synth::SPEC,
+        }
+    }
+}
+
+/// A channel's instrument and its parameters, indexed like its [`InstrumentKind::spec`].
+/// Missing trailing values take their defaults; values past the table are dropped.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Instrument {
+    Sampler {
+        sample: Option<Arc<SampleBuf>>,
+        params: Vec<f32>,
+    },
+    Synth {
+        params: Vec<f32>,
+    },
+}
+
+impl Instrument {
+    pub fn kind(&self) -> InstrumentKind {
+        match self {
+            Self::Sampler { .. } => InstrumentKind::Sampler,
+            Self::Synth { .. } => InstrumentKind::Synth,
+        }
+    }
+
+    /// The parameter table of the instrument's device.
+    pub fn spec(&self) -> &'static [(f32, f32, f32)] {
+        self.kind().spec()
+    }
+
+    /// A sampler's sample; a synth has none.
+    pub fn sample(&self) -> Option<&Arc<SampleBuf>> {
+        match self {
+            Self::Sampler { sample, .. } => sample.as_ref(),
+            Self::Synth { .. } => None,
+        }
+    }
+
+    pub fn params(&self) -> &[f32] {
+        match self {
+            Self::Sampler { params, .. } | Self::Synth { params } => params,
+        }
+    }
+
+    pub(crate) fn params_mut(&mut self) -> &mut Vec<f32> {
+        match self {
+            Self::Sampler { params, .. } | Self::Synth { params } => params,
+        }
+    }
+
+    /// Every parameter at its default.
+    pub(crate) fn reset_params(&mut self) {
+        let defaults = self.spec().iter().map(|&(_, _, d)| d).collect();
+        *self.params_mut() = defaults;
+    }
+}
+
 /// Everything that makes a channel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelSetup {
     pub id: ChannelId,
-    pub sample: Option<Arc<SampleBuf>>,
-    /// Sampler parameters, indexed like `grooviq_dsp::sampler::SPEC`. Missing trailing values
-    /// take their defaults; values past the table are dropped.
-    pub sampler: Vec<f32>,
+    pub instrument: Instrument,
     pub mix: ChannelMix,
+    /// Choke group, 0..=[`MAX_CHOKE_GROUP`] (0: none). A note-on in a channel of group g cuts
+    /// every other channel of g at its frame.
+    pub choke: u8,
 }
 
 impl ChannelSetup {
-    /// The setup with every value clamped and the parameter list exactly as long as the
-    /// sampler's table, or `Rejected` if a value is not finite.
+    /// A sampler channel in no choke group.
+    pub fn sampler(
+        id: ChannelId,
+        sample: Option<Arc<SampleBuf>>,
+        params: Vec<f32>,
+        mix: ChannelMix,
+    ) -> Self {
+        Self {
+            id,
+            instrument: Instrument::Sampler { sample, params },
+            mix,
+            choke: 0,
+        }
+    }
+
+    /// A synth channel in no choke group.
+    pub fn synth(id: ChannelId, params: Vec<f32>, mix: ChannelMix) -> Self {
+        Self {
+            id,
+            instrument: Instrument::Synth { params },
+            mix,
+            choke: 0,
+        }
+    }
+
+    /// The setup with every value clamped and the parameter list exactly as long as its
+    /// instrument's table, or `Rejected` if a value is not finite or the choke group is past
+    /// [`MAX_CHOKE_GROUP`].
     pub(crate) fn checked(mut self) -> Result<Self, ControlError> {
         self.mix = self.mix.clamped().ok_or(ControlError::Rejected)?;
-        let given = &self.sampler;
-        if given.iter().take(SPEC.len()).any(|v| !v.is_finite()) {
+        if self.choke > MAX_CHOKE_GROUP {
             return Err(ControlError::Rejected);
         }
-        self.sampler = SPEC
+        let spec = self.instrument.spec();
+        let given = self.instrument.params_mut();
+        if given.iter().take(spec.len()).any(|v| !v.is_finite()) {
+            return Err(ControlError::Rejected);
+        }
+        *given = spec
             .iter()
             .enumerate()
             .map(|(i, &(min, max, default))| given.get(i).map_or(default, |v| v.clamp(min, max)))
@@ -120,6 +223,9 @@ pub struct SeqNote {
     pub velocity: f32,
     /// Ticks the note is held.
     pub length: u32,
+    /// An FL-style slide: the channel's newest held note glides to this key instead of a new
+    /// note starting.
+    pub slide: bool,
 }
 
 /// A loop of notes.
@@ -127,7 +233,8 @@ pub struct SeqNote {
 pub struct PatternData {
     /// In ticks: at least 1, at most 256 steps.
     pub length: u32,
-    /// Sorted by tick, then channel. Notes at or past `length` never play.
+    /// Sorted by tick, channel, slide, then key: at one tick a slide follows the plain note it
+    /// bends. Notes at or past `length` never play.
     pub notes: Vec<SeqNote>,
 }
 
@@ -142,9 +249,9 @@ impl Default for PatternData {
 }
 
 impl PatternData {
-    /// The pattern with velocities clamped and notes sorted by tick, then channel (notes that
-    /// tie keep their order), or `Rejected` if the length is out of range, a key is above 127
-    /// or a velocity is not finite.
+    /// The pattern with velocities clamped and notes sorted by tick, channel, slide, then key
+    /// (notes that tie keep their order), or `Rejected` if the length is out of range, a key is
+    /// above 127 or a velocity is not finite.
     pub(crate) fn checked(mut self) -> Result<Self, ControlError> {
         if !(1..=MAX_STEPS * STEP_TICKS).contains(&self.length) {
             return Err(ControlError::Rejected);
@@ -155,7 +262,8 @@ impl PatternData {
             }
             note.velocity = note.velocity.clamp(0.0, 1.0);
         }
-        self.notes.sort_by_key(|n| (n.tick, n.channel));
+        self.notes
+            .sort_by_key(|n| (n.tick, n.channel, n.slide, n.key));
         Ok(self)
     }
 }
@@ -250,38 +358,93 @@ mod tests {
 
     #[test]
     fn setups_are_padded_clamped_and_truncated() {
-        let setup = |sampler: Vec<f32>| ChannelSetup {
-            id: ChannelId(0),
-            sample: None,
-            sampler,
-            mix: ChannelMix {
-                volume: -1.0,
-                pan: 3.0,
-                ..ChannelMix::default()
-            },
+        let mix = ChannelMix {
+            volume: -1.0,
+            pan: 3.0,
+            ..ChannelMix::default()
         };
+        let setup = |params: Vec<f32>| ChannelSetup::sampler(ChannelId(0), None, params, mix);
         let s = setup(vec![200.0, -100.0]).checked().unwrap();
         assert_eq!(s.mix.volume, 0.0);
         assert_eq!(s.mix.pan, 1.0);
-        assert_eq!(s.sampler.len(), SPEC.len());
-        assert_eq!(&s.sampler[..2], &[127.0, -24.0]);
-        assert_eq!(s.sampler[2..], SPEC.map(|(_, _, d)| d)[2..]);
-        let long = setup(vec![60.0; SPEC.len() + 3]).checked().unwrap();
-        assert_eq!(long.sampler.len(), SPEC.len());
+        let params = s.instrument.params();
+        assert_eq!(params.len(), sampler::SPEC.len());
+        assert_eq!(&params[..2], &[127.0, -24.0]);
+        assert_eq!(params[2..], sampler::SPEC.map(|(_, _, d)| d)[2..]);
+        let long = setup(vec![60.0; sampler::SPEC.len() + 3])
+            .checked()
+            .unwrap();
+        assert_eq!(long.instrument.params().len(), sampler::SPEC.len());
         assert_eq!(
             setup(vec![f32::INFINITY]).checked(),
             Err(ControlError::Rejected)
+        );
+
+        // A synth pads and clamps by its own table.
+        let synth = ChannelSetup::synth(ChannelId(0), vec![99.0], mix)
+            .checked()
+            .unwrap();
+        let params = synth.instrument.params();
+        assert_eq!(params.len(), synth::SPEC.len());
+        assert_eq!(params[0], synth::SPEC[0].1);
+        assert_eq!(params[1..], synth::SPEC.map(|(_, _, d)| d)[1..]);
+
+        // Choke groups 0..=16.
+        for (choke, ok) in [
+            (0, true),
+            (MAX_CHOKE_GROUP, true),
+            (MAX_CHOKE_GROUP + 1, false),
+        ] {
+            let s = ChannelSetup {
+                choke,
+                ..setup(Vec::new())
+            };
+            assert_eq!(s.checked().is_ok(), ok, "group {choke}");
+        }
+    }
+
+    #[test]
+    fn a_slide_sorts_after_the_plain_note_it_bends() {
+        let n = |tick, channel, key, slide| SeqNote {
+            tick,
+            channel: ChannelId(channel),
+            key,
+            velocity: 0.5,
+            length: 1,
+            slide,
+        };
+        let pattern = PatternData {
+            length: 3_840,
+            notes: vec![
+                n(0, 1, 43, true),
+                n(0, 1, 36, false),
+                n(0, 0, 50, true),
+                n(240, 1, 30, false),
+                n(0, 1, 40, false),
+            ],
+        };
+        let sorted: Vec<(u32, u32, bool, u8)> = pattern
+            .checked()
+            .unwrap()
+            .notes
+            .iter()
+            .map(|n| (n.tick, n.channel.0, n.slide, n.key))
+            .collect();
+        assert_eq!(
+            sorted,
+            [
+                (0, 0, true, 50),
+                (0, 1, false, 36),
+                (0, 1, false, 40),
+                (0, 1, true, 43),
+                (240, 1, false, 30)
+            ]
         );
     }
 
     #[test]
     fn state_checks_name_the_problem() {
-        let ch = |id| ChannelSetup {
-            id: ChannelId(id),
-            sample: None,
-            sampler: Vec::new(),
-            mix: ChannelMix::default(),
-        };
+        let ch = |id| ChannelSetup::sampler(ChannelId(id), None, Vec::new(), ChannelMix::default());
         let with = |channels| EngineState {
             channels,
             ..EngineState::default()
@@ -313,6 +476,7 @@ mod tests {
                 key: 128,
                 velocity: 0.5,
                 length: 1,
+                slide: false,
             }],
             ..PatternData::default()
         };

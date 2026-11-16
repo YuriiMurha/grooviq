@@ -47,12 +47,7 @@ fn exact() -> Vec<f32> {
 }
 
 fn channel(id: u32, sample: &Arc<SampleBuf>, mix: ChannelMix) -> ChannelSetup {
-    ChannelSetup {
-        id: ChannelId(id),
-        sample: Some(Arc::clone(sample)),
-        sampler: exact(),
-        mix,
-    }
+    ChannelSetup::sampler(ChannelId(id), Some(Arc::clone(sample)), exact(), mix)
 }
 
 fn state(channels: Vec<ChannelSetup>) -> EngineState {
@@ -340,7 +335,10 @@ fn sampler_params_are_clamped_mirrored_and_audible() {
         value,
     };
     c.send(set(100.0)).unwrap();
-    assert_eq!(c.state().channels[0].sampler[GAIN as usize], 12.0);
+    assert_eq!(
+        c.state().channels[0].instrument.params()[GAIN as usize],
+        12.0
+    );
     assert!(c.send(set(f32::NAN)).is_err());
     let bad_index = Command::SetSamplerParam {
         channel: ChannelId(1),
@@ -517,17 +515,16 @@ fn busy() -> (EngineState, Vec<(u64, Command)>) {
     let (a, b, k) = (dc(0.3), click(), click());
     let st = state(vec![
         channel(1, &a, ChannelMix::default()),
-        ChannelSetup {
-            sampler: Vec::new(), // defaults, declick on
-            ..channel(
-                2,
-                &b,
-                ChannelMix {
-                    pan: -0.3,
-                    ..ChannelMix::default()
-                },
-            )
-        },
+        // Defaults, declick on.
+        ChannelSetup::sampler(
+            ChannelId(2),
+            Some(Arc::clone(&b)),
+            Vec::new(),
+            ChannelMix {
+                pan: -0.3,
+                ..ChannelMix::default()
+            },
+        ),
         channel(3, &k, ChannelMix::default()),
     ]);
     let mut ev = Vec::new();
@@ -584,6 +581,7 @@ fn pattern() -> PatternData {
         key,
         velocity: 0.8,
         length: STEP_TICKS,
+        slide: false,
     };
     PatternData {
         length: 8 * STEP_TICKS,
@@ -790,6 +788,7 @@ fn edits_queued_before_a_new_project_and_a_rate_change_do_not_reach_it() {
             key: 60,
             velocity: 1.0,
             length: STEP_TICKS,
+            slide: false,
         }],
     })
     .unwrap();
@@ -807,7 +806,7 @@ fn edits_queued_before_a_new_project_and_a_rate_change_do_not_reach_it() {
         (4_800, true),
         "an octave up plays 2 400"
     );
-    assert_eq!(c.state().channels[0].sampler[1], 0.0);
+    assert_eq!(c.state().channels[0].instrument.params()[1], 0.0);
 }
 
 fn synth_note(on: bool) -> Command {

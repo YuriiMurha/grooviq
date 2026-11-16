@@ -5,7 +5,7 @@
 use grooviq_dsp::sampler::SPEC;
 use grooviq_engine::{
     ChannelId, ChannelMix, ChannelSetup, Command, EngineConfig, EngineState, ExportError,
-    ExportOptions, PatternData, STEP_TICKS, SampleBuf, SeqNote, WavFormat, export_wav,
+    ExportOptions, Instrument, PatternData, STEP_TICKS, SampleBuf, SeqNote, WavFormat, export_wav,
     render_offline_with, ticks_to_frames,
 };
 use std::path::{Path, PathBuf};
@@ -64,12 +64,7 @@ fn dc(seconds: f32) -> Arc<SampleBuf> {
 }
 
 fn channel(id: u32, sample: &Arc<SampleBuf>, sampler: Vec<f32>, mix: ChannelMix) -> ChannelSetup {
-    ChannelSetup {
-        id: ChannelId(id),
-        sample: Some(Arc::clone(sample)),
-        sampler,
-        mix,
-    }
+    ChannelSetup::sampler(ChannelId(id), Some(Arc::clone(sample)), sampler, mix)
 }
 
 fn note(step: u32, channel: u32, velocity: f32) -> SeqNote {
@@ -79,6 +74,7 @@ fn note(step: u32, channel: u32, velocity: f32) -> SeqNote {
         key: 60,
         velocity,
         length: STEP_TICKS,
+        slide: false,
     }
 }
 
@@ -249,7 +245,9 @@ fn pcm24_rounds_clips_and_reports_it() {
     let path = dir.path().join("loud.wav");
     let mut state = groove();
     // The click at +12 dB: about 3.98, far past full scale.
-    state.channels[1].sampler[GAIN] = 12.0;
+    if let Instrument::Sampler { params, .. } = &mut state.channels[1].instrument {
+        params[GAIN] = 12.0;
+    }
     let report = export(&state, &options(WavFormat::Pcm24, 1), &path).unwrap();
 
     let (spec, samples) = read_i32(&path);
