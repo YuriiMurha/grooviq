@@ -175,6 +175,22 @@ mod tests {
     }
 
     #[test]
+    fn the_menu_quit_is_held_until_the_person_chooses() {
+        // Cmd+Q calls `AppHandle::exit`, whose `ExitRequested` the run loop holds with
+        // `hold`: asked while dirty, let through when clean or once `app_exit` confirmed.
+        let root = tempfile::tempdir().unwrap();
+        let exit = ExitState::default();
+        assert!(!exit.hold(&session(false)), "nothing unsaved: Cmd+Q quits");
+        let dirty = session(true);
+        assert!(exit.hold(&dirty), "unsaved: Cmd+Q asks first");
+        confirm_exit(&exit, &recovery(root.path())).unwrap();
+        assert!(
+            !exit.hold(&dirty),
+            "the app.exit(0) after app_exit goes through"
+        );
+    }
+
+    #[test]
     fn ending_without_unsaved_changes_is_clean() {
         let root = tempfile::tempdir().unwrap();
         let exit = ExitState::default();
