@@ -50,6 +50,10 @@ impl Drop for Rendering {
     }
 }
 
+// TEMPORARY mutation proof for the rtsan job (reverted in the next commit).
+#[cfg(rtsan_mutation = "lock")]
+static MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Note events one block takes; more wait in the queue for the next block.
 const MAX_EVENTS: usize = 256;
 /// Meter release time constant.
@@ -103,6 +107,9 @@ impl AudioProcessor {
         trash: Producer<Trash>,
         live: Arc<LiveShared>,
     ) -> Self {
+        // Off the audio thread: the mutex's lazy setup allocates, so the lock alone is tested.
+        #[cfg(rtsan_mutation = "lock")]
+        drop(MUTATION_LOCK.lock());
         Self {
             commands,
             trash,
@@ -183,6 +190,12 @@ impl AudioProcessor {
     }
 
     fn render_block(&mut self) {
+        #[cfg(rtsan_mutation = "lock")]
+        drop(MUTATION_LOCK.lock());
+        #[cfg(rtsan_mutation = "file")]
+        let _ = std::hint::black_box(std::fs::File::open("/dev/null"));
+        #[cfg(rtsan_mutation = "alloc")]
+        std::hint::black_box(Box::new(0u64));
         let start = self.clock;
         let end = start + BLOCK as u64;
         self.retry_trash();
