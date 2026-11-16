@@ -2168,6 +2168,19 @@ impl Device for Synth {
         }
     }
 
+    /// Every sounding voice fades out with the steal fade (STEAL_FADE_MS) and frees; a note
+    /// still waiting for a stolen voice is dropped.
+    fn choke(&mut self) {
+        for v in self.voices.iter_mut() {
+            if v.active && !v.fading {
+                v.fading = true;
+                v.fade = 1.0;
+            }
+            v.gate = false;
+            v.pending = None;
+        }
+    }
+
     fn reset(&mut self) {
         for (i, v) in self.voices.iter_mut().enumerate() {
             *v = Voice::new(0x9E37_79B9 ^ (i as u32).wrapping_mul(0x85EB_CA6B).wrapping_add(1));

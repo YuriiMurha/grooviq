@@ -138,7 +138,7 @@ fn peak(x: &[f32]) -> f32 {
 
 #[test]
 fn the_parameter_table_matches_the_contract() {
-    let expected: [(&str, f32, f32, f32); 27] = [
+    let expected: [(&str, f32, f32, f32); 29] = [
         ("root", 0.0, 127.0, 60.0),
         ("tune", -24.0, 24.0, 0.0),
         ("fine", -100.0, 100.0, 0.0),
@@ -166,6 +166,8 @@ fn the_parameter_table_matches_the_contract() {
         ("flt_release", 1.0, 10000.0, 40.0),
         ("vel_amp", 0.0, 1.0, 1.0),
         ("vel_filter", 0.0, 1.0, 0.0),
+        ("voice_mode", 0.0, 2.0, 0.0),
+        ("glide", 0.0, 1000.0, 0.0),
     ];
     assert_eq!(PARAM_IDS.len(), expected.len());
     assert_eq!(SPEC.len(), expected.len());
@@ -1228,6 +1230,456 @@ fn block_splitting_never_changes_a_loop_across_its_seams() {
                 for block in [7, 64, 128] {
                     assert!(same_bits(&play(block), &reference), "{what}: block {block}");
                 }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2: voice modes, glide, slide notes and choke
+
+/// Frames a choke or steal fade lasts (3 ms).
+const FADE: usize = SR as usize * 3 / 1000;
+
+fn slide(offset: u32, key: u8, velocity: f32) -> NoteEvent {
+    NoteEvent {
+        slide: true,
+        ..on(offset, key, velocity)
+    }
+}
+
+/// A one-second full-scale DC sample.
+fn dc() -> Vec<f32> {
+    vec![1.0; SR as usize]
+}
+
+/// A two-second 1 kHz sine: with `root` 48, key 48 plays it at 1 kHz.
+fn sine_1k() -> Vec<f32> {
+    sine(SR, 1000.0, 2 * SR as usize)
+}
+
+/// Pitch over time, one point per period between rising zero crossings (sub-sample accurate):
+/// `(frame at the period's centre, key)`, where key `root` plays at `root_hz`.
+fn pitch_track(x: &[f32], root: f64, root_hz: f64) -> Vec<(f64, f64)> {
+    let mut crossings = Vec::new();
+    for i in 1..x.len() {
+        let (a, b) = (x[i - 1] as f64, x[i] as f64);
+        if a < 0.0 && b >= 0.0 {
+            crossings.push((i - 1) as f64 + a / (a - b));
+        }
+    }
+    crossings
+        .windows(2)
+        .map(|w| {
+            let hz = SR as f64 / (w[1] - w[0]);
+            ((w[0] + w[1]) / 2.0, root + 12.0 * libm::log2(hz / root_hz))
+        })
+        .collect()
+}
+
+/// Mean key of the track points between frames `from` and `to`.
+fn key_between(track: &[(f64, f64)], from: f64, to: f64) -> f64 {
+    let keys: Vec<f64> = track
+        .iter()
+        .filter(|(t, _)| (from..to).contains(t))
+        .map(|(_, k)| *k)
+        .collect();
+    assert!(keys.len() > 3, "too few periods between {from} and {to}");
+    keys.iter().sum::<f64>() / keys.len() as f64
+}
+
+/// The frame at which a straight line fitted through the track points whose key lies in
+/// `lo..hi` (the middle of a glide) reaches key `at`.
+fn line_reaches(track: &[(f64, f64)], lo: f64, hi: f64, at: f64) -> f64 {
+    let pts: Vec<(f64, f64)> = track
+        .iter()
+        .copied()
+        .filter(|(_, k)| (lo..hi).contains(k))
+        .collect();
+    assert!(pts.len() > 3, "too few periods between keys {lo} and {hi}");
+    let n = pts.len() as f64;
+    let mt = pts.iter().map(|p| p.0).sum::<f64>() / n;
+    let mk = pts.iter().map(|p| p.1).sum::<f64>() / n;
+    let cov = pts.iter().map(|p| (p.0 - mt) * (p.1 - mk)).sum::<f64>();
+    let var = pts.iter().map(|p| (p.0 - mt) * (p.0 - mt)).sum::<f64>();
+    let slope = cov / var;
+    mt + (at - mk) / slope
+}
+
+/// Renders like `render_split`, calling `choke` before the block that starts at `choke_at`.
+fn render_choked(
+    s: &mut Sampler,
+    frames: usize,
+    events: &[NoteEvent],
+    block: usize,
+    choke_at: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    assert_eq!(choke_at % block, 0, "the choke lands on a block boundary");
+    let mut l = vec![0.0; frames];
+    let mut r = vec![0.0; frames];
+    let mut start = 0;
+    while start < frames {
+        if start == choke_at {
+            s.choke();
+        }
+        let end = (start + block).min(frames);
+        let block_events: Vec<NoteEvent> = events
+            .iter()
+            .filter(|e| (start..end).contains(&(e.offset as usize)))
+            .map(|e| NoteEvent {
+                offset: e.offset - start as u32,
+                ..*e
+            })
+            .collect();
+        s.process(&mut l[start..end], &mut r[start..end], None, &block_events);
+        start = end;
+    }
+    (l, r)
+}
+
+#[test]
+fn mono_cuts_the_previous_note_with_a_fade() {
+    // DC with declick: the new note fades in over 2 ms while the cut one fades out over 3 ms, so
+    // no frame moves by more than a full-scale 3 ms fade does.
+    let mut s = configured(&dc(), &[("declick", 1.0), ("voice_mode", 1.0)]);
+    let events = [on(0, 60, 1.0), on(4_800, 64, 1.0)];
+    let (mut l, _) = render(&mut s, 4_800 + FADE - 2, &events);
+    assert_eq!(s.active_voices(), 2, "the cut note is still fading");
+    let (rest, _) = render(&mut s, 3, &[]);
+    l.extend(rest);
+    assert_eq!(
+        s.active_voices(),
+        1,
+        "3 ms + 1 frame later only the new note sounds"
+    );
+    let (rest, _) = render(&mut s, 4_800, &[]);
+    l.extend(rest);
+    let slope = 1.0 / FADE as f32;
+    let step = max_step(&l[4_700..]);
+    assert!(
+        step <= slope + 1e-6,
+        "step {step} above the fade slope {slope}"
+    );
+    assert!(
+        (l[l.len() - 1] - 1.0).abs() < 1e-6,
+        "one note sounds, not two: {}",
+        l[l.len() - 1]
+    );
+}
+
+#[test]
+fn legato_glides_without_retriggering() {
+    // Key 55 joins while 48 is held: with a 100 ms glide the pitch moves in a straight line from
+    // 48 to 55 over 100 ms, and the 20 ms attack does not start again.
+    let mut s = configured(
+        &sine_1k(),
+        &[
+            ("root", 48.0),
+            ("one_shot", 0.0),
+            ("attack", 20.0),
+            ("voice_mode", 2.0),
+            ("glide", 100.0),
+        ],
+    );
+    let events = [
+        on(0, 48, 1.0),
+        on(9_600, 55, 1.0),
+        off(30_000, 48),
+        off(30_000, 55),
+    ];
+    let (l, _) = render(&mut s, 36_000, &events);
+    let track = pitch_track(&l, 48.0, 1000.0);
+    let before = key_between(&track, 2_000.0, 9_500.0);
+    let after = key_between(&track, 15_000.0, 29_500.0);
+    assert!((before - 48.0).abs() < 0.01, "held at {before}");
+    assert!((after - 55.0).abs() < 0.01, "arrives at {after}");
+    let glide: Vec<f64> = track
+        .iter()
+        .filter(|(t, _)| (9_000.0..16_000.0).contains(t))
+        .map(|(_, k)| *k)
+        .collect();
+    assert!(
+        glide.windows(2).all(|w| w[1] >= w[0] - 1e-3),
+        "not monotonic: {glide:?}"
+    );
+    let start = line_reaches(&track, 49.0, 54.0, 48.0);
+    let end = line_reaches(&track, 49.0, 54.0, 55.0);
+    assert!(
+        (start - 9_600.0).abs() <= 48.0,
+        "the glide starts at {start}"
+    );
+    assert!((end - 14_400.0).abs() <= 48.0, "the glide ends at {end}");
+    let held = peak(&l[8_000..9_600]);
+    for (i, w) in l[9_600..29_500].chunks(240).enumerate() {
+        assert!(
+            peak(w) >= 0.9 * held,
+            "dip at {}: {} of {held}",
+            9_600 + i * 240,
+            peak(w)
+        );
+    }
+    assert_eq!(s.active_voices(), 0, "released by the end");
+}
+
+#[test]
+fn releasing_the_top_key_returns_to_the_held_one() {
+    // Mono, glide 0: 55 takes over from the held 48; releasing 55 jumps back to 48 without a
+    // new attack, and releasing 48 ends the note.
+    let mut s = configured(
+        &sine_1k(),
+        &[
+            ("root", 48.0),
+            ("one_shot", 0.0),
+            ("attack", 20.0),
+            ("voice_mode", 1.0),
+        ],
+    );
+    let events = [on(0, 48, 1.0), on(9_600, 55, 1.0), off(19_200, 55)];
+    let (l, _) = render(&mut s, 28_800, &events);
+    let track = pitch_track(&l, 48.0, 1000.0);
+    let top = key_between(&track, 12_000.0, 19_100.0);
+    let back = key_between(&track, 19_300.0, 28_700.0);
+    assert!((top - 55.0).abs() < 0.01, "plays the top key: {top}");
+    assert!((back - 48.0).abs() < 0.01, "back to the held key: {back}");
+    assert_eq!(s.active_voices(), 1);
+    let held = peak(&l[15_000..19_200]);
+    for (i, w) in l[19_200..28_800].chunks(240).enumerate() {
+        assert!(
+            peak(w) >= 0.9 * held,
+            "dip at {}: {} of {held}",
+            19_200 + i * 240,
+            peak(w)
+        );
+    }
+    let (l, _) = render(&mut s, 9_600, &[off(0, 48)]);
+    assert!(peak(&l[4_800..]) < 1e-3, "released: {}", peak(&l[4_800..]));
+    assert_eq!(s.active_voices(), 0);
+}
+
+#[test]
+fn a_slide_note_bends_the_held_note() {
+    // Poly mode, key 48 held, slide 52: the held voice glides to 52 over the default 60 ms and
+    // becomes that note. The 48 note-off belongs to the note that slid away; 52's ends it.
+    let mut s = configured(&sine_1k(), &[("root", 48.0), ("one_shot", 0.0)]);
+    let events = [on(0, 48, 1.0), slide(9_600, 52, 1.0), off(19_200, 48)];
+    let (l, _) = render(&mut s, 24_000, &events);
+    assert_eq!(s.active_voices(), 1, "the slide moved the held voice");
+    let track = pitch_track(&l, 48.0, 1000.0);
+    let before = key_between(&track, 2_000.0, 9_500.0);
+    let after = key_between(&track, 13_000.0, 23_900.0);
+    assert!((before - 48.0).abs() < 0.01, "held at {before}");
+    assert!((after - 52.0).abs() < 0.01, "slid to {after}");
+    let end = line_reaches(&track, 48.5, 51.5, 52.0);
+    assert!((end - 12_480.0).abs() <= 48.0, "the slide ends at {end}");
+    assert!(
+        peak(&l[21_000..24_000]) > 0.9,
+        "the 48 note-off left it alone"
+    );
+    let (l, _) = render(&mut s, 9_600, &[off(0, 52)]);
+    assert!(peak(&l[4_800..]) < 1e-3, "52's note-off released it");
+    assert_eq!(s.active_voices(), 0);
+}
+
+#[test]
+fn a_late_note_off_of_a_slid_note_leaves_the_newer_note_alone() {
+    // 48 slides to 52, then a new 48 starts before the first 48's note-off arrives. That
+    // note-off belongs to the note that slid away: the new 48 plays on until its own.
+    let mut s = configured(&dc(), &[("one_shot", 0.0), ("release", 1.0)]);
+    let events = [
+        on(0, 48, 1.0),
+        slide(4_800, 52, 1.0),
+        on(9_600, 48, 1.0),
+        off(12_000, 48),
+    ];
+    let (l, _) = render(&mut s, 14_400, &events);
+    assert!((l[14_399] - 2.0).abs() < 1e-6, "both sound: {}", l[14_399]);
+    let (l, _) = render(&mut s, 4_800, &[off(0, 48)]);
+    assert!(
+        (l[4_799] - 1.0).abs() < 1e-6,
+        "its own note-off: {}",
+        l[4_799]
+    );
+    let (l, _) = render(&mut s, 4_800, &[off(0, 52)]);
+    assert!(peak(&l[480..]) < 1e-3);
+    assert_eq!(s.active_voices(), 0);
+}
+
+#[test]
+fn a_slide_with_nothing_held_glides_from_the_last_pitch() {
+    // 48 played and released; a slide to 52 later starts a new note at 48's pitch that glides to
+    // 52 over 60 ms.
+    let mut s = configured(&sine_1k(), &[("root", 48.0), ("one_shot", 0.0)]);
+    let events = [on(0, 48, 1.0), off(4_800, 48), slide(14_400, 52, 1.0)];
+    let (l, _) = render(&mut s, 30_000, &events);
+    assert!(peak(&l[12_000..14_400]) < 1e-3, "silent before the slide");
+    let track = pitch_track(&l[14_400..], 48.0, 1000.0);
+    let shifted: Vec<(f64, f64)> = track.iter().map(|(t, k)| (t + 14_400.0, *k)).collect();
+    let start = line_reaches(&shifted, 48.5, 51.5, 48.0);
+    let end = line_reaches(&shifted, 48.5, 51.5, 52.0);
+    assert!(
+        (start - 14_400.0).abs() <= 48.0,
+        "the glide starts at {start}"
+    );
+    assert!((end - 17_280.0).abs() <= 48.0, "the glide ends at {end}");
+    let after = key_between(&shifted, 18_000.0, 29_900.0);
+    assert!((after - 52.0).abs() < 0.01, "arrives at {after}");
+}
+
+#[test]
+fn choke_fades_every_voice_in_3_ms() {
+    // Three DC voices sum to 3. Choked, they fall in a straight line to silence over 3 ms.
+    let chords = [on(0, 48, 1.0), on(10, 60, 1.0), on(20, 72, 1.0)];
+    let mut s = configured(&dc(), &[]);
+    render(&mut s, 4_800, &chords);
+    s.choke();
+    let (l, _) = render(&mut s, FADE + 1, &[]);
+    for (k, v) in l.iter().enumerate() {
+        let expected = 3.0 * FADE.saturating_sub(k + 1) as f32 / FADE as f32;
+        assert!(
+            (v - expected).abs() < 1e-5,
+            "frame {k}: {v}, expected {expected}"
+        );
+    }
+    assert!(l[FADE - 1..].iter().all(|v| v.abs() < 1e-6));
+    assert_eq!(s.active_voices(), 0);
+
+    // A note at the next frame plays as on a fresh sampler; the choked voices only add their fade.
+    let mut s = configured(&dc(), &[]);
+    render(&mut s, 4_800, &chords);
+    s.choke();
+    let (l, _) = render(&mut s, 4_800, &[on(0, 60, 0.5)]);
+    let mut fresh = configured(&dc(), &[]);
+    let (f, _) = render(&mut fresh, 4_800, &[on(0, 60, 0.5)]);
+    for k in 0..FADE {
+        let tail = 3.0 * FADE.saturating_sub(k + 1) as f32 / FADE as f32;
+        assert!((l[k] - f[k] - tail).abs() < 1e-5, "frame {k}");
+    }
+    assert_eq!(&l[FADE..], &f[FADE..], "unattenuated after the fade");
+}
+
+#[test]
+fn a_late_note_off_after_a_choke_leaves_the_newer_note_alone() {
+    // Gate mode: a choked note's note-off arrives after a new note on its key started. It belongs
+    // to the choked note, so the new one plays on until its own note-off.
+    for mode in [0.0, 1.0, 2.0] {
+        let mut s = configured(
+            &dc(),
+            &[("one_shot", 0.0), ("release", 1.0), ("voice_mode", mode)],
+        );
+        render(&mut s, 4_800, &[on(0, 60, 1.0)]);
+        s.choke();
+        let (l, _) = render(&mut s, 4_800, &[on(0, 60, 0.5), off(100, 60)]);
+        assert!(
+            (l[4_799] - 0.5).abs() < 1e-6,
+            "mode {mode}: the newer note sounds: {}",
+            l[4_799]
+        );
+        let (l, _) = render(&mut s, 4_800, &[off(0, 60)]);
+        assert!(
+            peak(&l[480..]) < 1e-3,
+            "mode {mode}: its own note-off ends it"
+        );
+        assert_eq!(s.active_voices(), 0, "mode {mode}");
+    }
+}
+
+#[test]
+fn a_stolen_voice_fades_instead_of_clicking() {
+    // 17 overlapping DC notes with 10 ms attacks: the 17th steals the first, which fades out
+    // over 3 ms instead of dropping out at once.
+    let mut s = configured(&dc(), &[("declick", 1.0), ("attack", 10.0)]);
+    let notes: Vec<NoteEvent> = (0..17).map(|i| on(i * 480, 40 + i as u8, 1.0)).collect();
+    let at = 16 * 480;
+    let (l, _) = render(&mut s, at + 4_800, &notes);
+    let slope = 1.0 / FADE as f32;
+    let step = max_step(&l);
+    assert!(
+        step <= slope + 1e-6,
+        "step {step} above the fade slope {slope}"
+    );
+    assert!((l[at - 1] - 16.0).abs() < 1e-3, "16 voices: {}", l[at - 1]);
+    assert!(
+        (l[l.len() - 1] - 16.0).abs() < 1e-3,
+        "still 16: {}",
+        l[l.len() - 1]
+    );
+    assert_eq!(s.active_voices(), VOICES);
+}
+
+#[test]
+fn voice_mode_and_glide_never_allocate() {
+    let mut s = Sampler::new(SR);
+    s.set_sample(Some(buf(44_100.0, noise(44_100))));
+    s.set_param(p("one_shot"), 0.0);
+    s.set_param(p("filter_type"), 1.0);
+    let mut l = vec![0.0; BLOCK];
+    let mut r = vec![0.0; BLOCK];
+    let events = [
+        on(0, 60, 0.9),
+        slide(5, 67, 0.8),
+        on(9, 48, 0.7),
+        on(12, 48, 0.6),
+        off(20, 60),
+        slide(30, 72, 1.0),
+        off(40, 67),
+        off(50, 48),
+        off(55, 48),
+        on(60, 36, 0.5),
+        off(63, 72),
+    ];
+    for i in 0..1_500u32 {
+        assert_no_alloc(|| {
+            s.set_param(p("voice_mode"), ((i / 100) % 3) as f32);
+            s.set_param(p("glide"), ((i % 5) * 100) as f32);
+            s.process(&mut l, &mut r, None, &events);
+            if i % 50 == 49 {
+                s.choke();
+            }
+        });
+        assert!(l.iter().chain(&r).all(|v| v.is_finite()));
+    }
+}
+
+#[test]
+fn block_splitting_never_changes_glides() {
+    let x = noise(SR as usize);
+    let events = [
+        on(3, 48, 0.9),
+        on(700, 55, 0.8),
+        slide(1_500, 60, 1.0),
+        off(2_000, 55),
+        on(2_500, 43, 0.7),
+        slide(3_100, 50, 0.6),
+        off(3_900, 48),
+        on(5_000, 62, 0.8),
+        slide(5_300, 57, 0.9),
+        off(6_500, 60),
+        off(7_000, 43),
+        off(7_200, 62),
+        off(8_000, 50),
+        off(9_000, 57),
+    ];
+    for mode in [0.0, 1.0, 2.0] {
+        for one_shot in [0.0, 1.0] {
+            let params = [
+                ("declick", 1.0),
+                ("one_shot", one_shot),
+                ("voice_mode", mode),
+                ("glide", 37.0),
+                ("filter_type", 1.0),
+                ("cutoff", 2_000.0),
+                ("filter_env", 0.5),
+            ];
+            // 4 480 is a multiple of 1, 7, 64 and 128.
+            let play = |block: usize| {
+                let mut s = configured(&x, &params);
+                render_choked(&mut s, 12_000, &events, block, 4_480)
+            };
+            let reference = play(1);
+            let what = format!("mode {mode}, one_shot {one_shot}");
+            assert!(peak(&reference.0) > 0.01, "{what}: plays");
+            for block in [7, 64, 128] {
+                assert!(same_bits(&play(block), &reference), "{what}: block {block}");
             }
         }
     }
