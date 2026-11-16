@@ -93,9 +93,9 @@ impl Band {
     }
 
     fn compute(&mut self, sr: f64) {
-        let f = (self.freq.cur.exp2() as f64).clamp(10.0, 0.49 * sr);
+        let f = (libm::exp2f(self.freq.cur) as f64).clamp(10.0, 0.49 * sr);
         let g = self.gain.cur as f64;
-        let q = (self.q.cur.exp2() as f64).clamp(0.1, 18.0);
+        let q = (libm::exp2f(self.q.cur) as f64).clamp(0.1, 18.0);
         let qs = q / std::f64::consts::FRAC_1_SQRT_2;
         match self.typ {
             0 => {
@@ -206,11 +206,11 @@ impl Eq {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.clamp(8000.0, 384_000.0);
         let window = (0..FFT_N)
-            .map(|i| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / FFT_N as f64).cos())
+            .map(|i| 0.5 - 0.5 * libm::cos(2.0 * std::f64::consts::PI * i as f64 / FFT_N as f64))
             .collect();
         let bin_map = (0..BINS)
             .map(|j| {
-                let f = |x: f64| 20.0 * 1000f64.powf(x / (BINS - 1) as f64);
+                let f = |x: f64| 20.0 * libm::pow(1000.0, x / (BINS - 1) as f64);
                 let to_bin = |hz: f64| hz / sr as f64 * FFT_N as f64;
                 let kc = to_bin(f(j as f64));
                 let lo = to_bin(f(j as f64 - 0.5)).ceil() as usize;
@@ -284,7 +284,10 @@ impl Eq {
         }
         self.fft.run(&mut self.re, &mut self.im, false);
         // separate the two real spectra: A = (X_k + conj X_{N-k}) / 2, B = (X_k - conj X_{N-k}) / 2i
-        let norm = (4.0 / FFT_N as f64).powi(2);
+        let norm = {
+            let s = 4.0 / FFT_N as f64;
+            s * s
+        };
         for k in 0..=FFT_N / 2 {
             let m = (FFT_N - k) & (FFT_N - 1);
             let (xr, xi, yr, yi) = (self.re[k], self.im[k], self.re[m], self.im[m]);
@@ -305,7 +308,7 @@ impl Eq {
                     let t = kc - k0 as f64;
                     pw[k0] * (1.0 - t) + pw[k0 + 1] * t
                 };
-                (10.0 * (p + 1.0e-12).log10()).max(-120.0) as f32
+                (10.0 * libm::log10(p + 1.0e-12)).max(-120.0) as f32
             };
             let vi = read(&self.pw_in);
             let vo = read(&self.pw_out);
@@ -350,9 +353,9 @@ impl Device for Eq {
                         b.dirty = true;
                     }
                 }
-                2 => b.freq.set(value.clamp(20.0, 20_000.0).log2()),
+                2 => b.freq.set(libm::log2f(value.clamp(20.0, 20_000.0))),
                 3 => b.gain.set(value.clamp(-24.0, 24.0)),
-                4 => b.q.set(value.clamp(0.1, 18.0).log2()),
+                4 => b.q.set(libm::log2f(value.clamp(0.1, 18.0))),
                 _ => {
                     let c = value.round().clamp(0.0, 2.0) as u8;
                     if c != b.ch {

@@ -45,8 +45,8 @@ pub fn test_input() -> (Vec<f32>, Vec<f32>) {
                 }
                 if i >= tail_start {
                     let t = (i - tail_start) as f64 / sr;
-                    let amp = 0.4 * 10f64.powf(-60.0 * t / 0.75 / 20.0);
-                    v += amp * (2.0 * std::f64::consts::PI * hz * t).sin();
+                    let amp = 0.4 * libm::pow(10.0, -60.0 * t / 0.75 / 20.0);
+                    v += amp * libm::sin(2.0 * std::f64::consts::PI * hz * t);
                 }
                 v as f32
             })

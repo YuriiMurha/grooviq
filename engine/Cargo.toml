@@ -20,6 +20,8 @@ test-hooks = []
 cpal = { version = "0.18.2", features = ["realtime"] }
 grooviq-dsp = { path = "../dsp" }
 rtrb = "0.3"
+# Pure-Rust maths: the same bits on every platform (clippy.toml bans the std methods).
+libm = "0.2"
 getrandom = "0.4"
 tungstenite = "0.30"
 # WAV export (Apache-2.0).
@@ -38,7 +40,6 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 [dev-dependencies]
 # Without the default `disable_release`, the allocation check also runs in release test builds.
 assert_no_alloc = { version = "1.1", default-features = false }
-libm = "0.2"
 tempfile = "3"
 
 [[test]]

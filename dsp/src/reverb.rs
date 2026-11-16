@@ -151,22 +151,22 @@ impl Reverb {
         let mut gsum = 0.0;
         for i in 0..LINES {
             let l = self.len[i].cur + 1.0;
-            let g = 10f32.powf(-3.0 * l / (self.decay * self.sr));
+            let g = libm::powf(10.0, -3.0 * l / (self.decay * self.sr));
             self.fb[i] = g;
             // Jot: Nyquist gain g^(1/ratio); one-pole with DC gain 1, Nyquist gain c
-            let c = g.powf(1.0 / ratio - 1.0);
+            let c = libm::powf(g, 1.0 / ratio - 1.0);
             self.damp_a[i] = (1.0 - c) / (1.0 + c);
             gsum += g * g;
         }
         // partial loudness normalisation so long decays do not build up excessively
-        self.norm = (1.0 - gsum / LINES as f32).max(0.0).powf(0.25).max(0.2);
+        self.norm = libm::powf((1.0 - gsum / LINES as f32).max(0.0), 0.25).max(0.2);
     }
 
     fn update_filters(&mut self) {
         let sr = self.sr as f64;
         let q = std::f64::consts::FRAC_1_SQRT_2;
-        self.c_lo = Coefs::highpass(self.lo.next().exp2() as f64, q, sr);
-        self.c_hi = Coefs::lowpass((self.hi.next().exp2() as f64).min(0.45 * sr), q, sr);
+        self.c_lo = Coefs::highpass(libm::exp2f(self.lo.next()) as f64, q, sr);
+        self.c_hi = Coefs::lowpass((libm::exp2f(self.hi.next()) as f64).min(0.45 * sr), q, sr);
     }
 
     fn snap_all(&mut self) {
@@ -198,12 +198,12 @@ impl Device for Reverb {
             2 => self.pre_d.set(v * 0.001 * self.sr),
             3 => self.damping = v,
             4 => self.width.set(v),
-            5 => self.lo.set(v.log2()),
-            6 => self.hi.set(v.log2()),
+            5 => self.lo.set(libm::log2f(v)),
+            6 => self.hi.set(libm::log2f(v)),
             _ => {
                 let a = v * std::f32::consts::FRAC_PI_2;
-                self.dry_g.set(a.cos());
-                self.wet_g.set(a.sin());
+                self.dry_g.set(libm::cosf(a));
+                self.wet_g.set(libm::sinf(a));
             }
         }
         if self.fresh {
@@ -268,7 +268,7 @@ impl Device for Reverb {
             for k in 0..LINES {
                 let ph = self.mod_ph[k] + self.mod_inc[k];
                 self.mod_ph[k] = if ph >= 1.0 { ph - 1.0 } else { ph };
-                let m = (self.mod_ph[k] as f32 * std::f32::consts::TAU).sin() * self.mod_depth;
+                let m = libm::sinf(self.mod_ph[k] as f32 * std::f32::consts::TAU) * self.mod_depth;
                 o[k] = self.fdn[k].read_frac(self.len[k].next() + m);
             }
             let mut y = [0.0f32; LINES];

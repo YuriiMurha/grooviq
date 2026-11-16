@@ -77,12 +77,19 @@ fn scenarios() -> Vec<Scenario> {
 /// Per 10 ms frame: RMS left, RMS right, peak left, peak right, in hundredths of a dB (floor
 /// -120 dB).
 fn frames(l: &[f32], r: &[f32]) -> Vec<[i64; 4]> {
-    let db = |x: f64| (100.0 * (20.0 * x.max(1e-6).log10())).round() as i64;
+    let db = |x: f64| (100.0 * (20.0 * libm::log10(x.max(1e-6)))).round() as i64;
     l.chunks(ms(10.0))
         .zip(r.chunks(ms(10.0)))
         .map(|(a, b)| {
             let rms = |x: &[f32]| {
-                (x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / x.len() as f64).sqrt()
+                (x.iter()
+                    .map(|v| {
+                        let d = *v as f64;
+                        d * d
+                    })
+                    .sum::<f64>()
+                    / x.len() as f64)
+                    .sqrt()
             };
             let peak = |x: &[f32]| x.iter().fold(0.0f64, |m, v| m.max(v.abs() as f64));
             [db(rms(a)), db(rms(b)), db(peak(a)), db(peak(b))]
@@ -172,7 +179,14 @@ fn presets_sound_like_the_original_synth() {
 }
 
 fn rms(l: &[f32], r: &[f32]) -> f64 {
-    let sum: f64 = l.iter().chain(r).map(|v| (*v as f64).powi(2)).sum();
+    let sum: f64 = l
+        .iter()
+        .chain(r)
+        .map(|v| {
+            let d = *v as f64;
+            d * d
+        })
+        .sum();
     (sum / (l.len() + r.len()) as f64).sqrt()
 }
 

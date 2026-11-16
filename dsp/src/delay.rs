@@ -130,8 +130,8 @@ impl Delay {
     fn update_filters(&mut self) {
         let sr = self.sr as f64;
         let q = std::f64::consts::FRAC_1_SQRT_2;
-        self.c_lo = Coefs::highpass(self.lo.next().exp2() as f64, q, sr);
-        self.c_hi = Coefs::lowpass((self.hi.next().exp2() as f64).min(0.45 * sr), q, sr);
+        self.c_lo = Coefs::highpass(libm::exp2f(self.lo.next()) as f64, q, sr);
+        self.c_hi = Coefs::lowpass((libm::exp2f(self.hi.next()) as f64).min(0.45 * sr), q, sr);
     }
 
     fn snap_all(&mut self) {
@@ -155,12 +155,12 @@ impl Device for Delay {
             2 => self.time_ms = v,
             3 => self.fb.set(v),
             4 => self.pingpong = v >= 0.5,
-            5 => self.lo.set(v.log2()),
-            6 => self.hi.set(v.log2()),
+            5 => self.lo.set(libm::log2f(v)),
+            6 => self.hi.set(libm::log2f(v)),
             7 => {
                 let a = v * std::f32::consts::FRAC_PI_2;
-                self.dry_g.set(a.cos());
-                self.wet_g.set(a.sin());
+                self.dry_g.set(libm::cosf(a));
+                self.wet_g.set(libm::sinf(a));
             }
             _ => self.bpm = v,
         }
@@ -209,7 +209,7 @@ impl Device for Delay {
             if self.xfading {
                 self.x = (self.x + self.xf_step).min(1.0);
                 let a = self.x * std::f32::consts::FRAC_PI_2;
-                let (ga, gb) = (a.cos(), a.sin());
+                let (ga, gb) = (libm::cosf(a), libm::sinf(a));
                 let bl = self.buf[0].read_frac(self.tb - 1.0);
                 let br = self.buf[1].read_frac(self.tb - 1.0);
                 dl = dl * ga + bl * gb;

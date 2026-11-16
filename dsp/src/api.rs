@@ -57,17 +57,21 @@ pub trait Device: Send {
 /// Decibels to linear gain.
 #[inline]
 pub fn db_to_gain(db: f32) -> f32 {
-    10f32.powf(db / 20.0)
+    libm::powf(10.0, db / 20.0)
 }
 
 /// Linear gain to decibels (floored at -120 dB).
 #[inline]
 pub fn gain_to_db(g: f32) -> f32 {
-    if g <= 1e-6 { -120.0 } else { 20.0 * g.log10() }
+    if g <= 1e-6 {
+        -120.0
+    } else {
+        20.0 * libm::log10f(g)
+    }
 }
 
 /// MIDI key to frequency in Hz (A4 = 69 = 440 Hz).
 #[inline]
 pub fn key_to_hz(key: f32) -> f32 {
-    440.0 * 2f32.powf((key - 69.0) / 12.0)
+    440.0 * libm::powf(2.0, (key - 69.0) / 12.0)
 }

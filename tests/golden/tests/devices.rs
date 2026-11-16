@@ -1,5 +1,5 @@
 use grooviq_golden::devices::{BLOCK, ott_cases, render_ott, test_input};
-use grooviq_golden::{compare, read_wav, write_wav};
+use grooviq_golden::{compare, compare_exact, read_wav, write_wav};
 
 #[test]
 fn each_ott_preset_matches_its_reference() {
@@ -11,7 +11,7 @@ fn each_ott_preset_matches_its_reference() {
             println!("golden file updated: explain why in the commit message");
             continue;
         }
-        if let Err(e) = compare(&actual, &read_wav(&path)) {
+        if let Err(e) = compare_exact(&actual, &read_wav(&path)) {
             panic!("preset {preset}: {e}");
         }
     }

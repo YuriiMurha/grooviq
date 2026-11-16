@@ -57,7 +57,8 @@ fn halfband(k: usize, beta: f64) -> Vec<f64> {
         } else {
             let x = n as f64 / m as f64;
             let w = bessel_i0(beta * (1.0 - x * x).max(0.0).sqrt()) / i0b;
-            (std::f64::consts::FRAC_PI_2 * n as f64).sin() / (std::f64::consts::PI * n as f64) * w
+            libm::sin(std::f64::consts::FRAC_PI_2 * n as f64) / (std::f64::consts::PI * n as f64)
+                * w
         };
     }
     // make the polyphase branch sum exactly 0.5 so DC gain is exactly 1
@@ -185,7 +186,7 @@ fn shape(mode: u8, x: f32) -> f32 {
             let t = fast_tanh(x);
             t + 0.22 * t * t
         }
-        _ => (x * std::f32::consts::FRAC_PI_2).sin(),
+        _ => libm::sinf(x * std::f32::consts::FRAC_PI_2),
     }
 }
 

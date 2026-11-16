@@ -31,7 +31,7 @@ impl Rng {
 
 fn sine(freq: f32, sr: f32, n: usize, amp: f32) -> Vec<f32> {
     (0..n)
-        .map(|i| amp * (2.0 * std::f32::consts::PI * freq * i as f32 / sr).sin())
+        .map(|i| amp * libm::sinf(2.0 * std::f32::consts::PI * freq * i as f32 / sr))
         .collect()
 }
 
@@ -51,7 +51,7 @@ fn rms(x: &[f32]) -> f32 {
 }
 
 fn db(x: f32) -> f32 {
-    20.0 * x.max(1e-12).log10()
+    20.0 * libm::log10f(x.max(1e-12))
 }
 
 fn note(offset: u32, key: u8, on: bool, slide: bool) -> NoteEvent {
@@ -123,8 +123,8 @@ fn eq_spectrum_meter_reads_a_full_scale_sine() {
             (0, -200.0f32),
             |a, (i, &v)| if v > a.1 { (i, v) } else { a },
         );
-    let f = 20.0 * 1000f32.powf(bin as f32 / 127.0);
-    assert!((f / 1000.0).log2().abs() < 0.1, "peak bin at {f} Hz");
+    let f = 20.0 * libm::powf(1000.0, bin as f32 / 127.0);
+    assert!(libm::log2f(f / 1000.0).abs() < 0.1, "peak bin at {f} Hz");
     assert!((peak).abs() < 2.0, "full-scale sine reads {peak} dB");
     assert!(spec[10] < -60.0, "far bins should be quiet: {}", spec[10]);
 }
@@ -142,7 +142,7 @@ fn compressor_static_curve_matches_threshold_and_ratio() {
         let mut c = create("comp", sr).unwrap();
         c.set_param(1, ratio);
         let n = sr as usize;
-        let amp = 10f32.powf(in_db / 20.0);
+        let amp = libm::powf(10.0, in_db / 20.0);
         let mut l = sine(1000.0, sr, n, amp);
         let mut r = l.clone();
         run(c.as_mut(), &mut l, &mut r, 128);
@@ -189,7 +189,7 @@ fn limiter_output_never_exceeds_ceiling() {
         lim.set_param(0, 12.0); // +12 dB input gain
         lim.set_param(1, -1.0); // ceiling
         lim.set_param(2, 20.0);
-        let ceil = 10f32.powf(-1.0 / 20.0);
+        let ceil = libm::powf(10.0, -1.0 / 20.0);
         let mut rng = Rng(7);
         let n = sr as usize * 2;
         let mut l: Vec<f32> = (0..n)
@@ -283,7 +283,7 @@ fn rt60(x: &[f32], sr: f32) -> f32 {
         energy[i] += energy[i + 1];
     }
     let e0 = energy[0];
-    let level = |i: usize| 10.0 * (energy[i] / e0).log10();
+    let level = |i: usize| 10.0 * libm::log10(energy[i] / e0);
     let t5 = (0..energy.len()).find(|&i| level(i) < -5.0).unwrap();
     let t35 = (0..energy.len()).find(|&i| level(i) < -35.0).unwrap();
     (t35 - t5) as f32 / sr * 2.0
@@ -327,7 +327,7 @@ fn peak_freq(x: &[f32], sr: f32, lo: f32, hi: f32) -> f32 {
     let n = x.len();
     let w: Vec<f64> = (0..n)
         .map(|i| {
-            (0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos()) * x[i] as f64
+            (0.5 - 0.5 * libm::cos(2.0 * std::f64::consts::PI * i as f64 / n as f64)) * x[i] as f64
         })
         .collect();
     let mag = |f: f64| {
@@ -335,8 +335,8 @@ fn peak_freq(x: &[f32], sr: f32, lo: f32, hi: f32) -> f32 {
         let (mut re, mut im) = (0.0, 0.0);
         for (i, v) in w.iter().enumerate() {
             let a = wk * i as f64;
-            re += v * a.cos();
-            im -= v * a.sin();
+            re += v * libm::cos(a);
+            im -= v * libm::sin(a);
         }
         re * re + im * im
     };
@@ -382,7 +382,7 @@ fn synth_default_patch_plays_a440_at_key_69() {
         assert!((f - 440.0).abs() < 1.0, "pitch {f} Hz @ {sr}");
         // osc 2 is a square one octave down (+7 cents)
         let f2 = peak_freq(seg, sr, 200.0, 240.0);
-        let expect2 = 220.0 * 2f32.powf(7.0 / 1200.0);
+        let expect2 = 220.0 * libm::powf(2.0, 7.0 / 1200.0);
         assert!((f2 - expect2).abs() < 1.0, "osc2 {f2} Hz");
         assert!(s.meter(0) > 0.05 && s.meter(2) == 1.0);
     }
@@ -577,9 +577,9 @@ fn peak_freq_mag(x: &[f32], sr: f32, f: f32) -> f32 {
     let wk = 2.0 * std::f64::consts::PI * f as f64 / sr as f64;
     let (mut re, mut im) = (0.0f64, 0.0f64);
     for (i, v) in x.iter().enumerate() {
-        let w = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos();
-        re += w * *v as f64 * (wk * i as f64).cos();
-        im -= w * *v as f64 * (wk * i as f64).sin();
+        let w = 0.5 - 0.5 * libm::cos(2.0 * std::f64::consts::PI * i as f64 / n as f64);
+        re += w * *v as f64 * libm::cos(wk * i as f64);
+        im -= w * *v as f64 * libm::sin(wk * i as f64);
     }
     ((re * re + im * im).sqrt() / n as f64 * 4.0) as f32
 }
@@ -653,7 +653,7 @@ fn random_signal(rng: &mut Rng, n: usize) -> Vec<f32> {
             0 => 0.0,
             1 => rng.bipolar() * 0.3,
             2 => rng.bipolar() * 6.0,
-            3 => (i as f32 * 0.05).sin() * 0.9,
+            3 => libm::sinf(i as f32 * 0.05) * 0.9,
             4 => {
                 if i % 1000 == 0 {
                     10.0
@@ -802,13 +802,13 @@ fn effects_are_block_size_invariant() {
     let mut rng = Rng(99);
     let input_l: Vec<f32> = (0..n)
         .map(|i| {
-            0.4 * (i as f32 * 0.031).sin()
+            0.4 * libm::sinf(i as f32 * 0.031)
                 + 0.2 * rng.bipolar()
                 + if i % 7001 == 0 { 0.9 } else { 0.0 }
         })
         .collect();
     let input_r: Vec<f32> = (0..n)
-        .map(|i| 0.4 * (i as f32 * 0.017).cos() + 0.2 * rng.bipolar())
+        .map(|i| 0.4 * libm::cosf(i as f32 * 0.017) + 0.2 * rng.bipolar())
         .collect();
     for id in EFFECTS {
         let mut outs = Vec::new();
@@ -841,4 +841,25 @@ fn effects_are_block_size_invariant() {
             .fold(0.0f32, f32::max);
         assert!(diff <= 1e-4, "{id}: block 128 vs 37 differ by {diff}");
     }
+}
+
+#[test]
+fn synth_param_ids_match_the_spec_table() {
+    use grooviq_dsp::synth::{PARAM_IDS, SPEC};
+    assert_eq!(PARAM_IDS.len(), 40);
+    assert_eq!(PARAM_IDS.len(), SPEC.len());
+    for (i, id) in PARAM_IDS.iter().enumerate() {
+        assert!(
+            !id.is_empty()
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                && !id.starts_with('_')
+                && !id.ends_with('_'),
+            "bad id {id:?}"
+        );
+        assert!(!PARAM_IDS[..i].contains(id), "duplicate id {id}");
+    }
+    assert_eq!(PARAM_IDS[20], "filter_cutoff");
+    assert_eq!(PARAM_IDS[39], "master");
 }
