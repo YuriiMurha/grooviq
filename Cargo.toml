@@ -1,5 +1,5 @@
 [workspace]
-members = ["dsp", "engine", "tests/golden"]
+members = ["dsp", "engine", "tests/golden", "app/src-tauri"]
 resolver = "3"
 
 [workspace.package]

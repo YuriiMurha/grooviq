@@ -1,0 +1,315 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 450 13px/1.4 var(--font);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: 2px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ---------------- toolbar ---------------- */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: var(--toolbar-h);
+  padding: 0 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.wordmark {
+  font-weight: 800;
+  font-size: 18px;
+  letter-spacing: 0.01em;
+  color: var(--paper);
+  /* the theme's misregistered second plate */
+  text-shadow: var(--reg-x) var(--reg-y) 0 var(--accent);
+}
+
+.toolbar-audio {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.chip-anchor {
+  position: relative;
+}
+
+.chip,
+.tone {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  cursor: pointer;
+  transition: border-color 120ms var(--ease), background 120ms var(--ease);
+}
+
+.chip:hover,
+.tone:hover {
+  border-color: var(--muted);
+}
+
+.chip-name {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.chip-latency {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chip.warn {
+  border-color: var(--ink-3);
+  box-shadow: inset 0 0 0 1px var(--ink-3);
+}
+
+.chip.warn .chip-name {
+  color: var(--ink-3);
+}
+
+.tone[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--well);
+  font-weight: 700;
+}
+
+/* ---------------- meter ---------------- */
+.meter {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  width: 140px;
+  height: 32px;
+  padding: 6px;
+  background: var(--well);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-s);
+}
+
+.meter-track {
+  height: 6px;
+  overflow: hidden;
+  background: var(--line-soft);
+  border-radius: 1px;
+}
+
+.meter-bar {
+  height: 100%;
+  background: var(--ok);
+  transform: scaleX(0);
+  transform-origin: left center;
+  will-change: transform;
+}
+
+.meter-bar.clip {
+  background: var(--ink-3b);
+}
+
+/* ---------------- popover ---------------- */
+.popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 10;
+  width: 380px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-l);
+  box-shadow: 0 22px 46px -20px rgba(4, 4, 22, 0.9);
+  user-select: text;
+}
+
+.devices {
+  margin: 0 0 12px;
+  padding: 0;
+  border: 0;
+}
+
+.devices legend,
+.log h3 {
+  margin: 0 0 6px;
+  padding: 0;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.device {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+
+.device:hover {
+  background: var(--raised);
+}
+
+.device.warn .device-name {
+  color: var(--ink-3);
+}
+
+.device-note {
+  color: var(--muted);
+}
+
+.guard {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+  cursor: pointer;
+}
+
+input[type="radio"],
+input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.log {
+  margin-top: 12px;
+}
+
+.log ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.log li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+
+.log time {
+  color: var(--faint);
+  font-family: var(--mono);
+}
+
+.log-warn span {
+  color: var(--ink-3);
+}
+
+.log-error span {
+  color: var(--ink-3b);
+}
+
+.log-empty {
+  margin: 0;
+  color: var(--faint);
+}
+
+/* ---------------- stage ---------------- */
+.stage {
+  flex: 1;
+  display: grid;
+  place-items: center;
+}
+
+.hint {
+  color: var(--faint);
+}
+
+/* ---------------- toasts ---------------- */
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 420px;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--ok);
+  border-radius: var(--radius-m);
+  box-shadow: 0 12px 30px -16px rgba(4, 4, 22, 0.9);
+}
+
+.toast.warn {
+  border-left-color: var(--ink-3);
+}
+
+.toast span {
+  flex: 1;
+}
+
+.toast button {
+  padding: 0 4px;
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chip,
+  .tone {
+    transition: none;
+  }
+}

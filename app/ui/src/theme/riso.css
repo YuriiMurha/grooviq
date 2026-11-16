@@ -1,0 +1,44 @@
+/* Riso Ink: the design tokens of Grooviq's prototype theme (style-lab/themes/riso.css), only
+   the custom properties. Our own design; the font is Manrope, bundled (OFL-1.1). */
+:root {
+  /* ---- required tokens ---- */
+  --bg: #0e1127;            /* midnight stock: content wells */
+  --panel: #141834;         /* chrome: toolbar, browser, heads */
+  --raised: #1c2145;        /* controls */
+  --line: #2e3563;
+  --line-soft: #1f2447;
+  --text: #f3eee4;          /* paper */
+  --muted: #bdb9cf;
+  --faint: #9693b3;
+  --accent: #ff48b0;        /* Riso Fluorescent Pink: transport, playhead, primary */
+  --select: #f3eee4;        /* registration white: selection never collides with an ink */
+  --ok: #82d8d5;            /* Riso Mint: power, meters */
+  --ink-1: #ff48b0; --ink-1b: #2f7bd8;   /* Fluorescent Pink / Blue */
+  --ink-2: #62a8e5; --ink-2b: #e2459f;   /* Cornflower / Pink */
+  --ink-3: #ffb511; --ink-3b: #f0504a;   /* Sunflower / Bright Red */
+  --ink-4: #ff6c2f; --ink-4b: #7d5bd6;   /* Orange / Purple */
+  --ink-5: #82d8d5; --ink-5b: #2f7bd8;   /* Mint / Blue */
+  --ink-6: #9d7ad2; --ink-6b: #e2459f;   /* Violet / Pink */
+  --font: "Manrope Variable", system-ui, sans-serif;
+  --radius-s: 4px;
+  --radius-m: 6px;
+  --radius-l: 10px;
+
+  /* ---- theme-private tokens ---- */
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --display: var(--font);
+  --paper: #f3eee4;
+  --well: #0a0d20;          /* recessed slots, meters, fields */
+  --step-a: #1a1e40;        /* beats 1 and 3 of the bar */
+  --step-b: #14183a;        /* beats 2 and 4 */
+  --knob-track: #2a3062;
+  --knob-gap: var(--bg);
+  --reg-x: 2px;             /* the one misregistration vector, used everywhere */
+  --reg-y: 2px;
+  --hair: rgba(243, 238, 228, 0.06);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --z-overlay: 20;
+
+  /* ---- geometry ---- */
+  --toolbar-h: 56px;
+}
