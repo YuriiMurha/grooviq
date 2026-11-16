@@ -1,0 +1,27 @@
+[package]
+name = "grooviq-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Real-time audio engine: lock-free commands, fixed 64-frame blocks, NaN guard, panic isolation, offline rendering"
+
+[lib]
+name = "grooviq_engine"
+
+[features]
+# Commands that make the synth output NaN or panic, for the audio-health tests. Never on in the app.
+test-hooks = []
+
+[dependencies]
+grooviq-dsp = { path = "../dsp" }
+rtrb = "0.3"
+
+[dev-dependencies]
+# Without the default `disable_release`, the allocation check also runs in release test builds.
+assert_no_alloc = { version = "1.1", default-features = false }
+
+[[test]]
+name = "panic"
+required-features = ["test-hooks"]

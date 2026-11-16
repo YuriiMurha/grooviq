@@ -8,12 +8,12 @@ Grooviq is a free, open-source desktop DAW for beatmakers. It works the way FL S
 
 ```sh
 cargo build --workspace
-cargo test --workspace
+cargo test --workspace --all-features
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-The pinned toolchain is in `rust-toolchain.toml`.
+`--all-features` turns on the engine's `test-hooks` feature; without it, the audio-health tests that inject a NaN or a panic do not run. The pinned toolchain is in `rust-toolchain.toml`.
 
 ## Licence
 
