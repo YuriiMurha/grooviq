@@ -89,6 +89,8 @@ fn reference_power(l: &[f32], r: &[f32], sr: f32) -> f64 {
 }
 
 /// Every window whose score exceeds `min_score_db`, strongest per 5 ms neighbourhood.
+// (the context loops index windows by position, as the description above reads; kept verbatim)
+#[allow(clippy::needless_range_loop)]
 fn scan(l: &[f32], r: &[f32], sr: f32, min_score_db: f32) -> Vec<Click> {
     let n = l.len().min(r.len());
     // (an absolute minimum, -200 dB, so digital silence scores very low instead of -inf or NaN)
