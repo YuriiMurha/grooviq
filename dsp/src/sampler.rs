@@ -125,6 +125,9 @@ struct Voice {
     age: u32,
     /// Note-on order, for stealing the oldest voice.
     order: u64,
+    /// Gate mode: this note's note-off has not arrived yet. It stays set when the voice ends
+    /// by itself first, so that late note-off finds this note, not a newer one on its key.
+    held: bool,
 }
 
 impl Voice {
@@ -139,6 +142,7 @@ impl Voice {
         vel: 0.0,
         age: 0,
         order: 0,
+        held: false,
     };
 }
 
@@ -186,17 +190,20 @@ impl Voices {
         let rate = buf.rate as f64 / sr as f64 * libm::pow(2.0, semis / 12.0);
         let reverse = p[REVERSE] >= 0.5;
         self.counter += 1;
-        // A free voice, else the one started first.
-        let i = match self.v.iter().position(|v| v.stage == Stage::Off) {
+        // A free voice; else the oldest silent one still owed a note-off; else the one
+        // started first.
+        let i = match self.v.iter().position(|v| v.stage == Stage::Off && !v.held) {
             Some(i) => i,
             None => {
-                let mut oldest = 0;
+                let silent = self.v.iter().any(|v| v.stage == Stage::Off);
+                let mut oldest: Option<usize> = None;
                 for (i, v) in self.v.iter().enumerate() {
-                    if v.order < self.v[oldest].order {
-                        oldest = i;
+                    let candidate = !silent || v.stage == Stage::Off;
+                    if candidate && oldest.is_none_or(|o| v.order < self.v[o].order) {
+                        oldest = Some(i);
                     }
                 }
-                oldest
+                oldest.unwrap_or(0)
             }
         };
         let attack = p[ATTACK] > 0.0;
@@ -215,15 +222,28 @@ impl Voices {
             },
             age: 0,
             order: self.counter,
+            held: p[ONE_SHOT] < 0.5,
         };
     }
 
+    /// Ends one note: the oldest on `key` whose note-off has not arrived, which releases it
+    /// if it still sounds. A note-off belongs to one note-on, so a newer hit on the same key
+    /// keeps sounding (a swung note that overlaps the next one, or a note-off booked before
+    /// a tempo change), also when the older voice already ended by itself.
     fn note_off(&mut self, p: &[f32; 15], key: u8) {
         if p[ONE_SHOT] >= 0.5 {
             return;
         }
-        for v in self.v.iter_mut() {
-            if v.key == key && matches!(v.stage, Stage::Attack | Stage::Decay | Stage::Sustain) {
+        let mut oldest: Option<usize> = None;
+        for (i, v) in self.v.iter().enumerate() {
+            if v.key == key && v.held && oldest.is_none_or(|o| v.order < self.v[o].order) {
+                oldest = Some(i);
+            }
+        }
+        if let Some(i) = oldest {
+            let v = &mut self.v[i];
+            v.held = false;
+            if matches!(v.stage, Stage::Attack | Stage::Decay | Stage::Sustain) {
                 v.stage = Stage::Release;
             }
         }
@@ -433,7 +453,13 @@ impl Device for Sampler {
                 v.age = v.age.saturating_add(1);
                 v.pos += v.step;
                 if v.pos >= v.end || v.pos < v.start {
-                    *v = Voice::OFF;
+                    // Ended by itself: a note-off it is still owed must find it.
+                    *v = Voice {
+                        key: v.key,
+                        order: v.order,
+                        held: v.held,
+                        ..Voice::OFF
+                    };
                 }
             }
             for ch in 0..2 {
