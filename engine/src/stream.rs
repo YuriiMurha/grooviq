@@ -290,7 +290,9 @@ impl Schedule {
 }
 
 /// Reads what the client sent so tungstenite answers Ping and Close. `false` when the
-/// connection is over (closed, failed, or the client sent something it has no business to).
+/// connection is over: the client sent Close (the reply is flushed first), the stream failed or
+/// closed, or a frame or message exceeded [`MAX_INCOMING`] (or was otherwise a protocol
+/// error). Text, Binary and Pong messages within that limit are read and ignored.
 fn drain_incoming(ws: &mut WebSocket<TcpStream>) -> bool {
     for _ in 0..MAX_DRAIN {
         match ws.read() {

@@ -257,16 +257,23 @@ fn dropping_the_server_ends_every_client_quickly() {
         "drop took {:?}",
         start.elapsed()
     );
-    // Every client thread is gone by the time drop returns, so every socket is already closed:
-    // a non-blocking read may find buffered frames, then EOF or a reset, never "no data yet".
+    // Every client thread is gone by the time drop returns, so each socket reaches EOF or a
+    // reset; allow 200 ms for the FIN to land (slow runners). A surviving thread keeps the
+    // socket open: the read then times out, or frames keep arriving past the window.
     for stream in [&mut stalled, raw(&mut ws), raw(&mut silent)] {
-        stream.set_nonblocking(true).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let window = Instant::now() + Duration::from_millis(200);
         let mut buf = [0u8; 4096];
         let ended = loop {
+            if Instant::now() > window {
+                break false;
+            }
             match stream.read(&mut buf) {
                 Ok(0) => break true,
                 Ok(_) => {}
-                Err(e) => break e.kind() != ErrorKind::WouldBlock,
+                Err(e) => break !matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut),
             }
         };
         assert!(ended, "a client thread outlived the server");
@@ -373,8 +380,11 @@ fn frames_arrive_on_the_schedule() {
     let span = times[119] - times[0];
     let ideal = Duration::from_secs_f64(119.0 / 60.0);
     let error = span.as_secs_f64() / ideal.as_secs_f64() - 1.0;
+    // 6% (about 120 ms over the span) absorbs one scheduling hiccup on a busy runner; the exact
+    // drift-free schedule is pinned by the `Schedule` unit tests. Per-frame restarts (a fixed-period
+    // sleep) measured 6.2-6.6% on macOS, so that mutation still fails.
     assert!(
-        error.abs() < 0.03,
+        error.abs() < 0.06,
         "119 intervals took {span:?}, ideal {ideal:?}"
     );
 }
