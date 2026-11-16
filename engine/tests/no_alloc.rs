@@ -8,9 +8,12 @@ use assert_no_alloc::assert_no_alloc;
 use grooviq_engine::{
     AudioOutput, AudioSlot, ChannelId, ChannelMix, ChannelSetup, Command, EngineConfig,
     EngineState, OutputBackend, OutputChoice, OutputInfo, OutputKind, PatternData, SampleBuf,
-    SeqNote, engine, engine_with,
+    SeqNote, engine, engine_with, run_silent,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 const SR: f32 = 48_000.0;
 
@@ -71,6 +74,45 @@ fn the_device_callback_path_is_allocation_free() {
     drop(out);
     assert_no_alloc(|| slot.process(&mut buf, 2));
     assert!(buf.iter().all(|x| *x == 0.0), "an emptied slot is silent");
+}
+
+#[test]
+fn the_silent_output_loop_is_allocation_free() {
+    let (mut c, p) = engine(EngineConfig { sample_rate: SR });
+    c.send(Command::TestTone {
+        on: true,
+        hz: 440.0,
+        gain_db: -12.0,
+    })
+    .unwrap();
+    let opened = Arc::new(Mutex::new(None));
+    let backend = Box::new(OneDevice(Arc::clone(&opened)));
+    let c = Arc::new(Mutex::new(c));
+    let out = AudioOutput::start(
+        backend,
+        Arc::clone(&c),
+        p,
+        OutputChoice::SystemDefault,
+        true,
+        Box::new(|_| {}),
+    );
+    let slot = opened.lock().unwrap().clone().expect("the device opened");
+    // The loop the silent backend runs on its own thread, here on this one: paced callbacks
+    // until told to quit, 50 ms from now.
+    let quit = Arc::new(AtomicBool::new(false));
+    let stopper = thread::spawn({
+        let quit = Arc::clone(&quit);
+        move || {
+            thread::sleep(Duration::from_millis(50));
+            quit.store(true, Ordering::Release);
+        }
+    });
+    assert_no_alloc(|| run_silent(&slot, &quit, 48_000));
+    stopper.join().unwrap();
+    let live = c.lock().unwrap().live();
+    assert!(live.frames >= 1_024, "it rendered: {} frames", live.frames);
+    assert!(live.peak[0] > 0.1, "it rendered sound");
+    drop(out);
 }
 
 #[test]

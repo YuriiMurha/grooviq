@@ -1,5 +1,5 @@
 # Repeatable commands. `make help` lists them. macOS or Linux shell.
-.PHONY: help hooks ui-install fmt check check-changed golden-update build-app install-app qa-ui
+.PHONY: help hooks ui-install fmt check check-changed golden-update build-app install-app qa-ui qa-app
 
 # rustup installs cargo into ~/.cargo/bin, which is often not on PATH.
 export PATH := $(HOME)/.cargo/bin:$(PATH)
@@ -39,6 +39,9 @@ golden-update: ## Rewrite the golden reference WAVs on purpose; say why in the P
 
 build-app: ui-install ## Build the release Grooviq.app (no .dmg) into target/release/bundle/macos
 	npm --prefix $(UI) run tauri build -- --bundles app
+
+qa-app: ## Run the built app silently (GROOVIQ_AUDIO=null) with a throwaway home folder (QA_HOME=<dir> reuses one)
+	sh scripts/qa-app.sh
 
 install-app: ## Copy the built Grooviq.app into /Applications (run build-app first)
 	@test -d $(APP_BUNDLE) || { echo "No $(APP_BUNDLE). Run make build-app first."; exit 1; }

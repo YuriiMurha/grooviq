@@ -4,7 +4,8 @@
 //! until the UI asks), starts the live-state stream for the meters and two threads: one
 //! forwards output events, one checks the engine's health every 250 ms. Both log what happened
 //! and emit it to the UI as `audio-event`. The UI talks back through the async commands in
-//! [`commands`].
+//! [`commands`]. Started with `GROOVIQ_AUDIO=null` it opens no audio device at all (see
+//! [`output_mode`]): the silent mode for QA runs.
 
 mod audio_log;
 mod autosave_notice;
@@ -12,6 +13,7 @@ mod commands;
 mod events;
 mod exit;
 mod menu;
+mod output_mode;
 pub mod panic_hook;
 mod project_cmds;
 mod settings;
@@ -20,8 +22,8 @@ use audio_log::{AudioLog, Level};
 use autosave_notice::{AutosaveStatus, FAILED_EVENT, disabled_notice};
 use events::AudioEvent;
 use grooviq_engine::{
-    AudioOutput, Controller, EngineConfig, OutputChoice, OutputEvent, StreamServer, cpal_backend,
-    engine, start_stream,
+    AudioOutput, Controller, EngineConfig, OutputChoice, OutputEvent, StreamServer, engine,
+    start_stream,
 };
 use grooviq_project::autosave::{AutosaveTick, autosave_tick};
 use grooviq_project::recovery::{Recovery, RecoveryDir};
@@ -148,9 +150,14 @@ fn start_audio(app: &AppHandle) -> Audio {
         .output
         .clone()
         .map_or(OutputChoice::SystemDefault, OutputChoice::Device);
+    let (mode, note) =
+        output_mode::output_mode(std::env::var_os(output_mode::AUDIO_ENV).as_deref());
+    if let Some((level, message)) = note {
+        lock(&log).push(level, message);
+    }
     // Not holding the controller's lock: `start` takes it itself.
     let output = Arc::new(AudioOutput::start(
-        cpal_backend(),
+        output_mode::backend(mode),
         Arc::clone(&controller),
         processor,
         choice,
