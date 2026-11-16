@@ -478,3 +478,102 @@ fn export_is_faster_than_real_time() {
     assert!(report.frames >= 8 * u64::from(SR));
     assert!(took.as_secs_f32() < 4.0, "an 8 s export took {took:?}");
 }
+
+/// `seconds` of the constant `value` on both sides.
+fn dc_at(seconds: f32, value: f32) -> Arc<SampleBuf> {
+    let n = (seconds * SR as f32) as usize;
+    Arc::new(SampleBuf {
+        rate: SR as f32,
+        l: vec![value; n],
+        r: vec![value; n],
+    })
+}
+
+/// One note of `sample` on the last step, at unity gain with declick off, so the sample's
+/// values come out unchanged and carry on into the tail.
+fn held_into_the_tail(sample: &Arc<SampleBuf>, step: u32) -> EngineState {
+    let mut exact = defaults();
+    exact[DECLICK] = 0.0;
+    EngineState {
+        bpm: 140.0,
+        channels: vec![channel(1, sample, exact, ChannelMix::default())],
+        pattern: PatternData {
+            length: 16 * STEP_TICKS,
+            notes: vec![note(step, 1, 1.0)],
+        },
+    }
+}
+
+#[test]
+fn cancel_during_the_tail_leaves_no_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cancelled_tail.wav");
+    let part = part_of(&path);
+    // A 60 s one-shot from the first step: the tail runs for up to a minute of audio.
+    let state = held_into_the_tail(&dc(60.0), 0);
+    let options = ExportOptions {
+        max_tail_seconds: 60.0,
+        ..options(WavFormat::Float32, 1)
+    };
+    // Past the pattern part's bytes (8 per frame, plus the header and the write buffer's lag):
+    // the export is in the tail.
+    let threshold = pattern_frames(&state, 1) * 8 + 64 * 1024;
+    let cancel = AtomicBool::new(false);
+    let finished = AtomicBool::new(false);
+    let mut seen_at = 0;
+    let result = std::thread::scope(|s| {
+        let watcher = s.spawn(|| {
+            while !finished.load(Ordering::Relaxed) {
+                let len = std::fs::metadata(&part).map_or(0, |m| m.len());
+                if len > threshold {
+                    cancel.store(true, Ordering::Relaxed);
+                    return len;
+                }
+                std::thread::yield_now();
+            }
+            0
+        });
+        let result = export_wav(state.clone(), &options, &path, &mut |_| {}, &cancel);
+        finished.store(true, Ordering::Relaxed);
+        seen_at = watcher.join().unwrap();
+        result
+    });
+    assert!(seen_at > threshold, "the watcher never saw the tail start");
+    assert!(matches!(result, Err(ExportError::Cancelled)), "{result:?}");
+    assert_eq!(listing(dir.path()), Vec::<String>::new());
+}
+
+#[test]
+fn a_tail_exactly_at_the_silence_threshold_counts_as_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("threshold.wav");
+    // 2 s of exactly 1e-5 from the last step: it sounds on through the whole tail window.
+    let state = held_into_the_tail(&dc_at(2.0, 1e-5), 15);
+    let pattern = pattern_frames(&state, 1);
+    // The engine passes the value through unchanged, so every tail frame is exactly 1e-5.
+    let longer = render(&state, 1, pattern + 9_600);
+    let tail = &longer[pattern as usize * 2..];
+    assert!(
+        tail.iter().all(|&x| x == 1e-5),
+        "the tail is not exactly 1e-5"
+    );
+
+    let report = export(&state, &options(WavFormat::Float32, 1), &path).unwrap();
+    assert_eq!(report.frames, pattern, "a tail at exactly 1e-5 was kept");
+}
+
+#[test]
+fn full_scale_is_not_clipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("full_scale.wav");
+    // The click at unity gain: one frame of exactly 1.0 on each side.
+    let state = held_into_the_tail(&click(), 0);
+    let longer = render(&state, 1, pattern_frames(&state, 1));
+    assert_eq!(longer.iter().fold(0.0f32, |m, x| m.max(x.abs())), 1.0);
+
+    let report = export(&state, &options(WavFormat::Pcm24, 1), &path).unwrap();
+    assert_eq!(report.clipped, 0, "1.0 is full scale, not a clip");
+    assert_eq!(report.peak, 1.0);
+    let (_, samples) = read_i32(&path);
+    assert_eq!(samples.iter().max(), Some(&8_388_607));
+}
