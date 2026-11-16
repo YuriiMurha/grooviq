@@ -17,6 +17,9 @@ Read the code; it is the documentation. `make help` lists the supported commands
 ## Work boundaries
 
 - Non-trivial work needs a GitHub issue. One PR per issue.
+- File a GitHub issue (milestone + labels) right away for anything useful a session finds —
+  a bug, a follow-up, a research result worth acting on, a deferred review finding.
+  Chat, ledgers and untracked notes are not a record.
 - Never play sound through the owner's speakers in automated checks.
   Tests render offline or use fake devices. Launch the app for QA only in silent mode.
 - Audio thread: no allocation, locks, I/O or logging.
@@ -84,6 +87,7 @@ CI quirks:
   GitHub issues own plans, history, progress and evidence.
 - README.md never carries milestones, a roadmap or feature status.
 - Specs, plans and evidence stay untracked under `docs/superpowers/`, `docs/evidence/`, `.superpowers/`.
+  Pre-repo mockups and prototypes live untracked in `docs/superpowers/archive/`. Never commit them.
 - When a rule changes, rewrite or delete the old text. Do not append.
 
 ## Communication
