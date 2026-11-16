@@ -304,15 +304,19 @@ enum UnfinishedWav {
     Sound(Vec<u8>),
 }
 
-/// A WAV recorder that stops before it can come back to fill in its header leaves a data chunk
-/// size of 0 (never filled in) or 0xFFFF_FFFF (streamed, size unknown). Other tools read such a
-/// file to its end; this returns the file with the sizes made true so the reader does the same.
-/// `None` when this is not a WAV, or its header is finished.
+/// A WAV recorder that stops before it can come back to fill in its header leaves a RIFF size
+/// of 0 (never filled in), 0xFFFF_FFFF (streamed) or more than the file holds, and a data chunk
+/// size of 0 or 0xFFFF_FFFF. Other tools read such a file to its end; this returns the file with
+/// the sizes made true so the reader does the same. `None` when this is not a WAV, or its header
+/// is finished: a writer that backpatched the RIFF size also backpatched the data size, so a
+/// data size of 0 there is an empty recording, whatever metadata follows it.
 fn unfinished_wav_header(bytes: &[u8]) -> Option<UnfinishedWav> {
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return None;
     }
     let riff_size = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    // 0xFFFF_FFFF (streamed) is past the end of any file this reads.
+    let riff_unfinished = riff_size == 0 || u64::from(riff_size) + 8 > bytes.len() as u64;
     let mut at = 12usize;
     while let Some(chunk) = bytes.get(at..at + 8) {
         let size = u32::from_le_bytes(chunk[4..8].try_into().ok()?);
@@ -323,12 +327,8 @@ fn unfinished_wav_header(bytes: &[u8]) -> Option<UnfinishedWav> {
         }
         let sound = at + 8;
         let after = bytes.len() - sound;
-        let finished_riff = riff_size as usize == bytes.len() - 8;
         return match size {
-            // A finished file with no frames in it is merely empty, and so is one whose only
-            // bytes after the empty data chunk are metadata chunks (a title, say).
-            0 if after == 0 && finished_riff => None,
-            0 if after > 0 && only_metadata_chunks(&bytes[sound..]) => None,
+            0 if !riff_unfinished => None,
             0 | u32::MAX if after == 0 => Some(UnfinishedWav::NoSound),
             0 | u32::MAX => {
                 let mut fixed = bytes.to_vec();
@@ -341,27 +341,6 @@ fn unfinished_wav_header(bytes: &[u8]) -> Option<UnfinishedWav> {
         };
     }
     None
-}
-
-/// Whether `rest` is a whole number of RIFF chunks with text tags (`LIST`, `id3 `, `bext`...),
-/// none of them `data`: what a finished file may carry after its sound. Raw audio does not
-/// parse as one: its sizes would have to chain exactly to the end, behind four letters.
-fn only_metadata_chunks(mut rest: &[u8]) -> bool {
-    while !rest.is_empty() {
-        let Some(head) = rest.get(..8) else {
-            return false;
-        };
-        let tag_ok = head[..4]
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || *b == b' ');
-        let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
-        if !tag_ok || &head[..4] == b"data" || size > rest.len() - 8 {
-            return false;
-        }
-        // Padded to an even size; the pad byte of the last chunk may be missing.
-        rest = &rest[(8 + size + (size & 1)).min(rest.len())..];
-    }
-    true
 }
 
 /// `bytes` (an Ogg stream) with the pages whose checksum fails removed, or `None` when every
@@ -499,8 +478,12 @@ mod tests {
 
     #[test]
     fn the_repair_budget_is_four_times_the_input() {
-        // The same input through the entry point the decoder uses.
-        assert!(without_damaged_ogg_pages(&dense_capture_patterns(1 << 18)).is_none());
+        // Through the entry point the decoder uses: 64 KiB of dense markers (about 150 MB of
+        // checksumming, far past 4x the input) padded to 1 MiB. With a budget of 1000x the scan
+        // would finish and return a repair.
+        let mut bytes = dense_capture_patterns(1 << 16);
+        bytes.resize(1 << 20, 0);
+        assert!(without_damaged_ogg_pages(&bytes).is_none());
     }
 
     #[test]

@@ -425,7 +425,10 @@ fn an_unfinished_wav_header_reads_to_the_end_of_the_file() {
     for (riff, data) in [
         (0, 0),
         (u32::MAX, u32::MAX),
-        (36 + 6_000, 0),
+        (u32::MAX, 0),
+        (10_000_000, 0),
+        // The file is two bytes shorter than its header says (cut off).
+        (36 + 6_000 + 2, 0),
         (36 + 6_000, u32::MAX),
     ] {
         let bytes = wav_with_sizes(3_000, riff, data);
@@ -650,15 +653,49 @@ fn a_finished_empty_wav_with_trailing_metadata_is_still_empty() {
             String::from_utf8_lossy(title)
         );
     }
+    // Other metadata a finished file may carry: XMP (`_PMX`) and Broadcast Wave (`bext`), whose
+    // tags and sizes need not look like text.
+    for tag in [b"_PMX", b"bext", b"iXML", b"\x01\x02\x03\x04"] {
+        let mut bytes = wav_with_sizes(0, 36, 0);
+        let body = b"<x:xmpmeta>record</x:xmpmeta>";
+        bytes.extend_from_slice(tag);
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(body);
+        bytes.push(0); // pad to an even size
+        let riff = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+        assert_eq!(
+            decode_sample(&bytes, Some("wav"), 600.0),
+            Err(SampleError::Empty),
+            "{}",
+            String::from_utf8_lossy(tag)
+        );
+    }
 }
 
 #[test]
-fn a_second_data_chunk_after_an_empty_one_is_sound_not_metadata() {
-    let mut bytes = wav_with_sizes(0, 0, 0);
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&8u32.to_le_bytes());
-    bytes.extend_from_slice(&[0x10; 8]);
-    assert_eq!(decode_sample(&bytes, Some("wav"), 600.0).unwrap().len(), 8);
+fn an_unfinished_payload_that_looks_like_chunks_is_still_sound() {
+    // Nothing is guessed from what follows an unfinished header: it is all sound.
+    // A second `data` chunk, and a `LIST` whose size (1000) runs past the end of the file.
+    for (chunk, frames) in [
+        (
+            [b"data".as_slice(), &8u32.to_le_bytes(), &[0x10; 8]].concat(),
+            8,
+        ),
+        (
+            [b"LIST".as_slice(), &1000u32.to_le_bytes(), &[0x10; 8]].concat(),
+            8,
+        ),
+    ] {
+        let mut bytes = wav_with_sizes(0, 0, 0);
+        bytes.extend_from_slice(&chunk);
+        assert_eq!(
+            decode_sample(&bytes, Some("wav"), 600.0).unwrap().len(),
+            frames,
+            "{}",
+            String::from_utf8_lossy(&chunk[..4])
+        );
+    }
 }
 
 #[test]
@@ -720,12 +757,7 @@ fn an_oversized_ogg_length_field_does_not_hide_the_good_pages_after_it() {
 #[test]
 fn a_recovered_file_is_held_to_the_length_limit() {
     // WAV: both ways a header can be unfinished, one second of sound, limit half a second.
-    for (riff, data) in [
-        (0, 0),
-        (u32::MAX, u32::MAX),
-        (36 + 96_000, 0),
-        (0, u32::MAX),
-    ] {
+    for (riff, data) in [(0, 0), (u32::MAX, u32::MAX), (10_000_000, 0), (0, u32::MAX)] {
         let bytes = wav_with_sizes(48_000, riff, data);
         match decode_sample(&bytes, Some("wav"), 0.5) {
             Err(SampleError::TooLong { seconds, limit }) => {
