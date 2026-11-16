@@ -4,10 +4,13 @@
 //! Connect to `ws://127.0.0.1:{port}/live?token={token}`. The server binds loopback only,
 //! answers 404 for another path, 401 for a missing or wrong token (compared in constant time)
 //! and 503 beyond [`MAX_CLIENTS`]; a handshake that takes longer than [`HANDSHAKE_TIMEOUT`] is
-//! cut off. Every client has its own thread that reads only atomics, so neither the audio thread
+//! cut off. Connections that have not yet authenticated count against the same cap of
+//! [`MAX_CLIENTS`] as streaming ones, so eight stalled handshakes lock real clients out for up
+//! to [`HANDSHAKE_TIMEOUT`] (a deliberate trade for a bounded thread count). Every client has its own thread that reads only atomics, so neither the audio thread
 //! nor the caller of [`start_stream`] ever waits on a client. Dropping the [`StreamServer`] stops
 //! all threads within about [`POLL`].
 
+use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -15,10 +18,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use tungstenite::Message;
 use tungstenite::handshake::HandshakeError;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::http::StatusCode;
+use tungstenite::protocol::WebSocketConfig;
+use tungstenite::{Error, Message, WebSocket};
 
 use crate::live::{LiveShared, encode_live};
 
@@ -28,26 +32,50 @@ const MAX_CLIENTS: usize = 8;
 const MAX_REJECTS: usize = 8;
 /// A handshake that has not finished by then is dropped.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
-/// How often blocked loops look at the stop flag.
-const POLL: Duration = Duration::from_millis(20);
+/// How often blocked loops look at the stop flag and drain what the client sent.
+const POLL: Duration = Duration::from_millis(10);
+/// Pause between handshake rounds on the non-blocking socket.
+const HANDSHAKE_POLL: Duration = Duration::from_millis(5);
+/// Clients never need to send data (Close and Ping only), so frames and messages stay tiny.
+const MAX_INCOMING: usize = 256;
+/// Most incoming frames handled per wake-up, so a flooding client cannot starve its own stream.
+const MAX_DRAIN: usize = 16;
+/// Frame rates outside this range are clamped.
+const HZ_RANGE: (u32, u32) = (1, 240);
 /// A client that cannot take a 32-byte frame within this long is dropped.
 const WRITE_TIMEOUT: Duration = Duration::from_millis(50);
 /// After a stall longer than this the schedule restarts instead of bursting to catch up.
 const MAX_LAG: Duration = Duration::from_millis(250);
 
 /// A running stream. Dropping it stops the accept thread and every client thread.
-#[derive(Debug)]
 pub struct StreamServer {
     /// The loopback port the server listens on.
     pub port: u16,
     /// 32 lowercase hex characters, new for every launch; clients pass it as `?token=`.
     pub token: String,
+    addr: SocketAddr,
     clients: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     accept: Option<JoinHandle<()>>,
 }
 
+// Hand-written so the token never reaches a log through `{:?}`.
+impl fmt::Debug for StreamServer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamServer")
+            .field("port", &self.port)
+            .field("token", &"<redacted>")
+            .field("clients", &self.clients())
+            .finish()
+    }
+}
+
 impl StreamServer {
+    /// The address the listener is bound to (always loopback).
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+
     /// Connections currently handshaking or streaming.
     pub fn clients(&self) -> usize {
         self.clients.load(SeqCst)
@@ -63,8 +91,8 @@ impl Drop for StreamServer {
     }
 }
 
-/// Starts the stream on a free loopback port, sending `hz` frames per second (at least 1) to
-/// each client.
+/// Starts the stream on a free loopback port, sending `hz` frames per second (clamped to
+/// 1..=240) to each client.
 pub fn start_stream(live: Arc<LiveShared>, hz: u32) -> io::Result<StreamServer> {
     let mut raw = [0u8; 16];
     getrandom::fill(&mut raw).map_err(|e| io::Error::other(e.to_string()))?;
@@ -72,8 +100,9 @@ pub fn start_stream(live: Arc<LiveShared>, hz: u32) -> io::Result<StreamServer> 
 
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
     listener.set_nonblocking(true)?;
-    let port = listener.local_addr()?.port();
-    let period = Duration::from_secs_f64(1.0 / f64::from(hz.max(1)));
+    let addr = listener.local_addr()?;
+    let port = addr.port();
+    let period = Duration::from_secs_f64(1.0 / f64::from(hz.clamp(HZ_RANGE.0, HZ_RANGE.1)));
 
     let clients = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
@@ -86,6 +115,7 @@ pub fn start_stream(live: Arc<LiveShared>, hz: u32) -> io::Result<StreamServer> 
     Ok(StreamServer {
         port,
         token,
+        addr,
         clients,
         stop,
         accept: Some(accept),
@@ -184,10 +214,11 @@ fn serve(
     stop: &AtomicBool,
 ) {
     let _ = stream.set_nodelay(true);
-    // The accepted socket must block (it may inherit the listener's non-blocking mode); reads
-    // time out every POLL so the handshake can watch the deadline and the stop flag.
-    if stream.set_nonblocking(false).is_err()
-        || stream.set_read_timeout(Some(POLL)).is_err()
+    // Non-blocking on every OS during the handshake: every platform then reports "no data yet"
+    // as `WouldBlock` (a read timeout is `TimedOut` on Windows, which tungstenite treats as a
+    // failure), and the deadline and the stop flag are checked every round however slowly
+    // bytes trickle in.
+    if stream.set_nonblocking(true).is_err()
         || stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err()
     {
         return;
@@ -198,8 +229,11 @@ fn serve(
         }
         authorise(request, token).map(|()| response)
     };
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_INCOMING))
+        .max_frame_size(Some(MAX_INCOMING));
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    let mut attempt = tungstenite::accept_hdr(stream, callback);
+    let mut attempt = tungstenite::accept_hdr_with_config(stream, callback, Some(config));
     let mut ws = loop {
         match attempt {
             Ok(ws) => break ws,
@@ -207,49 +241,165 @@ fn serve(
                 if stop.load(SeqCst) || Instant::now() >= deadline {
                     return;
                 }
+                thread::sleep(HANDSHAKE_POLL);
                 attempt = mid.handshake();
             }
             Err(HandshakeError::Failure(_)) => return,
         }
     };
-    if reject {
-        return;
+    if !reject {
+        stream_frames(&mut ws, live, period, stop);
     }
-    stream_frames(&mut ws, live, period, stop);
+}
+
+/// When frame `n` is due: absolute deadlines (`start + n * period`), so a late wake-up shortens
+/// the next wait instead of shifting every later frame. After a stall longer than [`MAX_LAG`]
+/// the schedule restarts from the moment of the late frame instead of bursting to catch up.
+struct Schedule {
+    start: Instant,
+    period: Duration,
+    n: u32,
+}
+
+impl Schedule {
+    fn new(start: Instant, period: Duration) -> Self {
+        Self {
+            start,
+            period,
+            n: 0,
+        }
+    }
+
+    fn due(&self) -> Instant {
+        self.start + self.period * self.n
+    }
+
+    /// Records that the frame due at [`Self::due`] went out at `now`.
+    fn sent(&mut self, now: Instant) {
+        if now.saturating_duration_since(self.due()) > MAX_LAG {
+            self.start = now;
+            self.n = 1;
+        } else if self.n == u32::MAX {
+            // After about two years at 240 Hz: rebase without moving the next deadline.
+            self.start = self.due() + self.period;
+            self.n = 0;
+        } else {
+            self.n += 1;
+        }
+    }
+}
+
+/// Reads what the client sent so tungstenite answers Ping and Close. `false` when the
+/// connection is over (closed, failed, or the client sent something it has no business to).
+fn drain_incoming(ws: &mut WebSocket<TcpStream>) -> bool {
+    for _ in 0..MAX_DRAIN {
+        match ws.read() {
+            Ok(Message::Close(_)) => {
+                // tungstenite queued the Close reply; push it out, then end the connection.
+                let _ = ws.get_ref().set_nonblocking(false);
+                let _ = ws.flush();
+                return false;
+            }
+            Ok(_) => {}
+            Err(Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => return true,
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 fn stream_frames(
-    ws: &mut tungstenite::WebSocket<TcpStream>,
+    ws: &mut WebSocket<TcpStream>,
     live: &LiveShared,
     period: Duration,
     stop: &AtomicBool,
 ) {
-    let mut start = Instant::now();
-    let mut n: u32 = 0;
+    let mut schedule = Schedule::new(Instant::now(), period);
     loop {
-        // Absolute deadlines: a late sleep shortens the next one instead of shifting the rest.
-        let due = start + period * n;
         loop {
-            if stop.load(SeqCst) {
+            if stop.load(SeqCst) || !drain_incoming(ws) {
                 return;
             }
             let now = Instant::now();
+            let due = schedule.due();
             if now >= due {
-                if now - due > MAX_LAG {
-                    start = now;
-                    n = 0;
-                }
                 break;
             }
             thread::sleep((due - now).min(POLL));
         }
         let frame = encode_live(&live.snapshot());
-        if ws.send(Message::Binary(frame.to_vec().into())).is_err() {
+        // Writes block (bounded by WRITE_TIMEOUT) so a frame is whole or the client is dropped.
+        let sent = ws.get_ref().set_nonblocking(false).is_ok()
+            && ws.send(Message::Binary(frame.to_vec().into())).is_ok()
+            && ws.get_ref().set_nonblocking(true).is_ok();
+        if !sent {
             return;
         }
-        n = n.wrapping_add(1);
-        if n == 0 {
-            start = Instant::now(); // after about 2 years at 60 Hz
+        schedule.sent(Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connect(server: &StreamServer) -> WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
+        let url = format!("ws://127.0.0.1:{}/live?token={}", server.port, server.token);
+        let (mut ws, _) = tungstenite::connect(url.as_str()).unwrap();
+        ws.read().unwrap(); // the handshake is done and the client is streaming
+        ws
+    }
+
+    #[test]
+    fn dropping_the_server_joins_every_client_thread() {
+        // Threads exit within one poll of the stop flag, so a drop that did not wait for them
+        // would only sometimes be caught: repeat to make a missing join near-certain to show.
+        for _ in 0..12 {
+            let server = start_stream(Arc::new(LiveShared::default()), 60).unwrap();
+            let _clients: Vec<_> = (0..4).map(|_| connect(&server)).collect();
+            let count = Arc::clone(&server.clients);
+            assert_eq!(count.load(SeqCst), 4);
+            drop(server);
+            assert_eq!(count.load(SeqCst), 0, "a client thread outlived the server");
         }
+    }
+
+    const PERIOD: Duration = Duration::from_micros(16_667);
+
+    #[test]
+    fn late_wake_ups_do_not_shift_later_frames() {
+        let start = Instant::now();
+        let mut s = Schedule::new(start, PERIOD);
+        for _ in 0..120 {
+            let late = s.due() + Duration::from_millis(3); // every sleep overshoots
+            s.sent(late);
+        }
+        assert_eq!(s.due(), start + PERIOD * 120);
+    }
+
+    #[test]
+    fn a_long_stall_restarts_the_schedule_instead_of_bursting() {
+        let start = Instant::now();
+        let mut s = Schedule::new(start, PERIOD);
+        let late = s.due() + Duration::from_millis(400);
+        s.sent(late);
+        assert_eq!(
+            s.due(),
+            late + PERIOD,
+            "no frames owed after a stall beyond MAX_LAG"
+        );
+    }
+
+    #[test]
+    fn a_short_stall_is_caught_up() {
+        let start = Instant::now();
+        let mut s = Schedule::new(start, PERIOD);
+        let late = s.due() + MAX_LAG / 2;
+        s.sent(late);
+        assert_eq!(
+            s.due(),
+            start + PERIOD,
+            "frames owed within MAX_LAG are still sent"
+        );
     }
 }
