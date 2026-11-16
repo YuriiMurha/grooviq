@@ -7,6 +7,7 @@
 //! [`commands`].
 
 mod audio_log;
+mod autosave_notice;
 mod commands;
 mod events;
 mod exit;
@@ -16,11 +17,13 @@ mod project_cmds;
 mod settings;
 
 use audio_log::{AudioLog, Level};
+use autosave_notice::{AutosaveStatus, FAILED_EVENT, disabled_notice};
 use events::AudioEvent;
 use grooviq_engine::{
     AudioOutput, Controller, EngineConfig, OutputChoice, OutputEvent, StreamServer, cpal_backend,
     engine, start_stream,
 };
+use grooviq_project::autosave::{AutosaveTick, autosave_tick};
 use grooviq_project::recovery::{Recovery, RecoveryDir};
 use grooviq_project::session::Session;
 use settings::Settings;
@@ -29,7 +32,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 
 /// The rate the engine starts at; the output layer moves it to the device's own.
@@ -72,6 +75,10 @@ pub(crate) struct Audio {
     export_running: AtomicBool,
     /// Whether the person chose to quit: closing is held back until then.
     exit: exit::ExitState,
+    /// What the UI is owed about autosave: why it is off, and the failure going on. Retained,
+    /// so the UI can ask once it listens (`autosave_status`); the failure event only carries
+    /// later changes.
+    autosave: Arc<Mutex<AutosaveStatus>>,
 }
 
 /// Locks `mutex` even if a thread panicked while holding it.
@@ -115,7 +122,8 @@ fn start_audio(app: &AppHandle) -> Audio {
     let controller = Arc::new(Mutex::new(controller));
     let session = Arc::new(Mutex::new(Session::new(Arc::clone(&controller))));
     let data_dir = app.path().app_data_dir().ok();
-    let (recovery, pending_recovery) = start_recovery(data_dir.as_deref(), &log);
+    let (recovery, pending_recovery, autosave_off) = start_recovery(data_dir.as_deref(), &log);
+    let autosave_status = Arc::new(Mutex::new(AutosaveStatus::off(autosave_off)));
     let backups = data_dir.map_or_else(
         || std::env::temp_dir().join("grooviq-backups"),
         |dir| dir.join("backups"),
@@ -163,13 +171,14 @@ fn start_audio(app: &AppHandle) -> Audio {
     });
     if autosave_on {
         spawn_named("grooviq-autosave", {
-            let (session, recovery, log, app) = (
+            let (session, recovery, log, status, app) = (
                 Arc::clone(&session),
                 Arc::clone(&recovery),
                 Arc::clone(&log),
+                Arc::clone(&autosave_status),
                 app.clone(),
             );
-            move || autosave_loop(&session, &recovery, &log, &app)
+            move || autosave_loop(&session, &recovery, &log, &status, &app)
         });
     }
 
@@ -187,6 +196,7 @@ fn start_audio(app: &AppHandle) -> Audio {
         export_cancel: Arc::new(AtomicBool::new(false)),
         export_running: AtomicBool::new(false),
         exit: exit::ExitState::default(),
+        autosave: autosave_status,
     }
 }
 
@@ -195,10 +205,10 @@ fn start_audio(app: &AppHandle) -> Audio {
 fn start_recovery(
     data_dir: Option<&std::path::Path>,
     log: &Mutex<AudioLog>,
-) -> (Option<RecoveryDir>, Option<Recovery>) {
+) -> (Option<RecoveryDir>, Option<Recovery>, Option<String>) {
     let Some(dir) = data_dir else {
         lock(log).push(Level::Warn, "No data folder: autosave and recovery are off");
-        return (None, None);
+        return (None, None, None);
     };
     match RecoveryDir::start(&dir.join("recovery")) {
         Ok((recovery, found)) => {
@@ -213,59 +223,44 @@ fn start_recovery(
                 );
             }
             // The newest first; the others wait for later launches.
-            (Some(recovery), found.into_iter().next())
+            (Some(recovery), found.into_iter().next(), None)
         }
         Err(e) => {
             lock(log).push(Level::Warn, format!("Autosave and recovery are off: {e}"));
-            (None, None)
+            (None, None, disabled_notice(&e))
         }
     }
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
-/// Every second: if an autosave is due, snapshots the project under the session's lock and
-/// writes it outside it, then tells the UI. Stops once a clean exit took the folder.
+/// Every second: if an autosave is due, writes it (see [`autosave_tick`]) and tells the UI: the
+/// time of each one written, and, once per distinct error since the last success, why one could
+/// not be (the status keeps the latest failure for a UI that asks). Stops once a
+/// clean exit took the folder.
 fn autosave_loop(
     session: &Mutex<Session>,
     recovery: &Mutex<Option<RecoveryDir>>,
     log: &Mutex<AudioLog>,
+    status: &Mutex<AutosaveStatus>,
     app: &AppHandle,
 ) {
     loop {
         thread::sleep(AUTOSAVE_CHECK);
-        let now = Instant::now();
-        let snapshot = {
-            let mut session = lock(session);
-            if session.autosave_due(now) {
-                session.autosave_snapshot(now)
-            } else {
-                None
-            }
-        };
-        let Some((project, samples, original)) = snapshot else {
-            continue;
-        };
-        let written = match lock(recovery).as_ref() {
-            Some(dir) => dir.write_autosave(&project, &samples, original.as_deref()),
-            None => return,
-        };
-        match written {
-            Ok(()) => {
-                let at = unix_now();
-                lock(session).autosaved(at);
+        match autosave_tick(session, recovery, Instant::now()) {
+            AutosaveTick::Idle | AutosaveTick::Replaced => {}
+            AutosaveTick::Stopped => return,
+            AutosaveTick::Written(at) => {
+                lock(status).succeeded();
                 let _ = app.emit(AUTOSAVED_EVENT, at);
             }
-            Err(e) => {
-                lock(session).autosave_failed(Instant::now());
+            AutosaveTick::Failed(e) => {
+                // The log has every failure; the person is told once per distinct error.
                 lock(log).push(
                     Level::Warn,
                     format!("The autosave could not be written: {e}"),
                 );
+                if let Some(message) = lock(status).failed(&e) {
+                    let _ = app.emit(FAILED_EVENT, message);
+                }
             }
         }
     }
@@ -368,6 +363,7 @@ pub fn run() {
             project_cmds::project_save_as,
             project_cmds::project_export,
             project_cmds::project_export_cancel,
+            project_cmds::autosave_status,
             project_cmds::recovery_status,
             project_cmds::recovery_restore,
             project_cmds::recovery_discard,

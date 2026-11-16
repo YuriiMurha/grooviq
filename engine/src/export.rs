@@ -5,14 +5,14 @@
 //! written with integer and basic IEEE arithmetic only, so one state gives the same bytes on
 //! every platform.
 
+use crate::leftover::{create_owned_temp, remove_stale_owned};
 use crate::{
     AudioProcessor, BLOCK, Command, EngineConfig, EngineState, engine_with, ticks_to_frames,
 };
-use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufWriter};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The largest 24-bit sample.
@@ -117,8 +117,13 @@ impl From<hound::Error> for ExportError {
 /// An engine of its own at `options.sample_rate` plays the pattern from frame 0
 /// ([`Command::PlayLoops`]) for `ticks_to_frames(loops * length)` frames. The tail follows in
 /// 64-frame blocks until 0.1 s of blocks in a row peak at most 1e-5, or `max_tail_seconds`
-/// have passed; the silent blocks at the end are cut. The file is written to `<path>.part` and
-/// renamed to `path` when complete; on an error or a cancel the `.part` file is deleted.
+/// have passed; the silent blocks at the end are cut. The file is written to a hidden part
+/// file of its own beside `path` (`.<name>.grooviq-<pid>-<random>.part`, created new and locked
+/// while this export runs), synced, and renamed to `path` when complete; on an error or a
+/// cancel that part file is deleted.
+///
+/// Only part files of this naming, ten minutes old and whose writer is gone (nobody holds the
+/// lock) are removed at the start; a file named `<path>.part` or anything else is never touched.
 ///
 /// `progress` gets 0..1 over the pattern part (never decreasing) and 1.0 once, when the file is
 /// complete. `cancel` is checked between chunks of 4 096 frames.
@@ -133,34 +138,80 @@ pub fn export_wav(
     progress: &mut dyn FnMut(f32),
     cancel: &AtomicBool,
 ) -> Result<ExportReport, ExportError> {
-    let part = part_path(path);
-    let result = write_part(state, options, &part, progress, cancel)
-        .and_then(|report| fs::rename(&part, path).map(|()| report).map_err(Into::into));
-    if result.is_err() {
-        // It may not exist (nothing was created); there is nothing else to clean up.
-        let _ = fs::remove_file(&part);
+    export_wav_with(state, options, path, progress, cancel, &RealFiles)
+}
+
+/// The two file operations that make an export durable, as a seam for tests: the real ones
+/// ([`RealFiles`]) sync to disk and rename; a test's record the order they are called in, or
+/// fail. Not part of the API.
+#[doc(hidden)]
+pub trait PartFiles {
+    /// Puts the part file's bytes on disk (`path` is its name).
+    fn sync(&self, file: &File, path: &Path) -> io::Result<()>;
+    /// Gives the part file its final name.
+    fn rename(&self, part: &Path, to: &Path) -> io::Result<()>;
+}
+
+/// What the app uses.
+#[doc(hidden)]
+pub struct RealFiles;
+
+impl PartFiles for RealFiles {
+    fn sync(&self, file: &File, _path: &Path) -> io::Result<()> {
+        file.sync_all()
     }
-    result
+
+    fn rename(&self, part: &Path, to: &Path) -> io::Result<()> {
+        fs::rename(part, to)
+    }
 }
 
-/// `<path>.part`: the whole file name with `.part` added, next to the target.
-fn part_path(path: &Path) -> PathBuf {
-    let mut part = OsString::from(path.as_os_str());
-    part.push(".part");
-    PathBuf::from(part)
-}
-
-/// Renders and writes the whole file to `part`.
-fn write_part(
+/// [`export_wav`] through `files`: the test seam. Not part of the API.
+#[doc(hidden)]
+pub fn export_wav_with(
     state: EngineState,
     options: &ExportOptions,
-    part: &Path,
+    path: &Path,
     progress: &mut dyn FnMut(f32),
     cancel: &AtomicBool,
+    files: &dyn PartFiles,
 ) -> Result<ExportReport, ExportError> {
     if cancel.load(Ordering::Relaxed) {
         return Err(ExportError::Cancelled);
     }
+    // Leftovers of writers that died, never anything else (see `leftover`); best effort.
+    let _ = remove_stale_owned(path, ".part");
+    // A name of our own, locked while this export writes: no other export, and no cleanup, can
+    // take it, and an old file of the same name in the folder is none of our business.
+    let part = create_owned_temp(path, ".part")?;
+    // From here the part file is ours, and goes on any error.
+    let result = write_part(state, options, &part.file, progress, cancel)
+        .and_then(|report| {
+            // On disk before it takes the final name: a power cut must not leave a complete
+            // name on a file whose bytes never landed.
+            files.sync(&part.file, &part.path)?;
+            Ok(report)
+        })
+        .and_then(|report| {
+            files
+                .rename(&part.path, path)
+                .map(|()| report)
+                .map_err(Into::into)
+        });
+    if result.is_err() {
+        let _ = fs::remove_file(&part.path);
+    }
+    result
+}
+
+/// Renders and writes the whole file to `part` (the caller syncs it).
+fn write_part(
+    state: EngineState,
+    options: &ExportOptions,
+    part: &File,
+    progress: &mut dyn FnMut(f32),
+    cancel: &AtomicBool,
+) -> Result<ExportReport, ExportError> {
     let config = EngineConfig {
         sample_rate: options.sample_rate as f32,
     };
@@ -193,9 +244,8 @@ fn write_part(
             WavFormat::Float32 => hound::SampleFormat::Float,
         },
     };
-    let file = BufWriter::new(File::create(part)?);
     let mut out = Output {
-        writer: hound::WavWriter::new(file, spec)?,
+        writer: hound::WavWriter::new(BufWriter::new(part), spec)?,
         format: options.format,
         report: ExportReport {
             frames: 0,
@@ -255,13 +305,13 @@ fn render(processor: &mut AudioProcessor, out: &mut [f32]) {
 }
 
 /// The WAV being written and what has gone into it.
-struct Output {
-    writer: hound::WavWriter<BufWriter<File>>,
+struct Output<'a> {
+    writer: hound::WavWriter<BufWriter<&'a File>>,
     format: WavFormat,
     report: ExportReport,
 }
 
-impl Output {
+impl Output<'_> {
     /// Appends interleaved stereo samples.
     fn write(&mut self, samples: &[f32]) -> Result<(), hound::Error> {
         for &x in samples {
@@ -306,13 +356,5 @@ mod tests {
         assert_eq!(pcm24(0.5), 4_194_304);
         assert_eq!(pcm24(-0.5), -4_194_304);
         assert_eq!(pcm24(f32::NAN), 0);
-    }
-
-    #[test]
-    fn the_part_file_sits_next_to_the_target() {
-        assert_eq!(
-            part_path(Path::new("out/beat.wav")),
-            Path::new("out/beat.wav.part")
-        );
     }
 }

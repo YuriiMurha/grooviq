@@ -1,28 +1,39 @@
 //! Crash recovery.
 //!
 //! While the app runs, its recovery folder holds `session.lock` (locked by the running app, so
-//! a second instance cannot take the folder) and, once something changed, `autosave.grooviq`
-//! with `autosave.json` (the project's own path and when it was written). A clean exit removes
-//! all three. If the next launch finds the lock file and an autosave, the last session ended
-//! without a clean exit: the autosave is moved to `pending-<n>.grooviq`, its metadata to
-//! `pending-<n>.json`, and offered back.
+//! a second instance cannot take the folder) and, once something changed, an autosave
+//! `autosave-<n>.grooviq` with `autosave.json` (the project's own path, when it was written, and
+//! which autosave file it describes). A clean exit removes all of it. If the next launch finds
+//! the lock file and an autosave, the last session ended without a clean exit: the autosave is
+//! moved to `pending-<n>.grooviq`, its metadata to `pending-<n>.json`, and offered back.
+//!
+//! The autosave and its metadata are one pair, and the pair changes in one step: each autosave
+//! is written to a new file name, and the rename of `autosave.json` (which names that file) is
+//! the commit. A crash before it leaves the old pair whole, plus the new snapshot's file if it
+//! was complete; a crash after it leaves the new pair whole. A path is never paired with another
+//! project's bytes, and a complete newer snapshot is never thrown away: the next launch offers
+//! the old pair with its path and the newer snapshot untitled, newest first.
 //!
 //! A pending project stays on disk, and is offered on every launch (newest first), until the
 //! person restores it (it becomes `recovered-<n>.grooviq`, of which the newest
 //! [`MAX_BACKUPS`] are kept) or discards it (it is deleted). Quitting without choosing, or
 //! crashing again, never loses it.
 
-use crate::file::{SampleFiles, save};
+use crate::file::{SampleFiles, save, sync_folder};
 use crate::model::{EXTENSION, Project};
 use crate::session::MAX_BACKUPS;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOCK: &str = "session.lock";
-const AUTOSAVE: &str = "autosave.grooviq";
+/// An autosave is `autosave-<n>.grooviq`, a new number each time.
+const AUTOSAVE: &str = "autosave-";
+/// The one name earlier versions used: still recognised, never written.
+const LEGACY_AUTOSAVE: &str = "autosave.grooviq";
 const META: &str = "autosave.json";
 /// Waiting for the person's choice.
 const PENDING: &str = "pending-";
@@ -35,6 +46,10 @@ const RECOVERED: &str = "recovered-";
 struct Meta {
     original: Option<PathBuf>,
     saved_at: u64,
+    /// The autosave file this describes (a name in the folder); absent in files written by
+    /// earlier versions, which meant [`LEGACY_AUTOSAVE`], and in a pending project's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
 }
 
 /// A project an earlier session left unsaved.
@@ -55,6 +70,8 @@ pub struct RecoveryDir {
     root: PathBuf,
     /// Held, and locked, for the app's life.
     lock: File,
+    /// The number of the newest autosave file this session wrote.
+    written: AtomicU64,
 }
 
 fn unix_now() -> u64 {
@@ -83,6 +100,43 @@ fn modified(path: &Path) -> u64 {
 fn read_meta(path: &Path) -> Option<Meta> {
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+/// `autosave-<n>.grooviq` (or the legacy `autosave.grooviq`): a name this module wrote.
+fn is_autosave_name(name: &str) -> bool {
+    name == LEGACY_AUTOSAVE || is_numbered(name, AUTOSAVE, EXTENSION)
+}
+
+/// `<prefix><digits>.<extension>`.
+fn is_numbered(name: &str, prefix: &str, extension: &str) -> bool {
+    name.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix(extension))
+        .and_then(|rest| rest.strip_suffix('.'))
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Writes `bytes` to `path` so that `path` is always either what it was or all of `bytes`:
+/// a temp file beside it, flushed and synced, renamed over it, then the folder synced.
+fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = grooviq_engine::sibling(path, ".tmp");
+    let written = (|| {
+        let mut file = File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)
+    })();
+    match written {
+        Ok(()) => {
+            sync_folder(path);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// Writes the session's process id into the lock file, for a person looking at the folder.
@@ -128,26 +182,114 @@ impl RecoveryDir {
         let dir = Self {
             root: root.to_path_buf(),
             lock,
+            written: AtomicU64::new(0),
         };
 
-        let autosave = root.join(AUTOSAVE);
-        if leftover && autosave.is_file() {
-            dir.set_aside(&autosave)?;
+        if leftover {
+            // Oldest first: the pending numbers grow in the order they are set aside, so the
+            // newer work stays the newer one even if this launch dies half way.
+            for (autosave, meta) in dir.recoverable() {
+                dir.set_aside(&autosave, meta)?;
+            }
         }
-        // Whatever is left belongs to no one now.
-        remove(&autosave)?;
+        // Whatever is left (an unfinished write, a metadata file without its autosave) belongs
+        // to no one now.
+        dir.remove_autosave_files(None)?;
         remove(&root.join(META))?;
+        dir.remove_unfinished_writes();
         dir.prune();
         let pending = dir.pending();
         Ok((dir, pending))
     }
 
-    /// Moves the autosave aside as a pending project, its metadata first.
-    fn set_aside(&self, autosave: &Path) -> io::Result<()> {
-        let meta = read_meta(&self.root.join(META)).unwrap_or_else(|| Meta {
-            original: None,
-            saved_at: modified(autosave),
+    /// What a crash left to offer, oldest first, each with its metadata if it has any:
+    ///
+    /// * the autosave `autosave.json` names, if both are there: the last committed pair, with
+    ///   its original path;
+    /// * the newest autosave file newer than that (a write that finished its file and died
+    ///   before its metadata), untitled: the work is kept, and no path is claimed for it, since
+    ///   the metadata that is there describes another snapshot. With no committed pair at all
+    ///   (a crash before the very first metadata, or a metadata left behind), the newest
+    ///   autosave file alone, likewise untitled.
+    ///
+    /// Older leftovers (a removal that failed after a commit) are superseded copies: not offered.
+    fn recoverable(&self) -> Vec<(PathBuf, Option<Meta>)> {
+        let files = self.numbered(AUTOSAVE);
+        let legacy = self.root.join(LEGACY_AUTOSAVE);
+        // The committed pair, as `(number, file, metadata)`; the legacy name counts as number 0.
+        let committed = read_meta(&self.root.join(META)).and_then(|meta| {
+            let name = meta
+                .file
+                .clone()
+                .unwrap_or_else(|| LEGACY_AUTOSAVE.to_owned());
+            // Only ever a file of ours in this folder, whatever the metadata says.
+            if !is_autosave_name(&name) || !self.root.join(&name).is_file() {
+                return None;
+            }
+            let number = files
+                .iter()
+                .find(|(_, path)| path.file_name().is_some_and(|n| n == name.as_str()))
+                .map_or(0, |(n, _)| *n);
+            Some((number, self.root.join(&name), meta))
         });
+        let floor = committed.as_ref().map(|(n, ..)| *n);
+        let newer = files
+            .into_iter()
+            .rfind(|(n, _)| floor.is_none_or(|floor| *n > floor))
+            .map(|(_, path)| path)
+            // Only an earlier version's file, and nothing numbered or committed.
+            .or_else(|| (committed.is_none() && legacy.is_file()).then_some(legacy));
+        let mut out = Vec::new();
+        if let Some((_, path, meta)) = committed {
+            out.push((path, Some(meta)));
+        }
+        if let Some(path) = newer {
+            out.push((path, None));
+        }
+        out
+    }
+
+    /// Removes every autosave file but `keep` (a file name). Never the metadata.
+    fn remove_autosave_files(&self, keep: Option<&str>) -> io::Result<()> {
+        for (_, path) in self.numbered(AUTOSAVE) {
+            if keep != path.file_name().and_then(|n| n.to_str()) {
+                remove(&path)?;
+            }
+        }
+        if keep != Some(LEGACY_AUTOSAVE) {
+            remove(&self.root.join(LEGACY_AUTOSAVE))?;
+        }
+        Ok(())
+    }
+
+    /// Removes the temp files of writes that died (`autosave.json.tmp`,
+    /// `autosave-<n>.grooviq.tmp`, `pending-<n>.json.tmp`). Only at the start, while this
+    /// session alone holds the folder, so no write of ours is under way.
+    fn remove_unfinished_writes(&self) {
+        for entry in fs::read_dir(&self.root).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_ours = name.strip_suffix(".tmp").is_some_and(|base| {
+                base == META
+                    || base == LEGACY_AUTOSAVE
+                    || is_autosave_name(base)
+                    || is_numbered(base, PENDING, "json")
+            });
+            if is_ours && entry.file_type().is_ok_and(|t| t.is_file()) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    /// Moves the autosave aside as a pending project, its metadata first.
+    fn set_aside(&self, autosave: &Path, meta: Option<Meta>) -> io::Result<()> {
+        let meta = meta.map_or_else(
+            || Meta {
+                original: None,
+                saved_at: modified(autosave),
+                file: None,
+            },
+            |meta| Meta { file: None, ..meta },
+        );
         // Numbers above every pending or recovered file so far keep the names in order.
         let newest = self
             .numbered(PENDING)
@@ -160,7 +302,7 @@ impl RecoveryDir {
         // Without its metadata the project is still offered (untitled, dated by the file),
         // so a failed write here is not worth losing it over.
         if let Ok(json) = serde_json::to_vec(&meta) {
-            let _ = fs::write(file.with_extension("json"), json);
+            let _ = write_atomic(&file.with_extension("json"), &json);
         }
         fs::rename(autosave, &file)
     }
@@ -237,28 +379,58 @@ impl RecoveryDir {
         Ok(())
     }
 
-    /// Writes the autosave atomically (through `save`), then `autosave.json` with `original`
-    /// and the time.
+    /// Writes an autosave (atomically, through `save`, to a new file name), then commits it by
+    /// atomically replacing `autosave.json` with `original`, the time and that file's name. See
+    /// the module docs: at every moment of a crash the folder holds a whole pair. On an error
+    /// the new file is removed and the old pair stays.
     pub fn write_autosave(
         &self,
         project: &Project,
         samples: &SampleFiles,
         original: Option<&Path>,
     ) -> io::Result<()> {
-        save(project, samples, &self.root.join(AUTOSAVE))?;
-        let meta = Meta {
-            original: original.map(Path::to_path_buf),
-            saved_at: unix_now(),
-        };
-        let json = serde_json::to_vec(&meta).map_err(io::Error::other)?;
-        let tmp = self.root.join(format!("{META}.tmp"));
-        fs::write(&tmp, json)?;
-        fs::rename(&tmp, self.root.join(META))
+        self.write_autosave_with(project, samples, original, || Ok(()))
+    }
+
+    /// [`Self::write_autosave`] with `between` run after the autosave file is in place and
+    /// before it is committed: the test hook for "a crash between the two writes". Not part of
+    /// the API.
+    #[doc(hidden)]
+    pub fn write_autosave_with(
+        &self,
+        project: &Project,
+        samples: &SampleFiles,
+        original: Option<&Path>,
+        between: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
+        let number = self.written.fetch_add(1, Ordering::AcqRel) + 1;
+        let name = format!("{AUTOSAVE}{number}.{EXTENSION}");
+        let file = self.root.join(&name);
+        save(project, samples, &file)?;
+        let committed = between().and_then(|()| {
+            let meta = Meta {
+                original: original.map(Path::to_path_buf),
+                saved_at: unix_now(),
+                file: Some(name.clone()),
+            };
+            let json = serde_json::to_vec(&meta).map_err(io::Error::other)?;
+            write_atomic(&self.root.join(META), &json)
+        });
+        if let Err(e) = committed {
+            let _ = fs::remove_file(&file);
+            return Err(e);
+        }
+        // The old autosave is only an older copy now; one that cannot be removed is taken
+        // care of at the next launch, or the next autosave.
+        let _ = self.remove_autosave_files(Some(&name));
+        Ok(())
     }
 
     /// Removes the autosave: the project was just saved, so there is nothing to recover.
     pub fn clear_autosave(&self) -> io::Result<()> {
-        remove(&self.root.join(AUTOSAVE))?;
+        // The files first: a crash half way leaves a metadata file naming nothing, which offers
+        // nothing, rather than an autosave to offer.
+        self.remove_autosave_files(None)?;
         remove(&self.root.join(META))
     }
 
@@ -290,7 +462,7 @@ impl RecoveryDir {
     /// offers nothing.
     pub fn clean_exit(self) -> io::Result<()> {
         self.clear_autosave()?;
-        let Self { root, lock } = self;
+        let Self { root, lock, .. } = self;
         // Closed before it is removed: Windows refuses to delete an open file.
         drop(lock);
         remove(&root.join(LOCK))
