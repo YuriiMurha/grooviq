@@ -28,7 +28,8 @@ import {
   type GridLayout,
 } from "./gridModel";
 import { readPalette, type GridRenderer, type Palette } from "./palette";
-import { defaultRenderer } from "./renderer";
+import { createCanvasRenderer } from "./canvasRenderer";
+import { createGlRenderer } from "./glRenderer";
 
 /** A step is a sixteenth: 240 ticks. */
 const TICKS_PER_STEP = 240n;
@@ -36,6 +37,8 @@ const TICKS_PER_STEP = 240n;
 const DRAG_START_PX = 3;
 /** What Alt+Up and Alt+Down change the velocity by. */
 const VELOCITY_KEY_STEP = 0.1;
+/** How long a lost WebGL context may stay lost before the grid gives up on it and draws in 2D. */
+export const RESTORE_WAIT_MS = 2000;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
@@ -58,8 +61,12 @@ interface Props {
   latest: RefObject<LiveFrame | null>;
   /** The output's rate, for the latency shift of the playhead. */
   sampleRate: number;
-  /** Makes the renderer for the canvas (tests pass a recording one). */
-  createRenderer?: (canvas: HTMLCanvasElement) => GridRenderer;
+  /** Makes the WebGL2 renderer for the canvas; `null` when WebGL2 or its shaders are not
+   * available (tests pass a recording one). */
+  createRenderer?: (canvas: HTMLCanvasElement) => GridRenderer | null;
+  /** Makes the 2D renderer used instead, always on a fresh canvas: one that has handed out a
+   * WebGL2 context cannot give a 2D one. */
+  createFallbackRenderer?: (canvas: HTMLCanvasElement) => GridRenderer;
 }
 
 /** A velocity being dragged, or committed and waiting for the view that holds it. */
@@ -89,7 +96,15 @@ interface Scene {
 
 /** The channel rack's step grid: one canvas for every channel's steps. The cells, playhead and
  * focus are drawn by a `GridRenderer`; React only handles input and sizing. */
-export function StepGrid({ channels, pattern, bpm, latest, sampleRate, createRenderer = defaultRenderer }: Props) {
+export function StepGrid({
+  channels,
+  pattern,
+  bpm,
+  latest,
+  sampleRate,
+  createRenderer = createGlRenderer,
+  createFallbackRenderer = createCanvasRenderer,
+}: Props) {
   const { apply } = useProject();
   const canvas = useRef<HTMLCanvasElement>(null);
   const [focus, setFocus] = useState<Cell>({ row: 0, step: 0 });
@@ -114,11 +129,14 @@ export function StepGrid({ channels, pattern, bpm, latest, sampleRate, createRen
   const press = useRef<Press | null>(null);
   const renderer = useRef<GridRenderer | null>(null);
   const palette = useRef<Palette | null>(null);
-  const factory = useRef(createRenderer);
+  const factories = useRef({ gl: createRenderer, fallback: createFallbackRenderer });
+  // Once WebGL2 has failed (no renderer, or a context lost for good) the grid draws in 2D on a
+  // new canvas element (the `key` below), and stays there.
+  const [use2d, setUse2d] = useState(false);
 
   useEffect(() => {
-    factory.current = createRenderer;
-  }, [createRenderer]);
+    factories.current = { gl: createRenderer, fallback: createFallbackRenderer };
+  }, [createRenderer, createFallbackRenderer]);
 
   // Keep the scene current; any change is a redraw. A new view comes with new `channels` and
   // `pattern` objects.
@@ -147,29 +165,48 @@ export function StepGrid({ channels, pattern, bpm, latest, sampleRate, createRen
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  // The renderer: made once, rebuilt after a lost WebGL context comes back.
+  // The renderer: WebGL2 first, rebuilt when a lost context comes back. If WebGL2 gives no
+  // renderer, or a lost context is not back within RESTORE_WAIT_MS, switch to 2D for good.
   useEffect(() => {
     const el = canvas.current;
     if (!el) return;
+    let wait: ReturnType<typeof setTimeout> | undefined;
+    const giveUp = () => {
+      setHasFocus(false);
+      setUse2d(true);
+    };
     const build = () => {
+      clearTimeout(wait);
       palette.current = paletteOf(document.documentElement);
-      renderer.current = factory.current(el);
+      const made = use2d ? factories.current.fallback(el) : factories.current.gl(el);
+      renderer.current = made;
       dirty.current = true;
+      // Deferred: a state change straight from an effect would render in a cascade.
+      if (!made) queueMicrotask(giveUp);
     };
     const onLost = (e: Event) => {
       e.preventDefault();
       renderer.current = null;
+      clearTimeout(wait);
+      wait = setTimeout(giveUp, RESTORE_WAIT_MS);
     };
     build();
+    if (use2d) {
+      return () => {
+        renderer.current?.dispose();
+        renderer.current = null;
+      };
+    }
     el.addEventListener("webglcontextlost", onLost);
     el.addEventListener("webglcontextrestored", build);
     return () => {
+      clearTimeout(wait);
       el.removeEventListener("webglcontextlost", onLost);
       el.removeEventListener("webglcontextrestored", build);
       renderer.current?.dispose();
       renderer.current = null;
     };
-  }, []);
+  }, [use2d]);
 
   // The draw loop: the playhead is read every frame; the grid is drawn only when the playhead's
   // step, the cells, the focus or the size changed.
@@ -345,6 +382,7 @@ export function StepGrid({ channels, pattern, bpm, latest, sampleRate, createRen
   return (
     <div className="step-grid">
       <canvas
+        key={use2d ? "2d" : "webgl2"}
         ref={canvas}
         className="step-grid-canvas"
         tabIndex={0}

@@ -35,7 +35,7 @@ interface Draw {
 function recorder() {
   const draws: Draw[] = [];
   const renderers: (GridRenderer & { dispose: ReturnType<typeof vi.fn> })[] = [];
-  const factory = vi.fn((): GridRenderer => {
+  const factory = vi.fn<(canvas: HTMLCanvasElement) => GridRenderer>(() => {
     const r = {
       draw: (instances: Float32Array, layout: GridLayout) => {
         draws.push({ instances: instances.slice(), layout });
@@ -66,9 +66,19 @@ const nextFrame = () =>
 const KICK = channel(1, "Kick");
 const SNARE = channel(2, "Snare");
 
-function setup(view: ProjectView, opts: { latest?: RefObject<LiveFrame | null>; renderer?: boolean } = {}) {
+function setup(
+  view: ProjectView,
+  opts: {
+    latest?: RefObject<LiveFrame | null>;
+    renderer?: boolean;
+    /** The WebGL2 factory fails (no context, or shaders that do not link). */
+    glFails?: boolean;
+  } = {},
+) {
   engine.current = createFakeEngine(view);
   const rec = recorder();
+  const fallback = recorder();
+  const failingGl = vi.fn<(canvas: HTMLCanvasElement) => GridRenderer | null>(() => null);
   const latest = opts.latest ?? createRef<LiveFrame | null>();
   const errors: string[] = [];
   const { unmount } = render(
@@ -81,17 +91,24 @@ function setup(view: ProjectView, opts: { latest?: RefObject<LiveFrame | null>; 
             bpm={v.bpm}
             latest={latest}
             sampleRate={48000}
-            createRenderer={opts.renderer === false ? undefined : rec.factory}
+            createRenderer={opts.renderer === false ? undefined : opts.glFails ? failingGl : rec.factory}
+            createFallbackRenderer={opts.renderer === false ? undefined : fallback.factory}
           />
         )}
       </Session>
       <HintBar />
     </>,
   );
-  return { rec, latest, errors, unmount, engine: engine.current };
+  return { rec, fallback, failingGl, latest, errors, unmount, engine: engine.current };
 }
 
-const grid = () => screen.findByLabelText("Step grid");
+/** The grid once it is on screen and its effects (renderer, a 2D swap) have run: the first view
+ * arrives outside `act`, so React may show the canvas before it flushes them. */
+async function grid() {
+  await screen.findByLabelText("Step grid");
+  await act(async () => {});
+  return screen.getByLabelText("Step grid");
+}
 
 beforeEach(() => {
   frames = [];
@@ -370,5 +387,78 @@ describe("StepGrid", () => {
     expect(getContext.mock.calls.map((c) => c[0])).toEqual(["webgl2", "2d"]);
     expect(calls.some((c) => c.startsWith("clearRect"))).toBe(true);
     expect(calls.some((c) => c.startsWith("fill"))).toBe(true);
+  });
+  it("alt_arrows_keep_the_velocity_within_0_and_1", async () => {
+    // Step 1 is at full velocity, step 2 almost silent.
+    const { engine } = setup(project([KICK], { 1: [1, 0.05] }));
+    const canvas = await grid();
+    act(() => canvas.focus());
+    // Alt+Up at 1.0 has nowhere to go: nothing is sent.
+    fireEvent.keyDown(canvas, { key: "ArrowUp", altKey: true });
+    await act(async () => {});
+    expect(engine.edits()).toEqual([]);
+    // Alt+Down at 0.05 stops at 0 (still a hit, silent), not below.
+    fireEvent.keyDown(canvas, { key: "ArrowRight" });
+    fireEvent.keyDown(canvas, { key: "ArrowDown", altKey: true });
+    await waitFor(() => expect(engine.edits()).toEqual([{ kind: "setStepVelocity", channel: 1, step: 1, velocity: 0 }]));
+  });
+
+  it("a_webgl2_renderer_that_cannot_be_built_falls_back_to_2d_on_a_fresh_canvas", async () => {
+    const { fallback, failingGl } = setup(project([KICK], { 1: [1] }), { glFails: true });
+    await waitFor(() => expect(fallback.factory).toHaveBeenCalledTimes(1));
+    // A canvas that already handed out a WebGL2 context cannot give a 2D one: it is replaced.
+    expect(failingGl).toHaveBeenCalledTimes(1);
+    const twoD = fallback.factory.mock.calls[0][0] as unknown as HTMLCanvasElement;
+    expect(twoD).not.toBe(failingGl.mock.calls[0][0]);
+    expect(screen.getByLabelText("Step grid")).toBe(twoD);
+    nextFrame();
+    expect(fallback.draws.length).toBeGreaterThan(0);
+    expect(velocityIn(fallback.draws.at(-1)!, 0, 0)).toBe(1);
+  });
+
+  it("a_lost_context_that_never_comes_back_falls_back_to_2d", async () => {
+    const { rec, fallback } = setup(project([KICK], { 1: [1] }));
+    const canvas = await grid();
+    nextFrame();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      act(() => {
+        canvas.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+      });
+      act(() => vi.advanceTimersByTime(1900));
+      expect(fallback.factory).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(200));
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(fallback.factory).toHaveBeenCalledTimes(1);
+    const fresh = screen.getByLabelText("Step grid");
+    expect(fresh).not.toBe(canvas);
+    expect(fallback.factory.mock.calls[0][0]).toBe(fresh);
+    nextFrame();
+    expect(fallback.draws.length).toBe(1);
+    // The 2D grid takes clicks like the WebGL2 one did, and WebGL2 is not tried again.
+    expect(rec.factory).toHaveBeenCalledTimes(1);
+  });
+
+  it("a_context_restored_in_time_stays_on_webgl2", async () => {
+    const { rec, fallback } = setup(project([KICK]));
+    const canvas = await grid();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      act(() => {
+        canvas.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+      });
+      act(() => vi.advanceTimersByTime(1000));
+      act(() => {
+        canvas.dispatchEvent(new Event("webglcontextrestored"));
+      });
+      act(() => vi.advanceTimersByTime(5000));
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(fallback.factory).not.toHaveBeenCalled();
+    expect(rec.factory).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText("Step grid")).toBe(canvas);
   });
 });
