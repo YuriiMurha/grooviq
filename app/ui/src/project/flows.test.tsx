@@ -116,6 +116,16 @@ describe("new_project_with_unsaved_changes_asks_first", () => {
     expect(projectCalls()).toEqual([]);
   });
 
+  it("Escape is Cancel: no new project, nothing saved, the dialog closes", async () => {
+    const user = await start();
+    await chooseFromMenu(user, VIEW, "New");
+    await screen.findByRole("dialog", { name: "Save changes?" });
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(projectCalls()).toEqual([]);
+    expect(names()).not.toContain("project_new");
+  });
+
   it("Don't save starts the new project without saving", async () => {
     const user = await start();
     await chooseFromMenu(user, VIEW, "New");
@@ -187,6 +197,16 @@ describe("close_requested_shows_the_same_prompt", () => {
     const dialog = await screen.findByRole("dialog", { name: "Save changes?" });
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(projectCalls()).toEqual([]);
+  });
+
+  it("Escape is Cancel: no app_exit, the dialog closes", async () => {
+    const user = await start();
+    emit("close-requested", null);
+    await screen.findByRole("dialog", { name: "Save changes?" });
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(projectCalls()).toEqual([]);
+    expect(names()).not.toContain("app_exit");
   });
 
   it("Don't save quits through app_exit", async () => {
@@ -394,7 +414,7 @@ describe("export", () => {
     expect(status.getAttribute("role")).toBe("status");
     expect(called("project_export")[0]?.args).toEqual({
       path: "/music/out.wav",
-      options: { sampleRate: 44100, format: "pcm24", loops: 1 },
+      options: { sampleRate: 48000, format: "pcm24", loops: 1 },
     });
   });
 
@@ -507,6 +527,19 @@ describe("bpm_field_accepts_typing_and_clamps_to_20_400", () => {
     await user.clear(input);
     await user.type(input, "128.456{Enter}");
     expect(tempoEdits()).toEqual([{ kind: "setTempo", bpm: 128.46 }]);
+  });
+
+  it("puts the old value back for an empty field (it must not become 20 BPM)", async () => {
+    const { user, input } = await field();
+    await user.clear(input);
+    await user.keyboard("{Enter}");
+    expect(tempoEdits()).toEqual([]);
+    expect(input.value).toBe("140.00");
+    // Leaving an emptied field does the same.
+    await user.clear(input);
+    await user.tab();
+    expect(tempoEdits()).toEqual([]);
+    expect(input.value).toBe("140.00");
   });
 
   it("puts the old value back for text that is not a number", async () => {

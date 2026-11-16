@@ -11,6 +11,8 @@ import { exportMessage } from "./exportText";
 import { Modal } from "./Modal";
 
 const RATES = [44100, 48000, 96000] as const;
+/** The project default (spec 5.7). */
+const DEFAULT_RATE = 48000;
 const LOOPS_MAX = 16;
 
 interface Props {
@@ -27,7 +29,7 @@ type Phase =
 /** Export WAV: format, rate and loops, then a file prompt, a progress bar and the result. */
 export function ExportDialog({ name, onClose }: Props) {
   const [format, setFormat] = useState<ExportFormat>("pcm24");
-  const [rate, setRate] = useState<number>(44100);
+  const [rate, setRate] = useState<number>(DEFAULT_RATE);
   const [loops, setLoops] = useState("1");
   const [phase, setPhase] = useState<Phase>({ kind: "options", error: null });
   const cancelled = useRef(false);
