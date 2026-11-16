@@ -645,6 +645,55 @@ describe("transport", () => {
     expect(called("transport_play")).toHaveLength(1);
   });
 
+  it("Space plays after a tempo is typed and Enter leaves the field", async () => {
+    const user = await start(CLEAN);
+    reply("transport_play", null);
+    const bpm = screen.getByRole("textbox", { name: "BPM" });
+    await user.click(bpm);
+    await user.keyboard(" ");
+    expect(called("transport_play")).toHaveLength(0);
+    await user.clear(bpm);
+    await user.type(bpm, "128{Enter}");
+    expect(called("project_edit").map((c) => c.args?.edit)).toEqual([{ kind: "setTempo", bpm: 128 }]);
+    expect(document.activeElement).not.toBe(bpm);
+    await user.keyboard(" ");
+    await waitFor(() => expect(called("transport_play")).toHaveLength(1));
+  });
+
+  it("Space plays after a pattern length is typed and Enter leaves the field", async () => {
+    const user = await start(CLEAN);
+    reply("transport_play", null);
+    reply("project_edit", (args: Args) => ({
+      ...CLEAN,
+      pattern: { ...CLEAN.pattern, steps: (args?.edit as { steps: number }).steps },
+    }));
+    const length = screen.getByRole("spinbutton", { name: "Pattern length" });
+    await user.clear(length);
+    await user.type(length, "32{Enter}");
+    expect(called("project_edit").map((c) => c.args?.edit)).toEqual([{ kind: "setPatternLength", steps: 32 }]);
+    expect(document.activeElement).not.toBe(length);
+    await user.keyboard(" ");
+    await waitFor(() => expect(called("transport_play")).toHaveLength(1));
+  });
+
+  it("Space plays while the swing slider or a time-signature select has focus, and only plays", async () => {
+    const user = await start(CLEAN);
+    reply("transport_play", null);
+    const swing = screen.getByRole("slider", { name: "Swing" }) as HTMLInputElement;
+    act(() => swing.focus());
+    await user.keyboard(" ");
+    await waitFor(() => expect(called("transport_play")).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Play" }).getAttribute("aria-pressed")).toBe("true"));
+    const beats = screen.getByRole("combobox", { name: "Beats per bar" }) as HTMLSelectElement;
+    act(() => beats.focus());
+    await user.keyboard(" ");
+    await waitFor(() => expect(called("transport_stop")).toHaveLength(1));
+    // Neither control took the key as its own.
+    expect(swing.value).toBe("0");
+    expect(beats.value).toBe("4");
+    expect(called("project_edit")).toHaveLength(0);
+  });
+
   it("shortcuts are off while a dialog is open", async () => {
     const user = await start();
     emit("close-requested", null);
