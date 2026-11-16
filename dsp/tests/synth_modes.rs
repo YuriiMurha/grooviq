@@ -186,3 +186,81 @@ fn the_sampler_and_synth_agree_on_slide_timing() {
         "sampler {sampler_end}, synth {synth_end}"
     );
 }
+
+fn off(offset: u32, key: u8) -> NoteEvent {
+    NoteEvent {
+        offset,
+        key,
+        velocity: 0.0,
+        on: false,
+        slide: false,
+    }
+}
+
+fn sine_synth_in(mode: f32) -> Synth {
+    let mut s = sine_synth();
+    s.set_param(index(&synth::PARAM_IDS, "voice_mode"), mode);
+    s
+}
+
+fn peak(x: &[f32]) -> f32 {
+    x.iter().fold(0.0, |m, v| m.max(v.abs()))
+}
+
+#[test]
+fn synth_notes_after_a_choke_start_on_their_frame() {
+    // A note right after a choke sounds from its own frame, as on a fresh synth: in poly mode
+    // with all 16 voices sounding, and in mono and legato modes (slot 0 just choked).
+    for (mode, notes) in [(0.0, 16u8), (1.0, 1), (2.0, 1)] {
+        let chord: Vec<NoteEvent> = (0..notes).map(|i| on(i as u32, 40 + i, false)).collect();
+        let mut s = sine_synth_in(mode);
+        render(&mut s, 4_800, &chord);
+        assert_eq!(voices(&s), notes as f32, "mode {mode}");
+        s.choke();
+        let with_note = render(&mut s, 4_800, &[on(0, 72, false)]);
+        let mut fresh = sine_synth_in(mode);
+        let alone = render(&mut fresh, 4_800, &[on(0, 72, false)]);
+        for k in FADE..4_800 {
+            assert!(
+                (with_note[k] - alone[k]).abs() < 1e-6,
+                "mode {mode}, frame {k}: {} vs {}",
+                with_note[k],
+                alone[k]
+            );
+        }
+    }
+}
+
+#[test]
+fn synth_choke_retires_held_keys_from_priority() {
+    // Mono and legato: 48 is down when the synth is choked. A new 60 then plays alone: its
+    // note-off releases it instead of returning to the choked 48.
+    for mode in [1.0, 2.0] {
+        let mut s = sine_synth_in(mode);
+        render(&mut s, 4_800, &[on(0, 48, false)]);
+        s.choke();
+        render(&mut s, 48_000, &[on(0, 60, false), off(4_800, 60)]);
+        assert_eq!(voices(&s), 0.0, "mode {mode}: released");
+    }
+}
+
+#[test]
+fn synth_a_late_note_off_after_a_choke_leaves_the_newer_note_alone() {
+    // A choked note's note-off arrives after a new note on its key started. It belongs to the
+    // choked note, so the new one plays on until its own.
+    for mode in [0.0, 1.0, 2.0] {
+        let mut s = sine_synth_in(mode);
+        render(&mut s, 4_800, &[on(0, 48, false)]);
+        s.choke();
+        let l = render(&mut s, 48_000, &[on(0, 48, false), off(100, 48)]);
+        assert!(
+            peak(&l[47_000..]) > 0.1,
+            "mode {mode}: the newer note sounds"
+        );
+        let l = render(&mut s, 48_000, &[off(0, 48)]);
+        assert!(
+            peak(&l[47_000..]) < 1e-4,
+            "mode {mode}: its own note-off ends it"
+        );
+    }
+}

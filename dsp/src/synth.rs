@@ -25,6 +25,10 @@ use crate::wavetable::{self, LEVELS, TABLE_LEN, Wavetables};
 
 pub const NUM_PARAMS: usize = 40;
 const NUM_VOICES: usize = 16;
+/// Voice slots: NUM_VOICES where notes start, then twice as many where stolen, cut and choked
+/// voices fade out (STEAL_FADE_MS), so the next note starts on its own frame. With every fade
+/// slot busy, a voice fades where it is and the note waits for it, as before.
+const SLOTS: usize = 3 * NUM_VOICES;
 const MAX_UNI: usize = 7;
 const SCOPE_LEN: usize = 256;
 const STEAL_FADE_MS: f32 = 3.0;
@@ -1009,6 +1013,7 @@ impl Lfo {
 #[derive(Clone, Copy, Debug)]
 struct Pending {
     key: u8,
+    ticket: u32,
     vel: f32,
     gate: bool,
     from: Option<f32>,
@@ -1098,6 +1103,8 @@ struct Voice {
     active: bool,
     gate: bool,
     key: u8,
+    /// The note's ticket on its key: the n-th note-on of a key owns that key's n-th note-off.
+    ticket: u32,
     vel_amp: f32,
     vel_flt: f32,
     /// After an in-place retrigger the velocity gains ramp to `vel_to` by `vel_step` per sample
@@ -1147,6 +1154,7 @@ impl Voice {
             active: false,
             gate: false,
             key: 60,
+            ticket: 0,
             vel_amp: 1.0,
             vel_flt: 1.0,
             vel_to: (1.0, 1.0),
@@ -1196,6 +1204,7 @@ impl Voice {
         self.active = true;
         self.gate = p.gate;
         self.key = p.key;
+        self.ticket = p.ticket;
         (self.vel_amp, self.vel_flt) = vel_curves(p.vel);
         self.vel_left = 0;
         self.age = age;
@@ -1482,7 +1491,7 @@ pub struct Synth {
     cx: Ctx,
     tables: &'static Wavetables,
     p: [f32; NUM_PARAMS],
-    voices: [Voice; NUM_VOICES],
+    voices: [Voice; SLOTS],
     b: Bufs,
     lfo: Lfo,
     /// LFO routing weights (cutoff, pitch, shape, volume): the target's ramps to 1, the others
@@ -1517,8 +1526,13 @@ pub struct Synth {
     drive_cache: (f32, f32, f32),
     mode: u8,
     age: u64,
-    stack: [u8; 16],
+    /// Mono and legato: the held notes `(key, ticket)`, oldest first; the top one sounds.
+    stack: [(u8, u32); 16],
     stack_len: usize,
+    /// Note-ons and note-offs so far per key: a key's n-th note-off belongs to its n-th
+    /// note-on, so a late note-off never ends a newer note on its key.
+    ons: [u32; 128],
+    offs: [u32; 128],
     last_pitch: Option<f32>,
     last_voice: usize,
     fresh: bool,
@@ -1595,8 +1609,10 @@ impl Synth {
             drive_cache: (f32::NAN, 0.0, 0.0),
             mode: 0,
             age: 0,
-            stack: [0; 16],
+            stack: [(0, 0); 16],
             stack_len: 0,
+            ons: [0; 128],
+            offs: [0; 128],
             last_pitch: None,
             last_voice: 0,
             fresh: true,
@@ -1850,21 +1866,53 @@ impl Synth {
 
     fn handle(&mut self, e: NoteEvent) {
         let key = e.key.min(127);
+        let k = key as usize;
         if e.on && e.velocity > 0.0 {
+            let ticket = self.ons[k];
+            self.ons[k] = ticket.wrapping_add(1);
             if self.mode == 0 {
-                self.poly_on(key, e.velocity, e.slide);
+                self.poly_on(key, ticket, e.velocity, e.slide);
             } else {
-                self.mono_on(key, e.velocity, e.slide);
+                self.mono_on(key, ticket, e.velocity, e.slide);
             }
             self.last_pitch = Some(key as f32);
-        } else if self.mode == 0 {
-            self.poly_off(key);
-        } else {
-            self.mono_off(key);
+        } else if self.offs[k] != self.ons[k] {
+            // (a note-off with no held note on its key, after a reset, belongs to nothing)
+            let ticket = self.offs[k];
+            self.offs[k] = ticket.wrapping_add(1);
+            if self.mode == 0 {
+                self.poly_off(key, ticket);
+            } else {
+                self.mono_off(key, ticket);
+            }
         }
     }
 
-    fn poly_on(&mut self, key: u8, vel: f32, slide: bool) {
+    /// Moves voice `i` to a free fade slot, where it fades out over STEAL_FADE_MS, and frees
+    /// slot `i`. False if every fade slot is busy (nothing moves).
+    fn park(&mut self, i: usize) -> bool {
+        let Some(j) = (NUM_VOICES..SLOTS).find(|&j| !self.voices[j].active) else {
+            return false;
+        };
+        let v = self.voices[i];
+        // (the copy keeps its slot's noise generator, so it is not correlated with a new note)
+        let rng = self.voices[j].rng;
+        self.voices[j] = Voice {
+            gate: false,
+            fading: true,
+            fade: if v.fading { v.fade } else { 1.0 },
+            pending: None,
+            rng,
+            ..v
+        };
+        let v = &mut self.voices[i];
+        v.active = false;
+        v.fading = false;
+        v.pending = None;
+        true
+    }
+
+    fn poly_on(&mut self, key: u8, ticket: u32, vel: f32, slide: bool) {
         let age = self.next_age();
         let sr = self.cx.sr;
         if slide {
@@ -1877,6 +1925,7 @@ impl Synth {
                 let v = &mut self.voices[i];
                 v.glide_to(key as f32, ms, sr);
                 v.key = key;
+                v.ticket = ticket;
                 v.age = age;
                 self.last_voice = i;
                 return;
@@ -1885,6 +1934,7 @@ impl Synth {
         let from = if slide { self.last_pitch } else { None };
         let pend = Pending {
             key,
+            ticket,
             vel,
             gate: true,
             from,
@@ -1906,6 +1956,7 @@ impl Synth {
         {
             let cx = self.cx;
             self.voices[i].retrigger(key, vel, age, &cx);
+            self.voices[i].ticket = ticket;
             self.last_voice = i;
             return;
         }
@@ -1924,7 +1975,8 @@ impl Synth {
             return;
         }
         // steal: a voice already fading (replace its pending note), else the quietest released
-        // voice, else the oldest held one
+        // voice, else the oldest held one. It fades out in a fade slot while the new note starts
+        // at once; with none free, it fades where it is and the new note waits for it.
         let i = (0..NUM_VOICES)
             .find(|&i| self.voices[i].fading)
             .or_else(|| {
@@ -1937,6 +1989,12 @@ impl Synth {
                     .min_by_key(|&i| self.voices[i].age)
                     .unwrap_or(0)
             });
+        self.last_voice = i;
+        if !self.voices[i].fading && self.park(i) {
+            let cx = self.cx;
+            self.voices[i].start(pend, &cx, age);
+            return;
+        }
         let v = &mut self.voices[i];
         if !v.fading {
             v.fading = true;
@@ -1945,34 +2003,40 @@ impl Synth {
         v.gate = false;
         v.pending = Some(pend);
         v.age = age;
-        self.last_voice = i;
     }
 
-    fn poly_off(&mut self, key: u8) {
+    fn poly_off(&mut self, key: u8, ticket: u32) {
         for v in self.voices.iter_mut() {
-            if let Some(p) = v.pending.as_mut().filter(|p| p.key == key) {
+            if let Some(p) = v
+                .pending
+                .as_mut()
+                .filter(|p| p.key == key && p.ticket == ticket)
+            {
                 p.gate = false;
             }
-            if v.active && v.gate && !v.fading && v.key == key {
+            if v.active && v.gate && !v.fading && v.key == key && v.ticket == ticket {
                 v.release();
             }
         }
     }
 
     fn stack_remove(&mut self, key: u8) {
-        if let Some(pos) = self.stack[..self.stack_len].iter().position(|&k| k == key) {
+        if let Some(pos) = self.stack[..self.stack_len]
+            .iter()
+            .position(|&(k, _)| k == key)
+        {
             self.stack.copy_within(pos + 1..self.stack_len, pos);
             self.stack_len -= 1;
         }
     }
 
-    fn mono_on(&mut self, key: u8, vel: f32, slide: bool) {
+    fn mono_on(&mut self, key: u8, ticket: u32, vel: f32, slide: bool) {
         self.stack_remove(key);
         if self.stack_len == self.stack.len() {
             self.stack.copy_within(1.., 0);
             self.stack_len -= 1;
         }
-        self.stack[self.stack_len] = key;
+        self.stack[self.stack_len] = (key, ticket);
         self.stack_len += 1;
 
         let age = self.next_age();
@@ -1992,6 +2056,7 @@ impl Synth {
             let v = &mut self.voices[0];
             v.glide_to(key as f32, ms, cx.sr);
             v.key = key;
+            v.ticket = ticket;
             v.age = age;
             return;
         }
@@ -2003,6 +2068,7 @@ impl Synth {
             // slow attacks: the envelopes go on from where they are (no dip, no click)
             let v = &mut self.voices[0];
             v.retrigger(key, vel, age, &cx);
+            v.ticket = ticket;
             v.glide_to(key as f32, ms, cx.sr);
             return;
         }
@@ -2015,6 +2081,7 @@ impl Synth {
         };
         let pend = Pending {
             key,
+            ticket,
             vel,
             gate: true,
             from,
@@ -2049,7 +2116,7 @@ impl Synth {
     /// Moves the sounding mono voice to a free slot, where it fades out over STEAL_FADE_MS, so
     /// the mono voice can start the next note at once. False if no slot is free.
     fn hand_off_mono(&mut self) -> bool {
-        let Some(j) = (1..NUM_VOICES).find(|&j| !self.voices[j].active) else {
+        let Some(j) = (1..SLOTS).find(|&j| !self.voices[j].active) else {
             return false;
         };
         // (the copy keeps its own noise generator, so the two notes' noise is not correlated)
@@ -2065,8 +2132,15 @@ impl Synth {
         true
     }
 
-    fn mono_off(&mut self, key: u8) {
-        self.stack_remove(key);
+    fn mono_off(&mut self, key: u8, ticket: u32) {
+        // A re-struck key replaced its older entry: that note's note-off finds nothing here.
+        if let Some(pos) = self.stack[..self.stack_len]
+            .iter()
+            .position(|&e| e == (key, ticket))
+        {
+            self.stack.copy_within(pos + 1..self.stack_len, pos);
+            self.stack_len -= 1;
+        }
         let glide = self.glide_ms();
         let sr = self.cx.sr;
         let top = if self.stack_len > 0 {
@@ -2075,14 +2149,19 @@ impl Synth {
             None
         };
         let v = &mut self.voices[0];
-        if let Some(p) = v.pending.as_mut().filter(|p| p.key == key) {
+        if let Some(p) = v
+            .pending
+            .as_mut()
+            .filter(|p| p.key == key && p.ticket == ticket)
+        {
             p.gate = false;
         }
-        if v.active && v.gate && v.key == key {
+        if v.active && v.gate && v.key == key && v.ticket == ticket {
             match top {
-                Some(k) => {
+                Some((k, t)) => {
                     v.glide_to(k as f32, glide, sr);
                     v.key = k;
+                    v.ticket = t;
                 }
                 None => v.release(),
             }
@@ -2168,17 +2247,23 @@ impl Device for Synth {
         }
     }
 
-    /// Every sounding voice fades out with the steal fade (STEAL_FADE_MS) and frees; a note
-    /// still waiting for a stolen voice is dropped.
+    /// Every sounding voice fades out with the steal fade (STEAL_FADE_MS) and frees: in a fade
+    /// slot, so a note after the call starts on its own frame, or where it is when every fade
+    /// slot is busy. A note still waiting for a stolen voice is dropped, and held keys leave the
+    /// mono priority stack (their note-offs still find nothing to end).
     fn choke(&mut self) {
-        for v in self.voices.iter_mut() {
-            if v.active && !v.fading {
-                v.fading = true;
-                v.fade = 1.0;
+        for i in 0..SLOTS {
+            self.voices[i].pending = None;
+            if i < NUM_VOICES && self.voices[i].active && !self.park(i) {
+                let v = &mut self.voices[i];
+                if !v.fading {
+                    v.fading = true;
+                    v.fade = 1.0;
+                }
             }
-            v.gate = false;
-            v.pending = None;
+            self.voices[i].gate = false;
         }
+        self.stack_len = 0;
     }
 
     fn reset(&mut self) {
@@ -2186,6 +2271,8 @@ impl Device for Synth {
             *v = Voice::new(0x9E37_79B9 ^ (i as u32).wrapping_mul(0x85EB_CA6B).wrapping_add(1));
         }
         self.stack_len = 0;
+        self.ons = [0; 128];
+        self.offs = [0; 128];
         self.last_pitch = None;
         self.lfo.phase = 0.0;
         self.lfo.out = 0.0;
