@@ -11,6 +11,10 @@ use crate::{BLOCK, Command, EngineConfig, engine};
 /// pass the same validation and clamping as [`crate::Controller::send`]; rejected ones are
 /// skipped. A note starts at its exact frame; every other command applies at the start of the
 /// 64-frame block that contains its frame. So the output does not depend on `callback`.
+///
+/// Events are fed to the queue as it drains, so any number works. Only extreme density moves
+/// notes to later blocks (more than 256 in one block, or more than the 1024-slot queue holds
+/// in one), and it does so the same way for every callback size.
 pub fn render_offline(
     config: EngineConfig,
     events: &[(u64, Command)],
@@ -34,9 +38,9 @@ pub fn render_offline(
                 }
                 waiting.next();
             }
-            // While events wait for room, stop before the block of the first one. If that
-            // block is due now, render it anyway (its late events slip to the next block):
-            // more events than the queue holds fall inside it.
+            // While events wait for room, render only the blocks before the first one's
+            // block. If that block is next anyway, the queue is full of earlier events: render
+            // it, and let what did not fit slip to the following blocks.
             let end = match waiting.peek() {
                 Some(&&(frame, _)) => {
                     let next_block = usize::try_from(frame).unwrap_or(usize::MAX) / BLOCK * BLOCK;

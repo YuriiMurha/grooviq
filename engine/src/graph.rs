@@ -10,6 +10,7 @@ use std::f64::consts::TAU;
 const RAMP_SECONDS: f32 = 0.005;
 
 pub(crate) struct Graph {
+    sample_rate: f32,
     tone: ToneNode,
     synth: SynthNode,
     /// The block of the node being rendered, checked by the guard before it joins the master.
@@ -22,11 +23,17 @@ impl Graph {
     pub(crate) fn new(sample_rate: f32) -> Self {
         let ramp_len = (RAMP_SECONDS * sample_rate).round().max(1.0) as u32;
         Self {
+            sample_rate,
             tone: ToneNode::new(sample_rate, ramp_len),
             synth: SynthNode::new(sample_rate, ramp_len),
             node_l: [0.0; BLOCK],
             node_r: [0.0; BLOCK],
         }
+    }
+
+    /// The rate the graph was built for.
+    pub(crate) fn sample_rate(&self) -> f32 {
+        self.sample_rate
     }
 
     pub(crate) fn set_tone(&mut self, on: bool, hz: f32, gain_db: f32) {

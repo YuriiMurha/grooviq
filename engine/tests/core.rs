@@ -80,6 +80,18 @@ fn output_is_identical_for_any_callback_size() {
 }
 
 #[test]
+fn any_callback_value_renders_the_same() {
+    let ev = [(0, tone(true))];
+    let reference = render_offline(cfg(), &ev, 1_000, 64);
+    for cb in [0, usize::MAX] {
+        assert!(
+            render_offline(cfg(), &ev, 1_000, cb) == reference,
+            "callback {cb}"
+        );
+    }
+}
+
+#[test]
 fn notes_start_at_their_frame_and_other_commands_at_their_block() {
     // Frame 1000 lies in the block 960..1024.
     let note = Command::Note {

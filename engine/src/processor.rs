@@ -2,7 +2,9 @@
 //! callbacks of any size, so the output never depends on how the device splits it.
 //!
 //! Nothing reachable from [`AudioProcessor::process`] allocates, frees, locks or does I/O.
-//! Replaced graphs go back to the controller through the trash queue to be freed there.
+//! Replaced graphs go back to the controller through the trash queue to be freed there. The
+//! one exception is a panic in the graph: unwinding allocates and the panic hook may print, so
+//! the processor catches it, frees its payload and stays silent until the graph is replaced.
 
 use crate::command::{Command, Msg};
 use crate::graph::Graph;
@@ -35,6 +37,8 @@ pub struct AudioProcessor {
     /// A replaced graph the full trash queue could not take yet; retried every block.
     unsent: Option<Box<Graph>>,
     graph: Box<Graph>,
+    /// The rate `graph` must be built for.
+    sample_rate: f32,
     /// A panic unwound out of the graph: it stays untouched (and the output silent) until the
     /// controller sends a replacement.
     faulted: bool,
@@ -67,6 +71,7 @@ impl AudioProcessor {
             trash,
             unsent: None,
             graph,
+            sample_rate,
             faulted: false,
             live,
             block_l: [0.0; BLOCK],
@@ -114,6 +119,7 @@ impl AudioProcessor {
     /// calls this, with the audio callback stopped, so the old graph is freed on its thread.
     pub(crate) fn restart(&mut self, sample_rate: f32, graph: Box<Graph>) {
         self.graph = graph;
+        self.sample_rate = sample_rate;
         self.unsent = None;
         self.faulted = false;
         // Leftover frames were rendered at the old rate.
@@ -245,14 +251,24 @@ impl AudioProcessor {
         self.faults = self.faults.wrapping_add(1);
     }
 
-    /// Swaps in a fresh graph. The old one is never freed here: it goes back to the controller,
-    /// or waits in `unsent` (free, as `drain` checked) while the trash queue is full.
+    /// Swaps in a fresh graph, unless it was built for another rate: a restart queued just
+    /// before `reconfigure` arrives after it, and must not bring back the old rate.
     fn replace_graph(&mut self, graph: Box<Graph>) {
-        let old = std::mem::replace(&mut self.graph, graph);
-        self.faulted = false;
-        if let Err(PushError::Full(old)) = self.trash.push(old) {
+        let leaving = if graph.sample_rate() == self.sample_rate {
+            self.faulted = false;
+            std::mem::replace(&mut self.graph, graph)
+        } else {
+            graph
+        };
+        self.discard(leaving);
+    }
+
+    /// Hands a graph back to the controller, or parks it in `unsent` (free, as `drain`
+    /// checked) while the trash queue is full. Never frees it here.
+    fn discard(&mut self, graph: Box<Graph>) {
+        if let Err(PushError::Full(graph)) = self.trash.push(graph) {
             debug_assert!(self.unsent.is_none());
-            self.unsent = Some(old);
+            self.unsent = Some(graph);
         }
     }
 
@@ -288,7 +304,6 @@ fn meter_release(sample_rate: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::Msg;
 
     const SR: f32 = 48_000.0;
 
@@ -329,5 +344,22 @@ mod tests {
         p.process(&mut buf, 2);
         assert_eq!(trash.slots(), 1);
         assert!(p.unsent.is_none());
+    }
+
+    #[test]
+    fn a_restart_queued_before_a_rate_change_is_discarded() {
+        let (mut p, mut commands, mut trash) = processor();
+        // check_health queued a graph for 48 kHz, then reconfigure switched to 44.1 kHz.
+        assert!(
+            commands
+                .push(Msg::ReplaceGraph(Box::new(Graph::new(SR))))
+                .is_ok()
+        );
+        p.restart(44_100.0, Box::new(Graph::new(44_100.0)));
+        let mut buf = [0.0; BLOCK * 2];
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.sample_rate(), 44_100.0);
+        // The stale graph goes back to be freed off the audio thread.
+        assert_eq!(trash.pop().ok().map(|g| g.sample_rate()), Some(SR));
     }
 }
