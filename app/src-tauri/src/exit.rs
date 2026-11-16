@@ -91,14 +91,16 @@ mod tests {
 
     fn recovery(root: &Path) -> Mutex<Option<RecoveryDir>> {
         let (dir, found) = RecoveryDir::start(root).unwrap();
-        assert!(found.is_none());
+        assert!(found.is_empty());
         Mutex::new(Some(dir))
     }
 
-    /// What the next launch finds: the recovered project's tempo, if any is offered.
+    /// What the next launch finds: the newest recovered project's tempo, if any is offered.
     fn next_launch(root: &Path) -> Option<f32> {
         let (dir, found) = RecoveryDir::start(root).unwrap();
-        let bpm = found.map(|r| grooviq_project::load(&r.file).unwrap().project.bpm);
+        let bpm = found
+            .first()
+            .map(|r| grooviq_project::load(&r.file).unwrap().project.bpm);
         dir.clean_exit().unwrap();
         bpm
     }
