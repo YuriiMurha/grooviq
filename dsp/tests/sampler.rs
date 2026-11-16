@@ -138,7 +138,7 @@ fn peak(x: &[f32]) -> f32 {
 
 #[test]
 fn the_parameter_table_matches_the_contract() {
-    let expected: [(&str, f32, f32, f32); 15] = [
+    let expected: [(&str, f32, f32, f32); 27] = [
         ("root", 0.0, 127.0, 60.0),
         ("tune", -24.0, 24.0, 0.0),
         ("fine", -100.0, 100.0, 0.0),
@@ -154,7 +154,21 @@ fn the_parameter_table_matches_the_contract() {
         ("gain", -60.0, 12.0, 0.0),
         ("pan", -1.0, 1.0, 0.0),
         ("declick", 0.0, 1.0, 1.0),
+        ("loop", 0.0, 1.0, 0.0),
+        ("loop_start", 0.0, 1.0, 0.0),
+        ("filter_type", 0.0, 3.0, 0.0),
+        ("cutoff", 20.0, 20000.0, 20000.0),
+        ("res", 0.0, 1.0, 0.0),
+        ("filter_env", -1.0, 1.0, 0.0),
+        ("flt_attack", 0.0, 5000.0, 0.0),
+        ("flt_decay", 1.0, 10000.0, 300.0),
+        ("flt_sustain", 0.0, 1.0, 0.0),
+        ("flt_release", 1.0, 10000.0, 40.0),
+        ("vel_amp", 0.0, 1.0, 1.0),
+        ("vel_filter", 0.0, 1.0, 0.0),
     ];
+    assert_eq!(PARAM_IDS.len(), expected.len());
+    assert_eq!(SPEC.len(), expected.len());
     for (i, (id, lo, hi, def)) in expected.into_iter().enumerate() {
         assert_eq!(PARAM_IDS[i], id);
         assert_eq!(SPEC[i], (lo, hi, def), "{id}");
@@ -516,6 +530,23 @@ fn no_sample_is_silent() {
 fn process_never_allocates() {
     let mut s = Sampler::new(SR);
     s.set_sample(Some(buf(44_100.0, noise(44_100))));
+    // Every M2 feature on: loop, a resonant filter swept by its envelope, velocity mapping.
+    for (name, value) in [
+        ("loop", 1.0),
+        ("loop_start", 0.4),
+        ("filter_type", 1.0),
+        ("cutoff", 900.0),
+        ("res", 0.6),
+        ("filter_env", 0.8),
+        ("flt_attack", 2.0),
+        ("flt_decay", 80.0),
+        ("flt_sustain", 0.3),
+        ("flt_release", 50.0),
+        ("vel_amp", 0.5),
+        ("vel_filter", 0.7),
+    ] {
+        s.set_param(p(name), value);
+    }
     let next = buf(SR, noise(10_000));
     let mut l = vec![0.0; BLOCK];
     let mut r = vec![0.0; BLOCK];
@@ -524,7 +555,7 @@ fn process_never_allocates() {
     for i in 0..1000u32 {
         let incoming = (i == 500).then(|| Arc::clone(&next));
         let old = assert_no_alloc(|| {
-            s.set_param(i % 15, (i % 7) as f32 * 300.0 - 600.0);
+            s.set_param(i % 27, (i % 7) as f32 * 300.0 - 600.0);
             s.set_param(1000, 1.0);
             s.process(&mut l, &mut r, None, &events);
             incoming.map(|b| s.set_sample(Some(b)))
@@ -535,4 +566,669 @@ fn process_never_allocates() {
         assert!(l.iter().chain(&r).all(|v| v.is_finite()));
     }
     assert!(swapped.is_some(), "the old buffer came back out");
+}
+
+/// The M1 reference scene: a ramp played at keys 55, 60 and 67 in one-shot and gate mode
+/// through attack, decay, sustain and release, with gain, pan, tune and fine tune, a start/end
+/// region and reverse. Declick is on only where the sample plays at its own rate (Grooviq M2
+/// times the edge fade in output frames, which only changes a pitched note). Returns the
+/// sections concatenated, stereo interleaved.
+fn m1_scene() -> Vec<f32> {
+    let len = 4_800;
+    let ramp: Vec<f32> = (0..len)
+        .map(|i| 2.0 * i as f32 / len as f32 - 1.0)
+        .collect();
+    let section = |params: &[(&str, f32)], events: &[NoteEvent], frames: usize| {
+        let mut s = Sampler::new(SR);
+        s.set_sample(Some(buf(SR, ramp.clone())));
+        for &(name, value) in params {
+            s.set_param(p(name), value);
+        }
+        let (l, r) = render(&mut s, frames, events);
+        l.into_iter()
+            .zip(r)
+            .flat_map(|(l, r)| [l, r])
+            .collect::<Vec<f32>>()
+    };
+    let mut out = Vec::new();
+    // Defaults: one-shot, declick on, at the root key.
+    out.extend(section(&[], &[on(0, 60, 1.0), on(1_000, 60, 0.7)], 6_000));
+    // Gate mode, a chord with attack, decay to a sustain, and release.
+    out.extend(section(
+        &[
+            ("declick", 0.0),
+            ("one_shot", 0.0),
+            ("attack", 5.0),
+            ("decay", 50.0),
+            ("sustain", 0.6),
+            ("release", 30.0),
+        ],
+        &[
+            on(0, 55, 1.0),
+            on(10, 60, 0.8),
+            on(20, 67, 0.5),
+            off(1_500, 60),
+            off(2_000, 55),
+            off(2_500, 67),
+        ],
+        6_000,
+    ));
+    // Gain, pan, tune and fine tune in one-shot mode.
+    out.extend(section(
+        &[
+            ("declick", 0.0),
+            ("gain", -6.0),
+            ("pan", 0.4),
+            ("tune", 2.0),
+            ("fine", 30.0),
+        ],
+        &[on(0, 55, 1.0), on(700, 67, 0.9)],
+        6_000,
+    ));
+    // A start/end region, reversed, with declick at the root key.
+    out.extend(section(
+        &[
+            ("start", 0.2),
+            ("end", 0.7),
+            ("reverse", 1.0),
+            ("pan", -0.5),
+        ],
+        &[on(0, 60, 1.0), on(3_000, 60, 0.6)],
+        6_000,
+    ));
+    // The same region pitched, without declick, in gate mode.
+    out.extend(section(
+        &[
+            ("declick", 0.0),
+            ("start", 0.7),
+            ("end", 0.2),
+            ("reverse", 1.0),
+            ("one_shot", 0.0),
+            ("release", 10.0),
+        ],
+        &[
+            on(0, 67, 1.0),
+            on(100, 55, 1.0),
+            off(900, 67),
+            off(1_800, 55),
+        ],
+        6_000,
+    ));
+    out
+}
+
+#[test]
+fn defaults_leave_the_m1_sound_unchanged() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/sampler_m1.f32");
+    let scene = m1_scene();
+    if std::env::var("GOLDEN_UPDATE").as_deref() == Ok("1") {
+        let bytes: Vec<u8> = scene.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(path, bytes).expect("write the M1 reference");
+    }
+    let bytes = std::fs::read(path).expect("the M1 reference (create it with GOLDEN_UPDATE=1)");
+    let reference: Vec<f32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect();
+    assert_eq!(scene.len(), reference.len(), "length");
+    assert!(peak(&reference) > 0.1, "the reference is not silent");
+    if let Some(i) = (0..scene.len()).find(|&i| scene[i].to_bits() != reference[i].to_bits()) {
+        panic!(
+            "first difference at sample {i} (frame {}): {} vs reference {}",
+            i / 2,
+            scene[i],
+            reference[i]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2: loop, filter, velocity mapping and the #73 fixes
+
+/// Renders `frames` frames in `block`-frame blocks, applying each `(frame, param, value)`
+/// change before the block that starts at its frame. `events` carry absolute frame offsets.
+fn render_split(
+    s: &mut Sampler,
+    frames: usize,
+    events: &[NoteEvent],
+    block: usize,
+    changes: &[(usize, &str, f32)],
+) -> (Vec<f32>, Vec<f32>) {
+    let mut l = vec![0.0; frames];
+    let mut r = vec![0.0; frames];
+    let mut start = 0;
+    while start < frames {
+        for &(at, name, value) in changes {
+            assert_eq!(at % block, 0, "changes land on block boundaries");
+            if at == start {
+                s.set_param(p(name), value);
+            }
+        }
+        let end = (start + block).min(frames);
+        let block_events: Vec<NoteEvent> = events
+            .iter()
+            .filter(|e| (start..end).contains(&(e.offset as usize)))
+            .map(|e| NoteEvent {
+                offset: e.offset - start as u32,
+                ..*e
+            })
+            .collect();
+        s.process(&mut l[start..end], &mut r[start..end], None, &block_events);
+        start = end;
+    }
+    (l, r)
+}
+
+/// Deterministic white noise in [-1, 1) from a seeded xorshift.
+fn white(len: usize, seed: u32) -> Vec<f32> {
+    let mut s = seed;
+    (0..len)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            (s >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+        })
+        .collect()
+}
+
+/// Power at `hz` (Goertzel over a Hann window), averaged over consecutive 1024-frame segments.
+fn power_at(x: &[f32], hz: f64) -> f64 {
+    const SEG: usize = 1024;
+    let w = 2.0 * std::f64::consts::PI * hz / SR as f64;
+    let coeff = 2.0 * libm::cos(w);
+    let window: Vec<f64> = (0..SEG)
+        .map(|i| 0.5 - 0.5 * libm::cos(2.0 * std::f64::consts::PI * i as f64 / SEG as f64))
+        .collect();
+    let mut total = 0.0;
+    let mut count = 0;
+    for seg in x.as_chunks::<SEG>().0 {
+        let (mut s1, mut s2) = (0.0f64, 0.0f64);
+        for (v, w) in seg.iter().zip(&window) {
+            let s0 = *v as f64 * w + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        total += s1 * s1 + s2 * s2 - coeff * s1 * s2;
+        count += 1;
+    }
+    assert!(count > 0, "at least one segment");
+    total / count as f64
+}
+
+/// Gain in dB of `wet` against `dry` (the same note unfiltered) at `hz`.
+fn gain_db(wet: &[f32], dry: &[f32], hz: f64) -> f64 {
+    10.0 * libm::log10(power_at(wet, hz) / power_at(dry, hz))
+}
+
+/// Energy of `x` between `lo` and `hi` Hz (100 Hz steps), one Hann-windowed segment.
+fn band_energy(x: &[f32], lo: f64, hi: f64) -> f64 {
+    let n = x.len();
+    let mut total = 0.0;
+    let mut hz = lo;
+    while hz <= hi {
+        let w = 2.0 * std::f64::consts::PI * hz / SR as f64;
+        let coeff = 2.0 * libm::cos(w);
+        let (mut s1, mut s2) = (0.0f64, 0.0f64);
+        for (i, v) in x.iter().enumerate() {
+            let win = 0.5 - 0.5 * libm::cos(2.0 * std::f64::consts::PI * i as f64 / n as f64);
+            let s0 = *v as f64 * win + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        total += s1 * s1 + s2 * s2 - coeff * s1 * s2;
+        hz += 100.0;
+    }
+    total
+}
+
+fn max_step(x: &[f32]) -> f32 {
+    x.windows(2).fold(0.0, |m, w| m.max((w[1] - w[0]).abs()))
+}
+
+/// A sampler playing `x` at its own rate with the named parameters set.
+fn configured(x: &[f32], params: &[(&str, f32)]) -> Sampler {
+    let mut s = sampler(SR, buf(SR, x.to_vec()));
+    for &(name, value) in params {
+        s.set_param(p(name), value);
+    }
+    s
+}
+
+#[test]
+fn a_loop_repeats_until_release_then_releases() {
+    let len = 1_000;
+    let ramp: Vec<f32> = (0..len).map(|i| (i + 1) as f32 / len as f32).collect();
+    for reverse in [false, true] {
+        let mut s = configured(
+            &ramp,
+            &[
+                ("loop", 1.0),
+                ("loop_start", 0.5),
+                ("reverse", if reverse { 1.0 } else { 0.0 }),
+            ],
+        );
+        assert!(
+            SPEC[p("one_shot") as usize].2 >= 0.5,
+            "one-shot is on: the loop overrides it"
+        );
+        let (l, _) = render(&mut s, 12_000, &[on(0, 60, 1.0), off(5_000, 60)]);
+        // While held: the whole region once, then its second half (in play order) again.
+        let played: Vec<f32> = if reverse {
+            ramp.iter().rev().copied().collect()
+        } else {
+            ramp.clone()
+        };
+        for (f, v) in l[..5_000].iter().enumerate() {
+            let expected = if f < len {
+                played[f]
+            } else {
+                played[500 + (f - len) % 500]
+            };
+            assert_eq!(*v, expected, "reverse {reverse}, frame {f}");
+        }
+        // After note-off it releases (40 ms) instead of stopping or looping on.
+        assert!(
+            l[5_000].abs() > 0.0,
+            "the release starts where the loop was"
+        );
+        let tail = peak(&l[5_000 + 4_800..]);
+        assert!(
+            20.0 * libm::log10f(tail.max(1e-12)) < -60.0,
+            "reverse {reverse}: 100 ms after note-off: {tail}"
+        );
+        assert_eq!(s.active_voices(), 0, "reverse {reverse}: released");
+    }
+}
+
+#[test]
+fn the_loop_seam_is_click_free_with_declick() {
+    for (key, reverse) in [(60u8, false), (67, false), (55, true)] {
+        let mut s = configured(
+            &[1.0; 1_000],
+            &[
+                ("declick", 1.0),
+                ("loop", 1.0),
+                ("loop_start", 0.5),
+                ("reverse", if reverse { 1.0 } else { 0.0 }),
+            ],
+        );
+        let (l, _) = render(&mut s, 20_000, &[on(0, key, 1.0)]);
+        // Past the 2 ms fade-in the level is flat across every seam.
+        let held = &l[200..];
+        assert!(held.iter().all(|v| *v > 0.99), "key {key}: still sounding");
+        let step = max_step(held);
+        assert!(step <= 1e-6, "key {key} reverse {reverse}: step {step}");
+    }
+}
+
+#[test]
+fn filters_shape_the_spectrum() {
+    let x = white(2 * SR as usize, 0x9E37_79B9);
+    let frames = x.len() - 1_024;
+    let play = |params: &[(&str, f32)]| {
+        let mut s = configured(&x, params);
+        render(&mut s, frames, &[on(0, 60, 1.0)]).0
+    };
+    let dry = play(&[]);
+    let filtered = |kind: f32| play(&[("filter_type", kind), ("cutoff", 1_000.0)]);
+
+    let lp = filtered(1.0);
+    let lp_drop = gain_db(&lp, &dry, 8_000.0) - gain_db(&lp, &dry, 250.0);
+    assert!(lp_drop <= -18.0, "low-pass: 8 kHz vs 250 Hz {lp_drop} dB");
+
+    let hp = filtered(2.0);
+    let hp_drop = gain_db(&hp, &dry, 250.0) - gain_db(&hp, &dry, 8_000.0);
+    assert!(hp_drop <= -18.0, "high-pass: 250 Hz vs 8 kHz {hp_drop} dB");
+
+    let bp = filtered(3.0);
+    let (mut best, mut best_hz) = (f64::NEG_INFINITY, 0.0);
+    for i in 0..=72 {
+        let hz = 125.0 * libm::exp2(i as f64 / 12.0);
+        let g = gain_db(&bp, &dry, hz);
+        if g > best {
+            (best, best_hz) = (g, hz);
+        }
+    }
+    let off = libm::log2(best_hz / 1_000.0).abs();
+    assert!(off <= 1.0 / 3.0, "band-pass peaks at {best_hz} Hz");
+
+    // Type 0 is no filter at all, whatever the other filter settings.
+    let bypass = play(&[
+        ("filter_type", 0.0),
+        ("cutoff", 300.0),
+        ("res", 0.9),
+        ("filter_env", -0.5),
+        ("vel_filter", 1.0),
+    ]);
+    assert_eq!(bypass, dry, "filter_type 0 is bit-identical to no filter");
+
+    // Resonance lifts the low-pass response at the cutoff (Q 0.707 to Q 20).
+    let resonant = play(&[("filter_type", 1.0), ("cutoff", 1_000.0), ("res", 1.0)]);
+    let lift = gain_db(&resonant, &dry, 1_000.0) - gain_db(&lp, &dry, 1_000.0);
+    assert!(lift >= 12.0, "res 1 vs 0 at the cutoff: {lift} dB");
+}
+
+#[test]
+fn the_filter_envelope_sweeps_the_cutoff() {
+    let x = white(SR as usize, 0x2545_F491);
+    let mut s = configured(
+        &x,
+        &[
+            ("filter_type", 1.0),
+            ("cutoff", 200.0),
+            ("filter_env", 1.0),
+            ("flt_decay", 100.0),
+        ],
+    );
+    let (l, _) = render(&mut s, 20_000, &[on(0, 60, 1.0)]);
+    let mut dry = configured(&x, &[]);
+    let (d, _) = render(&mut dry, 20_000, &[on(0, 60, 1.0)]);
+    let window = 480; // 10 ms
+    let at = 14_400; // 300 ms
+    let early =
+        band_energy(&l[..window], 2_000.0, 20_000.0) / band_energy(&d[..window], 2_000.0, 20_000.0);
+    let late = band_energy(&l[at..at + window], 2_000.0, 20_000.0)
+        / band_energy(&d[at..at + window], 2_000.0, 20_000.0);
+    let db = 10.0 * libm::log10(early / late);
+    assert!(db >= 12.0, "above 2 kHz, first 10 ms vs 300 ms: {db} dB");
+
+    // Held at full level, the envelope keeps the cutoff up until note-off, then its release
+    // brings it down while the note (a long amp release) still sounds.
+    let gate = [("one_shot", 0.0), ("release", 1_000.0)];
+    let mut s = configured(
+        &x,
+        &[
+            gate[0],
+            gate[1],
+            ("filter_type", 1.0),
+            ("cutoff", 200.0),
+            ("filter_env", 1.0),
+            ("flt_sustain", 1.0),
+            ("flt_release", 20.0),
+        ],
+    );
+    let events = [on(0, 60, 1.0), off(4_800, 60)];
+    let (l, _) = render(&mut s, 12_000, &events);
+    let mut dry = configured(&x, &gate);
+    let (d, _) = render(&mut dry, 12_000, &events);
+    let bright = |at: usize| {
+        band_energy(&l[at..at + window], 2_000.0, 20_000.0)
+            / band_energy(&d[at..at + window], 2_000.0, 20_000.0)
+    };
+    let db = 10.0 * libm::log10(bright(4_800 - window) / bright(9_600));
+    assert!(
+        db >= 12.0,
+        "above 2 kHz, before note-off vs 100 ms after: {db} dB"
+    );
+}
+
+#[test]
+fn the_filter_envelope_attack_opens_the_cutoff_over_its_time() {
+    // A 200 ms filter attack (the amp attack stays 0): the cutoff climbs from 200 Hz towards
+    // 12.8 kHz over the whole attack, then holds at full envelope (sustain 1).
+    let x = white(SR as usize, 0x6C07_8965);
+    let mut s = configured(
+        &x,
+        &[
+            ("filter_type", 1.0),
+            ("cutoff", 200.0),
+            ("filter_env", 1.0),
+            ("flt_attack", 200.0),
+            ("flt_sustain", 1.0),
+        ],
+    );
+    let (l, _) = render(&mut s, 20_000, &[on(0, 60, 1.0)]);
+    let mut dry = configured(&x, &[]);
+    let (d, _) = render(&mut dry, 20_000, &[on(0, 60, 1.0)]);
+    let window = 480; // 10 ms
+    let bright = |at: usize| {
+        band_energy(&l[at..at + window], 2_000.0, 20_000.0)
+            / band_energy(&d[at..at + window], 2_000.0, 20_000.0)
+    };
+    let db = |a: f64, b: f64| 10.0 * libm::log10(a / b);
+    let (start, middle, end) = (bright(0), bright(4_560), bright(14_400));
+    let opens = db(end, start);
+    assert!(opens >= 12.0, "300 ms vs the first 10 ms: {opens} dB");
+    // Halfway through (95..105 ms) the cutoff is still on its way up.
+    let rising = db(end, middle);
+    assert!(rising >= 6.0, "300 ms vs 100 ms: {rising} dB");
+}
+
+#[test]
+fn velocity_maps_to_level_and_filter() {
+    let x = noise(SR as usize);
+    let play = |params: &[(&str, f32)], velocity: f32| {
+        let mut s = configured(&x, params);
+        render(&mut s, 30_000, &[on(0, 60, velocity)]).0
+    };
+    assert_eq!(
+        play(&[("vel_amp", 0.0)], 0.25),
+        play(&[("vel_amp", 0.0)], 1.0),
+        "vel_amp 0: velocity leaves the level alone"
+    );
+    let full = play(&[("vel_amp", 1.0)], 1.0);
+    let half = play(&[("vel_amp", 1.0)], 0.5);
+    assert!(
+        full.iter()
+            .zip(&half)
+            .all(|(f, h)| (f * 0.5 - h).abs() <= 1e-6),
+        "vel_amp 1 halves the level at velocity 0.5"
+    );
+    let partial = play(&[("vel_amp", 0.5)], 0.5);
+    assert!(
+        full.iter()
+            .zip(&partial)
+            .all(|(f, h)| (f * 0.75 - h).abs() <= 1e-6),
+        "vel_amp 0.5 at velocity 0.5 plays at 0.75"
+    );
+
+    let lp = [
+        ("vel_amp", 0.0),
+        ("filter_type", 1.0),
+        ("cutoff", 4_000.0),
+        ("vel_filter", 1.0),
+    ];
+    let bright = play(&lp, 1.0);
+    let dark = play(&lp, 0.5);
+    let db = 10.0 * libm::log10(power_at(&dark, 8_000.0) / power_at(&bright, 8_000.0));
+    assert!(db <= -6.0, "vel_filter 1 at velocity 0.5: 8 kHz {db} dB");
+}
+
+#[test]
+fn cutoff_changes_are_smooth() {
+    let x: Vec<f32> = sine(SR, 3_000.0, SR as usize)
+        .iter()
+        .map(|v| 0.5 + 0.4 * v)
+        .collect();
+    let play = |filter: f32| {
+        let mut s = configured(&x, &[("declick", 1.0), ("filter_type", filter)]);
+        render_split(
+            &mut s,
+            9_600,
+            &[on(0, 60, 1.0)],
+            BLOCK,
+            &[(4_800, "cutoff", 200.0)],
+        )
+        .0
+    };
+    let dry = max_step(&play(0.0));
+    let lp = play(1.0);
+    assert!(peak(&lp[9_000..]) < 0.6, "the cutoff did fall");
+    let step = max_step(&lp);
+    assert!(step <= dry + 0.05, "largest step {step}, unfiltered {dry}");
+    // The cutoff glides down over 5 ms rather than jumping: 1 ms after the change the 3 kHz
+    // tone still passes; 10 ms after it, it is gone.
+    let swing = |x: &[f32]| {
+        let (lo, hi) = x
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
+        hi - lo
+    };
+    let early = swing(&lp[4_848..4_896]);
+    assert!(early > 0.5, "1 ms after the change: peak-to-peak {early}");
+    let late = swing(&lp[5_280..5_328]);
+    assert!(late < 0.05, "10 ms after the change: peak-to-peak {late}");
+}
+
+#[test]
+fn changing_sustain_while_held_does_not_click() {
+    let mut s = configured(&[1.0; SR as usize], &[("one_shot", 0.0), ("decay", 10.0)]);
+    let (l, _) = render_split(
+        &mut s,
+        24_000,
+        &[on(0, 60, 1.0)],
+        BLOCK,
+        &[(4_800, "sustain", 0.2)],
+    );
+    assert!((l[20_000] - 0.2).abs() < 1e-4, "reaches the new sustain");
+    let step = max_step(&l[1..]);
+    let limit = 1.0 / (0.005 * SR);
+    assert!(step < limit, "max step {step}, limit {limit}");
+}
+
+#[test]
+fn the_edge_fade_lasts_4_ms_at_any_pitch() {
+    let fade = (0.004 * SR) as i64;
+    for key in [48u8, 84] {
+        let mut s = configured(&[1.0; SR as usize], &[("declick", 1.0)]);
+        let (l, _) = render(&mut s, 2 * SR as usize, &[on(0, key, 1.0)]);
+        let end = played_len(&l);
+        let start = (end / 2..end).find(|&f| l[f] < 1.0 - 1e-6).expect("a fade");
+        let len = (end - start) as i64;
+        assert!(
+            (len - fade).abs() <= 1,
+            "key {key}: the fade-out lasts {len} frames, expected {fade}"
+        );
+    }
+}
+
+#[test]
+fn a_silent_sustain_zero_voice_frees_its_slot() {
+    let x = noise(10 * SR as usize);
+    for one_shot in [1.0, 0.0] {
+        let mut s = configured(
+            &x,
+            &[("one_shot", one_shot), ("sustain", 0.0), ("decay", 10.0)],
+        );
+        render(&mut s, 9_600, &[on(0, 60, 1.0)]);
+        assert_eq!(s.active_voices(), 0, "one_shot {one_shot}: freed in 200 ms");
+    }
+    // A freed gate note still owns its note-off: it does not end a newer note on its key.
+    let mut s = configured(
+        &[1.0; 10 * SR as usize],
+        &[("one_shot", 0.0), ("sustain", 0.0), ("decay", 10.0)],
+    );
+    render(&mut s, 9_600, &[on(0, 60, 1.0)]);
+    assert_eq!(s.active_voices(), 0);
+    s.set_param(p("sustain"), 1.0);
+    let (l, _) = render(&mut s, 9_600, &[on(0, 60, 1.0), off(100, 60)]);
+    assert!(
+        (l[9_000] - 1.0).abs() < 1e-6,
+        "the newer note sounds: {}",
+        l[9_000]
+    );
+    assert_eq!(s.active_voices(), 1);
+}
+
+#[test]
+fn block_splitting_never_changes_the_output() {
+    let x = noise(SR as usize);
+    let params = [
+        ("declick", 1.0),
+        ("one_shot", 0.0),
+        ("loop", 1.0),
+        ("loop_start", 0.3),
+        ("filter_type", 1.0),
+        ("cutoff", 800.0),
+        ("res", 0.5),
+        ("filter_env", 0.7),
+        ("flt_attack", 3.0),
+        ("flt_decay", 60.0),
+        ("flt_sustain", 0.2),
+        ("flt_release", 30.0),
+        ("vel_filter", 0.5),
+        ("sustain", 0.5),
+        ("decay", 40.0),
+    ];
+    let events = [
+        on(3, 55, 0.9),
+        on(500, 67, 0.6),
+        off(2_000, 55),
+        on(2_100, 60, 0.8),
+        off(9_000, 67),
+        off(12_000, 60),
+    ];
+    // At frame 4 480 (a multiple of 1, 7, 64 and 128) the cutoff, sustain and type change.
+    let changes = [
+        (4_480, "cutoff", 3_000.0),
+        (4_480, "sustain", 0.9),
+        (4_480, "filter_type", 3.0),
+    ];
+    let play = |block: usize| {
+        let mut s = configured(&x, &params);
+        render_split(&mut s, 16_000, &events, block, &changes)
+    };
+    let reference = play(1);
+    assert!(peak(&reference.0) > 0.01);
+    for block in [7, 64, 128] {
+        assert!(same_bits(&play(block), &reference), "block {block}");
+    }
+}
+
+/// Both renders hold the same bits in every sample of both channels.
+fn same_bits(a: &(Vec<f32>, Vec<f32>), b: &(Vec<f32>, Vec<f32>)) -> bool {
+    let bits = |x: &[f32]| x.iter().map(|v| v.to_bits()).collect::<Vec<u32>>();
+    bits(&a.0) == bits(&b.0) && bits(&a.1) == bits(&b.1)
+}
+
+#[test]
+fn block_splitting_never_changes_a_loop_across_its_seams() {
+    // A 1 000-frame source looped for 12 000 frames or more: dozens of wraps in each direction, at
+    // pitches that read between samples, through each filter type, then released.
+    let x = noise(1_000);
+    let events = [
+        on(0, 55, 1.0),
+        on(5, 60, 0.7),
+        on(11, 67, 0.9),
+        off(12_000, 55),
+        off(13_000, 60),
+        off(14_000, 67),
+    ];
+    for reverse in [0.0, 1.0] {
+        for loop_start in [0.0, 0.5, 1.0] {
+            for filter in [0.0, 1.0, 2.0, 3.0] {
+                let params = [
+                    ("declick", 1.0),
+                    ("loop", 1.0),
+                    ("loop_start", loop_start),
+                    ("reverse", reverse),
+                    ("filter_type", filter),
+                    ("cutoff", 1_500.0),
+                    ("res", 0.8),
+                    ("filter_env", 0.5),
+                    ("flt_decay", 200.0),
+                ];
+                let play = |block: usize| {
+                    let mut s = configured(&x, &params);
+                    let out = render_split(&mut s, 20_000, &events, block, &[]);
+                    assert_eq!(s.active_voices(), 0, "released by the end");
+                    out
+                };
+                let reference = play(1);
+                let what = format!("reverse {reverse}, loop_start {loop_start}, filter {filter}");
+                // A one-frame loop is DC, which the high- and band-pass remove.
+                let dc_removed = loop_start == 1.0 && filter >= 2.0;
+                assert!(
+                    dc_removed || peak(&reference.0[10_000..12_000]) > 0.01,
+                    "{what}: still looping at 11 000 frames"
+                );
+                for block in [7, 64, 128] {
+                    assert!(same_bits(&play(block), &reference), "{what}: block {block}");
+                }
+            }
+        }
+    }
 }
