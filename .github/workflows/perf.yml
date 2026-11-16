@@ -1,0 +1,169 @@
+name: perf
+
+# Speed numbers for every change, in each job's summary and as artifacts. Timings on shared
+# runners are noisy, so they never fail a job; the render benchmark fails only when a scene's
+# bits depend on the block size. Instruction counts are exact: that job fails when a benchmark
+# runs more than 1 % more instructions than on the pull request's base. None of these jobs is
+# a required check.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "perf-${{ github.event.pull_request.number || github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: bench (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+      - name: Machine
+        run: |
+          case "$RUNNER_OS" in
+            macOS) cpu=$(sysctl -n machdep.cpu.brand_string); cores=$(sysctl -n hw.ncpu) ;;
+            Windows) cpu=$(powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name"); cores=$NUMBER_OF_PROCESSORS ;;
+            *) cpu=$(sed -n 's/^model name\s*: //p' /proc/cpuinfo | head -1); cores=$(nproc) ;;
+          esac
+          {
+            echo "## $RUNNER_OS ($RUNNER_ARCH)"
+            echo
+            echo "$cpu, $cores logical cores, $(rustc --version). Shared runner: compare runs on the same runner class only."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p perf
+      - name: Render speed and block times
+        run: cargo bench -p grooviq-golden --bench render
+        env:
+          GROOVIQ_PERF_JSON: ${{ github.workspace }}/perf/render.json
+      - name: DSP kernels
+        run: |
+          cargo bench -p grooviq-dsp --bench kernels | tee perf/kernels.txt
+          {
+            echo "### DSP kernels (divan): one 64-frame block"
+            echo
+            echo '```text'
+            cat perf/kernels.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perf-${{ matrix.os }}
+          path: perf/
+
+  # The same scene must render the same bits on every platform (the export rule).
+  determinism:
+    name: determinism (macOS vs Windows)
+    needs: bench
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: perf-*
+          path: perf
+      - name: Compare the render hashes
+        run: |
+          python3 - <<'PY'
+          import glob, json, os, sys
+          runs = {}
+          for path in sorted(glob.glob("perf/perf-*/render.json")):
+              runs[path.split("/")[1].removeprefix("perf-")] = {
+                  (r["scene"], r["block"]): r["hash"] for r in json.load(open(path))["results"]
+              }
+          if len(runs) < 2:
+              sys.exit(f"expected results from two runners, got {sorted(runs)}")
+          names = sorted(runs)
+          keys = sorted(set().union(*runs.values()))
+          lines = ["## Render hashes across platforms", "",
+                   "| scene | block | " + " | ".join(names) + " | same |",
+                   "|---|--:|" + "---|" * len(names) + "---|"]
+          bad = 0
+          for key in keys:
+              hashes = [runs[n].get(key, "missing") for n in names]
+              same = len(set(hashes)) == 1 and "missing" not in hashes
+              bad += not same
+              lines.append(f"| {key[0]} | {key[1]} | " + " | ".join(f"`{h}`" for h in hashes)
+                           + f" | {'yes' if same else '**no**'} |")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          sys.exit(1 if bad else 0)
+          PY
+
+  instructions:
+    name: instructions (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Valgrind and ALSA headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends valgrind libasound2-dev
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: instructions
+      # The rust jobs never build this Linux-only code, so lint it here.
+      - run: cargo clippy -p grooviq-golden --benches -- -D warnings
+      # The runner must match the `gungraun` crate's version in Cargo.lock.
+      - name: gungraun-runner
+        run: |
+          version=$(sed -n '/^name = "gungraun"$/{n;s/^version = "\(.*\)"$/\1/p;}' Cargo.lock)
+          if [ "$(gungraun-runner --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
+            cargo install gungraun-runner --version "$version" --locked
+          fi
+      - name: Baseline (the pull request's base)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git checkout --quiet "$BASE_SHA"
+          if [ -f tests/golden/benches/instructions.rs ]; then
+            cargo bench -p grooviq-golden --bench instructions -- --save-baseline=base
+            echo "BASELINE=--baseline=base" >> "$GITHUB_ENV"
+          else
+            echo "The base has no instruction benchmarks yet: no comparison."
+          fi
+          git checkout --quiet "$HEAD_SHA"
+      # BASELINE is set by the step above when there is one to compare with.
+      - name: Instruction counts
+        run: |
+          status=0
+          cargo bench -p grooviq-golden --bench instructions -- $BASELINE 2>&1 | tee instructions.txt || status=$?
+          {
+            echo "## Instruction counts (Callgrind)"
+            echo
+            if [ -n "$BASELINE" ]; then
+              echo "Compared with the pull request's base; more than 1 % more instructions fails this job."
+            else
+              echo "No base to compare with."
+            fi
+            echo
+            echo '```text'
+            sed 's/\x1b\[[0-9;]*m//g' instructions.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
