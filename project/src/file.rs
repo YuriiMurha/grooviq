@@ -12,7 +12,7 @@
 use crate::model::{FORMAT, Project, VERSION};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Seek, Write};
@@ -32,6 +32,48 @@ const MAX_JSON_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SAMPLE_BYTES: u64 = 512 * 1024 * 1024;
 /// The most sample bytes one `load` reads in total, whatever the number of channels.
 const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// The size caps `save` and `load` both enforce, so a project one accepts the other opens.
+/// Injectable (crate-private) so tests use tiny limits instead of 512 MB files.
+#[derive(Clone, Copy)]
+pub(crate) struct Limits {
+    /// The most one sample may hold.
+    pub(crate) sample: u64,
+    /// The most all distinct samples of a project may hold together.
+    pub(crate) total: u64,
+}
+
+const LIMITS: Limits = Limits {
+    sample: MAX_SAMPLE_BYTES,
+    total: MAX_TOTAL_BYTES,
+};
+
+/// A size for a message: whole megabytes, or bytes when smaller.
+fn human(bytes: u64) -> String {
+    if bytes >= 1 << 20 {
+        format!("{} MB", bytes >> 20)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// `text` with its first letter lower-cased, to continue a sentence (an acronym such as "WAV"
+/// stays as it is).
+fn lower_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(a), Some(b)) if a.is_uppercase() && b.is_lowercase() => a
+            .to_lowercase()
+            .chain(std::iter::once(b))
+            .chain(chars)
+            .collect(),
+        _ => text.to_string(),
+    }
+}
+
+fn too_big(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
 /// Entries over this need the zip64 header.
 const ZIP64_THRESHOLD: u64 = u32::MAX as u64;
 
@@ -170,7 +212,18 @@ pub fn save_with(
     path: &Path,
     fail_after_temp: bool,
 ) -> io::Result<()> {
-    let (project, entries) = plan(project, samples);
+    save_with_limits(project, samples, path, fail_after_temp, LIMITS)
+}
+
+pub(crate) fn save_with_limits(
+    project: &Project,
+    samples: &SampleFiles,
+    path: &Path,
+    fail_after_temp: bool,
+    limits: Limits,
+) -> io::Result<()> {
+    // Everything that can be refused is refused before the first byte is written.
+    let (project, entries) = plan(project, samples, limits)?;
     write_atomic(path, |file| {
         write_zip(file, &project, &entries)?;
         if fail_after_temp {
@@ -184,23 +237,55 @@ pub fn save_with(
 
 /// Which samples go in the zip, and the project with each channel's `SampleRef.file` set.
 /// One entry per distinct byte content (the same `Arc` or equal bytes), in channel order.
-fn plan(project: &Project, samples: &SampleFiles) -> (Project, Vec<Entry>) {
+///
+/// Fails, naming the channel, when a sample is over `limits.sample`, the distinct samples
+/// together pass `limits.total` (a file `load` would then not fully open), or a channel still
+/// names a zip entry whose bytes are not here (a sample `load` skipped): saving would drop its
+/// only copy.
+fn plan(
+    project: &Project,
+    samples: &SampleFiles,
+    limits: Limits,
+) -> io::Result<(Project, Vec<Entry>)> {
     let mut project = project.clone();
     let mut entries: Vec<Entry> = Vec::new();
+    let mut total = 0u64;
     for channel in &mut project.channels {
         let Some(sample_ref) = channel.sample.as_mut() else {
             continue;
         };
         let Some(file) = samples.get(&channel.id) else {
-            sample_ref.file = None;
+            if sample_ref.file.is_some() {
+                return Err(too_big(format!(
+                    "Channel \"{}\": its sample was not loaded, so saving would lose it. Relink the sample or remove the channel first.",
+                    channel.name
+                )));
+            }
             continue;
         };
+        let size = file.bytes.len() as u64;
+        if size > limits.sample {
+            return Err(too_big(format!(
+                "Channel \"{}\": its sample is {}, over the {} limit for one sample.",
+                channel.name,
+                human(size),
+                human(limits.sample)
+            )));
+        }
         let shared = entries
             .iter()
             .find(|e| Arc::ptr_eq(&e.bytes, &file.bytes) || *e.bytes == *file.bytes);
         let name = match shared {
             Some(entry) => entry.name.clone(),
             None => {
+                total += size;
+                if total > limits.total {
+                    return Err(too_big(format!(
+                        "Channel \"{}\": its sample would take the project past the {} limit for all samples.",
+                        channel.name,
+                        human(limits.total)
+                    )));
+                }
                 let name = entry_name(entries.len() + 1, &file.name);
                 entries.push(Entry {
                     name: name.clone(),
@@ -211,7 +296,7 @@ fn plan(project: &Project, samples: &SampleFiles) -> (Project, Vec<Entry>) {
         };
         sample_ref.file = Some(name);
     }
-    (project, entries)
+    Ok((project, entries))
 }
 
 /// `samples/<n>-<file name>`, with the file name cut down to one safe path component: no
@@ -321,14 +406,28 @@ fn sync_folder(_path: &Path) {}
 /// original `SampleRef.path` is read from disk instead, with a warning; if that fails too the
 /// channel has no bytes (a warning), and keeps its reference so it can be relinked.
 pub fn load(path: &Path) -> Result<Loaded, LoadError> {
-    load_with_budget(path, MAX_TOTAL_BYTES)
+    load_with_limits(path, LIMITS)
 }
 
-/// [`load`] reading at most `budget` sample bytes in all (entries and disk fallbacks together),
-/// so a file claiming hundreds of channels of big samples cannot exhaust memory. A sample that
-/// does not fit is treated like a missing one.
+/// [`load`] with the total budget alone injected (for tests).
+#[cfg(test)]
 fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
-    let mut left = budget;
+    load_with_limits(
+        path,
+        Limits {
+            total: budget,
+            ..LIMITS
+        },
+    )
+}
+
+/// [`load`] reading at most `limits.sample` bytes per sample and `limits.total` in all (entries
+/// and disk fallbacks together), so a file claiming hundreds of channels of big samples cannot
+/// exhaust memory. An embedded sample over a limit is not loaded and not looked for on disk
+/// either: it is in the file, so the warning says it is too big, and the channel keeps its entry
+/// name (a later save refuses rather than drop it).
+fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
+    let mut left = limits.total;
     let mut file = File::open(path)?;
     // A zip starts with "PK"; anything else is not one of ours, and says so plainly instead of
     // as a zip parser's complaint.
@@ -367,20 +466,42 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
 
     let mut warnings = project.validate();
     let mut samples = SampleFiles::new();
-    let mut entries: HashMap<String, Option<SampleFile>> = HashMap::new();
+    let mut entries: HashMap<String, EntryRead> = HashMap::new();
+    // Channels whose embedded sample is too big: their entry name stays.
+    let mut skipped = HashSet::new();
     for channel in &project.channels {
         let Some(sample_ref) = &channel.sample else {
             continue;
         };
-        let embedded = sample_ref.file.as_deref().and_then(|name| {
+        let embedded = sample_ref.file.as_deref().map(|name| {
             entries
                 .entry(name.to_string())
-                .or_insert_with(|| read_entry(&mut zip, name, &mut left))
+                .or_insert_with(|| read_entry(&mut zip, name, limits.sample, &mut left))
                 .clone()
         });
-        if let Some(found) = embedded {
-            samples.insert(channel.id, found);
-            continue;
+        match embedded {
+            Some(EntryRead::Found(found)) => {
+                samples.insert(channel.id, found);
+                continue;
+            }
+            Some(EntryRead::TooBig { over_total }) => {
+                warnings.push(if over_total {
+                    format!(
+                        "Channel \"{}\": its sample would take the project past the {} limit for all samples, so it was not loaded.",
+                        channel.name,
+                        human(limits.total)
+                    )
+                } else {
+                    format!(
+                        "Channel \"{}\": its sample is larger than {}, so it was not loaded.",
+                        channel.name,
+                        human(limits.sample)
+                    )
+                });
+                skipped.insert(channel.id);
+                continue;
+            }
+            Some(EntryRead::Missing) | None => {}
         }
         let shown = sample_ref.path.display();
         if is_network_or_device_path(&sample_ref.path) {
@@ -392,7 +513,7 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
             ));
             continue;
         }
-        match read_fallback(&sample_ref.path, left.min(MAX_SAMPLE_BYTES)) {
+        match read_fallback(&sample_ref.path, left.min(limits.sample)) {
             Ok(found) => {
                 left -= found.bytes.len() as u64;
                 warnings.push(format!(
@@ -408,7 +529,7 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
             Err(Fallback::Refused(why)) => warnings.push(format!(
                 "Channel \"{}\": its sample is not stored in the file and \"{shown}\" was not used: {}; the channel is silent until you relink it.",
                 channel.name,
-                why.trim_end_matches('.')
+                lower_first(why.trim_end_matches('.'))
             )),
         }
     }
@@ -416,6 +537,7 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
     for channel in &mut project.channels {
         if let Some(sample_ref) = &mut channel.sample
             && !samples.contains_key(&channel.id)
+            && !skipped.contains(&channel.id)
         {
             sample_ref.file = None;
         }
@@ -509,27 +631,44 @@ pub fn migrate(json: Value) -> Result<Value, LoadError> {
     Ok(json)
 }
 
-/// A sample's bytes from its entry, or `None` if the entry is missing, unreadable (a checksum
-/// mismatch is an unreadable entry) or too big for `left` (the budget, which it then reduces).
-/// At most the declared size is ever decompressed (one byte more is read to catch a header that
-/// lies), so a compressed entry cannot grow past what was budgeted.
+/// What reading a sample's zip entry gave.
+#[derive(Clone)]
+enum EntryRead {
+    Found(SampleFile),
+    /// Not in the zip, or unreadable (a checksum mismatch is an unreadable entry): the disk
+    /// fallback may be tried.
+    Missing,
+    /// In the zip but over the per-sample limit, or past what is left of the total budget.
+    TooBig {
+        over_total: bool,
+    },
+}
+
+/// A sample's bytes from its entry (see [`EntryRead`]); a sample read reduces `left`. At most
+/// the declared size is ever decompressed (one byte more is read to catch a header that lies),
+/// so a compressed entry cannot grow past what was budgeted.
 fn read_entry<R: Read + Seek>(
     zip: &mut ZipArchive<R>,
     name: &str,
+    sample_limit: u64,
     left: &mut u64,
-) -> Option<SampleFile> {
-    let entry = zip.by_name(name).ok()?;
+) -> EntryRead {
+    let Ok(entry) = zip.by_name(name) else {
+        return EntryRead::Missing;
+    };
     let size = entry.size();
-    if size > MAX_SAMPLE_BYTES.min(*left) {
-        return None;
+    if size > sample_limit {
+        return EntryRead::TooBig { over_total: false };
+    }
+    if size > *left {
+        return EntryRead::TooBig { over_total: true };
     }
     let mut bytes = Vec::new();
-    entry.take(size + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 != size {
-        return None;
+    if entry.take(size + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 != size {
+        return EntryRead::Missing;
     }
     *left -= size;
-    Some(SampleFile {
+    EntryRead::Found(SampleFile {
         name: original_name(name),
         bytes: Arc::new(bytes),
     })
@@ -751,5 +890,201 @@ mod tests {
         let loaded = load_with_budget(&path, 100).unwrap();
         assert_eq!(loaded.samples.len(), 1, "{:?}", loaded.warnings);
         assert_eq!(loaded.warnings.len(), 2); // "read from disk" for one, "could not be read" for the other
+    }
+
+    fn with_sizes(sizes: &[usize]) -> (Project, SampleFiles) {
+        let (p, mut samples) = project_of(sizes.len() as u32);
+        for (i, &size) in sizes.iter().enumerate() {
+            let id = i as u32 + 1;
+            samples.insert(
+                id,
+                SampleFile {
+                    name: format!("{id}.wav"),
+                    bytes: Arc::new(vec![id as u8; size]),
+                },
+            );
+        }
+        (p, samples)
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn save_refuses_a_sample_over_the_per_sample_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let (p, samples) = with_sizes(&[6, 6]);
+        save(&p, &samples, &path).unwrap();
+        let old = fs::read(&path).unwrap();
+
+        let (p, samples) = with_sizes(&[6, 11]);
+        let limits = Limits {
+            sample: 10,
+            total: 100,
+        };
+        let err = save_with_limits(&p, &samples, &path, false, limits).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            "Channel \"C2\": its sample is 11 bytes, over the 10 bytes limit for one sample."
+        );
+        assert_eq!(fs::read(&path).unwrap(), old, "the old file is intact");
+        assert_eq!(leftovers(dir.path()), vec!["a.grooviq"], "nothing written");
+        // At the cap exactly is fine.
+        let (p, samples) = with_sizes(&[10, 10]);
+        save_with_limits(&p, &samples, &path, false, limits).unwrap();
+    }
+
+    #[test]
+    fn save_refuses_samples_over_the_total_cap_and_counts_shared_bytes_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let (p, samples) = with_sizes(&[6, 6]);
+        save(&p, &samples, &path).unwrap();
+        let old = fs::read(&path).unwrap();
+
+        let (p, samples) = with_sizes(&[6, 6, 6]);
+        let limits = Limits {
+            sample: 10,
+            total: 13,
+        };
+        let err = save_with_limits(&p, &samples, &path, false, limits).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            "Channel \"C3\": its sample would take the project past the 13 bytes limit for all samples."
+        );
+        assert_eq!(fs::read(&path).unwrap(), old);
+        assert_eq!(leftovers(dir.path()), vec!["a.grooviq"]);
+
+        // Equal bytes are stored once, so three channels with one sample fit in 13.
+        let (p, mut samples) = with_sizes(&[6, 6, 6]);
+        let shared = samples[&1].bytes.clone();
+        for id in [2, 3] {
+            samples.get_mut(&id).unwrap().bytes = shared.clone();
+        }
+        save_with_limits(&p, &samples, &path, false, limits).unwrap();
+    }
+
+    #[test]
+    fn an_over_cap_entry_warns_truthfully_is_not_read_from_disk_and_keeps_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let (mut p, samples) = with_sizes(&[6, 4]);
+        // A valid WAV at the channel's own path: the disk fallback would accept it.
+        let on_disk = dir.path().join("big.wav");
+        fs::write(&on_disk, wav_bytes(10)).unwrap();
+        p.channels[0].sample.as_mut().unwrap().path = on_disk;
+        save(&p, &samples, &path).unwrap();
+
+        // Over the per-sample cap: channel 1 (6 bytes) is too big, channel 2 (4 bytes) loads.
+        let loaded = load_with_limits(
+            &path,
+            Limits {
+                sample: 5,
+                total: 100,
+            },
+        )
+        .unwrap();
+        assert_eq!(loaded.samples.keys().copied().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(
+            loaded.warnings,
+            vec!["Channel \"C1\": its sample is larger than 5 bytes, so it was not loaded."]
+        );
+        let kept =
+            |l: &Loaded, i: usize| l.project.channels[i].sample.as_ref().unwrap().file.clone();
+        assert_eq!(kept(&loaded, 0).as_deref(), Some("samples/1-1.wav"));
+        assert_eq!(kept(&loaded, 1).as_deref(), Some("samples/2-2.wav"));
+
+        // Past the total: channel 1 fits (6 of 8), channel 2 (4 more) does not.
+        let loaded = load_with_limits(
+            &path,
+            Limits {
+                sample: 100,
+                total: 8,
+            },
+        )
+        .unwrap();
+        assert_eq!(loaded.samples.keys().copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            loaded.warnings,
+            vec![
+                "Channel \"C2\": its sample would take the project past the 8 bytes limit for all samples, so it was not loaded."
+            ]
+        );
+        assert_eq!(kept(&loaded, 1).as_deref(), Some("samples/2-2.wav"));
+    }
+
+    #[test]
+    fn a_save_after_a_load_that_skipped_a_sample_refuses_instead_of_dropping_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let (p, samples) = with_sizes(&[6, 4]);
+        save(&p, &samples, &path).unwrap();
+        let old = fs::read(&path).unwrap();
+
+        let loaded = load_with_limits(
+            &path,
+            Limits {
+                sample: 5,
+                total: 100,
+            },
+        )
+        .unwrap();
+        assert!(!loaded.samples.contains_key(&1));
+        let err = save(&loaded.project, &loaded.samples, &path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            "Channel \"C1\": its sample was not loaded, so saving would lose it. Relink the sample or remove the channel first."
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            old,
+            "the only copy is still in the file"
+        );
+        assert_eq!(leftovers(dir.path()), vec!["a.grooviq"]);
+
+        // Removing the channel is the way out; the other sample is kept.
+        let mut project = loaded.project;
+        project.channels.remove(0);
+        save(&project, &loaded.samples, &path).unwrap();
+        let again = load(&path).unwrap();
+        assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+        assert_eq!(*again.samples[&2].bytes, vec![2u8; 4]);
+
+        // A channel whose sample simply was not found (no entry name) saves fine.
+        let (mut p, _) = with_sizes(&[6]);
+        p.channels[0].sample.as_mut().unwrap().file = None;
+        save(&p, &SampleFiles::new(), &path).unwrap();
+    }
+
+    #[test]
+    fn a_decode_reason_continues_the_sentence_in_lower_case() {
+        assert_eq!(
+            lower_first("This file is not a sound"),
+            "this file is not a sound"
+        );
+        assert_eq!(lower_first("WAV is fine"), "WAV is fine");
+        assert_eq!(lower_first("a sample rate"), "a sample rate");
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake.wav");
+        fs::write(&fake, b"text, not sound").unwrap();
+        let (mut p, _) = with_sizes(&[6]);
+        p.channels[0].sample.as_mut().unwrap().path = fake;
+        p.channels[0].sample.as_mut().unwrap().file = None;
+        let path = dir.path().join("a.grooviq");
+        save(&p, &SampleFiles::new(), &path).unwrap();
+        let loaded = load(&path).unwrap();
+        let warning = &loaded.warnings[0];
+        let reason = warning.split("was not used: ").nth(1).unwrap();
+        assert!(reason.starts_with(|c: char| c.is_lowercase()), "{warning}");
     }
 }
