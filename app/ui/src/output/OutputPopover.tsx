@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { SYSTEM_DEFAULT, type LogEntry, type Output } from "../audio";
 import { AudioLog } from "../log/AudioLog";
+import { focusInto, returnFocus } from "./focus";
 import { kindIcon, kindWarns } from "./kind";
 
 interface Props {
@@ -15,9 +16,24 @@ interface Props {
 }
 
 /** The output menu: every device, the speaker guard and the audio log. Escape or a click
- * outside closes it. */
+ * outside closes it. Focus moves into it on open and back to what opened it on close. */
 export function OutputPopover({ outputs, chosen, guard, log, onSelect, onGuard, onClose }: Props) {
   const box = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = box.current;
+    // The chip, usually; WebKit does not focus a button on click, so it may be the page body.
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (el) focusInto(el);
+    return () => {
+      const active = document.activeElement;
+      // On unmount the dialog is already gone, so focus has fallen back to the page body unless
+      // something outside took it.
+      const movedElsewhere = active !== null && active !== document.body && !el?.contains(active);
+      const target = opener === document.body ? document.querySelector<HTMLElement>(".chip") : opener;
+      returnFocus(target, movedElsewhere);
+    };
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -40,7 +56,7 @@ export function OutputPopover({ outputs, chosen, guard, log, onSelect, onGuard, 
 
   const defaultName = outputs.find((o) => o.isDefault)?.name;
   return (
-    <div ref={box} className="popover" role="dialog" aria-label="Audio output">
+    <div ref={box} className="popover" role="dialog" aria-label="Audio output" tabIndex={-1}>
       <fieldset className="devices">
         <legend>Output</legend>
         <label className="device">

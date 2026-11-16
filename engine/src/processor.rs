@@ -26,6 +26,11 @@ thread_local! {
 
 /// Whether the calling thread is inside [`AudioProcessor::process`]. A panic hook calls it to
 /// stay silent for a panic the engine catches on the audio thread, where printing is I/O.
+///
+/// The flag follows `process`, not the audio thread: it is also on while the output
+/// controller renders off-stream in `stop_sound` (`output/backend.rs`), which runs the
+/// processor on the controller's own thread to play out the guard-stop fade with no stream
+/// open.
 pub fn in_audio_callback() -> bool {
     RENDERING.with(Cell::get)
 }
