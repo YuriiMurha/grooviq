@@ -22,7 +22,7 @@ use crate::model::{
 use grooviq_dsp::sampler::{PARAM_IDS, SPEC, SampleBuf};
 use grooviq_engine::{
     ChannelId, ChannelMix, ChannelSetup, Command, ControlError, Controller, EngineState,
-    MAX_CHANNELS, MAX_SAMPLE_SECONDS, STEP_TICKS, decode_sample,
+    InstrumentKind, MAX_CHANNELS, MAX_SAMPLE_SECONDS, STEP_TICKS, decode_sample,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -594,7 +594,8 @@ impl Session {
                     p.notes
                         .retain(|n| !(n.channel == channel && n.tick == tick));
                     if p.notes.len() == before {
-                        p.notes.push(hit(channel, tick, DEFAULT_VELOCITY));
+                        let id = p.take_note_id();
+                        p.notes.push(hit(id, channel, tick, DEFAULT_VELOCITY));
                     }
                 })
             }
@@ -614,7 +615,8 @@ impl Session {
                         }
                     }
                     if !found {
-                        p.notes.push(hit(channel, tick, velocity));
+                        let id = p.take_note_id();
+                        p.notes.push(hit(id, channel, tick, velocity));
                     }
                 })
             }
@@ -743,11 +745,15 @@ impl Session {
                 path: path.to_path_buf(),
                 file: None,
             }),
+            instrument: InstrumentKind::Sampler,
             sampler: BTreeMap::new(),
+            synth: BTreeMap::new(),
+            preset: None,
             volume: 1.0,
             pan: 0.0,
             mute: false,
             solo: false,
+            choke: 0,
         };
         lock(&self.controller).add_channel(ChannelSetup::sampler(
             ChannelId(id),
@@ -1007,12 +1013,14 @@ impl Session {
     }
 }
 
-fn hit(channel: u32, tick: u32, velocity: f32) -> Note {
+fn hit(id: u32, channel: u32, tick: u32, velocity: f32) -> Note {
     Note {
+        id,
         channel,
         tick,
         length: HIT_TICKS,
         key: DEFAULT_KEY,
         velocity,
+        slide: false,
     }
 }

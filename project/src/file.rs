@@ -572,9 +572,14 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
     })
 }
 
-/// Brings a parsed `project.json` up to [`VERSION`]. Version 1 passes through unchanged; a
-/// version 2 will add its upgrade step here, one version at a time.
-pub fn migrate(json: Value) -> Result<Value, LoadError> {
+/// Brings a parsed `project.json` up to [`VERSION`], one version at a time:
+///
+/// * 1 → 2: every channel is a sampler (`"instrument": "sampler"`), and each pattern's notes get
+///   the ids `1..=n` in stored order, with `nextNoteId` n + 1.
+///
+/// A version above [`VERSION`] is [`LoadError::NewerVersion`]. Parts of the wrong shape are left
+/// as they are, for deserializing to report.
+pub fn migrate(mut json: Value) -> Result<Value, LoadError> {
     let header = json.as_object().ok_or(LoadError::NotAProject)?;
     if header.get("format").and_then(Value::as_str) != Some(FORMAT) {
         return Err(LoadError::NotAProject);
@@ -593,7 +598,34 @@ pub fn migrate(json: Value) -> Result<Value, LoadError> {
             supported: VERSION,
         });
     }
+    if version == 1 {
+        v1_to_v2(&mut json);
+    }
     Ok(json)
+}
+
+fn v1_to_v2(json: &mut Value) {
+    let Some(project) = json.as_object_mut() else {
+        return;
+    };
+    project.insert("version".into(), 2.into());
+    if let Some(channels) = project.get_mut("channels").and_then(Value::as_array_mut) {
+        for channel in channels.iter_mut().filter_map(Value::as_object_mut) {
+            channel.insert("instrument".into(), "sampler".into());
+        }
+    }
+    if let Some(patterns) = project.get_mut("patterns").and_then(Value::as_array_mut) {
+        for pattern in patterns.iter_mut().filter_map(Value::as_object_mut) {
+            let mut next: u64 = 1;
+            if let Some(notes) = pattern.get_mut("notes").and_then(Value::as_array_mut) {
+                for note in notes.iter_mut().filter_map(Value::as_object_mut) {
+                    note.insert("id".into(), next.into());
+                    next += 1;
+                }
+            }
+            pattern.insert("nextNoteId".into(), next.into());
+        }
+    }
 }
 
 /// What reading a sample's zip entry gave.
@@ -695,11 +727,15 @@ mod tests {
                     path: PathBuf::from("/nowhere/x.wav"),
                     file: None,
                 }),
+                instrument: grooviq_engine::InstrumentKind::Sampler,
                 sampler: Default::default(),
+                synth: Default::default(),
+                preset: None,
                 volume: 1.0,
                 pan: 0.0,
                 mute: false,
                 solo: false,
+                choke: 0,
             });
             samples.insert(
                 id,

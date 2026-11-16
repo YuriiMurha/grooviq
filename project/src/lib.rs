@@ -23,12 +23,13 @@ pub mod recovery;
 pub mod session;
 
 pub use backup::{backup_before_save, backup_folder};
-pub use compile::{compile_pattern, engine_state, sampler_values};
+pub use compile::{compile_pattern, engine_state, sampler_values, synth_values};
 #[doc(hidden)]
 pub use file::save_with;
 pub use file::{LoadError, Loaded, SampleFile, SampleFiles, load, migrate, read_sample_file, save};
 pub use model::{
-    Channel, DEFAULT_KEY, DEFAULT_VELOCITY, EXTENSION, FORMAT, MAX_STEPS, Note, Pattern, Project,
-    SampleRef, TimeSignature, VERSION,
+    Channel, DEFAULT_KEY, DEFAULT_VELOCITY, EXTENSION, FORMAT, MAX_NOTES_PER_PATTERN, MAX_STEPS,
+    Note, Pattern, Project, ProjectKey, SCALES, SampleRef, TimeSignature, VERSION, is_plain_step,
+    roll_channels,
 };
 pub use session::{DecodedSamples, decode_samples};

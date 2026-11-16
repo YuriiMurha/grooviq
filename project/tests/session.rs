@@ -135,11 +135,13 @@ fn toggling_a_step_adds_a_note_at_its_tick_and_sends_the_pattern() {
     assert_eq!(
         session.project().patterns[0].notes,
         vec![Note {
+            id: 1,
             channel: kick,
             tick: 1_200,
             length: 240,
             key: 60,
             velocity: 0.8,
+            slide: false,
         }]
     );
     let pattern = controller.lock().unwrap().state().pattern.clone();
@@ -830,11 +832,15 @@ fn channel(id: u32, name: &str, entry: Option<&str>) -> Channel {
             path: PathBuf::from(format!("/gone/{}.wav", name.to_lowercase())),
             file: entry.map(Into::into),
         }),
+        instrument: grooviq_engine::InstrumentKind::Sampler,
         sampler: BTreeMap::new(),
+        synth: BTreeMap::new(),
+        preset: None,
         volume: 1.0,
         pan: 0.0,
         mute: false,
         solo: false,
+        choke: 0,
     }
 }
 
@@ -850,15 +856,18 @@ fn loaded_with_a_missing_sample() -> Loaded {
     project
         .channels
         .push(channel(3, "Hat", Some("samples/2-hat.wav")));
-    for (channel, tick) in [(1, 0), (2, 0), (2, 960), (3, 0)] {
+    for (id, (channel, tick)) in (1..).zip([(1, 0), (2, 0), (2, 960), (3, 0)]) {
         project.patterns[0].notes.push(Note {
+            id,
             channel,
             tick,
             length: 240,
             key: 60,
             velocity: 0.8,
+            slide: false,
         });
     }
+    project.patterns[0].next_note_id = 5;
     let mut samples = std::collections::HashMap::new();
     samples.insert(1, sample_file("kick.wav"));
     samples.insert(
@@ -1286,13 +1295,15 @@ fn the_grid_shows_only_hits_that_start_on_a_step() {
     let mut loaded = loaded_with_a_missing_sample();
     let notes = &mut loaded.project.patterns[0].notes;
     notes.clear();
-    for (tick, velocity) in [(100, 0.3), (480, 0.6), (16 * 240, 0.9)] {
+    for (id, (tick, velocity)) in (1..).zip([(100, 0.3), (480, 0.6), (16 * 240, 0.9)]) {
         notes.push(Note {
+            id,
             channel: 1,
             tick,
             length: 240,
             key: 60,
             velocity,
+            slide: false,
         });
     }
     let decoded = decode_samples(&loaded);
