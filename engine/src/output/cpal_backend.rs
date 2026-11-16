@@ -9,6 +9,7 @@ use cpal::{
 };
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "macos")]
@@ -19,9 +20,13 @@ const PREFERRED_RATE: u32 = 48_000;
 /// Frames per callback asked for wherever a device allows it.
 const PREFERRED_BUFFER: u32 = 256;
 
+/// cpal backends created in this process. Every way into cpal goes through one.
+static CREATED: AtomicUsize = AtomicUsize::new(0);
+
 /// The system's audio host (CoreAudio on macOS, WASAPI on Windows). Creating it touches no
 /// device.
 pub fn cpal_backend() -> Box<dyn OutputBackend> {
+    CREATED.fetch_add(1, Ordering::Relaxed);
     #[cfg(target_os = "macos")]
     super::macos::notify_on_own_thread();
     Box::new(CpalBackend {
@@ -30,6 +35,13 @@ pub fn cpal_backend() -> Box<dyn OutputBackend> {
         last: Mutex::default(),
         stuck: Mutex::default(),
     })
+}
+
+/// How many cpal backends this process has created: lets a test prove that a path (the silent
+/// output) never reached the audio system.
+#[doc(hidden)]
+pub fn cpal_backends_created() -> usize {
+    CREATED.load(Ordering::Relaxed)
 }
 
 struct CpalBackend {

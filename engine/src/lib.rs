@@ -52,8 +52,9 @@ pub use leftover::{OwnedTemp, STALE_AFTER, create_owned_temp, remove_stale_owned
 pub use live::{LIVE_LEN, LIVE_VERSION, LiveShared, LiveSnapshot, decode_live, encode_live};
 pub use offline::{render_offline, render_offline_with};
 pub use output::{
-    AudioOutput, AudioSlot, OutputBackend, OutputChoice, OutputEvent, OutputInfo, OutputKind,
-    OutputMonitor, Transport, classify, cpal_backend,
+    AudioOutput, AudioSlot, NULL_OUTPUT_ID, OutputBackend, OutputChoice, OutputEvent, OutputInfo,
+    OutputKind, OutputMonitor, Transport, classify, cpal_backend, cpal_backends_created,
+    null_backend, run_silent,
 };
 pub use processor::{AudioProcessor, in_audio_callback};
 pub use sample_file::{

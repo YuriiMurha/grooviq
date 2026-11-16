@@ -21,7 +21,8 @@ Read the code; it is the documentation. `make help` lists the supported commands
   a bug, a follow-up, a research result worth acting on, a deferred review finding.
   Chat, ledgers and untracked notes are not a record.
 - Never play sound through the owner's speakers in automated checks.
-  Tests render offline or use fake devices. Launch the app for QA only in silent mode.
+  Tests render offline or use fake devices. Launch the app for QA only with `make qa-app`:
+  no audio device (`GROOVIQ_AUDIO=null`) and a throwaway home folder.
 - Audio thread: no allocation, locks, I/O or logging.
 - The export path stays platform-identical: `libm` maths, no `mul_add`.
   The acceptance golden must match byte for byte on macOS and Windows.

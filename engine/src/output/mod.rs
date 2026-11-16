@@ -6,7 +6,8 @@
 //! device) to anything but headphones; a move the user picks plays on. [`AudioOutput`] carries
 //! the decisions out on an [`OutputBackend`]: it owns the processor, looks at the devices every
 //! 500 ms and switches streams so that a guard stop never reaches the new device.
-//! [`cpal_backend`] is the real backend.
+//! [`cpal_backend`] is the real backend; [`null_backend`] a silent one for QA runs of the app,
+//! which opens no device.
 //!
 //! Only output devices are ever listed or opened: opening the AirPods' microphone would drop
 //! them into their low-quality headset mode.
@@ -15,9 +16,11 @@ mod backend;
 mod cpal_backend;
 #[cfg(target_os = "macos")]
 mod macos;
+mod null_backend;
 
 pub use backend::{AudioOutput, AudioSlot, OutputBackend};
-pub use cpal_backend::cpal_backend;
+pub use cpal_backend::{cpal_backend, cpal_backends_created};
+pub use null_backend::{NULL_OUTPUT_ID, null_backend, run_silent};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// What an output is, as far as the speaker guard is concerned.
