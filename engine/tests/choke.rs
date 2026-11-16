@@ -79,6 +79,10 @@ fn left(inter: &[f32]) -> Vec<f32> {
     inter.iter().step_by(2).copied().collect()
 }
 
+fn right(inter: &[f32]) -> Vec<f32> {
+    inter.iter().skip(1).step_by(2).copied().collect()
+}
+
 fn render(channels: Vec<ChannelSetup>, events: &[(u64, Command)], frames: usize) -> Vec<f32> {
     render_offline_with(cfg(), state(channels), events, frames, 64)
 }
@@ -221,15 +225,87 @@ fn a_choke_group_out_of_range_is_refused() {
 
 #[test]
 fn more_than_256_grouped_note_ons_in_a_block_never_panic() {
-    // Three channels of one group, each with 128 note-ons in one block: 384 > 256.
+    // In the block from frame 64, grouped note-ons count in channel order, then offset:
+    // channel 1 gives entries 1-128 (offset 0), channel 2 entries 129-256 (offset 0, the last
+    // at 20) and channel 3 entry 257 (offset 40). Channel 4, heard alone on the left, is held
+    // from frame 0 and struck again at offsets 10 and 30: entry 256 must cut the note at 10,
+    // and entry 257 must play without cutting the note at 30.
     let mut events = Vec::new();
-    for channel in 1..=3 {
-        for i in 0..128 {
-            events.push(hit(64 + i / 2, channel));
-        }
-    }
-    let channels = vec![hat(1, 1, -1.0), hat(2, 1, 1.0), hat(3, 1, 1.0)];
+    events.push(hit(0, 4));
+    events.extend((0..128).map(|_| hit(64, 1)));
+    events.extend((0..127).map(|_| hit(64, 2)));
+    events.push(hit(64 + 20, 2));
+    events.push(hit(64 + 40, 3));
+    events.push(hit(64 + 10, 4));
+    events.push(hit(64 + 30, 4));
+    let channels = vec![
+        hat(1, 1, 1.0),
+        hat(2, 1, 1.0),
+        hat(3, 1, 1.0),
+        hat(4, 1, -1.0),
+    ];
     let out = render(channels, &events, 1_024);
     assert!(out.iter().all(|x| x.is_finite()));
-    assert!(out.iter().any(|&x| x != 0.0));
+    let l = left(&out);
+    assert!(l[..64].iter().all(|&x| x == OPEN));
+    // Every cut note has faded by 64 + 20 + 144; only the note struck at offset 30 is left.
+    assert!(l[64 + 20 + FADE..].iter().all(|&x| x == OPEN), "{}", l[300]);
+}
+
+#[test]
+fn notes_starting_together_in_a_group_both_survive() {
+    // Channels 1 and 2 of one group, each holding a note, strike again on the same frame: each
+    // cuts the other's old note, and both new notes play on. At an offset inside a block, and
+    // at a block start.
+    for frame in [1_000, 1_024] {
+        let out = render(
+            vec![hat(1, 1, -1.0), hat(2, 1, 1.0)],
+            &[hit(0, 1), hit(0, 2), hit(frame, 1), hit(frame, 2)],
+            3_000,
+        );
+        let f = frame as usize;
+        let (l, r) = (left(&out), right(&out));
+        assert!(
+            l[f] > OPEN,
+            "frame {frame}: the new note sounds from its frame"
+        );
+        assert!(
+            l[f + FADE..].iter().all(|&x| x == OPEN),
+            "frame {frame}: left"
+        );
+        assert!(
+            r[f + FADE..].iter().all(|&x| x == OPEN),
+            "frame {frame}: right"
+        );
+    }
+}
+
+#[test]
+fn only_a_sounding_note_on_chokes() {
+    // A held note on channel 1, then an event on channel 2 of its group at frame 1 000.
+    let at_1000 = |velocity, on| {
+        let event = (
+            1_000,
+            Command::ChannelNote {
+                channel: ChannelId(2),
+                key: 60,
+                velocity,
+                on,
+            },
+        );
+        left(&render(
+            vec![hat(1, 1, -1.0), hat(2, 1, 1.0)],
+            &[hit(0, 1), event],
+            2_000,
+        ))
+    };
+    // A note-on with velocity 0 and a note-off (with a velocity) leave it untouched.
+    assert!(at_1000(0.0, true).iter().all(|&x| x == OPEN), "velocity 0");
+    assert!(at_1000(1.0, false).iter().all(|&x| x == OPEN), "note-off");
+    // A note-on that sounds cuts it.
+    let cut = at_1000(0.5, true);
+    assert!(
+        cut[1_000 + FADE..].iter().all(|x| x.abs() < 1e-6),
+        "note-on"
+    );
 }
