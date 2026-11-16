@@ -179,6 +179,11 @@ impl Graph {
         std::mem::replace(&mut self.pattern, pattern)
     }
 
+    /// The pattern's length in ticks.
+    pub(crate) fn pattern_length(&self) -> u32 {
+        self.pattern.length
+    }
+
     /// The transport started: the sequencer finds its place again.
     pub(crate) fn transport_started(&mut self) {
         self.sequencer.reseek();

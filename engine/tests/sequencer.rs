@@ -293,6 +293,82 @@ fn shortening_the_pattern_mid_play_wraps_cleanly() {
     assert_eq!(got, expected);
 }
 
+/// A pattern of `steps` steps with a one-step note on every step, whose velocity names it:
+/// step `s` plays at `0.25 + s / 100`, so an onset's level says which step it was.
+fn numbered(steps: u32) -> PatternData {
+    PatternData {
+        length: steps * STEP_TICKS,
+        notes: (0..steps)
+            .map(|s| SeqNote {
+                velocity: step_level(s),
+                ..note(s * STEP_TICKS, 1, STEP_TICKS)
+            })
+            .collect(),
+    }
+}
+
+fn step_level(step: u32) -> f32 {
+    0.25 + step as f32 / 100.0
+}
+
+/// Every onset as (frame, step), the step read back from its level.
+fn numbered_onsets(inter: &[f32]) -> Vec<(u64, u32)> {
+    let l = left(inter);
+    onsets(inter)
+        .into_iter()
+        .map(|f| {
+            let step = ((l[f as usize] - 0.25) * 100.0).round() as u32;
+            // One voice at its own level: never two notes on one frame.
+            assert!((l[f as usize] - step_level(step)).abs() < 1e-6, "frame {f}");
+            (f, step)
+        })
+        .collect()
+}
+
+#[test]
+fn changing_the_pattern_length_mid_play_keeps_the_place_in_the_loop() {
+    // 16 steps, then a new length during step 4 of the second or third loop. The place in
+    // the loop (step 4) carries on into the new pattern: step 5 next, on the frame a run
+    // without the swap gives it, every step once, then the new pattern's own wrap.
+    for new_steps in [32u32, 17, 15] {
+        for loop_index in [1u64, 2] {
+            let at_step = 16 * loop_index + 4;
+            // 6 000 frames a step at 120 BPM: 100 frames into step 4, rounded to its block.
+            let swap = block_start(at_step * 6_000 + 100);
+            assert!(swap > at_step * 6_000);
+            let total_steps = at_step + 1 + 2 * u64::from(new_steps);
+            let frames = (total_steps * 6_000) as usize;
+            let script = vec![
+                (0, Action::Send(Command::Play)),
+                (swap, Action::Pattern(numbered(new_steps))),
+            ];
+            let got = numbered_onsets(&drive(clicks(120.0, numbered(16)), &script, frames, 64));
+            let steady = numbered_onsets(&drive(
+                clicks(120.0, numbered(16)),
+                &[(0, Action::Send(Command::Play))],
+                frames,
+                64,
+            ));
+            let expected: Vec<(u64, u32)> = (0..total_steps)
+                .map(|n| {
+                    let step = if n <= at_step {
+                        n % 16
+                    } else {
+                        (4 + n - at_step) % u64::from(new_steps)
+                    };
+                    (n * 6_000, step as u32)
+                })
+                .collect();
+            let case = format!("16 -> {new_steps} steps in loop {}", loop_index + 1);
+            assert_eq!(got, expected, "{case}");
+            // The first onset after the swap is on the frame the unswapped run gives step 5.
+            let next = got.iter().find(|(f, _)| *f >= swap).unwrap();
+            assert_eq!(*next, steady[at_step as usize + 1], "{case}");
+            assert_eq!(next.1, 5, "{case}");
+        }
+    }
+}
+
 #[test]
 fn play_loops_stops_emitting_at_the_end() {
     let pat = pattern(16, &steps(&[0, 4, 8, 12]));

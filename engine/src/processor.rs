@@ -282,7 +282,11 @@ impl AudioProcessor {
                     let leaving = if self.faulted {
                         pattern
                     } else {
-                        self.graph.set_pattern(pattern)
+                        let new_len = pattern.length;
+                        let leaving = self.graph.set_pattern(pattern);
+                        // A new length keeps the place in the loop (no jump, no lost notes).
+                        self.transport.keep_position(leaving.length, new_len);
+                        leaving
                     };
                     self.discard(Trash::Pattern(leaving));
                 }
@@ -392,7 +396,12 @@ impl AudioProcessor {
     fn replace_graph(&mut self, graph: Box<Graph>) {
         let leaving = if graph.generation() == self.generation {
             self.faulted = false;
-            std::mem::replace(&mut self.graph, graph)
+            let new_len = graph.pattern_length();
+            let leaving = std::mem::replace(&mut self.graph, graph);
+            // A pattern swap a faulted graph refused arrives with the fresh graph.
+            self.transport
+                .keep_position(leaving.pattern_length(), new_len);
+            leaving
         } else {
             graph
         };
