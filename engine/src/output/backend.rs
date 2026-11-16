@@ -520,7 +520,8 @@ impl State {
 
     /// The guard stop: `AllSoundOff` while the old stream still runs, so a device that is
     /// still there plays the fade; then, with the stream closed, the processor runs silent
-    /// until the fade is over, so not even the fade reaches the next device.
+    /// until the fade is over, so not even the fade reaches the next device. That render calls
+    /// `process` off the audio thread, so `in_audio_callback` is true during it as well.
     fn stop_sound(&mut self, slot: &AudioSlot) {
         let stopped = lock(&self.controller).send(Command::AllSoundOff).is_ok();
         self.close(slot);
