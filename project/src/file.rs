@@ -30,6 +30,8 @@ const SAMPLES_DIR: &str = "samples/";
 const MAX_JSON_BYTES: u64 = 64 * 1024 * 1024;
 /// The most one sample file may hold, read from the zip or from disk.
 const MAX_SAMPLE_BYTES: u64 = 512 * 1024 * 1024;
+/// The most sample bytes one `load` reads in total, whatever the number of channels.
+const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Entries over this need the zip64 header.
 const ZIP64_THRESHOLD: u64 = u32::MAX as u64;
 
@@ -113,20 +115,30 @@ struct Entry {
     bytes: Arc<Vec<u8>>,
 }
 
-/// Reads a sample file from disk, keeping its name and bytes as they are.
+/// Reads a sample file from disk, keeping its name and bytes as they are. A regular file of at
+/// most 512 MB; anything else (a folder, a device, a pipe, a bigger file) is an error.
 pub fn read_sample_file(path: &Path) -> io::Result<SampleFile> {
-    let size = fs::metadata(path)?.len();
-    if size > MAX_SAMPLE_BYTES {
+    read_limited(path, MAX_SAMPLE_BYTES)
+}
+
+/// [`read_sample_file`] with a lower limit. The limit is enforced on the bytes read, not on the
+/// size the file system reported, so a file that grows while it is read cannot get past it.
+fn read_limited(path: &Path, limit: u64) -> io::Result<SampleFile> {
+    let file = File::open(path)?;
+    if !file.metadata()?.is_file() {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "the file is {} MB, over the {} MB limit",
-                size >> 20,
-                MAX_SAMPLE_BYTES >> 20
-            ),
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
         ));
     }
-    let bytes = fs::read(path)?;
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the file is over the {} MB limit", limit >> 20),
+        ));
+    }
     let name = path
         .file_name()
         .map_or_else(|| "sample".into(), |n| n.to_string_lossy().into_owned());
@@ -300,6 +312,14 @@ fn sync_folder(_path: &Path) {}
 /// original `SampleRef.path` is read from disk instead, with a warning; if that fails too the
 /// channel has no bytes (a warning), and keeps its reference so it can be relinked.
 pub fn load(path: &Path) -> Result<Loaded, LoadError> {
+    load_with_budget(path, MAX_TOTAL_BYTES)
+}
+
+/// [`load`] reading at most `budget` sample bytes in all (entries and disk fallbacks together),
+/// so a file claiming hundreds of channels of big samples cannot exhaust memory. A sample that
+/// does not fit is treated like a missing one.
+fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
+    let mut left = budget;
     let mut file = File::open(path)?;
     // A zip starts with "PK"; anything else is not one of ours, and says so plainly instead of
     // as a zip parser's complaint.
@@ -346,7 +366,7 @@ pub fn load(path: &Path) -> Result<Loaded, LoadError> {
         let embedded = sample_ref.file.as_deref().and_then(|name| {
             entries
                 .entry(name.to_string())
-                .or_insert_with(|| read_entry(&mut zip, name))
+                .or_insert_with(|| read_entry(&mut zip, name, &mut left))
                 .clone()
         });
         if let Some(found) = embedded {
@@ -354,8 +374,9 @@ pub fn load(path: &Path) -> Result<Loaded, LoadError> {
             continue;
         }
         let shown = sample_ref.path.display();
-        match read_sample_file(&sample_ref.path) {
+        match read_limited(&sample_ref.path, left.min(MAX_SAMPLE_BYTES)) {
             Ok(found) => {
+                left -= found.bytes.len() as u64;
                 warnings.push(format!(
                     "Channel \"{}\": its sample is not stored in the file; read \"{shown}\" from disk instead.",
                     channel.name
@@ -399,15 +420,26 @@ pub fn migrate(json: Value) -> Result<Value, LoadError> {
     Ok(json)
 }
 
-/// A sample's bytes from its entry, or `None` if the entry is missing, too big or unreadable
-/// (a checksum mismatch is an unreadable entry).
-fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Option<SampleFile> {
+/// A sample's bytes from its entry, or `None` if the entry is missing, unreadable (a checksum
+/// mismatch is an unreadable entry) or too big for `left` (the budget, which it then reduces).
+/// At most the declared size is ever decompressed (one byte more is read to catch a header that
+/// lies), so a compressed entry cannot grow past what was budgeted.
+fn read_entry<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    name: &str,
+    left: &mut u64,
+) -> Option<SampleFile> {
     let entry = zip.by_name(name).ok()?;
-    if entry.size() > MAX_SAMPLE_BYTES {
+    let size = entry.size();
+    if size > MAX_SAMPLE_BYTES.min(*left) {
         return None;
     }
     let mut bytes = Vec::new();
-    entry.take(MAX_SAMPLE_BYTES).read_to_end(&mut bytes).ok()?;
+    entry.take(size + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 != size {
+        return None;
+    }
+    *left -= size;
     Some(SampleFile {
         name: original_name(name),
         bytes: Arc::new(bytes),
@@ -429,5 +461,123 @@ fn zip_error(e: ZipError) -> LoadError {
     match e {
         ZipError::Io(io) if io.kind() != io::ErrorKind::UnexpectedEof => LoadError::Io(io),
         other => LoadError::Corrupt(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Channel, SampleRef};
+
+    fn project_of(n: u32) -> (Project, SampleFiles) {
+        let mut p = Project::new();
+        let mut samples = SampleFiles::new();
+        for id in 1..=n {
+            p.channels.push(Channel {
+                id,
+                name: format!("C{id}"),
+                color: 0,
+                sample: Some(SampleRef {
+                    path: PathBuf::from("/nowhere/x.wav"),
+                    file: None,
+                }),
+                sampler: Default::default(),
+                volume: 1.0,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+            });
+            samples.insert(
+                id,
+                SampleFile {
+                    name: format!("{id}.wav"),
+                    bytes: Arc::new(vec![id as u8; 6]),
+                },
+            );
+        }
+        p.next_id = n + 1;
+        (p, samples)
+    }
+
+    #[test]
+    fn the_total_of_sample_bytes_read_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let (p, samples) = project_of(3);
+        save(&p, &samples, &path).unwrap();
+
+        // 6 bytes each: a budget of 13 holds two, the third is treated as missing.
+        let loaded = load_with_budget(&path, 13).unwrap();
+        assert_eq!(loaded.samples.len(), 2);
+        assert!(loaded.samples.contains_key(&1) && loaded.samples.contains_key(&2));
+        assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
+        assert!(loaded.warnings[0].starts_with("Channel \"C3\""));
+        assert_eq!(load_with_budget(&path, 18).unwrap().samples.len(), 3);
+    }
+
+    #[test]
+    fn a_deflated_entry_loads_but_never_past_its_declared_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let (p, samples) = project_of(1);
+        save(&p, &samples, &path).unwrap();
+        // Rewrite the zip with the sample deflated (a tool that re-zipped it might).
+        let mut zip = ZipArchive::new(File::open(&path).unwrap()).unwrap();
+        let mut json = Vec::new();
+        zip.by_name(PROJECT_JSON)
+            .unwrap()
+            .read_to_end(&mut json)
+            .unwrap();
+        let mut out = ZipWriter::new(File::create(&path).unwrap());
+        let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        out.start_file(PROJECT_JSON, deflated).unwrap();
+        out.write_all(&json).unwrap();
+        out.start_file("samples/1-1.wav", deflated).unwrap();
+        out.write_all(&[7u8; 4096]).unwrap();
+        out.finish().unwrap();
+
+        let loaded = load(&path).unwrap();
+        assert_eq!(*loaded.samples[&1].bytes, vec![7u8; 4096]);
+        // The budget counts decompressed bytes: 4096 do not fit in 4095.
+        let tight = load_with_budget(&path, 4095).unwrap();
+        assert!(tight.samples.is_empty());
+        assert_eq!(tight.warnings.len(), 1, "{:?}", tight.warnings);
+    }
+
+    #[test]
+    fn disk_reads_are_regular_files_within_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_sample_file(dir.path()).is_err(), "a folder");
+        let file = dir.path().join("x.wav");
+        fs::write(&file, [0u8; 11]).unwrap();
+        assert_eq!(read_limited(&file, 11).unwrap().bytes.len(), 11);
+        let err = read_limited(&file, 10).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_reads_refuse_devices_and_stop_at_the_limit() {
+        // Not a regular file, though it opens and reads (as zero bytes).
+        assert!(read_sample_file(Path::new("/dev/null")).is_err());
+        // Endless: only the read cap keeps this from running out of memory.
+        let err = read_limited(Path::new("/dev/zero"), 1000);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn disk_fallbacks_count_against_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut p, _) = project_of(2);
+        for (i, c) in p.channels.iter_mut().enumerate() {
+            let on_disk = dir.path().join(format!("{i}.wav"));
+            fs::write(&on_disk, [1u8; 6]).unwrap();
+            c.sample.as_mut().unwrap().path = on_disk;
+        }
+        let path = dir.path().join("a.grooviq");
+        save(&p, &SampleFiles::new(), &path).unwrap(); // no copies: both read from disk
+        let loaded = load_with_budget(&path, 8).unwrap();
+        assert_eq!(loaded.samples.len(), 1, "{:?}", loaded.warnings);
+        assert_eq!(loaded.warnings.len(), 2); // "read from disk" for one, "could not be read" for the other
     }
 }
