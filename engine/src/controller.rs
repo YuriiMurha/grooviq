@@ -14,8 +14,9 @@ use std::sync::Arc;
 /// What [`Controller::check_health`] found since its previous call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HealthEvent {
-    /// The graph panicked and was rebuilt from the controller's state; `faults` counts every
-    /// panic so far.
+    /// The graph panicked and was rebuilt (by `check_health`, or by `reconfigure` if it came
+    /// first) from the controller's state, or with default parameters if replaying that state
+    /// panicked too; `faults` counts every panic so far.
     Restarted { faults: u32 },
     /// The NaN guard silenced and reset a node; `total` counts every such block so far.
     DeviceSilenced { total: u32 },
@@ -177,8 +178,9 @@ impl Controller {
     }
 
     /// Switches the engine to a new sample rate, rebuilding the graph from the controller's
-    /// state. Call it with the audio callback stopped (it needs the processor itself), never
-    /// on the audio thread.
+    /// state (which also recovers a graph that panicked; the next `check_health` still reports
+    /// the panic). Call it with the audio callback stopped (it needs the processor itself),
+    /// never on the audio thread.
     pub fn reconfigure(&mut self, processor: &mut AudioProcessor, config: EngineConfig) {
         self.sample_rate = config.rate();
         // Replacements queued before now are stale: the processor drops them.
