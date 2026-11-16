@@ -41,10 +41,11 @@ child=$!
 # Ctrl+C or a kill of this script ends the app too (a background child ignores SIGINT), and
 # the folder is cleaned only once the app is gone.
 trap 'kill -TERM "$child" 2>/dev/null' INT TERM
+# A trapped signal interrupts `wait` before the app has ended: wait again until it has, and
+# keep the status of the wait that saw it end.
 status=0
 wait "$child" || status=$?
-# A trapped signal interrupts `wait` before the app has ended: wait for the app itself.
 while kill -0 "$child" 2>/dev/null; do
-	wait "$child" || status=$?
+	if wait "$child"; then status=0; else status=$?; fi
 done
 exit "$status"

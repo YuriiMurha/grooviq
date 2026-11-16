@@ -169,9 +169,16 @@ mod tests {
         backend.open(&info, Arc::clone(&slot)).unwrap();
         backend.open(&info, Arc::clone(&slot)).unwrap();
         wait_for_frames(&live, 0);
-        // One stream: about 48 000 frames a second, not two or three times that.
-        let rendered = frames_over(&live, Duration::from_millis(500));
-        assert!(rendered < 24_000 + 2_048, "{rendered} frames in 0.5 s");
+        // One stream: about 48 000 frames a second, not two or three times that. Timed here,
+        // as the sleep may last longer than asked on a busy runner.
+        let (before, start) = (live.snapshot().frames, Instant::now());
+        thread::sleep(Duration::from_millis(500));
+        let rendered = (live.snapshot().frames - before) as f64;
+        let one_stream = start.elapsed().as_secs_f64() * 48_000.0;
+        assert!(
+            rendered < one_stream * 1.5 + 512.0,
+            "{rendered} frames, one stream renders {one_stream}"
+        );
         drop(backend);
         assert_eq!(
             frames_over(&live, Duration::from_millis(40)),
