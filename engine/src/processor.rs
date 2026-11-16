@@ -12,8 +12,37 @@ use crate::live::LiveShared;
 use crate::{BLOCK, QUEUE_CAPACITY};
 use grooviq_dsp::NoteEvent;
 use rtrb::{Consumer, Producer, PushError};
+use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+
+thread_local! {
+    /// On while this thread is inside [`AudioProcessor::process`]. Const-initialised and
+    /// without a destructor, so reading and writing it never allocates.
+    static RENDERING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the calling thread is inside [`AudioProcessor::process`]. A panic hook calls it to
+/// stay silent for a panic the engine catches on the audio thread, where printing is I/O.
+pub fn in_audio_callback() -> bool {
+    RENDERING.with(Cell::get)
+}
+
+/// Turns [`RENDERING`] on until dropped.
+struct Rendering;
+
+impl Rendering {
+    fn start() -> Self {
+        RENDERING.with(|r| r.set(true));
+        Self
+    }
+}
+
+impl Drop for Rendering {
+    fn drop(&mut self) {
+        RENDERING.with(|r| r.set(false));
+    }
+}
 
 /// Note events one block takes; more wait in the queue for the next block.
 const MAX_EVENTS: usize = 256;
@@ -91,6 +120,7 @@ impl AudioProcessor {
     /// left and right (a single channel gets their average); further channels and a trailing
     /// partial frame get silence. Real-time safe.
     pub fn process(&mut self, out: &mut [f32], channels: usize) {
+        let _rendering = Rendering::start();
         if channels == 0 {
             out.fill(0.0);
             return;
@@ -346,6 +376,14 @@ mod tests {
         p.process(&mut buf, 2);
         assert_eq!(trash.slots(), 1);
         assert!(p.unsent.is_none());
+    }
+
+    #[test]
+    fn the_rendering_flag_is_off_outside_process() {
+        let (mut p, _commands, _trash) = processor();
+        assert!(!in_audio_callback());
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert!(!in_audio_callback());
     }
 
     #[test]
