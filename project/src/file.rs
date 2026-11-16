@@ -6,8 +6,8 @@
 //!   so a crash or a full disk leaves the previous file untouched.
 //! * The bytes are a function of the project and the samples: entry order, names and timestamps
 //!   are fixed, so saving twice gives the same file.
-//! * Loading never trusts the file: sizes are capped, and a missing sample falls back to the
-//!   original path with a warning instead of failing the whole project.
+//! * Loading never trusts the file: sizes are capped, and a missing sample is a warning instead of
+//!   a failed project. `load` never opens a path the file names; relinking is the user's choice.
 
 use crate::model::{FORMAT, Project, VERSION};
 use serde::Serialize;
@@ -28,7 +28,7 @@ const PROJECT_JSON: &str = "project.json";
 const SAMPLES_DIR: &str = "samples/";
 /// The most `project.json` may hold (a project of 256 channels is a few hundred KB).
 const MAX_JSON_BYTES: u64 = 64 * 1024 * 1024;
-/// The most one sample file may hold, read from the zip or from disk.
+/// The most one sample file may hold, read from the zip or from a file the user picked.
 const MAX_SAMPLE_BYTES: u64 = 512 * 1024 * 1024;
 /// The most sample bytes one `load` reads in total, whatever the number of channels.
 const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -54,20 +54,6 @@ fn human(bytes: u64) -> String {
         format!("{} MB", bytes >> 20)
     } else {
         format!("{bytes} bytes")
-    }
-}
-
-/// `text` with its first letter lower-cased, to continue a sentence (an acronym such as "WAV"
-/// stays as it is).
-fn lower_first(text: &str) -> String {
-    let mut chars = text.chars();
-    match (chars.next(), chars.next()) {
-        (Some(a), Some(b)) if a.is_uppercase() && b.is_lowercase() => a
-            .to_lowercase()
-            .chain(std::iter::once(b))
-            .chain(chars)
-            .collect(),
-        _ => text.to_string(),
     }
 }
 
@@ -402,9 +388,10 @@ fn sync_folder(_path: &Path) {}
 /// Opens a project: reads `project.json`, migrates it to this version, validates it and finds
 /// each channel's sample bytes (see [`Loaded`]).
 ///
-/// A channel's sample is read from its zip entry. If the entry is missing or unreadable the
-/// original `SampleRef.path` is read from disk instead, with a warning; if that fails too the
-/// channel has no bytes (a warning), and keeps its reference so it can be relinked.
+/// A channel's sample is read from its zip entry and from nowhere else: `load` never opens a path
+/// the project file names (`SampleRef.path` is only shown, and offered for relinking). If the entry
+/// is missing or unreadable the channel has no bytes and no entry name, with a warning; the path
+/// stays so the person can relink it.
 pub fn load(path: &Path) -> Result<Loaded, LoadError> {
     load_with_limits(path, LIMITS)
 }
@@ -421,11 +408,10 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
     )
 }
 
-/// [`load`] reading at most `limits.sample` bytes per sample and `limits.total` in all (entries
-/// and disk fallbacks together), so a file claiming hundreds of channels of big samples cannot
-/// exhaust memory. An embedded sample over a limit is not loaded and not looked for on disk
-/// either: it is in the file, so the warning says it is too big, and the channel keeps its entry
-/// name (a later save refuses rather than drop it).
+/// [`load`] reading at most `limits.sample` bytes per sample and `limits.total` in all, so a file
+/// claiming hundreds of channels of big samples cannot exhaust memory. An embedded sample over a
+/// limit is not loaded: the warning says it is too big, and the channel keeps its entry name (a
+/// later save refuses rather than drop it).
 fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
     let mut left = limits.total;
     let mut file = File::open(path)?;
@@ -503,35 +489,11 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
             }
             Some(EntryRead::Missing) | None => {}
         }
-        let shown = sample_ref.path.display();
-        if is_network_or_device_path(&sample_ref.path) {
-            // Never touched: on Windows even a `stat` of a UNC path sends the user's
-            // credentials to the named server.
-            warnings.push(format!(
-                "Channel \"{}\": its sample is not stored in the file and \"{shown}\" is a network or device path, which a project file may not make Grooviq read; the channel is silent until you relink it.",
-                channel.name
-            ));
-            continue;
-        }
-        match read_fallback(&sample_ref.path, left.min(limits.sample)) {
-            Ok(found) => {
-                left -= found.bytes.len() as u64;
-                warnings.push(format!(
-                    "Channel \"{}\": its sample is not stored in the file; read \"{shown}\" from disk instead.",
-                    channel.name
-                ));
-                samples.insert(channel.id, found);
-            }
-            Err(Fallback::Unreadable) => warnings.push(format!(
-                "Channel \"{}\": its sample is not stored in the file and \"{shown}\" could not be read; the channel is silent until you relink it.",
-                channel.name
-            )),
-            Err(Fallback::Refused(why)) => warnings.push(format!(
-                "Channel \"{}\": its sample is not stored in the file and \"{shown}\" was not used: {}; the channel is silent until you relink it.",
-                channel.name,
-                lower_first(why.trim_end_matches('.'))
-            )),
-        }
+        // Missing or unreadable entry: no bytes. The path in the file is never opened.
+        warnings.push(format!(
+            "Channel \"{}\": its sample is missing from the project file. Relink it to hear it.",
+            channel.name
+        ));
     }
     // A channel whose bytes could not be had keeps its path (to relink) but has no entry.
     for channel in &mut project.channels {
@@ -547,64 +509,6 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
         samples,
         warnings,
     })
-}
-
-/// Extensions a project-named path may have for the disk fallback.
-const FALLBACK_EXTENSIONS: [&str; 6] = ["wav", "aif", "aiff", "flac", "mp3", "ogg"];
-
-/// Why the disk fallback did not give a sample.
-enum Fallback {
-    /// The file could not be read (missing, not a regular file, over the limit, ...).
-    Unreadable,
-    /// It was not used, for this reason (a sentence the person can read).
-    Refused(String),
-}
-
-/// A project file may name any path on the person's disk, so the fallback reads one only if it
-/// looks like a sample (a known audio extension), passes the file guards of [`read_limited`] and
-/// then actually decodes as audio. Bytes that do not decode are dropped here, so they can never
-/// be kept and written into a project on the next save.
-fn read_fallback(path: &Path, limit: u64) -> Result<SampleFile, Fallback> {
-    let extension = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_ascii_lowercase())
-        .filter(|e| FALLBACK_EXTENSIONS.contains(&e.as_str()))
-        .ok_or_else(|| {
-            Fallback::Refused("only WAV, AIFF, FLAC, MP3 and OGG files are read from a path".into())
-        })?;
-    let file = read_limited(path, limit).map_err(|_| Fallback::Unreadable)?;
-    grooviq_engine::decode_sample(
-        &file.bytes,
-        Some(&extension),
-        grooviq_engine::MAX_SAMPLE_SECONDS,
-    )
-    .map_err(|e| Fallback::Refused(e.to_string()))?;
-    Ok(file)
-}
-
-/// Whether a path a project file names is a UNC share (`\\server\share`), a Windows device or
-/// verbatim path (`\\?\`, `\\.\`) or an NT path (`\??\`). Windows reads `/` and `\` as the
-/// same separator, so `\/server` and `/\server` are shares too: any path that starts with two
-/// separators, or with a separator and `?`, is refused. The text check runs on every platform,
-/// so a file saved on one system is judged the same on another; on Windows the parsed prefix
-/// must also be a plain drive.
-fn is_network_or_device_path(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    let mut chars = text.chars();
-    let sep = |c: char| c == '/' || c == '\\';
-    let by_text = matches!(
-        (chars.next(), chars.next()),
-        (Some(a), Some(b)) if sep(a) && (sep(b) || b == '?')
-    );
-    #[cfg(windows)]
-    let by_prefix = matches!(
-        path.components().next(),
-        Some(std::path::Component::Prefix(p))
-            if !matches!(p.kind(), std::path::Prefix::Disk(_))
-    );
-    #[cfg(not(windows))]
-    let by_prefix = false;
-    by_text || by_prefix
 }
 
 /// Brings a parsed `project.json` up to [`VERSION`]. Version 1 passes through unchanged; a
@@ -635,8 +539,7 @@ pub fn migrate(json: Value) -> Result<Value, LoadError> {
 #[derive(Clone)]
 enum EntryRead {
     Found(SampleFile),
-    /// Not in the zip, or unreadable (a checksum mismatch is an unreadable entry): the disk
-    /// fallback may be tried.
+    /// Not in the zip, or unreadable (a checksum mismatch is an unreadable entry).
     Missing,
     /// In the zip but over the per-sample limit, or past what is left of the total budget.
     TooBig {
@@ -826,46 +729,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn network_and_device_paths_in_a_project_are_never_read() {
-        for path in [
-            "\\\\server\\share\\kick.wav",
-            "//server/share/kick.wav",
-            "\\\\?\\C:\\kick.wav",
-            "\\\\.\\pipe\\x",
-            "\\/server/share/kick.wav", // mixed separators: still a share on Windows
-            "/\\server\\share\\kick.wav",
-            "\\??\\C:\\kick.wav",
-            "/?/C:/kick.wav",
-        ] {
-            assert!(is_network_or_device_path(Path::new(path)), "{path}");
-        }
-        for path in [
-            "/music/kick.wav",
-            "/.config/kick.wav",
-            "C:/music/kick.wav",
-            "C:\\music\\kick.wav",
-            "kick.wav",
-            "../kick.wav",
-        ] {
-            assert!(!is_network_or_device_path(Path::new(path)), "{path}");
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let (mut p, _) = project_of(1);
-        p.channels[0].sample.as_mut().unwrap().path = PathBuf::from("//server/share/kick.wav");
-        let path = dir.path().join("a.grooviq");
-        save(&p, &SampleFiles::new(), &path).unwrap();
-        let loaded = load(&path).unwrap();
-        assert!(loaded.samples.is_empty());
-        assert_eq!(loaded.warnings.len(), 1);
-        assert!(
-            loaded.warnings[0].contains("network or device path"),
-            "{:?}",
-            loaded.warnings
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn disk_reads_refuse_devices_and_stop_at_the_limit() {
@@ -874,22 +737,6 @@ mod tests {
         // Endless: only the read cap keeps this from running out of memory.
         let err = read_limited(Path::new("/dev/zero"), 1000);
         assert!(err.is_err());
-    }
-
-    #[test]
-    fn disk_fallbacks_count_against_the_budget() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut p, _) = project_of(2);
-        for (i, c) in p.channels.iter_mut().enumerate() {
-            let on_disk = dir.path().join(format!("{i}.wav"));
-            fs::write(&on_disk, wav_bytes(10)).unwrap();
-            c.sample.as_mut().unwrap().path = on_disk;
-        }
-        let path = dir.path().join("a.grooviq");
-        save(&p, &SampleFiles::new(), &path).unwrap(); // no copies: both read from disk
-        let loaded = load_with_budget(&path, 100).unwrap();
-        assert_eq!(loaded.samples.len(), 1, "{:?}", loaded.warnings);
-        assert_eq!(loaded.warnings.len(), 2); // "read from disk" for one, "could not be read" for the other
     }
 
     fn with_sizes(sizes: &[usize]) -> (Project, SampleFiles) {
@@ -978,7 +825,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.grooviq");
         let (mut p, samples) = with_sizes(&[6, 4]);
-        // A valid WAV at the channel's own path: the disk fallback would accept it.
+        // A valid WAV at the channel's own path: `load` must not look at it.
         let on_disk = dir.path().join("big.wav");
         fs::write(&on_disk, wav_bytes(10)).unwrap();
         p.channels[0].sample.as_mut().unwrap().path = on_disk;
@@ -1064,27 +911,5 @@ mod tests {
         let (mut p, _) = with_sizes(&[6]);
         p.channels[0].sample.as_mut().unwrap().file = None;
         save(&p, &SampleFiles::new(), &path).unwrap();
-    }
-
-    #[test]
-    fn a_decode_reason_continues_the_sentence_in_lower_case() {
-        assert_eq!(
-            lower_first("This file is not a sound"),
-            "this file is not a sound"
-        );
-        assert_eq!(lower_first("WAV is fine"), "WAV is fine");
-        assert_eq!(lower_first("a sample rate"), "a sample rate");
-        let dir = tempfile::tempdir().unwrap();
-        let fake = dir.path().join("fake.wav");
-        fs::write(&fake, b"text, not sound").unwrap();
-        let (mut p, _) = with_sizes(&[6]);
-        p.channels[0].sample.as_mut().unwrap().path = fake;
-        p.channels[0].sample.as_mut().unwrap().file = None;
-        let path = dir.path().join("a.grooviq");
-        save(&p, &SampleFiles::new(), &path).unwrap();
-        let loaded = load(&path).unwrap();
-        let warning = &loaded.warnings[0];
-        let reason = warning.split("was not used: ").nth(1).unwrap();
-        assert!(reason.starts_with(|c: char| c.is_lowercase()), "{warning}");
     }
 }

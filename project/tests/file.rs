@@ -586,69 +586,6 @@ fn a_project_opens_after_its_original_samples_are_deleted() {
 }
 
 #[test]
-fn a_missing_entry_falls_back_to_the_original_path_then_to_no_sample() {
-    let dir = tempfile::tempdir().unwrap();
-    let on_disk = write(dir.path(), "kick.wav", &wav_bytes(32));
-    let gone = dir.path().join("gone.wav");
-    let json = format!(
-        r#"{{"format":"grooviq-project","version":1,"name":"x","bpm":140,
-            "timeSignature":{{"beats":4,"unit":4}},
-            "channels":[
-              {{"id":1,"name":"Kick","color":0,"sample":{{"path":{kick},"file":"samples/1-kick.wav"}},"volume":1,"pan":0,"mute":false,"solo":false}},
-              {{"id":2,"name":"Snare","color":0,"sample":{{"path":{gone},"file":"samples/2-snare.wav"}},"volume":1,"pan":0,"mute":false,"solo":false}},
-              {{"id":3,"name":"Never saved","color":0,"sample":{{"path":{kick},"file":null}},"volume":1,"pan":0,"mute":false,"solo":false}}
-            ],
-            "patterns":[{{"id":0,"name":"Pattern 1","steps":16,"swing":0,"notes":[]}}],
-            "currentPattern":0,"nextId":4}}"#,
-        kick = serde_json::to_string(on_disk.to_str().unwrap()).unwrap(),
-        gone = serde_json::to_string(gone.to_str().unwrap()).unwrap(),
-    );
-    let path = write(dir.path(), "a.grooviq", &json_zip(&json));
-    let loaded = load(&path).unwrap();
-
-    assert_eq!(
-        loaded.warnings,
-        vec![
-            format!(
-                "Channel \"Kick\": its sample is not stored in the file; read \"{}\" from disk instead.",
-                on_disk.display()
-            ),
-            format!(
-                "Channel \"Snare\": its sample is not stored in the file and \"{}\" could not be read; the channel is silent until you relink it.",
-                gone.display()
-            ),
-            format!(
-                "Channel \"Never saved\": its sample is not stored in the file; read \"{}\" from disk instead.",
-                on_disk.display()
-            ),
-        ]
-    );
-    assert_eq!(*loaded.samples[&1].bytes, wav_bytes(32));
-    assert_eq!(loaded.samples[&1].name, "kick.wav");
-    assert!(!loaded.samples.contains_key(&2));
-    assert_eq!(*loaded.samples[&3].bytes, wav_bytes(32));
-    // A channel with no bytes has no entry any more, but keeps its path so it can be relinked.
-    let snare = loaded.project.channels[1].sample.as_ref().unwrap();
-    assert_eq!(snare.file, None);
-    assert_eq!(snare.path, gone);
-    // The channels that were found keep what the file said.
-    assert_eq!(
-        loaded.project.channels[0]
-            .sample
-            .as_ref()
-            .unwrap()
-            .file
-            .as_deref(),
-        Some("samples/1-kick.wav")
-    );
-    // The channel keeps its reference, so the person can relink it.
-    assert_eq!(
-        loaded.project.channels[1].sample.as_ref().unwrap().path,
-        gone
-    );
-}
-
-#[test]
 fn sample_entries_are_stored_uncompressed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("a.grooviq");
@@ -737,50 +674,129 @@ fn backups_keep_the_last_ten() {
     assert_eq!(fs::read_dir(backups.join("Other")).unwrap().count(), 1);
 }
 
+/// A project of channels whose zip has no sample entries: each is `(name, path)`, and says it was
+/// embedded (`"file":"samples/<id>-x.wav"`) except where `embedded` is false.
+fn project_zip_without_entries(channels: &[(&str, &str, bool)]) -> Vec<u8> {
+    let list: Vec<String> = channels
+        .iter()
+        .enumerate()
+        .map(|(i, (name, path, embedded))| {
+            let file = if *embedded {
+                format!("\"samples/{}-x.wav\"", i + 1)
+            } else {
+                "null".to_string()
+            };
+            format!(
+                r#"{{"id":{id},"name":{name},"color":0,"sample":{{"path":{path},"file":{file}}},"volume":1,"pan":0,"mute":false,"solo":false}}"#,
+                id = i + 1,
+                name = serde_json::to_string(name).unwrap(),
+                path = serde_json::to_string(path).unwrap(),
+            )
+        })
+        .collect();
+    json_zip(&format!(
+        r#"{{"format":"grooviq-project","version":1,"name":"x","bpm":140,
+            "timeSignature":{{"beats":4,"unit":4}},"channels":[{}],
+            "patterns":[{{"id":0,"name":"Pattern 1","steps":16,"swing":0,"notes":[]}}],
+            "currentPattern":0,"nextId":{}}}"#,
+        list.join(","),
+        channels.len() + 1
+    ))
+}
+
 #[test]
-fn the_disk_fallback_only_reads_audio_that_decodes() {
+fn load_never_reads_a_path_named_by_the_project() {
     let dir = tempfile::tempdir().unwrap();
-    let text = write(dir.path(), "notes.txt", b"just some text, not a sound");
-    let fake = write(dir.path(), "fake.wav", b"just some text, renamed to .wav");
-    let real = write(dir.path(), "REAL.WAV", &wav_bytes(32)); // the extension's case does not matter
-    let mut p = Project::new();
-    p.channels = vec![
-        channel(1, "Text", Some(text.to_str().unwrap())),
-        channel(2, "Fake", Some(fake.to_str().unwrap())),
-        channel(3, "Real", Some(real.to_str().unwrap())),
+    let real = write(dir.path(), "kick.wav", &wav_bytes(32)); // (a) a valid WAV that exists
+    let text = write(dir.path(), "notes.txt", b"just some text, not a sound"); // (b)
+    let channels = [
+        ("Kick", real.to_str().unwrap(), true),
+        ("Text", text.to_str().unwrap(), true),
+        // (c) relative paths resolve against the working directory: "Cargo.toml" exists there
+        // when the tests run, "kick.wav" does not.
+        ("Relative", "Cargo.toml", true),
+        ("Relative wav", "kick.wav", true),
+        // (d) a network share
+        ("Share", "//server/share/x.wav", true),
+        // Never embedded at all: the path is no more used than for a missing entry.
+        ("Never saved", real.to_str().unwrap(), false),
     ];
-    p.next_id = 4;
-    let path = dir.path().join("a.grooviq");
-    save(&p, &SampleFiles::new(), &path).unwrap(); // no copies: every channel needs the fallback
+    let path = write(
+        dir.path(),
+        "a.grooviq",
+        &project_zip_without_entries(&channels),
+    );
 
     let loaded = load(&path).unwrap();
-    assert_eq!(loaded.samples.keys().copied().collect::<Vec<_>>(), vec![3]);
-    assert_eq!(*loaded.samples[&3].bytes, wav_bytes(32));
-    assert_eq!(loaded.warnings.len(), 3, "{:#?}", loaded.warnings);
-    assert_eq!(
-        loaded.warnings[0],
-        format!(
-            "Channel \"Text\": its sample is not stored in the file and \"{}\" was not used: only WAV, AIFF, FLAC, MP3 and OGG files are read from a path; the channel is silent until you relink it.",
-            text.display()
-        )
-    );
-    assert!(
-        loaded.warnings[1].starts_with(&format!(
-            "Channel \"Fake\": its sample is not stored in the file and \"{}\" was not used: ",
-            fake.display()
-        )),
-        "{}",
-        loaded.warnings[1]
-    );
-    assert!(loaded.warnings[1].ends_with("; the channel is silent until you relink it."));
-    assert!(
-        loaded.warnings[2].contains("read") && loaded.warnings[2].contains("from disk instead")
-    );
 
-    // Nothing that failed can be written back: only the audio is embedded on the next save.
+    assert!(loaded.samples.is_empty(), "{:?}", loaded.samples.keys());
+    assert_eq!(
+        loaded.warnings,
+        channels
+            .iter()
+            .map(|(name, ..)| format!(
+                "Channel \"{name}\": its sample is missing from the project file. Relink it to hear it."
+            ))
+            .collect::<Vec<_>>()
+    );
+    // Each channel keeps its path (to show and to relink) but has no entry name.
+    for (channel, (_, path, _)) in loaded.project.channels.iter().zip(channels) {
+        let sample = channel.sample.as_ref().unwrap();
+        assert_eq!(sample.path, Path::new(path), "{}", channel.name);
+        assert_eq!(sample.file, None, "{}", channel.name);
+    }
+    // Nothing was found, so a save has nothing to lose and embeds nothing.
     let again = dir.path().join("again.grooviq");
     save(&loaded.project, &loaded.samples, &again).unwrap();
-    assert_eq!(names(&again), vec!["project.json", "samples/1-REAL.WAV"]);
+    assert_eq!(names(&again), vec!["project.json"]);
+}
+
+/// Opening a FIFO for reading blocks until a writer appears, and a writer's `open` blocks until a
+/// reader does: so a writer thread parked on the FIFO learns that something opened it.
+#[cfg(unix)]
+#[test]
+fn load_does_not_even_open_the_path_the_project_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("kick.wav");
+    if !std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        return; // no mkfifo here
+    }
+    let channels = [("Kick", fifo.to_str().unwrap(), true)];
+    let path = write(
+        dir.path(),
+        "a.grooviq",
+        &project_zip_without_entries(&channels),
+    );
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let writer_path = fifo.clone();
+    let writer = std::thread::spawn(move || {
+        let end = fs::OpenOptions::new().write(true).open(&writer_path);
+        tx.send(end.is_ok()).unwrap();
+    });
+
+    let loaded = load(&path).unwrap();
+    assert!(loaded.samples.is_empty());
+    assert_eq!(
+        loaded.warnings,
+        vec![
+            "Channel \"Kick\": its sample is missing from the project file. Relink it to hear it."
+        ]
+    );
+    let opened = rx.recv_timeout(std::time::Duration::from_millis(500));
+    // Release the parked writer whatever happened, so the test never hangs.
+    if opened.is_err() {
+        let _ = fs::File::open(&fifo);
+    }
+    writer.join().unwrap();
+    assert!(
+        opened.is_err(),
+        "load opened the path named by the project file"
+    );
 }
 
 #[test]
