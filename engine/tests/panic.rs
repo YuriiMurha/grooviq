@@ -5,8 +5,15 @@
 #[global_allocator]
 static A: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
-use grooviq_engine::{Command, EngineConfig, HealthEvent, INJECTED_PANIC, engine};
+use grooviq_engine::{
+    Command, EngineConfig, HealthEvent, INJECTED_PANIC, engine, in_audio_callback,
+};
 use std::sync::Once;
+use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+
+/// Injected panics the hook saw with the rendering flag on, and with it off.
+static INSIDE: AtomicU32 = AtomicU32::new(0);
+static OUTSIDE: AtomicU32 = AtomicU32::new(0);
 
 const SR: f32 = 48_000.0;
 
@@ -34,9 +41,35 @@ fn silence_injected_panics() {
         std::panic::set_hook(Box::new(move |info| {
             if info.payload_as_str() != Some(INJECTED_PANIC) {
                 default_hook(info);
+            } else if in_audio_callback() {
+                INSIDE.fetch_add(1, SeqCst);
+            } else {
+                OUTSIDE.fetch_add(1, SeqCst);
             }
         }));
     });
+}
+
+#[test]
+fn a_panic_while_rendering_sees_the_rendering_flag() {
+    silence_injected_panics();
+    let (mut c, mut p) = engine(cfg());
+    c.send(Command::InjectPanic).unwrap();
+    let before = INSIDE.load(SeqCst);
+    p.process(&mut [0f32; 128], 2);
+    assert!(
+        INSIDE.load(SeqCst) > before,
+        "the hook ran inside `process`"
+    );
+    assert_eq!(
+        OUTSIDE.load(SeqCst),
+        0,
+        "every injected panic is raised while rendering"
+    );
+    assert!(
+        !in_audio_callback(),
+        "and the flag is off again after `process`"
+    );
 }
 
 #[test]

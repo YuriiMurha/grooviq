@@ -34,7 +34,7 @@ pub use output::{
     AudioOutput, AudioSlot, OutputBackend, OutputChoice, OutputEvent, OutputInfo, OutputKind,
     OutputMonitor, Transport, classify, cpal_backend,
 };
-pub use processor::AudioProcessor;
+pub use processor::{AudioProcessor, in_audio_callback};
 pub use stream::{StreamServer, start_stream};
 
 /// Frames in every internal block. Commands apply at block starts; notes at their exact frame.
