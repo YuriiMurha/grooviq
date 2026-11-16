@@ -151,6 +151,9 @@ jobs:
       # BASELINE is set by the step above when there is one to compare with.
       - name: Instruction counts
         run: |
+          # The default `run` shell is `bash -e` without pipefail: keep gungraun's exit code
+          # (3 on a regression), not tee's.
+          set -o pipefail
           status=0
           cargo bench -p grooviq-golden --bench instructions -- $BASELINE 2>&1 | tee instructions.txt || status=$?
           {
