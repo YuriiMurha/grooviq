@@ -751,15 +751,24 @@ impl Recorder {
 }
 
 impl grooviq_engine::PartFiles for Recorder {
-    fn sync(&self, file: &std::fs::File, path: &Path) -> std::io::Result<()> {
+    fn sync(&self, file: &std::fs::File, _path: &Path) -> std::io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
         self.events.lock().unwrap().push("sync");
         // Everything is already in the file: flushed out of the buffer, header finalized
-        // (24-bit stereo: hound's 68-byte extensible header and 3 bytes a sample). Syncing earlier would put
-        // only part of it on disk.
-        let reader = hound::WavReader::open(path).expect("a whole WAV at sync time");
+        // (24-bit stereo: hound's 68-byte extensible header and 3 bytes a sample). Syncing
+        // earlier would put only part of it on disk. Read it through the export's own handle:
+        // the file is locked, and Windows refuses a second handle even to read.
+        let mut handle = file;
+        let at = handle.stream_position()?;
+        handle.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        handle.read_to_end(&mut bytes)?;
+        handle.seek(SeekFrom::Start(at))?;
+        let reader =
+            hound::WavReader::new(std::io::Cursor::new(&bytes)).expect("a whole WAV at sync time");
         assert!(reader.len() > 0, "the header was not finalized");
         assert_eq!(
-            file.metadata().unwrap().len(),
+            bytes.len() as u64,
             68 + u64::from(reader.len()) * 3,
             "bytes were still buffered"
         );
@@ -836,4 +845,35 @@ fn a_failed_sync_keeps_the_destination_and_removes_only_its_own_part_file() {
         "only this export's own part file goes"
     );
     drop(other);
+}
+
+/// A handle the OS cannot sync: a pipe on Unix (`fsync` refuses special files), a read-only file
+/// on Windows (`FlushFileBuffers` needs write access).
+fn unsyncable_handle(dir: &Path) -> std::fs::File {
+    #[cfg(unix)]
+    {
+        let _ = dir;
+        let (_reader, writer) = std::io::pipe().unwrap();
+        // Keeping only the write end open is fine for `fsync`.
+        std::fs::File::from(std::os::fd::OwnedFd::from(writer))
+    }
+    #[cfg(not(unix))]
+    {
+        let path = dir.join("read-only.bin");
+        std::fs::write(&path, b"x").unwrap();
+        std::fs::File::open(&path).unwrap()
+    }
+}
+
+#[test]
+fn the_real_adapter_reports_a_sync_the_os_refuses() {
+    use grooviq_engine::PartFiles;
+    let dir = tempfile::tempdir().unwrap();
+    let file = unsyncable_handle(dir.path());
+    // Proves the handle is one `sync_all` refuses; otherwise this test proves nothing.
+    assert!(file.sync_all().is_err(), "the fixture can be synced");
+    // The production adapter hands the file to the OS and passes its answer on. An adapter that
+    // returned Ok without syncing would hide a disk that never got the bytes.
+    let result = grooviq_engine::RealFiles.sync(&file, &dir.path().join("mix.wav.part"));
+    assert!(result.is_err(), "the real adapter did not sync");
 }

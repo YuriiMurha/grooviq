@@ -221,12 +221,16 @@ pub(crate) fn save_with_limits(
 /// Writes `project` to a temp file beside `path` without touching `path`: a save that is
 /// refused or fails stops here, before anything (a backup, the file itself) changes.
 /// [`Staged::commit`] puts it in place.
-pub(crate) fn stage_save(
+///
+/// `fault` runs on the temp file once the zip is written into it and before
+/// it is synced: the test seam for "the disk fails while a save is staged". Not part of the API.
+pub(crate) fn stage_save_faulty(
     project: &Project,
     samples: &SampleFiles,
     path: &Path,
+    fault: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> io::Result<Staged> {
-    stage_save_with_limits(project, samples, path, LIMITS)
+    stage_save_with_limits_and_fault(project, samples, path, LIMITS, fault)
 }
 
 fn stage_save_with_limits(
@@ -235,11 +239,24 @@ fn stage_save_with_limits(
     path: &Path,
     limits: Limits,
 ) -> io::Result<Staged> {
+    stage_save_with_limits_and_fault(project, samples, path, limits, |_| Ok(()))
+}
+
+fn stage_save_with_limits_and_fault(
+    project: &Project,
+    samples: &SampleFiles,
+    path: &Path,
+    limits: Limits,
+    fault: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<Staged> {
     // Temp files of saves that died (and only those: see `leftover`); best effort.
     let _ = grooviq_engine::remove_stale_owned(path, ".tmp");
     // Everything that can be refused is refused before the first byte is written.
     let (project, entries) = plan(project, samples, limits)?;
-    stage(path, |file| write_zip(file, &project, &entries))
+    stage(path, |file| {
+        write_zip(file, &project, &entries)?;
+        fault(file)
+    })
 }
 
 /// Which samples go in the zip, and the project with each channel's `SampleRef.file` set.

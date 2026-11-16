@@ -570,6 +570,16 @@ fn saving_over_a_file_keeps_a_backup() {
     assert_eq!(load(&path).unwrap().project.bpm, 101.0);
 }
 
+/// The names in `dir`, sorted.
+fn names(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
 /// The tempos of the backups of the project at `project`, oldest first.
 fn backup_tempos(project: &Path, backups: &Path) -> Vec<f32> {
     let folder = grooviq_project::backup_folder(project, backups).unwrap();
@@ -611,34 +621,35 @@ fn saves_that_change_nothing_keep_the_older_backups() {
     assert_eq!(load(&path).unwrap().project.bpm, 110.0);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_failed_save_makes_no_backup() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let (mut session, path, backups) = saved_twice(dir.path());
     session
         .apply(Edit::SetTempo { bpm: 120.0 }, Instant::now())
         .unwrap();
-    // The temp file cannot be created: the project's folder takes no new files.
-    let open = std::fs::metadata(dir.path()).unwrap().permissions();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
-    let mut errors = Vec::new();
+    let before = names(dir.path());
     for _ in 0..3 {
-        errors.push(session.save(None, &backups));
-    }
-    std::fs::set_permissions(dir.path(), open).unwrap();
-    for result in errors {
-        // (A process allowed to write anywhere, such as root, would save: not a failure case.)
-        if let Err(err) = result {
-            assert!(matches!(err, SessionError::Save(_)), "{err}");
-        } else {
-            return;
-        }
+        // The disk fails while the new file is being staged (after the zip is in the temp file).
+        let job = session.begin_save(None).unwrap();
+        let err = job
+            .write_faulty(&backups, |_| {
+                Err(std::io::Error::other("injected: disk full"))
+            })
+            .unwrap_err();
+        session.save_failed();
+        assert!(matches!(err, SessionError::Save(_)), "{err}");
+        assert!(err.to_string().contains("disk full"), "{err}");
     }
     assert_eq!(backup_tempos(&path, &backups), [100.0], "no backup rotated");
-    assert_eq!(load(&path).unwrap().project.bpm, 110.0);
-    assert!(session.view().dirty);
+    assert_eq!(
+        load(&path).unwrap().project.bpm,
+        110.0,
+        "the file is intact"
+    );
+    assert!(session.view().dirty, "the change is still unsaved");
+    // And nothing of the failed saves is left beside the project.
+    assert_eq!(names(dir.path()), before);
 }
 
 #[test]
