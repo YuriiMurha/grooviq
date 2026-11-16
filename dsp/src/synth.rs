@@ -30,7 +30,9 @@ const SCOPE_LEN: usize = 256;
 const STEAL_FADE_MS: f32 = 3.0;
 const DEFAULT_SLIDE_MS: f32 = 60.0;
 /// Declick floor: a release never falls faster than a straight line from the level it started
-/// at to zero over this time. Releases longer than about 21 ms never reach the floor.
+/// at to zero over this time. Releases longer than about 21 ms reach it only from a quiet start
+/// (below -53 dB for a 30 ms release, -70 dB for 90 ms, -83 dB for 300 ms): the exponential
+/// aims below zero, so near zero it falls by a fixed step that the start-scaled line undercuts.
 const MIN_RELEASE_MS: f64 = 3.0;
 /// A new velocity on a voice restarted in place ramps in over this time.
 const VEL_RAMP_MS: f32 = 3.0;
@@ -2204,6 +2206,11 @@ mod tests {
             (7001, FILTER_TYPE, 0.0),
             (7003, OSC2_UNI, 5.0),
             (9001, OSC1_UNI, 6.0),
+            (5_557, CUTOFF, 300.0),
+            (8_191, CUTOFF, 9000.0),
+            (8_250, RES, 0.8),
+            (10_007, CUTOFF, 700.0),
+            (10_101, OSC1_UNI, 3.0),
         ] {
             ev.push((t, Ev::Param(i, v)));
         }
@@ -2342,8 +2349,8 @@ mod tests {
             };
             let (a, b) = (render(true), render(false));
             assert!(
-                a.0[..4_800].iter().all(|v| *v == 0.0),
-                "{name}: not silent before the note"
+                a.0[silent..].iter().any(|v| v.abs() > 0.01),
+                "{name}: the note does not sound"
             );
             let diff = (0..a.0.len())
                 .map(|i| (a.0[i] - b.0[i]).abs().max((a.1[i] - b.1[i]).abs()))
@@ -2478,6 +2485,106 @@ mod tests {
             c = e;
         }
         l
+    }
+
+    /// Steps the cutoff knob while a note sounds and returns how long its smoothed value takes
+    /// to cover 95% of the step (in log frequency).
+    fn cutoff_settle_ms(res: f32) -> f32 {
+        let mut s = Synth::new(48_000.0);
+        s.set_param(RES as u32, res);
+        s.set_param(CUTOFF as u32, 200.0);
+        let (mut l, mut r) = ([0.0f32; 1], [0.0f32; 1]);
+        let on = NoteEvent {
+            offset: 0,
+            key: 60,
+            velocity: 1.0,
+            on: true,
+            slide: false,
+        };
+        s.process(&mut l, &mut r, None, &[on]);
+        s.set_param(CUTOFF as u32, 12000.0);
+        let (from, to) = (200f32.log2(), 12000f32.log2());
+        for n in 1..48_000 {
+            s.process(&mut l, &mut r, None, &[]);
+            if (s.s_cut.cur - from) >= 0.95 * (to - from) {
+                return n as f32 / 48.0;
+            }
+        }
+        f32::INFINITY
+    }
+
+    /// The cutoff knob glides with a one-pole of 8 ms at low resonance and 20 ms at the most
+    /// (documented at CUTOFF_SMOOTH_MS): 95% of a step within 3 time constants, 24 / 60 ms.
+    #[test]
+    fn cutoff_knob_settles_within_its_documented_time() {
+        let low = cutoff_settle_ms(0.0);
+        let high = cutoff_settle_ms(1.0);
+        assert!(
+            low <= 25.0,
+            "res 0: 95% after {low} ms (8 ms one-pole: 24 ms)"
+        );
+        assert!(
+            high <= 61.0,
+            "res 1: 95% after {high} ms (20 ms one-pole: 60 ms)"
+        );
+    }
+
+    /// Only the knob value is smoothed: with the knob still, a resonant patch whose cutoff moves
+    /// by LFO, filter envelope, key tracking and velocity sounds exactly the same as with the
+    /// knob smoothing switched off.
+    #[test]
+    fn cutoff_knob_smoothing_leaves_modulation_alone() {
+        let render = |cut_ms: [f32; 2]| {
+            let mut s = Synth::new(48_000.0);
+            s.cut_ms = cut_ms;
+            for (i, v) in [
+                (OSC1_SHAPE, 2.0),
+                (CUTOFF, 900.0),
+                (RES, 0.7),
+                (ENV_AMT, 0.8),
+                (KEYTRACK, 1.0),
+                (FLT_A, 0.5),
+                (FLT_D, 120.0),
+                (FLT_S, 0.2),
+                (LFO_SHAPE, 3.0),
+                (LFO_RATE, 7.0),
+                (LFO_AMOUNT, 0.8),
+                (LFO_TARGET, 0.0),
+            ] {
+                s.set_param(i as u32, v);
+            }
+            let n = 24_000;
+            let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+            let mut c = 0;
+            while c < n {
+                let e = (c + MAX_BLOCK).min(n);
+                let mut ev = Vec::new();
+                for (t, key, vel) in [(100, 48u8, 1.0f32), (9_000, 67, 0.3)] {
+                    if t >= c && t < e {
+                        ev.push(NoteEvent {
+                            offset: (t - c) as u32,
+                            key,
+                            velocity: vel,
+                            on: true,
+                            slide: false,
+                        });
+                    }
+                }
+                s.process(&mut l[c..e], &mut r[c..e], None, &ev);
+                c = e;
+            }
+            l
+        };
+        let smoothed = render([CUTOFF_SMOOTH_MS, CUTOFF_SMOOTH_RES_MS]);
+        let instant = render([0.0, 0.0]);
+        assert!(rms(&smoothed) > 0.01, "silent render");
+        let diff = (0..smoothed.len())
+            .map(|i| (smoothed[i] - instant[i]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            diff == 0.0,
+            "the knob smoothing changed the modulated sound by {diff}"
+        );
     }
 
     #[test]

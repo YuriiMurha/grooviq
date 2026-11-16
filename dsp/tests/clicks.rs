@@ -854,6 +854,44 @@ fn knob_moves_while_sounding_are_click_free() {
     c.finish();
 }
 
+/// Knob moves while notes ring out after their note-off: the voices still sound, so the moves
+/// must be smoothed as during a held note (release lengthened to 3 s so every move lands in the
+/// tail).
+#[test]
+fn knob_moves_during_release_tails_are_click_free() {
+    let mut c = Checker::new("tail knobs");
+    let labels = [
+        "filter type",
+        "filter type b",
+        "filter type c",
+        "osc1 unison",
+        "osc2 unison",
+        "osc1 octave",
+        "osc1 semi",
+        "osc2 octave",
+        "env amt",
+    ];
+    let mut res = probe();
+    for (i, v) in [(CUTOFF, 3000.0), (RES, 0.6), (ENV_AMT, 0.5), (FLT_S, 0.5)] {
+        set(&mut res, i, v);
+    }
+    type Patch = (String, Vec<(u32, f32)>, Vec<u8>);
+    let mut bases: Vec<Patch> = PRESETS
+        .iter()
+        .map(|&n| (n.to_string(), with_mode(n, 0.0), vec![48, 55]))
+        .collect();
+    bases.push(("probe".into(), probe(), vec![40, 47]));
+    bases.push(("probe+res".into(), res, vec![40, 47]));
+    for (name, base, keys) in bases {
+        let mut p = base;
+        set(&mut p, AMP_R, 3000.0);
+        for &mv in MOVES.iter().filter(|m| labels.contains(&m.1)) {
+            check_move(&mut c, &format!("{name} tail"), &p, &keys, mv, 300.0);
+        }
+    }
+    c.finish();
+}
+
 // ---------------------------------------------------------------------------------------------
 // Envelopes
 
@@ -896,39 +934,4 @@ fn short_releases_are_click_free() {
         }
     }
     c.finish();
-}
-
-#[test]
-#[ignore]
-fn tmp_diag() {
-    let p = with_mode("Pluck", 1.0);
-    let mut line = String::from("retrig at 820+d ms (prev vel 0.25):");
-    for d in 0..12 {
-        let t = 820.0 + d as f32 * 0.7;
-        let acts = [
-            (ms(720.0), Act::On(48, 0.25)),
-            (ms(770.0), Act::Off(48)),
-            (ms(t), Act::On(48, 1.0)),
-            (ms(t + 50.0), Act::Off(48)),
-        ];
-        let mut s = synth_with(&p);
-        let (l, r) = render_with(s.as_mut(), &acts, ms(1000.0), 128);
-        let w = worst_in(&l, &r, ms(800.0), ms(900.0)).unwrap();
-        line += &format!(" {:+.1}", w.score_db);
-    }
-    println!("{line}");
-    let mut c = Checker::new("tmp");
-    let mut line = String::from("fresh knock by key:");
-    for key in 40u8..=56 {
-        line += &format!(" {key}:{:+.1}", c.knock(&p, key, 1.0));
-    }
-    println!("{line}");
-    // fresh notes with osc 1 detuned slightly (moves its edges relative to the filter peak)
-    let mut line = String::from("fresh knock key 48, osc1 fine:");
-    for fine in [-40.0f32, -30.0, -20.0, -10.0, 10.0, 20.0, 30.0, 40.0] {
-        let mut q = p.clone();
-        q[3].1 = fine;
-        line += &format!(" {fine}:{:+.1}", c.knock(&q, 48, 1.0));
-    }
-    println!("{line}");
 }
