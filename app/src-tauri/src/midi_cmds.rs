@@ -5,20 +5,16 @@
 //! session's), so the audio thread's record tap hears them like any live note.
 
 use crate::audio_log::{AudioLog, Level};
-use crate::midi::{MidiHub, Poll};
+use crate::midi::{MidiHub, Poll, Schedule};
 use crate::{Audio, commands, lock};
 use serde::Serialize;
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
 
 /// Sent (no payload) when the list of MIDI inputs or one's switch changed.
 pub(crate) const INPUTS_CHANGED: &str = "midi-inputs-changed";
-/// How often the MIDI thread looks for keyboards plugged in or out.
-const POLL_PERIOD: Duration = Duration::from_secs(2);
-/// How often the MIDI thread hands the engine the releases it refused.
-const RETRY_PERIOD: Duration = Duration::from_millis(100);
 /// One MIDI input as the settings show it.
 #[derive(Serialize)]
 pub struct MidiInputView {
@@ -83,20 +79,17 @@ fn report(poll: &Poll, log: &Mutex<AudioLog>, app: &AppHandle) {
     }
 }
 
-/// At once and then every [`POLL_PERIOD`]: opens the keyboards that were plugged in and closes
-/// the ones that were unplugged. In between, every [`RETRY_PERIOD`], it hands the engine the
-/// releases it refused. Runs for the life of the app.
+/// Runs the hub's timetable (see [`Schedule`]): a poll at once and every 2 s, and between polls
+/// a retry of the releases the engine refused. Runs for the life of the app.
 pub(crate) fn poll_loop(hub: &Mutex<MidiHub>, log: &Mutex<AudioLog>, app: &AppHandle) {
-    let mut polled: Option<Instant> = None;
+    let mut schedule = Schedule::new();
     loop {
-        if polled.is_none_or(|at| at.elapsed() >= POLL_PERIOD) {
-            // The lock is released before reporting.
-            let poll = lock(hub).poll();
+        let (action, wait) = schedule.step(Instant::now());
+        // The lock is released before reporting.
+        let poll = lock(hub).run(action);
+        if let Some(poll) = poll {
             report(&poll, log, app);
-            polled = Some(Instant::now());
-        } else {
-            lock(hub).retry_owed();
         }
-        thread::sleep(RETRY_PERIOD);
+        thread::sleep(wait);
     }
 }

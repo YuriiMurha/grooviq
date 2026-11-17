@@ -3,41 +3,56 @@
 use super::CommandSink;
 use crate::lock;
 use grooviq_engine::{ChannelId, Command, Controller};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-/// The most releases kept for later: far above the keys a person holds.
-const MAX_OWED: usize = 1024;
+/// Releases the engine owes on one channel: a bit per key.
+struct Owed {
+    /// The channel instance the keys sound on (`Controller::channel_instance`).
+    instance: u64,
+    keys: u128,
+}
 
 /// Sends to the engine's controller (its lock only, never the session's).
 ///
 /// A note-off the engine refuses because its command queue is full would leave the note ringing
-/// forever, so it is kept and tried again (after every message and by the poll) until the engine
-/// takes it. One refused because its channel is gone is dropped: nothing is left to ring.
+/// forever, so it is kept and tried again until the engine takes it. The debt is a bit per key
+/// per channel that exists, so it cannot overflow and no release is ever forgotten. It belongs
+/// to the channel instance that was sounding: one refused because its channel is gone, or
+/// outlived by another channel that took the same id, is dropped, as the engine already cut
+/// those notes.
 ///
 /// Lock order: the owed set, then the controller.
 pub struct ControllerSink {
     controller: Arc<Mutex<Controller>>,
-    /// Releases the engine owes: (channel, key).
-    owed: Mutex<BTreeSet<(u32, u8)>>,
+    /// Releases the engine owes, by channel.
+    owed: Mutex<BTreeMap<u32, Owed>>,
 }
 
 impl ControllerSink {
     pub fn new(controller: Arc<Mutex<Controller>>) -> Self {
         Self {
             controller,
-            owed: Mutex::new(BTreeSet::new()),
+            owed: Mutex::new(BTreeMap::new()),
         }
     }
 
     /// Note-offs the engine refused and still owes.
     pub fn owed(&self) -> usize {
-        lock(&self.owed).len()
+        lock(&self.owed)
+            .values()
+            .map(|o| o.keys.count_ones() as usize)
+            .sum()
     }
 }
 
-fn exists(controller: &Controller, channel: ChannelId) -> bool {
-    controller.state().channels.iter().any(|c| c.id == channel)
+fn off(channel: u32, key: u8) -> Command {
+    Command::ChannelNote {
+        channel: ChannelId(channel),
+        key,
+        velocity: 0.0,
+        on: false,
+    }
 }
 
 impl CommandSink for ControllerSink {
@@ -51,10 +66,19 @@ impl CommandSink for ControllerSink {
                 on: false,
                 ..
             } => {
+                let id = channel.0;
                 if controller.send(cmd).is_ok() {
-                    owed.remove(&(channel.0, key));
-                } else if exists(&controller, channel) && owed.len() < MAX_OWED {
-                    owed.insert((channel.0, key));
+                    if let Some(debt) = owed.get_mut(&id) {
+                        debt.keys &= !(1u128 << key);
+                    }
+                } else if let Some(instance) = controller.channel_instance(channel) {
+                    // Refused with the channel still there: the queue is full.
+                    let debt = owed.entry(id).or_insert(Owed { instance, keys: 0 });
+                    if debt.instance != instance {
+                        // What was owed belonged to a channel this id no longer is.
+                        *debt = Owed { instance, keys: 0 };
+                    }
+                    debt.keys |= 1u128 << key;
                 }
             }
             Command::ChannelNote {
@@ -64,13 +88,16 @@ impl CommandSink for ControllerSink {
                 ..
             } => {
                 // A release still owed would land after this note and cut it.
-                owed.remove(&(channel.0, key));
+                if let Some(debt) = owed.get_mut(&channel.0) {
+                    debt.keys &= !(1u128 << key);
+                }
                 let _ = controller.send(cmd);
             }
             other => {
                 let _ = controller.send(other);
             }
         }
+        owed.retain(|_, debt| debt.keys != 0);
     }
 
     fn retry(&self) {
@@ -79,15 +106,18 @@ impl CommandSink for ControllerSink {
             return;
         }
         let mut controller = lock(&self.controller);
-        owed.retain(|&(channel, key)| {
-            let channel = ChannelId(channel);
-            let off = Command::ChannelNote {
-                channel,
-                key,
-                velocity: 0.0,
-                on: false,
-            };
-            exists(&controller, channel) && controller.send(off).is_err()
+        owed.retain(|&id, debt| {
+            let channel = ChannelId(id);
+            // The channel it was owed to is gone or replaced: nothing is left to ring.
+            if controller.channel_instance(channel) != Some(debt.instance) {
+                return false;
+            }
+            for key in 0..128u8 {
+                if debt.keys & (1u128 << key) != 0 && controller.send(off(id, key)).is_ok() {
+                    debt.keys &= !(1u128 << key);
+                }
+            }
+            debt.keys != 0
         });
     }
 }

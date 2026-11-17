@@ -7,7 +7,7 @@ mod sink;
 
 use std::collections::HashMap;
 
-pub use hub::{CommandSink, MidiHub, Player, Poll};
+pub use hub::{Action, CommandSink, MidiHub, POLL_PERIOD, Player, Poll, RETRY_PERIOD, Schedule};
 pub use parse::{MidiMessage, parse};
 pub use sink::ControllerSink;
 

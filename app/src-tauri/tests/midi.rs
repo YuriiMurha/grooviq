@@ -639,3 +639,422 @@ mod engine_queue {
         assert_eq!(sink.owed(), 0, "nothing is owed to a channel that is gone");
     }
 }
+
+// ---- two keyboards at the same instant ----
+
+/// Hands the callbacks of two plugged-in keyboards to the test, so each can run on its own
+/// thread (the fake ports' own lock would serialize them).
+fn callbacks(ports: &Fake, names: [&str; 2]) -> [Callback; 2] {
+    let mut state = ports.0.lock().unwrap();
+    names.map(|name| state.open.remove(name).unwrap())
+}
+
+#[test]
+fn a_concurrent_last_release_cannot_cut_a_new_owner() {
+    use std::sync::Condvar;
+    use std::time::Duration;
+
+    /// A sink that holds the first note-off back until another input's note-on reaches it
+    /// (or, when the hub rightly keeps that note-on waiting, a moment passes).
+    struct HoldOff {
+        sent: Recorded,
+        armed: Mutex<bool>,
+        reached: Condvar,
+        held: Mutex<bool>,
+        on_seen: Condvar,
+        on_arrived: Mutex<bool>,
+    }
+    impl CommandSink for HoldOff {
+        fn send(&self, cmd: Command) {
+            match cmd {
+                Command::ChannelNote { on: false, .. }
+                    if std::mem::take(&mut *self.armed.lock().unwrap()) =>
+                {
+                    *self.held.lock().unwrap() = true;
+                    self.reached.notify_all();
+                    let arrived = self.on_arrived.lock().unwrap();
+                    let _ = self
+                        .on_seen
+                        .wait_timeout_while(arrived, Duration::from_millis(300), |seen| !*seen)
+                        .unwrap();
+                }
+                Command::ChannelNote { on: true, .. } => {
+                    *self.on_arrived.lock().unwrap() = true;
+                    self.on_seen.notify_all();
+                }
+                _ => {}
+            }
+            self.sent.send(cmd);
+        }
+    }
+
+    let ports = Fake::default();
+    ports.plug("Keys");
+    ports.plug("Pads");
+    let sink = Arc::new(HoldOff {
+        sent: Recorded::default(),
+        armed: Mutex::new(false),
+        reached: Condvar::new(),
+        held: Mutex::new(false),
+        on_seen: Condvar::new(),
+        on_arrived: Mutex::new(false),
+    });
+    let mut hub = MidiHub::new(
+        Box::new(ports.clone()),
+        Arc::clone(&sink) as Arc<dyn CommandSink>,
+        Arc::new(AtomicU32::new(1)),
+        Vec::new(),
+    );
+    hub.poll();
+    let [mut keys, mut pads] = callbacks(&ports, ["Keys", "Pads"]);
+    keys(&[NOTE_ON, 60, 100]);
+    sink.sent.take();
+    *sink.on_arrived.lock().unwrap() = false;
+    *sink.armed.lock().unwrap() = true;
+
+    // Keys lets go of C4 (the last owner) and stalls on its way to the engine; Pads presses C4
+    // meanwhile.
+    let release = std::thread::spawn(move || keys(&[NOTE_OFF, 60, 0]));
+    {
+        let held = sink.held.lock().unwrap();
+        let _held = sink.reached.wait_while(held, |held| !*held).unwrap();
+    }
+    let press = std::thread::spawn(move || pads(&[NOTE_ON, 60, 100]));
+    release.join().unwrap();
+    press.join().unwrap();
+
+    let heard = sink.sent.take();
+    assert!(
+        !matches!(heard.last(), Some(Command::ChannelNote { on: false, .. })),
+        "the new owner's note was cut: {heard:?}"
+    );
+}
+
+// ---- debts the engine owes, at their edges ----
+
+mod engine_queue_edges {
+    use super::*;
+    use grooviq_app::midi::ControllerSink;
+    use grooviq_engine::{
+        AudioProcessor, ChannelMix, ChannelSetup, Controller, EngineConfig, EngineState,
+        RecordEvent, engine_with,
+    };
+
+    /// `n` synth channels (ids 1..=n), recording while playing.
+    fn setup(n: u32) -> (Arc<Mutex<Controller>>, AudioProcessor) {
+        let state = EngineState {
+            channels: (1..=n)
+                .map(|id| ChannelSetup::synth(ChannelId(id), Vec::new(), ChannelMix::default()))
+                .collect(),
+            ..EngineState::default()
+        };
+        let (controller, mut processor) = engine_with(
+            EngineConfig {
+                sample_rate: 48_000.0,
+            },
+            state,
+        );
+        let controller = Arc::new(Mutex::new(controller));
+        controller.lock().unwrap().send(Command::Play).unwrap();
+        controller
+            .lock()
+            .unwrap()
+            .send(Command::SetRecording { on: true })
+            .unwrap();
+        run(&mut processor);
+        (controller, processor)
+    }
+
+    fn run(processor: &mut AudioProcessor) {
+        for _ in 0..4 {
+            processor.process(&mut [0.0; 512], 2);
+        }
+    }
+
+    fn fill(controller: &Mutex<Controller>) {
+        while controller
+            .lock()
+            .unwrap()
+            .send(Command::SetTempo { bpm: 120.0 })
+            .is_ok()
+        {}
+    }
+
+    fn heard(controller: &Mutex<Controller>) -> Vec<RecordEvent> {
+        let mut events = Vec::new();
+        controller.lock().unwrap().take_recorded(&mut events);
+        events
+    }
+
+    #[test]
+    fn the_1025th_release_is_not_forgotten() {
+        let (controller, mut processor) = setup(9);
+        let sink = ControllerSink::new(Arc::clone(&controller));
+        sink.send(on(9, 127, 1.0));
+        run(&mut processor);
+        heard(&controller);
+        fill(&controller);
+        // 8 channels x 128 keys of debt, then one more on a ninth channel.
+        for channel in 1..=8 {
+            for key in 0..128 {
+                sink.send(off(channel, key));
+            }
+        }
+        assert_eq!(sink.owed(), 1024);
+        sink.send(off(9, 127));
+        // The queue holds 1,024 commands, so the debt is paid over several retries.
+        let mut released = false;
+        for _ in 0..4 {
+            run(&mut processor);
+            sink.retry();
+            run(&mut processor);
+            released |= heard(&controller).iter().any(|e| {
+                matches!(
+                    e,
+                    RecordEvent::Note {
+                        channel: ChannelId(9),
+                        key: 127,
+                        on: false,
+                        ..
+                    }
+                )
+            });
+        }
+        assert!(released, "the release past 1,024 was lost");
+        assert_eq!(sink.owed(), 0);
+    }
+
+    #[test]
+    fn an_owed_release_does_not_cross_to_a_channel_made_afterwards() {
+        let (controller, mut processor) = setup(1);
+        let sink = ControllerSink::new(Arc::clone(&controller));
+        sink.send(on(1, 60, 1.0));
+        run(&mut processor);
+        heard(&controller);
+        fill(&controller);
+        sink.send(off(1, 60));
+        run(&mut processor);
+        // Channel 1 is removed and made again before the release is retried.
+        controller
+            .lock()
+            .unwrap()
+            .remove_channel(ChannelId(1))
+            .unwrap();
+        run(&mut processor);
+        controller
+            .lock()
+            .unwrap()
+            .add_channel(ChannelSetup::synth(
+                ChannelId(1),
+                Vec::new(),
+                ChannelMix::default(),
+            ))
+            .unwrap();
+        run(&mut processor);
+        // The new channel's note comes from somewhere else (the roll), not from this sink.
+        controller.lock().unwrap().send(on(1, 60, 1.0)).unwrap();
+        run(&mut processor);
+        heard(&controller);
+        sink.retry();
+        run(&mut processor);
+        assert!(
+            !heard(&controller).iter().any(|e| matches!(
+                e,
+                RecordEvent::Note {
+                    key: 60,
+                    on: false,
+                    ..
+                }
+            )),
+            "the old channel's owed release cut its replacement"
+        );
+    }
+
+    #[test]
+    fn a_new_debt_on_a_reused_id_forgets_the_old_channels_keys() {
+        let (controller, mut processor) = setup(1);
+        let sink = ControllerSink::new(Arc::clone(&controller));
+        sink.send(on(1, 60, 1.0));
+        run(&mut processor);
+        heard(&controller);
+        fill(&controller);
+        sink.send(off(1, 60));
+        run(&mut processor);
+        // Channel 1 is made again; C4 sounds on it from the roll, and a key played through
+        // this sink is let go while the queue is full again.
+        controller
+            .lock()
+            .unwrap()
+            .remove_channel(ChannelId(1))
+            .unwrap();
+        run(&mut processor);
+        controller
+            .lock()
+            .unwrap()
+            .add_channel(ChannelSetup::synth(
+                ChannelId(1),
+                Vec::new(),
+                ChannelMix::default(),
+            ))
+            .unwrap();
+        run(&mut processor);
+        controller.lock().unwrap().send(on(1, 60, 1.0)).unwrap();
+        sink.send(on(1, 62, 1.0));
+        run(&mut processor);
+        heard(&controller);
+        fill(&controller);
+        sink.send(off(1, 62));
+        assert_eq!(sink.owed(), 1, "only the new channel's key is owed");
+        run(&mut processor);
+        sink.retry();
+        run(&mut processor);
+        let ended: Vec<u8> = heard(&controller)
+            .iter()
+            .filter_map(|e| match e {
+                RecordEvent::Note { key, on: false, .. } => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ended, [62], "C4 from the roll must keep sounding");
+    }
+
+    // ---- every way a refused release is tried again ----
+
+    /// A keyboard "Keys" under a hub on a real engine, whose C4 was let go while the engine's
+    /// queue was full: the release is owed, the queue has drained since, nothing retried yet.
+    struct Stalled {
+        hub: MidiHub,
+        ports: Fake,
+        controller: Arc<Mutex<Controller>>,
+        processor: AudioProcessor,
+        sink: Arc<ControllerSink>,
+    }
+
+    fn stalled() -> Stalled {
+        let (controller, mut processor) = setup(1);
+        let sink = Arc::new(ControllerSink::new(Arc::clone(&controller)));
+        let ports = Fake::default();
+        ports.plug("Keys");
+        let mut hub = MidiHub::new(
+            Box::new(ports.clone()),
+            Arc::clone(&sink) as Arc<dyn CommandSink>,
+            Arc::new(AtomicU32::new(1)),
+            Vec::new(),
+        );
+        hub.poll();
+        ports.send("Keys", &[NOTE_ON, 60, 100]);
+        run(&mut processor);
+        heard(&controller);
+        fill(&controller);
+        ports.send("Keys", &[NOTE_OFF, 60, 0]);
+        assert_eq!(sink.owed(), 1, "the engine owes the release");
+        run(&mut processor);
+        Stalled {
+            hub,
+            ports,
+            controller,
+            processor,
+            sink,
+        }
+    }
+
+    impl Stalled {
+        /// Whether the audio thread has heard C4's release by now.
+        fn released(&mut self) -> bool {
+            run(&mut self.processor);
+            heard(&self.controller).iter().any(|e| {
+                matches!(
+                    e,
+                    RecordEvent::Note {
+                        key: 60,
+                        on: false,
+                        ..
+                    }
+                )
+            })
+        }
+    }
+
+    #[test]
+    fn the_hub_hands_the_engine_its_owed_release_when_asked() {
+        let mut stall = stalled();
+        assert!(!stall.released(), "nothing retries by itself");
+        stall.hub.retry_owed();
+        assert!(stall.released());
+        assert_eq!(stall.sink.owed(), 0);
+    }
+
+    #[test]
+    fn the_next_message_from_any_keyboard_hands_over_the_owed_release() {
+        let mut stall = stalled();
+        stall.ports.send("Keys", &[NOTE_ON, 62, 100]);
+        assert!(stall.released());
+    }
+
+    #[test]
+    fn a_poll_hands_over_the_owed_release() {
+        let mut stall = stalled();
+        stall.hub.poll();
+        assert!(stall.released());
+    }
+
+    #[test]
+    fn switching_an_input_hands_over_the_owed_release() {
+        let mut stall = stalled();
+        stall.hub.set_enabled("Keys", false);
+        assert!(stall.released());
+    }
+
+    #[test]
+    fn the_timetable_hands_over_the_owed_release_within_a_quarter_second() {
+        use grooviq_app::midi::Schedule;
+        use std::time::{Duration, Instant};
+
+        let mut stall = stalled();
+        // A clock the test moves: no sleeping.
+        let start = Instant::now();
+        let mut schedule = Schedule::new();
+        // The first step is the poll at start-up, which pays the debt itself: skip it, and see
+        // what the steps after it do.
+        let (_, first_wait) = schedule.step(start);
+        let mut now = start + first_wait;
+        let mut delivered = None;
+        while now.duration_since(start) < Duration::from_secs(3) {
+            let (action, wait) = schedule.step(now);
+            stall.hub.run(action);
+            if stall.released() {
+                delivered = Some(now.duration_since(start));
+                break;
+            }
+            now += wait;
+        }
+        let delivered = delivered.expect("the timetable never delivered the release");
+        assert!(
+            delivered <= Duration::from_millis(250),
+            "after {delivered:?}"
+        );
+    }
+
+    #[test]
+    fn the_timetable_polls_every_two_seconds_and_retries_in_between() {
+        use grooviq_app::midi::{Action, POLL_PERIOD, Schedule};
+        use std::time::{Duration, Instant};
+
+        let mut schedule = Schedule::new();
+        let start = Instant::now();
+        let (first, wait) = schedule.step(start);
+        assert_eq!(first, Action::Poll, "at once");
+        let mut now = start;
+        let mut polls = 0;
+        while now.duration_since(start) < POLL_PERIOD * 3 {
+            now += wait;
+            if schedule.step(now).0 == Action::Poll {
+                polls += 1;
+                // A poll comes no sooner than it is due.
+                assert!(now.duration_since(start) >= POLL_PERIOD * polls);
+            }
+        }
+        assert_eq!(polls, 3);
+        assert!(wait > Duration::ZERO);
+    }
+}

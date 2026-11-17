@@ -5,6 +5,7 @@ use grooviq_engine::{ChannelId, Command};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 /// Where a keyboard's commands go: the engine's controller, never through the session's lock.
 pub trait CommandSink: Send + Sync {
@@ -48,6 +49,9 @@ impl Ledger {
 /// the selection changes, everything on the old channel is released first, so no note rings
 /// forever on a channel the keyboard no longer plays. Runs on the MIDI thread, never the audio
 /// thread.
+///
+/// Played on its own (`handle`, `select`) a player counts only its own keys. Under a hub every
+/// input's keys are counted in one [`Ledger`], under the hub's lock (`handle_in`, ...).
 #[derive(Debug, Default)]
 pub struct Player {
     /// The channel the keys below sound on.
@@ -57,10 +61,8 @@ pub struct Player {
     /// Keys let go while the pedal was down: still sounding.
     held: BTreeSet<u8>,
     pedal: bool,
-    /// Set once the input is closed: a late message from it plays nothing.
-    retired: bool,
-    /// Who owns which key, across the hub's inputs. A player made alone owns its own.
-    ledger: Arc<Mutex<Ledger>>,
+    /// What a player played on its own counts its keys in.
+    solo: Ledger,
 }
 
 impl Player {
@@ -68,27 +70,37 @@ impl Player {
         Self::default()
     }
 
-    /// A player whose keys are counted with the other inputs' in `ledger`.
-    fn sharing(ledger: &Arc<Mutex<Ledger>>) -> Self {
-        Self {
-            ledger: Arc::clone(ledger),
-            ..Self::default()
-        }
-    }
-
     /// The commands `msg` causes when `channel` is selected (`None`: no channel, nothing plays).
     /// A change of channel releases the old one's notes first.
     pub fn handle(&mut self, msg: MidiMessage, channel: Option<u32>) -> Vec<Command> {
-        if self.retired {
-            return Vec::new();
-        }
-        let mut commands = self.select(channel);
+        let mut ledger = std::mem::take(&mut self.solo);
+        let commands = self.handle_in(&mut ledger, msg, channel);
+        self.solo = ledger;
+        commands
+    }
+
+    /// Moves the player to `channel`: if that is another channel, releases everything on the
+    /// old one. Nothing otherwise.
+    pub fn select(&mut self, channel: Option<u32>) -> Vec<Command> {
+        let mut ledger = std::mem::take(&mut self.solo);
+        let commands = self.select_in(&mut ledger, channel);
+        self.solo = ledger;
+        commands
+    }
+
+    fn handle_in(
+        &mut self,
+        ledger: &mut Ledger,
+        msg: MidiMessage,
+        channel: Option<u32>,
+    ) -> Vec<Command> {
+        let mut commands = self.select_in(ledger, channel);
         match msg {
             MidiMessage::NoteOn { key, velocity } => {
                 if let Some(channel) = channel {
                     // Down or pedal-held already: still this player's key, only sounded again.
                     if !self.down.contains(&key) && !self.held.remove(&key) {
-                        lock(&self.ledger).acquire(channel, key);
+                        ledger.acquire(channel, key);
                     }
                     self.down.insert(key);
                     commands.push(note(channel, key, f32::from(velocity) / 127.0, true));
@@ -99,57 +111,54 @@ impl Player {
                     if self.pedal {
                         self.held.insert(key);
                     } else if let Some(channel) = self.channel {
-                        self.disown(channel, key, &mut commands);
+                        disown(ledger, channel, key, &mut commands);
                     }
                 }
             }
             MidiMessage::Sustain(pressed) => {
                 self.pedal = pressed;
                 if !pressed {
-                    self.release(&mut commands, false);
+                    self.release(ledger, &mut commands, false);
                 }
             }
-            MidiMessage::AllNotesOff => self.release(&mut commands, true),
+            MidiMessage::AllNotesOff => self.release(ledger, &mut commands, true),
         }
         commands
     }
 
-    /// Moves the player to `channel`: if that is another channel, releases everything on the
-    /// old one. Nothing otherwise.
-    pub fn select(&mut self, channel: Option<u32>) -> Vec<Command> {
+    fn select_in(&mut self, ledger: &mut Ledger, channel: Option<u32>) -> Vec<Command> {
         let mut commands = Vec::new();
         if channel != self.channel {
-            self.release(&mut commands, true);
+            self.release(ledger, &mut commands, true);
             self.channel = channel;
         }
         commands
     }
 
-    /// The input is gone or switched off: releases everything and ignores what still arrives.
-    pub fn retire(&mut self) -> Vec<Command> {
+    /// The input is gone or switched off: releases everything.
+    fn retire_in(&mut self, ledger: &mut Ledger) -> Vec<Command> {
         let mut commands = Vec::new();
-        self.release(&mut commands, true);
-        self.retired = true;
+        self.release(ledger, &mut commands, true);
         commands
     }
 
     /// Releases the notes the pedal holds, and with `keys` the ones still down as well.
-    fn release(&mut self, commands: &mut Vec<Command>, keys: bool) {
+    fn release(&mut self, ledger: &mut Ledger, commands: &mut Vec<Command>, keys: bool) {
         let Some(channel) = self.channel else { return };
         let mut gone = std::mem::take(&mut self.held);
         if keys {
             gone.append(&mut self.down);
         }
         for key in gone {
-            self.disown(channel, key, commands);
+            disown(ledger, channel, key, commands);
         }
     }
+}
 
-    /// This player no longer holds `key`: the engine hears it only if no other input does.
-    fn disown(&self, channel: u32, key: u8, commands: &mut Vec<Command>) {
-        if lock(&self.ledger).release(channel, key) {
-            commands.push(note(channel, key, 0.0, false));
-        }
+/// One owner no longer holds `key`: the engine hears it only if no other input does.
+fn disown(ledger: &mut Ledger, channel: u32, key: u8, commands: &mut Vec<Command>) {
+    if ledger.release(channel, key) {
+        commands.push(note(channel, key, 0.0, false));
     }
 }
 
@@ -187,6 +196,55 @@ pub struct Poll {
     pub changed: bool,
 }
 
+/// What every open input shares, under one lock: who holds which key, and each input's player.
+/// A callback holds the lock from the change in ownership to the command it causes reaching the
+/// engine, so no input's release can land after another's press of the same key.
+#[derive(Default)]
+struct Bus {
+    ledger: Ledger,
+    players: BTreeMap<String, Player>,
+}
+
+/// What the hub's thread does next, and how long to wait after it (see [`Schedule`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Look for keyboards plugged in or out.
+    Poll,
+    /// Hand the engine the releases it refused.
+    Retry,
+}
+
+/// How often the hub looks for keyboards plugged in or out.
+pub const POLL_PERIOD: Duration = Duration::from_secs(2);
+/// How often the hub hands the engine the releases it refused, between polls.
+pub const RETRY_PERIOD: Duration = Duration::from_millis(100);
+
+/// The hub thread's timetable: a poll every [`POLL_PERIOD`], a retry every [`RETRY_PERIOD`] in
+/// between. Takes the time as an argument so it can be driven by a clock a test controls.
+#[derive(Debug, Default)]
+pub struct Schedule {
+    polled: Option<Instant>,
+}
+
+impl Schedule {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// What to do at `now`, and how long to wait before asking again.
+    pub fn step(&mut self, now: Instant) -> (Action, Duration) {
+        let due = self
+            .polled
+            .is_none_or(|at| now.saturating_duration_since(at) >= POLL_PERIOD);
+        if due {
+            self.polled = Some(now);
+            (Action::Poll, RETRY_PERIOD)
+        } else {
+            (Action::Retry, RETRY_PERIOD)
+        }
+    }
+}
+
 /// Owns the MIDI inputs: every enabled input that is plugged in is open, each with its own
 /// [`Player`]. [`MidiHub::poll`] runs every 2 s on the `grooviq-midi` thread.
 pub struct MidiHub {
@@ -197,9 +255,8 @@ pub struct MidiHub {
     disabled: BTreeSet<String>,
     /// Inputs plugged in at the last poll, sorted.
     listed: Vec<String>,
-    open: BTreeMap<String, Arc<Mutex<Player>>>,
-    /// The keys every open input holds.
-    ledger: Arc<Mutex<Ledger>>,
+    /// The open inputs' players and the keys they hold.
+    bus: Arc<Mutex<Bus>>,
     /// Inputs whose last open failed and was reported.
     failed: BTreeSet<String>,
 }
@@ -217,9 +274,19 @@ impl MidiHub {
             selected,
             disabled: disabled.into_iter().collect(),
             listed: Vec::new(),
-            open: BTreeMap::new(),
-            ledger: Arc::default(),
+            bus: Arc::default(),
             failed: BTreeSet::new(),
+        }
+    }
+
+    /// Does what the timetable says: a poll (and its result), or a retry of refused releases.
+    pub fn run(&mut self, action: Action) -> Option<Poll> {
+        match action {
+            Action::Poll => Some(self.poll()),
+            Action::Retry => {
+                self.retry_owed();
+                None
+            }
         }
     }
 
@@ -242,6 +309,9 @@ impl MidiHub {
 
     /// Tries again the releases the engine refused (a stalled audio thread).
     pub fn retry_owed(&self) {
+        // Under the bus lock, so no callback's note-on slips in between the debt being read and
+        // being paid.
+        let _bus = lock(&self.bus);
         self.sink.retry();
     }
 
@@ -273,9 +343,10 @@ impl MidiHub {
     /// the keyboard to send anything.
     pub fn release_stale(&mut self) {
         let channel = selected(&self.selected);
-        for player in self.open.values() {
-            let mut player = lock(player);
-            for cmd in player.select(channel) {
+        let mut bus = lock(&self.bus);
+        let Bus { ledger, players } = &mut *bus;
+        for player in players.values_mut() {
+            for cmd in player.select_in(ledger, channel) {
                 self.sink.send(cmd);
             }
         }
@@ -283,60 +354,74 @@ impl MidiHub {
 
     /// Closes what vanished or was switched off, opens what is plugged in and on.
     fn apply(&mut self, poll: &mut Poll) {
-        let gone: Vec<String> = self
-            .open
+        let gone: Vec<String> = lock(&self.bus)
+            .players
             .keys()
             .filter(|name| !self.listed.contains(name) || self.disabled.contains(*name))
             .cloned()
             .collect();
         for name in gone {
             self.ports.close(&name);
-            if let Some(player) = self.open.remove(&name) {
-                // Under the player's lock, so nothing it sends interleaves with the releases.
-                let mut player = lock(&player);
-                for cmd in player.retire() {
-                    self.sink.send(cmd);
+            {
+                // The player leaves and its releases go out in one step: nothing it sends can
+                // come after another input's press.
+                let mut bus = lock(&self.bus);
+                let Bus { ledger, players } = &mut *bus;
+                if let Some(mut player) = players.remove(&name) {
+                    for cmd in player.retire_in(ledger) {
+                        self.sink.send(cmd);
+                    }
                 }
             }
             poll.closed.push(name);
         }
-        let wanted: Vec<String> = self
-            .listed
-            .iter()
-            .filter(|name| !self.disabled.contains(*name) && !self.open.contains_key(*name))
-            .cloned()
-            .collect();
+        let wanted: Vec<String> = {
+            let bus = lock(&self.bus);
+            self.listed
+                .iter()
+                .filter(|name| !self.disabled.contains(*name) && !bus.players.contains_key(*name))
+                .cloned()
+                .collect()
+        };
         for name in wanted {
-            let player = Arc::new(Mutex::new(Player::sharing(&self.ledger)));
-            match self.ports.open(&name, self.callback(&player)) {
+            // Registered first: a message that arrives while the port is still being opened
+            // finds its player.
+            lock(&self.bus).players.insert(name.clone(), Player::new());
+            match self.ports.open(&name, self.callback(&name)) {
                 Ok(()) => {
                     self.failed.remove(&name);
-                    self.open.insert(name.clone(), player);
                     poll.opened.push(name);
                 }
                 // Tried again at every poll; said once.
                 Err(why) => {
+                    lock(&self.bus).players.remove(&name);
                     if self.failed.insert(name.clone()) {
                         poll.failed.push((name, why));
                     }
                 }
             }
         }
-        self.sink.retry();
+        self.retry_owed();
     }
 
     /// What an input does with each message it sends.
-    fn callback(&self, player: &Arc<Mutex<Player>>) -> MidiSink {
-        let (player, sink, selected_channel) = (
-            Arc::clone(player),
+    fn callback(&self, name: &str) -> MidiSink {
+        let (name, bus, sink, selected_channel) = (
+            name.to_owned(),
+            Arc::clone(&self.bus),
             Arc::clone(&self.sink),
             Arc::clone(&self.selected),
         );
         Box::new(move |bytes| {
             let Some(msg) = parse(bytes) else { return };
             let channel = selected(&selected_channel);
-            let mut player = lock(&player);
-            for cmd in player.handle(msg, channel) {
+            let mut bus = lock(&bus);
+            let Bus { ledger, players } = &mut *bus;
+            // An input that was closed has no player: a late message plays nothing.
+            let Some(player) = players.get_mut(&name) else {
+                return;
+            };
+            for cmd in player.handle_in(ledger, msg, channel) {
                 sink.send(cmd);
             }
             sink.retry();
