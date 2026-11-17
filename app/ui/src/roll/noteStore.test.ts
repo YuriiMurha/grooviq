@@ -125,6 +125,16 @@ describe("note store", () => {
     expect(s.count).toBe(2);
   });
 
+  it("a_snapped_move_is_built_into_the_instances_with_the_commit_rule", () => {
+    const s = new NoteStore();
+    s.load(1, [note(1, 0, 240, 60), note(2, 0, 240, 64), note(3, 480, 240, 67)]);
+    s.setSelection([1, 2]);
+    const keys = (r: { data: Float32Array; count: number }) => Array.from({ length: r.count }, (_, i) => [r.data[i * INSTANCE_STRIDE], r.data[i * INSTANCE_STRIDE + 2]]);
+    const moved = buildInstances(s, 1, { ghosts: false, inkOf: () => 0, moved: { dTick: 240, dKey: 2, scale: { root: 0, scale: "major" } } });
+    // The selected notes are where the commit would put them (C+2 = D, E+2 = F# snapped to F); the rest stay.
+    expect(keys(moved)).toEqual([[240, 62], [240, 65], [480, 67]]);
+  });
+
   it("instances_carry_ghosts_of_other_channels_under_the_channels_own_notes", () => {
     const s = new NoteStore();
     s.load(1, [note(1, 0, 240, 60), { ...note(2, 0, 240, 60, 2), slide: true }, note(3, 480, 240, 62, 3)]);

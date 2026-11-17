@@ -4,9 +4,6 @@ import type { LocalEdit } from "./noteStore";
 // Whole-selection operations on notes: each takes notes and returns new ones in the same order,
 // leaving the input alone. `changed` turns a before/after pair into the edit to commit.
 
-/** The quietest a humanized note gets (one MIDI step): never silent. */
-const MIN_VELOCITY = 1 / 127;
-
 /** Notes with starts moved to the nearest grid line (half way rounds up). Nothing else moves. */
 export function quantize(notes: readonly WireNote[], grid: number): WireNote[] {
   const g = Math.max(1, grid);
@@ -45,8 +42,8 @@ function xorshift(seed: number): () => number {
 }
 
 /** Each note's start moved by up to `timing` ticks either way and its velocity by up to
- * `velocity` (0..1), chosen from `seed`. Starts stay whole and at 0 or later; velocities stay
- * in (0, 1]. */
+ * `velocity` (0..1), chosen from `seed`. Starts stay whole and at 0 or later; velocities stay in
+ * the session's range, 0..1. Zero amounts leave every note as it is. */
 export function humanize(notes: readonly WireNote[], timing: number, velocity: number, seed: number): WireNote[] {
   const next = xorshift(seed);
   const spread = () => next() * 2 - 1;
@@ -57,7 +54,7 @@ export function humanize(notes: readonly WireNote[], timing: number, velocity: n
     return {
       ...n,
       tick: Math.max(0, n.tick + Math.round(dt * timing)),
-      velocity: Math.min(1, Math.max(MIN_VELOCITY, n.velocity + dv * velocity)),
+      velocity: Math.min(1, Math.max(0, n.velocity + dv * velocity)),
     };
   });
 }

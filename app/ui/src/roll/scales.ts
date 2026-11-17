@@ -46,3 +46,12 @@ export function scaleMask(root: number, scale: string | null): number {
   for (const s of set) mask |= 1 << pitchClass(root + s);
   return mask;
 }
+
+/** Where a note at `key` lands when moved `dKey` rows: held to the keyboard and, with a scale,
+ * resolved to its nearest key (ties down). A key that does not move stays as it is. The one
+ * rule for a drag's preview and its commit. */
+export function moveKey(key: number, dKey: number, scale?: { root: number; scale: string } | null): number {
+  if (dKey === 0) return key;
+  const k = Math.min(127, Math.max(0, key + dKey));
+  return scale ? snapKey(k, scale.root, scale.scale) : k;
+}

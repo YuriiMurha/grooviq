@@ -1,7 +1,7 @@
 // M2 Task 12: the piano roll's musical side: key and scale, slide notes, the velocity lane, ghost
 // notes, quantize, copy, paste and duplicate, chord stamps. Assertions read the mock session's
 // command log and notes, the roll's counters and the pixels on screen.
-
+import type { Page } from "@playwright/test";
 import { brightness, colourDistance, expect, pixelsAt, test } from "./fixture";
 import type { MockNote } from "./mockTauri";
 import { at, boxSelect, canvas, drag, lane, local, nextFrame, openRoll, sessionNotes, shot, stats, token, tool, twoChannels } from "./rollHelpers";
@@ -373,3 +373,98 @@ for (const renderer of ["webgl2", "canvas2d"] as const) {
   });
 }
 
+
+/** Whether each (tick, key) shows a note of Bass's ink at velocity 0.8 (what a drawn note gets). */
+async function inkedAt(page: Page, points: [number, number][]) {
+  const full = await token(page, "--ink-4");
+  const want = full.map((c) => c * (0.45 + 0.55 * 0.8));
+  const px = await pixelsAt(page, canvas(page), await Promise.all(points.map(([t, k]) => local(page, t, k))));
+  return px.map((c) => colourDistance(c, want) < 45);
+}
+
+test.describe("scale snap on paste and group moves", () => {
+  test.use({
+    seed: { project: twoChannels([note(1, 480, 60), note(2, 480, 64), note(3, 480, 67)], { key: { root: 0, scale: "major" } }) },
+  });
+
+  test("a_group_move_snaps_every_voice_into_the_scale", async ({ app, mock }, info) => {
+    await openRoll(app);
+    await boxSelect(app, 10, 70, 1500, 58);
+    // Grab C and hold it two rows up, on D: E would be F# (not in C major) and G would be A.
+    const from = await at(app, 540, 60);
+    await app.mouse.move(from.x, from.y);
+    await app.mouse.down();
+    const to = await at(app, 540, 62);
+    await app.mouse.move(to.x, to.y, { steps: 4 });
+    await nextFrame(app);
+    await shot(app, info, "group-move-held");
+    // The preview shows the keys the commit will send: D, F and A, and no F#.
+    expect(await inkedAt(app, [[540, 62], [540, 65], [540, 69], [540, 66], [540, 60], [540, 64], [540, 67]])).toEqual([true, true, true, false, false, false, false]);
+    expect(await mock.calls("notes_edit")).toEqual([]);
+    await app.mouse.up();
+    await expect.poll(() => sessionNotes(mock)).toEqual([
+      [1, 480, 240, 62],
+      [1, 480, 240, 65],
+      [1, 480, 240, 69],
+    ]);
+    expect(await mock.calls("notes_edit")).toHaveLength(1);
+    await nextFrame(app);
+    expect(await inkedAt(app, [[540, 62], [540, 65], [540, 69], [540, 66]])).toEqual([true, true, true, false]);
+  });
+});
+
+test.describe("paste into the key", () => {
+  test.use({ seed: { project: twoChannels([note(1, 0, 61)], { key: { root: 0, scale: "major" } }) } });
+
+  test("paste_snaps_to_the_scale", async ({ app, mock }) => {
+    await openRoll(app);
+    // C# is outside C major. Copy it, paste at 960 with the snap on: it lands on C.
+    await app.keyboard.press("ControlOrMeta+KeyA");
+    await app.keyboard.press("ControlOrMeta+KeyC");
+    const p = await at(app, 960, 66);
+    await app.mouse.move(p.x, p.y);
+    await app.keyboard.press("ControlOrMeta+KeyV");
+    await expect.poll(() => sessionNotes(mock)).toEqual([
+      [1, 960, 240, 60],
+      [1, 0, 240, 61],
+    ].sort((a, b) => a[3] - b[3] || a[1] - b[1]));
+    // With the snap off the same clip keeps its key.
+    await app.getByRole("button", { name: "Snap to scale", exact: true }).click();
+    const q = await at(app, 1920, 66);
+    await app.mouse.move(q.x, q.y);
+    await app.keyboard.press("ControlOrMeta+KeyV");
+    await expect.poll(() => sessionNotes(mock).then((n) => n.length)).toBe(3);
+    expect((await sessionNotes(mock)).filter((n) => n[1] === 1920).map((n) => n[3])).toEqual([61]);
+  });
+});
+
+test.describe("a dragged chord stamp", () => {
+  test.use({ seed: { project: twoChannels([]) } });
+
+  test("a_dragged_chord_stamp_is_one_edit_and_a_preview_until_release", async ({ app, mock }, info) => {
+    await openRoll(app);
+    await app.getByRole("combobox", { name: "Chord", exact: true }).selectOption("major");
+    const from = await at(app, 970, 60);
+    await app.mouse.move(from.x, from.y);
+    await app.mouse.down();
+    const to = await at(app, 1450, 62);
+    await app.mouse.move(to.x, to.y, { steps: 5 });
+    await nextFrame(app);
+    await shot(app, info, "stamp-held");
+    // Held: the chord is on screen at the new place (D, F#, A at 1440), not at the old one, and
+    // nothing has gone to the engine.
+    expect(await inkedAt(app, [[1500, 62], [1500, 66], [1500, 69], [1000, 60], [1000, 64]])).toEqual([true, true, true, false, false]);
+    expect(await mock.calls("notes_edit")).toEqual([]);
+    await app.mouse.up();
+    // Released: one edit, an add of the three notes where they were let go.
+    await expect.poll(() => sessionNotes(mock)).toEqual([
+      [1, 1440, 240, 62],
+      [1, 1440, 240, 66],
+      [1, 1440, 240, 69],
+    ]);
+    const edits = await mock.calls("notes_edit");
+    expect(edits).toHaveLength(1);
+    const sent = edits[0].args.edit as { add: unknown[]; update: unknown[]; delete: unknown[] };
+    expect([sent.add.length, sent.update.length, sent.delete.length]).toEqual([3, 0, 0]);
+  });
+});

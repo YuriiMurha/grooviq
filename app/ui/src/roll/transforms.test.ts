@@ -47,14 +47,23 @@ describe("transforms", () => {
       expect(Math.abs(n.tick - notes[i].tick)).toBeLessThanOrEqual(20);
       expect(Number.isInteger(n.tick)).toBe(true);
       expect(n.tick).toBeGreaterThanOrEqual(0);
-      expect(n.velocity).toBeGreaterThan(0);
+      expect(n.velocity).toBeGreaterThanOrEqual(0);
       expect(n.velocity).toBeLessThanOrEqual(1);
     }
     // It does move things, both ways.
     expect(a.some((n, i) => n.tick > notes[i].tick)).toBe(true);
     expect(a.some((n, i) => n.tick < notes[i].tick)).toBe(true);
-    // Zero amounts change nothing.
+    // Zero amounts change nothing, even for silent and nearly silent notes.
     expect(humanize(notes, 0, 0, 3)).toEqual(notes);
+    const quiet = [note(1, 10, 60, { velocity: 0 }), note(2, 10, 60, { velocity: 0.003 }), note(3, 10, 60, { velocity: 1 })];
+    expect(humanize(quiet, 0, 0, 1)).toEqual(quiet);
+    // Velocity only: starts stay; a silent note can only go up, a full one only down; 0 and 1 are reachable.
+    const only = humanize(quiet, 0, 0.5, 5);
+    expect(only.map((n) => n.tick)).toEqual([10, 10, 10]);
+    expect(only[0].velocity).toBeGreaterThanOrEqual(0);
+    expect(only[2].velocity).toBeLessThanOrEqual(1);
+    const wide = humanize(Array.from({ length: 300 }, (_, i) => note(i, 0, 60, { velocity: 0.01 })), 0, 1, 11);
+    expect(Math.min(...wide.map((n) => n.velocity))).toBeLessThan(1 / 127);
   });
 
   it("changed_lists_only_the_notes_that_differ", () => {

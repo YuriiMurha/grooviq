@@ -1,4 +1,5 @@
 import type { WireNote } from "../api/notes";
+import { moveKey } from "./scales";
 
 /** An edit made in the piano roll, applied to the store at once and sent to the engine after.
  * Added notes carry temporary negative ids until the engine gives them real ones. */
@@ -278,17 +279,25 @@ let scratch = new Float32Array(0);
 export function buildInstances(
   store: NoteStore,
   channel: number,
-  ghosts?: { ghosts: boolean; inkOf: (channel: number) => number },
+  ghosts?: {
+    ghosts: boolean;
+    inkOf: (channel: number) => number;
+    /** The selection built already moved (a drag that snaps each voice to a scale cannot use the
+     * shader's one offset): by `dTick` ticks and `dKey` rows, keys resolved by `moveKey`. */
+    moved?: { dTick: number; dKey: number; scale?: { root: number; scale: string } | null };
+  },
 ): { data: Float32Array; count: number; own: number } {
   const order = store.drawOrder();
   const want = ghosts?.ghosts ? order.length : 0;
   if (scratch.length < order.length * INSTANCE_STRIDE) scratch = new Float32Array(Math.max(order.length * INSTANCE_STRIDE, scratch.length * 2));
   const data = scratch;
   let o = 0;
+  const moved = ghosts?.moved;
   const put = (slot: number, flags: number) => {
-    data[o] = store.ticks[slot];
+    const shift = moved && (flags & FLAG_SELECTED) !== 0;
+    data[o] = shift ? store.ticks[slot] + moved.dTick : store.ticks[slot];
     data[o + 1] = store.lengths[slot];
-    data[o + 2] = store.keys[slot];
+    data[o + 2] = shift ? moveKey(store.keys[slot], moved.dKey, moved.scale) : store.keys[slot];
     data[o + 3] = store.velocities[slot];
     data[o + 4] = flags | (store.slides[slot] ? FLAG_SLIDE : 0);
     o += INSTANCE_STRIDE;

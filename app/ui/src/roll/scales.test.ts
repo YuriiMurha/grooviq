@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SCALES, inScale, scaleMask, snapKey } from "./scales";
+import { SCALES, inScale, moveKey, scaleMask, snapKey } from "./scales";
 
 describe("scales", () => {
   it("every_scale_has_its_semitones", () => {
@@ -48,6 +48,25 @@ describe("scales", () => {
           expect(s).toBeLessThanOrEqual(127);
         }
       }
+    }
+  });
+
+  it("move_key_shifts_and_resolves_into_the_scale_inside_the_keyboard", () => {
+    const c = { root: 0, scale: "major" };
+    expect(moveKey(64, 2, c)).toBe(65);
+    expect(moveKey(60, 2, c)).toBe(62);
+    // No scale: chromatic, held to the keyboard.
+    expect(moveKey(64, 2)).toBe(66);
+    expect(moveKey(125, 9)).toBe(127);
+    expect(moveKey(3, -9)).toBe(0);
+    // A key that does not move stays, in the scale or not.
+    expect(moveKey(61, 0, c)).toBe(61);
+    // Moved results are always in the scale and in range.
+    for (let k = 0; k < 128; k++) for (let d = -127; d <= 127; d += 7) {
+      const m = moveKey(k, d, c);
+      expect(m).toBeGreaterThanOrEqual(0);
+      expect(m).toBeLessThanOrEqual(127);
+      if (d !== 0) expect(inScale(m, 0, "major")).toBe(true);
     }
   });
 

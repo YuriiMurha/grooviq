@@ -149,6 +149,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   }, [queue]);
   // Another channel: nothing stays selected, and the view centres on its notes once loaded.
   useEffect(() => {
+    abandon(store, gesture.current);
     store.setSelection([]);
     centred.current = undefined;
     centreKey.current = null;
@@ -237,10 +238,16 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
 
       const b = built.current;
       // Ghosts are in the buffer with their channels' inks: either changing rebuilds it.
-      const ghostKey = s.ghosts ? s.inkOf.sig : "";
+      // A drag that snaps each voice to a scale moves keys by more than the shader's one offset,
+      // so while one is held the buffer is built with the selection already moved, again only
+      // when the snapped delta changes.
+      const held = gesture.current;
+      const snapped = held?.kind === "move" && s.snapScale && s.key && held.dKey !== 0 ? held : null;
+      const ghostKey = `${s.ghosts ? s.inkOf.sig : ""}|${snapped ? `${snapped.dTick}:${snapped.dKey}` : ""}`;
       if (b.version !== store.version || b.channel !== s.channel || b.renderer !== r || b.ghosts !== ghostKey) {
+        const moved = snapped ? { dTick: snapped.dTick, dKey: snapped.dKey, scale: s.key } : undefined;
         const { data, count, own } =
-          s.channel === null ? { data: new Float32Array(0), count: 0, own: 0 } : buildInstances(store, s.channel, { ghosts: s.ghosts, inkOf: s.inkOf.of });
+          s.channel === null ? { data: new Float32Array(0), count: 0, own: 0 } : buildInstances(store, s.channel, { ghosts: s.ghosts, inkOf: s.inkOf.of, moved });
         r.setNotes(data, count);
         if (STATS) rollStats.bufferBuilds++;
         built.current = { version: store.version, channel: s.channel, renderer: r, ghosts: ghostKey };
@@ -282,6 +289,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
       if (!dirty.current && at === shownPlayhead) return;
 
       const g = gesture.current;
+      const offset = g?.kind === "move" && !(s.snapScale && s.key && g.dKey !== 0);
       const box = g?.kind === "box" ? { x0: g.from.x, y0: g.from.y, x1: g.to.x, y1: g.to.y } : null;
       r.draw(
         {
@@ -292,7 +300,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
           barTicks: barTicks(s.sig),
           endTick: loop,
           scaleMask: s.key ? scaleMask(s.key.root, s.key.scale) : 0,
-          drag: g?.kind === "move" ? [g.dTick, g.dKey] : [0, 0],
+          drag: g?.kind === "move" && offset ? [g.dTick, g.dKey] : [0, 0],
           resize: g?.kind === "resize" ? g.dLength : 0,
           minLength: g?.kind === "resize" ? g.minLength : 1,
           playhead: at,
@@ -379,6 +387,8 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     return { x, y, tick: w.tick, key: w.key, button: e.button, shift: e.shiftKey };
   };
   const take = (step: Step) => {
+    // A held stamp shows in the store only; the release sends it.
+    if (step.preview) store.apply(step.preview);
     if (step.edit) queue.commit(step.edit);
     if (step.select) store.setSelection(step.select);
     if (step.lastLength !== undefined) lastLength.current = step.lastLength;
@@ -417,6 +427,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     dirty.current = true;
   };
   const onPointerCancel = () => {
+    abandon(store, gesture.current);
     gesture.current = null;
     dirty.current = true;
   };
@@ -461,7 +472,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
       const s = scene.current;
       if (!clipboard || s.channel === null) return;
       const at = snapTick(Math.max(0, pointerTick.current ?? view.current.scrollTick), s.grid, "floor");
-      add(paste(clipboard, at, s.channel, newId));
+      add(paste(clipboard, at, s.channel, newId, s.snapScale ? s.key : null));
     },
     duplicate: () => {
       const s = scene.current;
@@ -559,6 +570,11 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
       {lane && <VelocityLane store={store} queue={queue} channel={channel} view={view} ink={ink} />}
     </div>
   );
+}
+
+/** A gesture that ends without a release takes back the notes it only showed. */
+function abandon(store: NoteStore, g: Gesture | null) {
+  if (g?.kind === "move" && g.fresh) store.apply({ add: [], update: [], delete: g.fresh.map((n) => n.id) });
 }
 
 /** The pointer's look over the roll: a resize arrow on a note's right edge, a hand on a note. */

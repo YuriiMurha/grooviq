@@ -1,7 +1,7 @@
 import type { WireNote } from "../api/notes";
 import { stamp } from "./chords";
 import type { LocalEdit, NoteStore } from "./noteStore";
-import { snapKey } from "./scales";
+import { moveKey, snapKey } from "./scales";
 import { snapTick } from "./snap";
 import type { RollView } from "./view";
 
@@ -64,8 +64,9 @@ export type Gesture =
   | { kind: "none" }
   /** Right button (or the delete tool): deletes every note it passes over. */
   | { kind: "erase" }
-  /** Moves the selection: `dTick`, `dKey` so far. `anchor` is the grabbed note's start. */
-  | { kind: "move"; from: Pointer; anchor: number; anchorKey: number; dTick: number; dKey: number; minDTick: number; minDKey: number; maxDKey: number; moved: boolean }
+  /** Moves the selection: `dTick`, `dKey` so far. `anchor` is the grabbed note's start. `fresh`
+   * holds notes just drawn, still unsent: the release adds them where they were let go. */
+  | { kind: "move"; from: Pointer; anchor: number; fresh: WireNote[] | null; dTick: number; dKey: number; minDTick: number; minDKey: number; maxDKey: number; moved: boolean }
   /** Resizes the selection from the grabbed note's right edge (`end`): `dLength` so far. */
   | { kind: "resize"; from: Pointer; id: number; end: number; dLength: number; minLength: number; moved: boolean }
   /** Paints a note into each grid cell of the row `key`; `cell` is the last one visited. */
@@ -76,6 +77,8 @@ export type Gesture =
 export interface Step {
   gesture: Gesture;
   edit: LocalEdit | null;
+  /** Notes to show in the store now but not send: a stamp held down. The release sends them. */
+  preview?: LocalEdit;
   /** The new selection, when it changes. */
   select?: number[];
   /** The new last length, when it changes. */
@@ -113,8 +116,8 @@ function moveLimits(store: NoteStore, ids: number[] | null) {
   return { minDTick: -minTick, minDKey: -minKey, maxDKey: TOP_KEY - maxKey };
 }
 
-function moveOf(from: Pointer, anchor: number, anchorKey: number, limits: ReturnType<typeof moveLimits>): Gesture {
-  return { kind: "move", from, anchor, anchorKey, dTick: 0, dKey: 0, ...limits, moved: false };
+function moveOf(from: Pointer, anchor: number, limits: ReturnType<typeof moveLimits>, fresh: WireNote[] | null = null): Gesture {
+  return { kind: "move", from, anchor, fresh, dTick: 0, dKey: 0, ...limits, moved: false };
 }
 
 /** A row, moved to the nearest key of the scale when snapping to one. */
@@ -165,7 +168,7 @@ export function startGesture(ctx: ToolContext, p: Pointer): Step {
       const gesture: Gesture = { kind: "resize", from: p, id: hit, end: n.tick + n.length, dLength: 0, minLength: Math.max(1, ctx.grid), moved: false };
       return { gesture, edit: null, select, lastLength };
     }
-    return { gesture: moveOf(p, n.tick, n.key, moveLimits(store, select ?? null)), edit: null, select, lastLength };
+    return { gesture: moveOf(p, n.tick, moveLimits(store, select ?? null)), edit: null, select, lastLength };
   }
 
   if (tool === "select") return { gesture: { kind: "box", from: p, to: p, additive: p.shift }, edit: null };
@@ -185,7 +188,7 @@ export function startGesture(ctx: ToolContext, p: Pointer): Step {
   const lo = Math.min(...notes.map((n) => n.key));
   const hi = Math.max(...notes.map((n) => n.key));
   const limits = { minDTick: -tick, minDKey: -lo, maxDKey: TOP_KEY - hi };
-  return { gesture: moveOf(p, tick, root, limits), edit: edit({ add: notes }), select: notes.map((n) => n.id) };
+  return { gesture: moveOf(p, tick, limits, notes), edit: null, preview: edit({ add: notes }), select: notes.map((n) => n.id) };
 }
 
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
@@ -202,7 +205,7 @@ export function moveGesture(ctx: ToolContext, g: Gesture, p: Pointer): Step {
       if (!moved) return { gesture: g, edit: null };
       const start = snapTick(g.anchor + (p.tick - g.from.tick), ctx.grid, "round");
       const dTick = Math.max(start - g.anchor, g.minDTick);
-      const dKey = clamp(inKey(ctx, clamp(g.anchorKey + row(p) - row(g.from), 0, TOP_KEY)) - g.anchorKey, g.minDKey, g.maxDKey);
+      const dKey = clamp(row(p) - row(g.from), g.minDKey, g.maxDKey);
       return { gesture: { ...g, moved, dTick, dKey }, edit: null };
     }
     case "resize": {
@@ -234,14 +237,21 @@ export function endGesture(ctx: ToolContext, g: Gesture, p: Pointer): Step {
   const done = last.gesture;
   switch (done.kind) {
     case "move": {
+      // The notes just drawn go out once, where they were let go; the others are updated.
+      if (done.fresh) {
+        const add = done.fresh.map((n) => ({ ...n, tick: n.tick + done.dTick, key: moveKey(n.key, done.dKey, ctx.scale) }));
+        return { gesture: done, edit: edit({ add }) };
+      }
       if (done.dTick === 0 && done.dKey === 0) return { gesture: done, edit: null };
       const update: WireNote[] = [];
       for (let i = 0; i < store.count; i++) {
         if (!store.selected[i]) continue;
         const n = store.note(i);
-        update.push({ ...n, tick: n.tick + done.dTick, key: n.key + done.dKey });
+        // Each voice resolves into the scale on its own, by the rule the preview is built with.
+        const moved = { ...n, tick: n.tick + done.dTick, key: moveKey(n.key, done.dKey, ctx.scale) };
+        if (moved.tick !== n.tick || moved.key !== n.key) update.push(moved);
       }
-      return { gesture: done, edit: edit({ update }) };
+      return { gesture: done, edit: update.length ? edit({ update }) : null };
     }
     case "resize": {
       if (done.dLength === 0) return { gesture: done, edit: null };

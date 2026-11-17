@@ -24,15 +24,20 @@ describe("clipboard", () => {
       [BAR + 960, 480, 64, false],
       [BAR + 1920, 240, 67, true],
     ]);
-    // A selection that starts mid-bar and ends mid-bar: the offset is whole bars covering it.
-    const mid = [note(4, 960, 60), note(5, 4000, 62, { length: 400 })];
-    // Spans 960..4400 (3440 ticks): one bar on.
-    expect(duplicate(mid, BAR).map((n) => n.tick)).toEqual([960 + BAR, 4000 + BAR]);
-    // Spans past a bar: two bars on.
+    // Inside one bar, off the bar line: 100..300 moves on by that one bar, to 3940..4140.
+    const small = [note(8, 100, 60, { length: 200 })];
+    expect(duplicate(small, BAR).map((n) => [n.tick, n.tick + n.length])).toEqual([[3940, 4140]]);
+    // A selection that crosses a bar line covers two bars, even if it is shorter than one:
+    // 3000..4000 moves on by two bars.
+    const across = [note(4, 3000, 60, { length: 500 }), note(5, 3500, 62, { length: 500 })];
+    expect(duplicate(across, BAR).map((n) => n.tick)).toEqual([3000 + 2 * BAR, 3500 + 2 * BAR]);
+    // Ending exactly on a bar line does not cover the next bar.
+    expect(duplicate([note(9, 0, 60, { length: BAR })], BAR).map((n) => n.tick)).toEqual([BAR]);
+    const mid = across;
     const long = [note(6, 0, 60), note(7, 4000, 62, { length: 400 })];
     expect(duplicate(long, BAR).map((n) => n.tick)).toEqual([2 * BAR, 4000 + 2 * BAR]);
     // The copies never overlap the selection's own span.
-    for (const set of [sel, mid, long]) {
+    for (const set of [sel, mid, long, small]) {
       const end = Math.max(...set.map((n) => n.tick + n.length));
       const start = Math.min(...set.map((n) => n.tick));
       const copies = duplicate(set, BAR);
@@ -56,5 +61,9 @@ describe("clipboard", () => {
     expect(other.map((n) => [n.channel, n.id])).toEqual([[9, -1], [9, -2], [9, -3]]);
     // An empty clip pastes nothing.
     expect(paste(copy([]), 100)).toEqual([]);
+    // Into a scale: each key goes to the nearest key of it, ties down (C# to C in C major); a key
+    // already in it, and one at the end of the keyboard, stay inside 0..127.
+    const keyed = paste(copy([note(1, 0, 61), note(2, 0, 62), note(3, 0, 127)]), 0, 1, () => 0, { root: 0, scale: "major" });
+    expect(keyed.map((n) => n.key)).toEqual([60, 62, 127]);
   });
 });

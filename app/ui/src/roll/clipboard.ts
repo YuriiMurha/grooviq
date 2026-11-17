@@ -1,4 +1,5 @@
 import type { WireNote } from "../api/notes";
+import { snapKey } from "./scales";
 
 /** Copied notes: positions relative to the earliest start, with no ids or channel. */
 export interface Clip {
@@ -12,18 +13,32 @@ export function copy(notes: readonly WireNote[]): Clip {
 }
 
 /** The clip's notes with its earliest start at `atTick`, on `channel`, each with an id from
- * `newId` (0 without one). */
-export function paste(clip: Clip, atTick: number, channel = 0, newId: () => number = () => 0): WireNote[] {
-  return clip.notes.map((n) => ({ id: newId(), channel, tick: atTick + n.tick, length: n.length, key: n.key, velocity: n.velocity, slide: n.slide }));
+ * `newId` (0 without one). With a `scale`, each key moves to the nearest key of it. */
+export function paste(
+  clip: Clip,
+  atTick: number,
+  channel = 0,
+  newId: () => number = () => 0,
+  scale?: { root: number; scale: string } | null,
+): WireNote[] {
+  return clip.notes.map((n) => ({
+    id: newId(),
+    channel,
+    tick: atTick + n.tick,
+    length: n.length,
+    key: scale ? snapKey(n.key, scale.root, scale.scale) : n.key,
+    velocity: n.velocity,
+    slide: n.slide,
+  }));
 }
 
-/** Copies of the selection, moved on by whole bars so the first of them starts after the end of
- * the originals (Mod+B): each note keeps its place in the bar. Ids are copied; the caller
- * gives the new notes theirs. */
+/** Copies of the selection, moved on by the whole number of bars that covers it (Mod+B, as FL's
+ * duplicate): each note keeps its place in the bar, and a selection that crosses a bar line
+ * covers both bars. Ids are copied; the caller gives the new notes theirs. */
 export function duplicate(selection: readonly WireNote[], bar: number): WireNote[] {
   if (!selection.length) return [];
   const start = selection.reduce((m, n) => Math.min(m, n.tick), Infinity);
   const end = selection.reduce((m, n) => Math.max(m, n.tick + n.length), 0);
-  const offset = Math.max(1, Math.ceil((end - start) / bar)) * bar;
+  const offset = (Math.floor((end - 1) / bar) - Math.floor(start / bar) + 1) * bar;
   return selection.map((n) => ({ ...n, tick: n.tick + offset }));
 }
