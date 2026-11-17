@@ -2,11 +2,28 @@
 
 use grooviq_dsp::{Device, NoteEvent, create, param_spec};
 
-const IDS: [&str; 9] = [
-    "synth", "eq", "comp", "limiter", "drive", "reverb", "delay", "ott", "utility",
+const IDS: [&str; 10] = [
+    "synth",
+    "eq",
+    "comp",
+    "limiter",
+    "drive",
+    "reverb",
+    "character_delay",
+    "delay",
+    "ott",
+    "utility",
 ];
-const EFFECTS: [&str; 8] = [
-    "eq", "comp", "limiter", "drive", "reverb", "delay", "ott", "utility",
+const EFFECTS: [&str; 9] = [
+    "eq",
+    "comp",
+    "limiter",
+    "drive",
+    "reverb",
+    "character_delay",
+    "delay",
+    "ott",
+    "utility",
 ];
 const RATES: [f32; 5] = [22050.0, 44100.0, 48000.0, 96000.0, 192000.0];
 
@@ -769,6 +786,7 @@ fn interesting(id: &str) -> Vec<(u32, f32)> {
         "limiter" => vec![(0, 12.0), (1, -2.0), (2, 30.0)],
         "drive" => vec![(0, 3.0), (1, 18.0), (2, 0.4), (3, 0.8), (5, 2.0)],
         "reverb" => vec![(0, 0.8), (1, 3.0), (2, 35.0), (3, 0.3), (4, 0.7), (7, 0.5)],
+        "character_delay" => vec![(9, 2.0), (10, 0.8), (12, 0.4), (11, 0.5)],
         "delay" => vec![(1, 2.0), (3, 0.6), (4, 1.0), (7, 0.5)],
         "ott" => vec![(0, 0.8), (1, 0.3), (4, 3.0), (6, -2.0)],
         "utility" => vec![(0, -3.0), (1, 0.3), (2, 1.5), (3, 120.0)],
@@ -789,6 +807,7 @@ fn changes(id: &str) -> Vec<(u32, f32)> {
         "limiter" => vec![(0, 3.0)],
         "drive" => vec![(1, 6.0), (2, -0.5), (3, 0.3)],
         "reverb" => vec![(0, 0.2), (2, 90.0), (5, 400.0), (7, 0.9)],
+        "character_delay" => vec![(9, 1.0), (10, 0.4), (12, 0.7), (11, 0.2), (1, 5.0)],
         "delay" => vec![(1, 5.0), (3, 0.2), (6, 3000.0)],
         "ott" => vec![(7, 300.0), (8, 5000.0), (0, 0.3)],
         "utility" => vec![(1, -0.6), (3, 0.0), (4, 1.0)],

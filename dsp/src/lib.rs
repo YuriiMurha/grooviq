@@ -14,6 +14,7 @@ mod fft;
 mod util;
 mod wavetable;
 
+pub mod character_delay;
 pub mod comp;
 pub mod delay;
 pub mod drive;
@@ -36,6 +37,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
         "limiter" => &limiter::SPEC,
         "drive" => &drive::SPEC,
         "reverb" => &reverb::SPEC,
+        "character_delay" => &character_delay::SPEC,
         "delay" => &delay::SPEC,
         "ott" => &ott::SPEC,
         "utility" => &utility::SPEC,
@@ -55,6 +57,7 @@ pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
         "limiter" => Box::new(limiter::Limiter::new(sample_rate)),
         "drive" => Box::new(drive::Drive::new(sample_rate)),
         "reverb" => Box::new(reverb::Reverb::new(sample_rate)),
+        "character_delay" => Box::new(character_delay::CharacterDelay::new(sample_rate)),
         "delay" => Box::new(delay::Delay::new(sample_rate)),
         "ott" => Box::new(ott::Ott::new(sample_rate)),
         "utility" => Box::new(utility::Utility::new(sample_rate)),

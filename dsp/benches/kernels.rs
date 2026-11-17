@@ -113,3 +113,27 @@ fn synth_trap_lead_uni7_block(bencher: Bencher, voices: usize) {
     let (mut l, mut r) = settle(&mut synth, &chord(48, voices));
     bencher.bench_local(|| synth.process(black_box(&mut l), black_box(&mut r), None, &[]));
 }
+
+#[divan::bench(args = ["Glass Steps", "Soft Spools", "Dusk Circuit"], consts = [64, 128])]
+fn character_delay<const N: usize>(bencher: Bencher, name: &str) {
+    use grooviq_dsp::character_delay::{CharacterDelay, preset};
+    let mut device = CharacterDelay::new(SR);
+    for (i, v) in preset(name).unwrap() {
+        device.set_param(i, v);
+    }
+    let mut frame = 0usize;
+    for _ in 0..800 {
+        let mut l = [0.2; N];
+        let mut r = [-0.1; N];
+        device.process(&mut l, &mut r, None, &[]);
+    }
+    bencher.bench_local(move || {
+        let mut l =
+            std::array::from_fn::<_, N, _>(|i| (((frame + i) % 97) as f32 / 97.0 - 0.5) * 0.5);
+        let mut r =
+            std::array::from_fn::<_, N, _>(|i| (((frame + i) % 73) as f32 / 73.0 - 0.5) * 0.4);
+        frame = frame.wrapping_add(N);
+        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
+        black_box((l, r));
+    });
+}

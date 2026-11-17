@@ -732,3 +732,6 @@ fn a_waiting_recording_barrier_never_allocates() {
         "{taken:?}"
     );
 }
+
+#[path = "realtime/character_delay.rs"]
+mod character_delay;
