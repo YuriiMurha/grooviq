@@ -68,6 +68,8 @@ export interface MockSeed {
   samplerParams?: { id: string; min: number; max: number; default: number }[];
   /** The synth's parameters (the same fixture). */
   synthParams?: { id: string; min: number; max: number; default: number }[];
+  /** Every synth preset's 40 values in SPEC order (tests/fixtures/synth-presets.json). */
+  synthPresets?: Record<string, number[]>;
 }
 
 export function installMockTauri(seed: MockSeed): void {
@@ -80,6 +82,11 @@ export function installMockTauri(seed: MockSeed): void {
   if (!seed.samplerParams?.length) throw new Error("the mock needs the sampler's parameters");
   const PARAMS: [string, number, number, number][] = seed.samplerParams.map((p) => [p.id, p.min, p.max, p.default]);
   const SYNTH_PARAMS: [string, number, number, number][] = (seed.synthParams ?? []).map((p) => [p.id, p.min, p.max, p.default]);
+  if (!seed.synthPresets) throw new Error("the mock needs the synth presets");
+  const PRESET_VALUES = seed.synthPresets;
+  /** All 40 values of a factory preset, by parameter id (`LoadSynthPreset`, Task 7). */
+  const presetValues = (name: string) =>
+    Object.fromEntries(SYNTH_PARAMS.map(([id], i) => [id, PRESET_VALUES[name][i]]));
   // project/src (Task 6 and 7): presets (grooviq_dsp::synth::PRESETS), ranges, the notes wire format.
   const PRESETS = ["Init", "808 Glide", "Sub Bass", "Reese", "Bell Keys", "Dark Pad", "Pluck", "Trap Lead"];
   const SCALES = [
@@ -268,6 +275,11 @@ export function installMockTauri(seed: MockSeed): void {
     if (!(n >= 0 && n < steps)) throw `Step ${n + 1} is past the end of the pattern (${steps} steps).`;
     return n * STEP_TICKS;
   };
+  /** Every note change, from any path, bumps the revision and tells the UI (Task 7). */
+  const notesChanged = () => {
+    s.notesRevision += 1;
+    emit("notes-changed", s.notesRevision);
+  };
   /** Changes the pattern; `true` if anything changed. A note change bumps the notes revision. */
   const editPattern = (change: (p: Project["pattern"]) => void) => {
     const before = JSON.stringify(s.project.pattern);
@@ -276,7 +288,7 @@ export function installMockTauri(seed: MockSeed): void {
     change(next);
     if (JSON.stringify(next) === before) return false;
     s.project.pattern = next;
-    if (JSON.stringify(next.notes) !== notesBefore) s.notesRevision += 1;
+    if (JSON.stringify(next.notes) !== notesBefore) notesChanged();
     return true;
   };
   const nextNoteId = () => Math.max(0, ...s.project.pattern.notes.map((n) => n.id ?? 0)) + 1;
@@ -340,8 +352,7 @@ export function installMockTauri(seed: MockSeed): void {
         const c = p.channels[channelIndex(e.channel)];
         if (c.kind !== "synth") throw `${c.name} is not a synth channel.`;
         if (!PRESETS.includes(String(e.preset))) throw `There is no synth preset called "${String(e.preset)}".`;
-        // The mock does not know the presets' values: every parameter goes back to its default.
-        c.synth = {};
+        c.synth = presetValues(String(e.preset));
         c.preset = String(e.preset);
         return true;
       }
@@ -468,7 +479,7 @@ export function installMockTauri(seed: MockSeed): void {
   const openProject = (p: Project, path: string | null, unsaved: boolean) => {
     stopTransport();
     s.project = normalise(clone(p));
-    s.notesRevision += 1;
+    notesChanged();
     s.path = path;
     markClean();
     if (unsaved) changed();
@@ -503,7 +514,12 @@ export function installMockTauri(seed: MockSeed): void {
     s.transport.startTicks = target;
     s.transport.startMs = performance.now();
   };
+  /** Stops the clock. Recording ends at the stop tick first: every open note closes there
+   * (the recorder's `End`), so a key let go later records nothing more. */
   const stopTransport = () => {
+    const end = ticksNow();
+    for (const key of [...s.recordOpen.keys()]) closeRecorded(key, end);
+    s.recordOpen.clear();
     s.transport = { playing: false, startMs: 0, startTicks: 0, held: null };
   };
 
@@ -637,7 +653,6 @@ export function installMockTauri(seed: MockSeed): void {
       growToNotes(pat);
     });
     changed();
-    emit("notes-changed", s.notesRevision);
   };
 
   // --- Commands. ---
@@ -720,7 +735,7 @@ export function installMockTauri(seed: MockSeed): void {
         solo: false,
         sampler: {},
         kind: "synth",
-        synth: {},
+        synth: presetValues(preset),
         preset,
         choke: 0,
       });

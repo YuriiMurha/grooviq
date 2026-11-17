@@ -20,11 +20,13 @@ interface Props {
   onError: (message: string) => void;
   /** The typing keyboard is on. */
   keyboard: boolean;
+  /** The transport plays (from the live frames as well as the buttons). */
+  playing: boolean;
 }
 
 /** The channel rack and the piano roll, stacked, each toggled by its key (F6, F7), with a
  * splitter between them; the selected channel they and the typing keyboard share. */
-export function Workspace({ latest, sampleRate, onError, keyboard }: Props) {
+export function Workspace({ latest, sampleRate, onError, keyboard, playing }: Props) {
   const { view } = useProject();
   const [panels, setPanels] = useState<Panels>(DEFAULT_PANELS);
   const [chosen, setChosen] = useState<number | null>(null);
@@ -41,7 +43,7 @@ export function Workspace({ latest, sampleRate, onError, keyboard }: Props) {
     channelSelect(channel).catch((e: unknown) => onError(errorText(e)));
   }, [channel, onError]);
 
-  useTypingKeyboard(keyboard, channel, onError);
+  useTypingKeyboard(keyboard, channel, onError, { playing, recording: view?.recording ?? false });
 
   const openRoll = useCallback((id: number) => {
     setChosen(id);

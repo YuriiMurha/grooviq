@@ -43,8 +43,26 @@ export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSele
     if (previewing.current === on) return;
     previewing.current = on;
     const sent = synth ? channelNote(id, PREVIEW_KEY, on ? TYPING_VELOCITY : 0, on) : channelPreview(id, on);
-    sent.catch((e: unknown) => onError(errorText(e)));
+    // Stopping is best effort: the channel may just have been removed.
+    sent.catch((e: unknown) => {
+      if (on) onError(errorText(e));
+    });
   };
+
+  // A preview held while the row goes away (F6 hides the rack, the channel is removed) or the
+  // window loses focus gets no keyup or pointerup: stop it then.
+  const stopPreview = useRef(() => {});
+  useEffect(() => {
+    stopPreview.current = () => preview(false);
+  });
+  useEffect(() => {
+    const stop = () => stopPreview.current();
+    window.addEventListener("blur", stop);
+    return () => {
+      window.removeEventListener("blur", stop);
+      stop();
+    };
+  }, []);
 
   useEffect(() => {
     if (!menu) return;

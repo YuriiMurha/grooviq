@@ -1,13 +1,25 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { channelNote, TYPING_VELOCITY } from "../api/notes";
 import { errorText } from "../api/project";
 import { modalIsOpen } from "../project/shortcuts";
 import { DEFAULT_BASE, HeldKeys, accepts, keyFor, shiftOctave, type LiveNote } from "./typingKeyboard";
 
+/** The transport as the typing keyboard needs it: a stop or the end of a recording releases
+ * every held key. */
+export interface TransportEdges {
+  playing: boolean;
+  recording: boolean;
+}
+
 /** Plays `channel` from the computer keyboard while `on`. Every held key is released when the
  * window loses focus or is hidden, when it is switched off, when the channel changes (on the old
- * channel) and on unmount. */
-export function useTypingKeyboard(on: boolean, channel: number | null, onError: (message: string) => void) {
+ * channel), when playback stops or recording ends (however that happened), and on unmount. */
+export function useTypingKeyboard(
+  on: boolean,
+  channel: number | null,
+  onError: (message: string) => void,
+  { playing, recording }: TransportEdges,
+) {
   const held = useRef(new HeldKeys());
   const base = useRef(DEFAULT_BASE);
   const report = useRef(onError);
@@ -15,17 +27,27 @@ export function useTypingKeyboard(on: boolean, channel: number | null, onError: 
     report.current = onError;
   }, [onError]);
 
-  // Releases whatever sounds; runs when `on` or `channel` change and on unmount.
+  // A failed note-on is reported. A note-off is best effort: its channel may just have been
+  // removed, and the engine drops a removed channel's live notes itself.
+  const send = useCallback((n: LiveNote, down: boolean) => {
+    channelNote(n.channel, n.key, down ? TYPING_VELOCITY : 0, down).catch((e: unknown) => {
+      if (down) report.current(errorText(e));
+    });
+  }, []);
+  const releaseAll = useCallback(() => {
+    for (const n of held.current.releaseAll()) send(n, false);
+  }, [send]);
+
+  // Playback stopped or recording ended: the notes held across the edge end there.
+  const was = useRef({ playing, recording });
   useEffect(() => {
-    // A failed note-on is reported. A note-off is best effort: its channel may just have been
-    // removed, and the engine drops a removed channel's live notes itself.
-    const send = (n: LiveNote, down: boolean) =>
-      channelNote(n.channel, n.key, down ? TYPING_VELOCITY : 0, down).catch((e: unknown) => {
-        if (down) report.current(errorText(e));
-      });
-    const releaseAll = () => {
-      for (const n of held.current.releaseAll()) void send(n, false);
-    };
+    const before = was.current;
+    was.current = { playing, recording };
+    if ((before.playing && !playing) || (before.recording && !recording)) releaseAll();
+  }, [playing, recording, releaseAll]);
+
+  // Releases whatever sounds when `on` or `channel` change and on unmount.
+  useEffect(() => {
     if (!on || channel === null) return releaseAll;
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -44,11 +66,11 @@ export function useTypingKeyboard(on: boolean, channel: number | null, onError: 
       if (keyFor(e.code, base.current) === null) return;
       e.preventDefault();
       const note = held.current.press(e.code, base.current, channel);
-      if (note) void send(note, true);
+      if (note) send(note, true);
     };
     const onKeyUp = (e: KeyboardEvent) => {
       const note = held.current.release(e.code);
-      if (note) void send(note, false);
+      if (note) send(note, false);
     };
     const onHidden = () => {
       if (document.visibilityState === "hidden") releaseAll();
@@ -64,5 +86,5 @@ export function useTypingKeyboard(on: boolean, channel: number | null, onError: 
       document.removeEventListener("visibilitychange", onHidden);
       releaseAll();
     };
-  }, [on, channel]);
+  }, [on, channel, send, releaseAll]);
 }

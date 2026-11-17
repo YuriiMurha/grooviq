@@ -341,7 +341,7 @@ export function App() {
           </div>
         </header>
         <main className="stage">
-          {view && <Workspace latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} />}
+          {view && <Workspace latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} playing={playing} />}
         </main>
         <HintBar />
         <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />

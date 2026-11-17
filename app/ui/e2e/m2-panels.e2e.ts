@@ -2,7 +2,7 @@
 // keyboard, record and metronome, removing a channel (#69) and the rack items of #73. Assertions
 // read the mock session's command log and state.
 import type { Page, TestInfo } from "@playwright/test";
-import { brightness, cellPoint, clickCell, colourDistance, expect, grid, pixelsAt, project, soundsFor, test, type Mock } from "./fixture";
+import { brightness, cellPoint, clickCell, colourDistance, expect, grid, pixelsAt, presetValues, project, soundsFor, test, type Mock } from "./fixture";
 import type { MockProject } from "./mockTauri";
 
 const KIT = ["Kick", "Snare", "Hat"];
@@ -555,5 +555,151 @@ test.describe("at a narrow window (900 px)", () => {
     await app.keyboard.press("Delete");
     await app.getByRole("dialog", { name: "Remove Trap Lead?" }).getByRole("button", { name: "Remove" }).click();
     await expect.poll(() => rows(app)).toEqual([...KIT, "Bass"]);
+  });
+});
+
+test.describe("stuck notes at the edges (fix round 1)", () => {
+  test.use({ seed: kitSeed });
+
+  test("stop_and_record_off_release_held_keys", async ({ app, mock }) => {
+    await app.getByRole("button", { name: "Play" }).click();
+    await nameButton(app, "Kick").focus();
+    await app.keyboard.down("z");
+    await expect.poll(() => live(mock)).toEqual(["1:48"]);
+    await app.getByRole("button", { name: "Stop" }).click();
+    await expect.poll(() => live(mock)).toEqual([]);
+    // Record off while a key is held.
+    const record = app.getByRole("button", { name: "Record" });
+    await record.click();
+    await expect(record).toHaveAttribute("aria-pressed", "true");
+    await nameButton(app, "Kick").focus();
+    await app.keyboard.down("x");
+    // Z is still physically down but was released at Stop: only X sounds.
+    await expect.poll(() => live(mock)).toEqual(["1:50"]);
+    await record.click();
+    await expect(record).toHaveAttribute("aria-pressed", "false");
+    await expect.poll(() => live(mock)).toEqual([]);
+    // A stop the UI did not ask for (the speaker guard, another window): seen in the live frames.
+    await app.getByRole("button", { name: "Play" }).click();
+    await nameButton(app, "Kick").focus();
+    await app.keyboard.down("c");
+    await expect.poll(() => live(mock)).toEqual(["1:52"]);
+    // The live frames have shown it playing (the position moved), then the engine stops alone.
+    await mock.eval("(m) => m.hold(960)");
+    await expect(app.getByRole("timer", { name: "Position" })).toHaveText("1.2.01");
+    await mock.eval("(m) => { m.state.transport.playing = false; }");
+    await expect.poll(() => live(mock)).toEqual([]);
+    for (const k of ["z", "x", "c"]) await app.keyboard.up(k);
+    // Each note-off went to the channel and key its note-on went to, once.
+    const calls = await noteCalls(mock);
+    expect(calls.filter((c) => c[2]).map((c) => c.slice(0, 2))).toEqual([
+      [1, 48],
+      [1, 50],
+      [1, 52],
+    ]);
+    expect(calls.filter((c) => !c[2]).map((c) => c.slice(0, 2))).toEqual([
+      [1, 48],
+      [1, 50],
+      [1, 52],
+    ]);
+  });
+
+  test("hiding_the_rack_or_leaving_the_window_stops_a_preview", async ({ app, mock }) => {
+    await app.getByRole("button", { name: "+ Add channel" }).click();
+    await app.getByRole("menuitem", { name: "Init" }).click();
+    await expect.poll(() => rows(app)).toEqual([...KIT, "Init"]);
+    await nameButton(app, "Init").focus();
+    await app.keyboard.down("Enter");
+    await expect.poll(() => live(mock)).toEqual(["4:60"]);
+    await app.keyboard.press("F6");
+    await expect(app.getByRole("region", { name: "Channel rack" })).toBeHidden();
+    await expect.poll(() => live(mock)).toEqual([]);
+    await app.keyboard.up("Enter");
+    await app.keyboard.press("F6");
+    // A sample preview held while the window loses focus.
+    const previews = () => mock.eval<[number, boolean][]>("(m) => [...m.state.previews.entries()]");
+    await nameButton(app, "Kick").focus();
+    await app.keyboard.down("Enter");
+    await expect.poll(previews).toEqual([[1, true]]);
+    await app.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await expect.poll(previews).toEqual([[1, false]]);
+    await app.keyboard.up("Enter");
+    expect(await live(mock)).toEqual([]);
+  });
+});
+
+/** Calls a shell command straight from the page, as the UI's `invoke` would. */
+const call = (page: Page, cmd: string, args: Record<string, unknown> = {}) =>
+  page.evaluate(
+    ([cmd, args]) => (window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__.invoke(cmd, args),
+    [cmd, args] as const,
+  );
+
+test.describe("the mock follows Task 7 (fix round 1)", () => {
+  test.use({ seed: kitSeed });
+
+  test("every_note_change_emits_notes_changed", async ({ app, mock }) => {
+    // A listener of its own, registered through the event plugin like `listen` does.
+    await app.evaluate(() => {
+      const w = window as unknown as {
+        seen: unknown[];
+        __TAURI_INTERNALS__: { transformCallback: (cb: (e: { payload: unknown }) => void) => number; invoke: (c: string, a: unknown) => Promise<unknown> };
+      };
+      w.seen = [];
+      const handler = w.__TAURI_INTERNALS__.transformCallback((e) => w.seen.push(e.payload));
+      return w.__TAURI_INTERNALS__.invoke("plugin:event|listen", { event: "notes-changed", target: { kind: "Any" }, handler });
+    });
+    const seen = () => app.evaluate(() => (window as unknown as { seen: number[] }).seen);
+    const revision = () => mock.view().then((v) => v.notesRevision);
+    const expected: number[] = [];
+    // A step edit.
+    await call(app, "project_edit", { edit: { kind: "toggleStep", channel: 1, step: 3 } });
+    expected.push(await revision());
+    // A notes edit.
+    await call(app, "notes_edit", {
+      edit: { baseRevision: await revision(), add: [{ channel: 2, tick: 120, length: 600, key: 64, velocity: 0.5, slide: false }], update: [], delete: [] },
+    });
+    expected.push(await revision());
+    // A mix change is not a note change.
+    await call(app, "project_edit", { edit: { kind: "setChannelMix", channel: 1, volume: 0.5, pan: 0, mute: false, solo: false } });
+    // Removing a channel with notes.
+    await call(app, "project_edit", { edit: { kind: "removeChannel", channel: 2 } });
+    expected.push(await revision());
+    // Replacing the project.
+    await call(app, "project_new");
+    expected.push(await revision());
+    expect(new Set(expected).size).toBe(4);
+    await expect.poll(seen).toEqual(expected);
+  });
+
+  test("presets_load_all_their_values", async ({ mock, app }) => {
+    const synthOf = async (id: number) => (await mock.eval<{ channels: { id: number; synth: Record<string, number>; preset: string | null }[] }>("(m) => m.view()")).channels.find((c) => c.id === id)!;
+    await call(app, "channel_add_synth", { preset: "808 Glide" });
+    expect((await synthOf(4)).synth).toEqual(presetValues("808 Glide"));
+    expect((await synthOf(4)).synth.filter_cutoff).toBe(650);
+    await call(app, "project_edit", { edit: { kind: "setInstrumentParam", channel: 4, param: "filter_cutoff", value: 123 } });
+    expect((await synthOf(4)).synth.filter_cutoff).toBe(123);
+    await call(app, "project_edit", { edit: { kind: "loadSynthPreset", channel: 4, preset: "808 Glide" } });
+    expect((await synthOf(4)).synth).toEqual(presetValues("808 Glide"));
+    await call(app, "project_edit", { edit: { kind: "loadSynthPreset", channel: 4, preset: "Reese" } });
+    expect(await synthOf(4)).toMatchObject({ synth: presetValues("Reese"), preset: "Reese" });
+    await call(app, "channel_add_synth", { preset: "Init" });
+    expect((await synthOf(5)).synth).toEqual(presetValues("Init"));
+  });
+
+  test("stop_closes_recorded_notes_at_the_stop_tick", async ({ app, mock }) => {
+    await call(app, "record_set", { on: true });
+    await call(app, "transport_play");
+    await mock.eval("(m) => m.hold(480)");
+    await call(app, "channel_note", { channel: 1, key: 48, velocity: 0.8, on: true });
+    await mock.eval("(m) => m.hold(960)");
+    await call(app, "transport_stop");
+    const recorded = () => mock.eval("(m) => m.notes().filter((n) => n.key === 48)");
+    const one = [{ id: expect.any(Number), channel: 1, tick: 480, length: 480, key: 48, velocity: 0.8, slide: false }];
+    expect(await recorded()).toEqual(one);
+    expect(await mock.eval<number>("(m) => m.state.recordOpen.size")).toBe(0);
+    // The key comes up after the stop: nothing changes, nothing doubles.
+    await call(app, "channel_note", { channel: 1, key: 48, velocity: 0, on: false });
+    expect(await recorded()).toEqual(one);
   });
 });

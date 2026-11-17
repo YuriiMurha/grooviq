@@ -9,6 +9,13 @@ const DEVICE_PARAMS = JSON.parse(
 ) as { sampler: MockSeed["samplerParams"]; synth: MockSeed["synthParams"] };
 const SAMPLER_PARAMS = DEVICE_PARAMS.sampler;
 const SYNTH_PARAMS = DEVICE_PARAMS.synth;
+/** Every synth factory preset's 40 values in SPEC order (dsp/tests/params_fixture.rs writes it). */
+export const SYNTH_PRESETS = JSON.parse(
+  readFileSync(new URL("../../../tests/fixtures/synth-presets.json", import.meta.url), "utf8"),
+) as Record<string, number[]>;
+/** A preset's values by parameter id. */
+export const presetValues = (name: string): Record<string, number> =>
+  Object.fromEntries(SYNTH_PARAMS!.map((p, i) => [p.id, SYNTH_PRESETS[name][i]]));
 
 // Grid geometry (src/rack/gridModel.ts): 28 px cells, 6 px gaps, 4 px edge.
 const CELL = 28;
@@ -79,7 +86,7 @@ export const test = base.extend<{ seed: MockSeed; app: Page; mock: Mock }>({
       if (m.type() === "error" || m.type() === "warning") consoleErrors.push(`${m.type()}: ${m.text()}`);
     });
     page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
-    await page.addInitScript(installMockTauri, { samplerParams: SAMPLER_PARAMS, synthParams: SYNTH_PARAMS, ...seed });
+    await page.addInitScript(installMockTauri, { samplerParams: SAMPLER_PARAMS, synthParams: SYNTH_PARAMS, synthPresets: SYNTH_PRESETS, ...seed });
     await page.goto("/");
     await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
     await use(page);

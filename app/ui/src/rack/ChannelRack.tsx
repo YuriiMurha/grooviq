@@ -37,9 +37,11 @@ function usePatternNotes(revision: number | undefined, onError: (message: string
   const { run } = useProject();
   const [notes, setNotes] = useState<WireNote[]>([]);
   const report = useRef(onError);
+  const shown = useRef(revision);
   useEffect(() => {
     report.current = onError;
-  }, [onError]);
+    shown.current = revision;
+  }, [onError, revision]);
 
   useEffect(() => {
     if (revision === undefined) return;
@@ -56,8 +58,11 @@ function usePatternNotes(revision: number | undefined, onError: (message: string
   }, [revision]);
 
   useEffect(() => {
-    // Outside the Tauri shell there is nothing to listen to.
-    const listening = onNotesChanged(() => void run(projectView)).catch(() => null);
+    // Outside the Tauri shell there is nothing to listen to. A revision the view already has
+    // (an edit this UI made) needs no fetch.
+    const listening = onNotesChanged((r) => {
+      if (r !== shown.current) void run(projectView);
+    }).catch(() => null);
     return () => {
       void listening.then((stop) => stop?.());
     };
