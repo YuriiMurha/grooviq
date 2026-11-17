@@ -185,3 +185,44 @@ test.describe("autosave trouble at startup", () => {
     expect(await call(app, "autosave_status")).toEqual({ disabled: "Autosave is off in this window.", failure: null });
   });
 });
+
+test.describe("recording when the pattern's note ids run out", () => {
+  // One id left (session.rs `collect_recorded`: u32::MAX is never handed out).
+  const lastId = twoChannels([]);
+  lastId.pattern.nextNoteId = 0xffff_fffe;
+  test.use({ seed: { project: lastId } });
+
+  test("keeps_what_fits_switches_recording_off_and_counts_the_rest", async ({ app, mock }) => {
+    const stops = await app.evaluate(async () => {
+      const w = window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (c: string, a?: unknown) => Promise<unknown>; transformCallback: (cb: (e: { payload: unknown }) => void) => number };
+        __grooviqMock: { hold: (t: number) => void };
+      };
+      const t = w.__TAURI_INTERNALS__;
+      const got: unknown[] = [];
+      const handler = t.transformCallback((e) => got.push(e.payload));
+      await t.invoke("plugin:event|listen", { event: "recording-stopped", target: { kind: "Any" }, handler });
+      await t.invoke("record_set", { on: true });
+      await t.invoke("transport_play");
+      w.__grooviqMock.hold(0);
+      const press = (key: number) => t.invoke("channel_note", { channel: 1, key, velocity: 0.8, on: true });
+      const release = (key: number, p: unknown) => t.invoke("channel_note", { channel: 1, key, velocity: 0, on: false, press: p });
+      const a = await press(60);
+      w.__grooviqMock.hold(240);
+      await release(60, a);
+      // Two more held; the first let go finds no id left, the other is still down.
+      const b = await press(61);
+      const c = await press(62);
+      w.__grooviqMock.hold(480);
+      await release(61, b);
+      w.__grooviqMock.hold(720);
+      await release(62, c);
+      return got;
+    });
+    expect(stops).toEqual([expect.objectContaining({ reason: "noteIds", dropped: 2 })]);
+    expect(await mock.eval("(m) => m.state.recording")).toBe(false);
+    expect(await recorded(app)).toEqual([[0, 240, 60, 0.8]]);
+    await expect(app.getByRole("status", { name: "Messages" }).locator(".toast.warn")).toHaveCount(1);
+    await expect(app.getByRole("button", { name: "Record", exact: true })).toHaveAttribute("aria-pressed", "false");
+  });
+});

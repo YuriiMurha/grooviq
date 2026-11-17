@@ -906,17 +906,21 @@ export function installMockTauri(seed: MockSeed): void {
     return { revision: s.notesRevision, addedIds: added, ignoredIds: ignored, reload: stale || clamped, view: view() };
   };
   /** session.rs `disarm`: recording switches itself off because `dropped` recorded notes did not
-   * fit; the notes held now are refused too, and counted with them. */
-  const stopsItself = (dropped: number) => {
+   * fit (the note cap, or the pattern's used-up note ids); the notes held now are refused too,
+   * and counted with them. */
+  const stopsItself = (dropped: number, reason: "noteCap" | "noteIds" = "noteCap") => {
     const lost = dropped + s.recordOpen.size;
     s.recordOpen.clear();
     if (s.recording && s.transport.playing) s.take += 1;
     s.recording = false;
     const notes = lost === 1 ? "1 recorded note was" : `${lost} recorded notes were`;
     emit("recording-stopped", {
-      reason: "noteCap",
+      reason,
       dropped: lost,
-      message: `Recording stopped: this pattern holds ${MAX_NOTES} notes, the most a pattern can hold. ${notes} not added.`,
+      message:
+        reason === "noteIds"
+          ? `Recording stopped: this pattern has used up its note ids (save and reopen the project to renumber them). ${notes} not added.`
+          : `Recording stopped: this pattern holds ${MAX_NOTES} notes, the most a pattern can hold. ${notes} not added.`,
     });
   };
   /** The recorder (recorder.rs): a press's note-on and note-off become a note at the tick it
@@ -927,9 +931,14 @@ export function installMockTauri(seed: MockSeed): void {
     s.recordOpen.delete(press);
     const { channel, key: note } = open;
     if (!s.project.channels.some((c) => c.id === channel)) return;
-    // At the note cap the note is not added: recording switches off and says so (session.rs).
-    if (s.project.pattern.notes.length >= MAX_NOTES) {
-      stopsItself(1);
+    // session.rs `collect_recorded`: what fits is the note cap and the ids left (u32::MAX is
+    // never handed out); a note that does not fit is not added, and recording switches off
+    // and says why.
+    const pat = s.project.pattern;
+    const room = MAX_NOTES - pat.notes.length;
+    const ids = 0xffff_ffff - Math.max(1, pat.nextNoteId ?? 1);
+    if (Math.min(room, ids) < 1) {
+      stopsItself(1, ids < room ? "noteIds" : "noteCap");
       return;
     }
     const loop = s.project.pattern.steps * STEP_TICKS;
