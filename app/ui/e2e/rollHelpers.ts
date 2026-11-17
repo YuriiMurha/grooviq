@@ -1,6 +1,6 @@
 // Shared by the piano roll's specs that read the roll's own counters and pixels.
 import type { Page, TestInfo } from "@playwright/test";
-import { expect, project } from "./fixture";
+import { expect, project, workspaceReady } from "./fixture";
 import type { MockNote, MockProject } from "./mockTauri";
 
 export interface RollStats {
@@ -72,9 +72,11 @@ export async function settled(page: Page) {
 
 /** F7 opens the roll on the first channel; F6 hides the rack to give it the height. */
 export async function openRoll(page: Page) {
+  await workspaceReady(page);
   await page.keyboard.press("F7");
-  await page.keyboard.press("F6");
   await expect(canvas(page)).toBeVisible();
+  await page.keyboard.press("F6");
+  await expect(page.getByRole("region", { name: "Channel rack" })).toBeHidden();
   await expect.poll(async () => (await stats(page))?.draws ?? 0).toBeGreaterThan(0);
   await settled(page);
 }
