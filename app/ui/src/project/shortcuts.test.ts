@@ -134,3 +134,42 @@ describe("record", () => {
     expect(shortcutFor(key("r", { metaKey: true }), "MacIntel")).toBe("export");
   });
 });
+
+
+describe("non-Latin Mod shortcuts", () => {
+  for (const platform of ["MacIntel", "Win32", "Linux x86_64"]) {
+    const mod = platform === "MacIntel" ? { metaKey: true } : { ctrlKey: true };
+    for (const letter of ["і", "σ"]) {
+      for (const [code, action] of [["KeyS", "save"], ["KeyN", "new"], ["KeyO", "open"], ["KeyR", "export"], ["KeyZ", "undo"]] as const) {
+        it(`${platform} ${letter}/${code} ${action}`, () => {
+          expect(shortcutFor(key(letter, { ...mod, code }), platform)).toBe(action);
+        });
+      }
+      it(`${platform} ${letter} shifted and redo`, () => {
+        expect(shortcutFor(key(letter, { ...mod, code: "KeyS", shiftKey: true }), platform)).toBe("saveAs");
+        expect(shortcutFor(key(letter, { ...mod, code: "KeyZ", shiftKey: true }), platform)).toBe("redo");
+        expect(shortcutFor(key(letter, { ...mod, code: "KeyY" }), platform)).toBe(platform === "MacIntel" ? null : "redo");
+        expect(shortcutFor(key(letter, { ...mod, code: "KeyY", shiftKey: true }), platform)).toBeNull();
+        expect(shortcutFor(key(letter, { ...mod, code: "KeyO", shiftKey: true }), platform)).toBeNull();
+      });
+    }
+    it(`${platform} preserves ASCII letters and rejects invalid codes and modifiers`, () => {
+      for (const [letter, code, action] of [["z", "KeyY", "undo"], ["S", "KeyZ", "save"], ["q", "KeyS", null]] as const) {
+        expect(shortcutFor(key(letter, { ...mod, code }), platform)).toBe(action);
+      }
+      for (const code of [undefined, "", "Keys", "KeySS", "Key1", "DigitS", "KeyＳ"]) {
+        expect(shortcutFor(key("і", { ...mod, code }), platform)).toBeNull();
+      }
+      expect(shortcutFor(key("і", { ...mod, code: "KeyS", altKey: true }), platform)).toBeNull();
+      expect(shortcutFor(key("і", { code: "KeyS", metaKey: true, ctrlKey: true }), platform)).toBeNull();
+      const wrongMod = platform === "MacIntel" ? { ctrlKey: true } : { metaKey: true };
+      expect(shortcutFor(key("і", { ...wrongMod, code: "KeyS" }), platform)).toBeNull();
+      for (const code of ["KeyZ", "KeyY"]) {
+        expect(shortcutFor(key("я", { ...mod, code, target: INPUT }), platform)).toBeNull();
+      }
+      expect(shortcutFor(key("і", { ...mod, code: "KeyS", target: INPUT }), platform)).toBe("save");
+      expect(shortcutFor(key("і", { code: "KeyR" }), platform)).toBeNull();
+      expect(shortcutFor(key("і", { code: "Space" }), platform)).toBeNull();
+    });
+  }
+});
