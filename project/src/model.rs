@@ -218,7 +218,8 @@ pub struct Pattern {
     /// 0..=1: odd steps start later by `round(swing * 120)` ticks.
     #[serde(default)]
     pub swing: f32,
-    #[serde(default)]
+    /// At most [`MAX_NOTES_PER_PATTERN`] are read from a file: the rest are skipped unread.
+    #[serde(default, deserialize_with = "capped_notes")]
     pub notes: Vec<Note>,
     /// Above every note id in the pattern: the id the next new note gets.
     #[serde(default)]
@@ -255,6 +256,36 @@ pub struct Note {
     pub slide: bool,
 }
 
+/// A note list that keeps the first [`MAX_NOTES_PER_PATTERN`] notes and skips the rest
+/// without building them, so an untrusted file cannot fill memory with notes it would lose.
+/// `load` counts the skipped ones for its warning.
+fn capped_notes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Note>, D::Error> {
+    struct Capped;
+    impl<'de> serde::de::Visitor<'de> for Capped {
+        type Value = Vec<Note>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a list of notes")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Vec<Note>, A::Error> {
+            let mut notes = Vec::new();
+            while notes.len() < MAX_NOTES_PER_PATTERN {
+                match seq.next_element()? {
+                    Some(note) => notes.push(note),
+                    None => return Ok(notes),
+                }
+            }
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(notes)
+        }
+    }
+    d.deserialize_seq(Capped)
+}
+
 /// Whether the step grid may edit `note`: it starts on a step, lasts one step, is on the
 /// default key and does not slide.
 pub fn is_plain_step(note: &Note) -> bool {
@@ -289,11 +320,16 @@ impl Pattern {
         }
     }
 
-    /// A fresh note id, above every id in the pattern.
-    pub(crate) fn take_note_id(&mut self) -> u32 {
+    /// A fresh note id, above every id in the pattern, or `None` once the counter has reached
+    /// `u32::MAX` (the used-up mark: that id is never handed out). Ids are never reused within
+    /// a session; [`Project::validate`] renumbers a used-up pattern on the next load.
+    pub(crate) fn take_note_id(&mut self) -> Option<u32> {
         let id = self.next_note_id.max(1);
-        self.next_note_id = id.saturating_add(1);
-        id
+        if id == u32::MAX {
+            return None;
+        }
+        self.next_note_id = id + 1;
+        Some(id)
     }
 }
 
@@ -568,8 +604,9 @@ impl Project {
 
 /// Gives every note of `p` an id that is not 0 and not used before it in the pattern, and moves
 /// `next_note_id` above every id (silently: it is bookkeeping). The first note with an id keeps
-/// it; a repaired one gets an id above the largest. If that leaves no room (ids near `u32::MAX`),
-/// every note is renumbered from 1 in stored order. Returns the warning, if any note changed.
+/// it; a repaired one gets an id above the largest. If that leaves no id for a new note (ids
+/// near `u32::MAX`, or a used-up counter: see [`Pattern::take_note_id`]), every note is
+/// renumbered from 1 in stored order. Returns the warning, if any note changed.
 fn repair_note_ids(p: &mut Pattern) -> Option<String> {
     let mut seen = HashSet::with_capacity(p.notes.len());
     let bad: Vec<usize> = (0..p.notes.len())
@@ -579,8 +616,15 @@ fn repair_note_ids(p: &mut Pattern) -> Option<String> {
         })
         .collect();
     let largest = p.notes.iter().map(|n| n.id).max().unwrap_or(0);
-    // Room for every repaired id and, above them, `next_note_id`.
-    let fix = if u64::from(largest) + bad.len() as u64 >= u64::from(u32::MAX) {
+    // Room for every repaired id and, above them, at least one id for a new note (the counter
+    // stays below the used-up mark).
+    let used_up = p.next_note_id == u32::MAX;
+    let fix = if p.notes.is_empty() {
+        if used_up {
+            p.next_note_id = 1;
+        }
+        None
+    } else if used_up || u64::from(largest) + bad.len() as u64 + 1 >= u64::from(u32::MAX) {
         for (n, id) in p.notes.iter_mut().zip(1..) {
             n.id = id;
         }
@@ -655,4 +699,22 @@ fn clamp_fix(
 
 fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn note_ids_run_up_to_the_used_up_mark_and_never_repeat() {
+        let mut p = Pattern::new(0, "P");
+        p.next_note_id = 0;
+        assert_eq!(p.take_note_id(), Some(1), "0 is never an id");
+        p.next_note_id = u32::MAX - 1;
+        assert_eq!(p.take_note_id(), Some(u32::MAX - 1));
+        assert_eq!(p.next_note_id, u32::MAX);
+        assert_eq!(p.take_note_id(), None);
+        assert_eq!(p.take_note_id(), None, "still used up");
+        assert_eq!(p.next_note_id, u32::MAX);
+    }
 }

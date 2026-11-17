@@ -299,9 +299,13 @@ fn load_rejects_non_zip_truncated_missing_json_and_newer_versions() {
 }
 
 #[test]
-fn migrate_passes_the_current_version_through() {
-    let json = serde_json::json!({"format": FORMAT, "version": VERSION, "name": "x"});
-    assert_eq!(migrate(json.clone()).unwrap(), json);
+fn migrate_leaves_the_current_version_alone() {
+    let (mut p, _) = project();
+    p.patterns[0].notes[0].id = 42;
+    let before = p.clone();
+    migrate(&mut p, VERSION).unwrap();
+    assert_eq!(p, before);
+    assert!(matches!(migrate(&mut p, 0), Err(LoadError::Corrupt(_))));
 }
 
 #[test]
@@ -1067,11 +1071,15 @@ fn a_v1_file_opens_and_sounds_the_same() {
     assert_eq!(reloaded.project, *p);
 
     // The migration step on its own.
-    let migrated = migrate(serde_json::from_str(V1_JSON).unwrap()).unwrap();
-    assert_eq!(migrated["version"], 2);
-    assert_eq!(migrated["channels"][0]["instrument"], "sampler");
-    assert_eq!(migrated["patterns"][0]["notes"][1]["id"], 2);
-    assert_eq!(migrated["patterns"][0]["nextNoteId"], 4);
+    // A v1 file with v2 fields in it (no M1 Grooviq wrote one) is still read as v1.
+    let mut v1: Project = serde_json::from_str(V1_JSON).unwrap();
+    v1.channels[0].instrument = InstrumentKind::Synth;
+    v1.patterns[0].notes[0].id = 77;
+    migrate(&mut v1, 1).unwrap();
+    assert_eq!(v1.channels[0].instrument, InstrumentKind::Sampler);
+    let ids: Vec<u32> = v1.patterns[0].notes.iter().map(|n| n.id).collect();
+    assert_eq!(ids, vec![1, 2, 3]);
+    assert_eq!(v1.patterns[0].next_note_id, 4);
 }
 
 #[test]
@@ -1155,10 +1163,11 @@ fn ids_are_repaired_and_note_count_capped() {
     assert_eq!(
         loaded.warnings,
         vec![
-            "Pattern \"Dups\": 2 notes had a missing or repeated id and got new ones.".to_string(),
+            // Skipped while reading, before any repair.
             format!(
                 "Pattern \"Huge\": dropped 5 notes past the limit of {MAX_NOTES_PER_PATTERN} notes per pattern."
             ),
+            "Pattern \"Dups\": 2 notes had a missing or repeated id and got new ones.".to_string(),
         ]
     );
 
@@ -1286,7 +1295,7 @@ fn out_of_range_v2_values_are_clamped_with_warnings() {
 #[test]
 fn a_v3_file_is_refused_as_newer() {
     let json = serde_json::json!({"format": FORMAT, "version": 3, "channels": "whatever"});
-    match migrate(json.clone()) {
+    match migrate(&mut Project::new(), 3) {
         Err(LoadError::NewerVersion { found, supported }) => {
             assert_eq!((found, supported), (3, 2));
         }
@@ -1310,4 +1319,58 @@ fn a_v3_file_is_refused_as_newer() {
         err.to_string().contains("newer version of Grooviq"),
         "{err}"
     );
+}
+
+#[test]
+fn a_save_over_the_note_cap_is_refused_and_keeps_the_old_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cap.grooviq");
+    let (p, samples) = project();
+    save(&p, &samples, &path).unwrap();
+    let before = fs::read(&path).unwrap();
+
+    // One note more than `load` keeps: saving it would lose that note on the next open.
+    let mut over = p.clone();
+    over.patterns[0].name = "Full".into();
+    over.patterns[0].notes = (1..=MAX_NOTES_PER_PATTERN as u32 + 1)
+        .map(|id| note(id, 1, 0))
+        .collect();
+    over.patterns[0].next_note_id = MAX_NOTES_PER_PATTERN as u32 + 2;
+    let err = save(&over, &samples, &path).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "Pattern \"Full\" has 100001 notes, more than the {MAX_NOTES_PER_PATTERN} a pattern can hold, so the project was not saved."
+        )
+    );
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        before,
+        "the old file is untouched"
+    );
+    assert_eq!(
+        names_in(dir.path()),
+        vec!["cap.grooviq".to_string()],
+        "no temp file left"
+    );
+
+    // Exactly at the cap saves and loads whole.
+    over.patterns[0].notes.pop();
+    save(&over, &samples, &path).unwrap();
+    let loaded = load(&path).unwrap();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    assert_eq!(
+        loaded.project.patterns[0].notes.len(),
+        MAX_NOTES_PER_PATTERN
+    );
+}
+
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
 }

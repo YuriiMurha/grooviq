@@ -16,8 +16,8 @@ use crate::backup::backup_before_save;
 use crate::compile::{compile_pattern, engine_state, sampler_values};
 use crate::file::{Loaded, SampleFiles, stage_save_faulty};
 use crate::model::{
-    BPM, Channel, DEFAULT_KEY, DEFAULT_VELOCITY, EXTENSION, MAX_STEPS, Note, Pattern, Project,
-    SampleRef, TimeSignature, VOLUME,
+    BPM, Channel, DEFAULT_KEY, DEFAULT_VELOCITY, EXTENSION, MAX_NOTES_PER_PATTERN, MAX_STEPS, Note,
+    Pattern, Project, SampleRef, TimeSignature, VOLUME,
 };
 use grooviq_dsp::sampler::{PARAM_IDS, SPEC, SampleBuf};
 use grooviq_engine::{
@@ -250,6 +250,10 @@ pub enum SessionError {
     /// A value that is not a number, or a time signature that does not exist.
     InvalidValue(String),
     TooManyChannels,
+    /// The pattern holds [`MAX_NOTES_PER_PATTERN`] notes: a file keeps no more.
+    TooManyNotes,
+    /// The pattern's note id counter is at its end; reopening the project renumbers the notes.
+    NoteIdsUsedUp,
     /// The project has no file yet: ask where to save it.
     NoPath,
     /// Another save of this session is still being written.
@@ -276,6 +280,14 @@ impl fmt::Display for SessionError {
             Self::TooManyChannels => write!(
                 f,
                 "A project holds at most {MAX_CHANNELS} channels; remove one to add another."
+            ),
+            Self::TooManyNotes => write!(
+                f,
+                "This pattern already holds {MAX_NOTES_PER_PATTERN} notes, the most a pattern can hold; remove some to add more."
+            ),
+            Self::NoteIdsUsedUp => write!(
+                f,
+                "This pattern has used up its note ids. Save the project and open it again to renumber its notes."
             ),
             Self::NoPath => write!(f, "Choose where to save this project."),
             Self::SaveRunning => write!(
@@ -594,9 +606,9 @@ impl Session {
                     p.notes
                         .retain(|n| !(n.channel == channel && n.tick == tick));
                     if p.notes.len() == before {
-                        let id = p.take_note_id();
-                        p.notes.push(hit(id, channel, tick, DEFAULT_VELOCITY));
+                        add_hit(p, channel, tick, DEFAULT_VELOCITY)?;
                     }
+                    Ok(())
                 })
             }
             Edit::SetStepVelocity {
@@ -615,9 +627,9 @@ impl Session {
                         }
                     }
                     if !found {
-                        let id = p.take_note_id();
-                        p.notes.push(hit(id, channel, tick, velocity));
+                        add_hit(p, channel, tick, velocity)?;
                     }
+                    Ok(())
                 })
             }
             Edit::ClearStep { channel, step } => {
@@ -625,15 +637,22 @@ impl Session {
                 self.edit_pattern(|p| {
                     p.notes
                         .retain(|n| !(n.channel == channel && n.tick == tick));
+                    Ok(())
                 })
             }
             Edit::SetPatternLength { steps } => {
                 let steps = steps.clamp(1, MAX_STEPS);
-                self.edit_pattern(|p| p.steps = steps)
+                self.edit_pattern(|p| {
+                    p.steps = steps;
+                    Ok(())
+                })
             }
             Edit::SetSwing { swing } => {
                 let swing = finite(swing, "swing")?.clamp(0.0, 1.0);
-                self.edit_pattern(|p| p.swing = swing)
+                self.edit_pattern(|p| {
+                    p.swing = swing;
+                    Ok(())
+                })
             }
             Edit::SetTempo { bpm } => {
                 let bpm = finite(bpm, "tempo")?.clamp(BPM.0, BPM.1);
@@ -671,10 +690,14 @@ impl Session {
         Ok(step * STEP_TICKS)
     }
 
-    /// Changes a copy of the current pattern, sends it to the engine, then keeps it.
-    fn edit_pattern(&mut self, change: impl FnOnce(&mut Pattern)) -> Result<bool, SessionError> {
+    /// Changes a copy of the current pattern, sends it to the engine, then keeps it. A change
+    /// that fails leaves the pattern as it was.
+    fn edit_pattern(
+        &mut self,
+        change: impl FnOnce(&mut Pattern) -> Result<(), SessionError>,
+    ) -> Result<bool, SessionError> {
         let mut pattern = self.current().clone();
-        change(&mut pattern);
+        change(&mut pattern)?;
         if pattern == *self.current() {
             return Ok(false);
         }
@@ -1011,6 +1034,17 @@ impl Session {
             self.pending_since.get_or_insert(now);
         }
     }
+}
+
+/// Adds a one-step hit with a fresh id, or refuses: at [`MAX_NOTES_PER_PATTERN`] (a file keeps
+/// no more, so a save would lose it) or when the pattern's ids are used up.
+fn add_hit(p: &mut Pattern, channel: u32, tick: u32, velocity: f32) -> Result<(), SessionError> {
+    if p.notes.len() >= MAX_NOTES_PER_PATTERN {
+        return Err(SessionError::TooManyNotes);
+    }
+    let id = p.take_note_id().ok_or(SessionError::NoteIdsUsedUp)?;
+    p.notes.push(hit(id, channel, tick, velocity));
+    Ok(())
 }
 
 fn hit(id: u32, channel: u32, tick: u32, velocity: f32) -> Note {

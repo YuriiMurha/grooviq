@@ -19,6 +19,7 @@ pub mod backup;
 pub mod compile;
 pub mod file;
 pub mod model;
+mod outline;
 pub mod recovery;
 pub mod session;
 
