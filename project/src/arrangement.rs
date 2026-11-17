@@ -2,7 +2,10 @@
 use crate::{Project, ProjectKey, SCALES, SampleRef};
 use serde::de::{Deserializer, Error, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 pub const MAX_SONG_TICKS: u64 = 38_400_000;
 pub const MAX_TRACKS: usize = 256;
 pub const MAX_CLIPS: usize = 100_000;
@@ -95,7 +98,7 @@ pub struct Clip {
     pub muted: bool,
     pub content: ClipContent,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -121,11 +124,10 @@ pub enum ClipContent {
         priority: u32,
         offset_tick: u32,
         length_ticks: u64,
-        #[serde(deserialize_with = "bounded::<_, _, MAX_AUTOMATION_POINTS>")]
         points: Vec<AutomationPoint>,
     },
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -158,6 +160,98 @@ pub struct AutomationPoint {
     pub value: f32,
     pub mode: SegmentMode,
 }
+// Flat readers deliberately avoid serde's internally-tagged Content buffer. Unknown fields
+// stream through IgnoredAny; points reach their cap before the rest of the array is read.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentFields {
+    #[serde(rename = "type")]
+    kind: String,
+    pattern: Option<u32>,
+    offset_tick: Option<u32>,
+    length_ticks: Option<u64>,
+    asset: Option<u32>,
+    source_start: Option<u64>,
+    source_end: Option<u64>,
+    gain: Option<f32>,
+    reverse: Option<bool>,
+    fade_in: Option<u64>,
+    fade_out: Option<u64>,
+    target: Option<AutomationTarget>,
+    priority: Option<u32>,
+    points: Option<Points>,
+}
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct Points(
+    #[serde(deserialize_with = "bounded::<_, _, MAX_AUTOMATION_POINTS>")] Vec<AutomationPoint>,
+);
+fn required<T, E: Error>(value: Option<T>, name: &'static str) -> Result<T, E> {
+    value.ok_or_else(|| E::missing_field(name))
+}
+impl<'de> Deserialize<'de> for ClipContent {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let f = crate::reading::named::<D, ContentFields>(d)?;
+        Ok(match f.kind.as_str() {
+            "pattern" => Self::Pattern {
+                pattern: required(f.pattern, "pattern")?,
+                offset_tick: required(f.offset_tick, "offsetTick")?,
+                length_ticks: required(f.length_ticks, "lengthTicks")?,
+            },
+            "audio" => Self::Audio {
+                asset: required(f.asset, "asset")?,
+                source_start: required(f.source_start, "sourceStart")?,
+                source_end: required(f.source_end, "sourceEnd")?,
+                gain: required(f.gain, "gain")?,
+                reverse: required(f.reverse, "reverse")?,
+                fade_in: required(f.fade_in, "fadeIn")?,
+                fade_out: required(f.fade_out, "fadeOut")?,
+            },
+            "automation" => Self::Automation {
+                target: required(f.target, "target")?,
+                priority: required(f.priority, "priority")?,
+                offset_tick: required(f.offset_tick, "offsetTick")?,
+                length_ticks: required(f.length_ticks, "lengthTicks")?,
+                points: required(f.points, "points")?.0,
+            },
+            _ => {
+                return Err(D::Error::unknown_variant(
+                    &f.kind,
+                    &["pattern", "audio", "automation"],
+                ));
+            }
+        })
+    }
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TargetFields {
+    #[serde(rename = "type")]
+    kind: String,
+    channel: u32,
+    instrument: Option<String>,
+    param: Option<String>,
+}
+impl<'de> Deserialize<'de> for AutomationTarget {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let f = crate::reading::named::<D, TargetFields>(d)?;
+        Ok(match f.kind.as_str() {
+            "channelVolume" => Self::ChannelVolume { channel: f.channel },
+            "channelPan" => Self::ChannelPan { channel: f.channel },
+            "instrumentParam" => Self::InstrumentParam {
+                channel: f.channel,
+                instrument: required(f.instrument, "instrument")?,
+                param: required(f.param, "param")?,
+            },
+            _ => {
+                return Err(D::Error::unknown_variant(
+                    &f.kind,
+                    &["channelVolume", "channelPan", "instrumentParam"],
+                ));
+            }
+        })
+    }
+}
 impl Project {
     /// Shared monotonic identity allocator. Exhaustion is permanent.
     pub fn take_id(&mut self) -> Option<u32> {
@@ -189,12 +283,33 @@ impl Project {
         {
             return bad();
         }
-        let mut ids: HashSet<u32> = self
+        let mut patterns = HashSet::new();
+        patterns
+            .try_reserve(self.patterns.len())
+            .map_err(|_| "Cannot index patterns")?;
+        patterns.extend(self.patterns.iter().map(|p| p.id));
+        let tracks: HashSet<_> = a.tracks.iter().map(|t| t.id).collect();
+        let assets: HashMap<_, _> = a.audio_assets.iter().map(|a| (a.id, a)).collect();
+        let mut channels = HashMap::new();
+        channels
+            .try_reserve(self.channels.len())
+            .map_err(|_| "Cannot index channels")?;
+        channels.extend(self.channels.iter().map(|c| (c.id, c)));
+        let mut ids = HashSet::new();
+        let capacity = self
             .channels
-            .iter()
-            .map(|x| x.id)
-            .chain(self.patterns.iter().map(|x| x.id))
-            .collect();
+            .len()
+            .checked_add(self.patterns.len())
+            .and_then(|n| n.checked_add(a.tracks.len() + a.clips.len() + a.audio_assets.len()))
+            .ok_or("Identity index overflow")?;
+        ids.try_reserve(capacity)
+            .map_err(|_| "Cannot index project identities")?;
+        ids.extend(
+            self.channels
+                .iter()
+                .map(|c| c.id)
+                .chain(self.patterns.iter().map(|p| p.id)),
+        );
         for id in a.entity_ids() {
             if id == u32::MAX || !ids.insert(id) {
                 return bad();
@@ -206,8 +321,19 @@ impl Project {
             return bad();
         }
         for asset in &a.audio_assets {
-            if asset.source_rate == 0
+            let bad = || {
+                Err(format!(
+                    "Audio asset {}: invalid source rate, frame count, original tempo or key.",
+                    asset.id
+                ))
+            };
+            // Same provenance range as engine/sample_file.rs (decoder range is private).
+            if !(8_000..=384_000).contains(&asset.source_rate)
                 || asset.source_frames == 0
+                || asset.source_frames
+                    > u64::from(asset.source_rate)
+                        .checked_mul(grooviq_engine::MAX_SAMPLE_SECONDS as u64)
+                        .ok_or("Audio source duration overflow")?
                 || asset
                     .original_tempo
                     .is_some_and(|t| !t.is_finite() || !(20.0..=400.0).contains(&t))
@@ -253,7 +379,13 @@ impl Project {
         }
         let mut total = 0usize;
         for c in &a.clips {
-            if c.start_tick >= MAX_SONG_TICKS || !a.tracks.iter().any(|t| t.id == c.track) {
+            let bad = || {
+                Err(format!(
+                    "Clip {} ({}): invalid track/source reference, bounds or automation value.",
+                    c.id, c.name
+                ))
+            };
+            if c.start_tick >= MAX_SONG_TICKS || !tracks.contains(&c.track) {
                 return bad();
             }
             let length = match &c.content {
@@ -262,7 +394,7 @@ impl Project {
                     offset_tick,
                     length_ticks,
                 } => {
-                    let Some(_) = self.patterns.iter().find(|p| p.id == *pattern) else {
+                    let Some(_) = patterns.get(pattern) else {
                         return bad();
                     };
                     if u64::from(*offset_tick) > MAX_SONG_TICKS {
@@ -279,7 +411,7 @@ impl Project {
                     fade_out,
                     ..
                 } => {
-                    let Some(a) = a.audio_assets.iter().find(|a| a.id == *asset) else {
+                    let Some(a) = assets.get(asset) else {
                         return bad();
                     };
                     if source_start >= source_end
@@ -321,7 +453,7 @@ impl Project {
                             instrument,
                             param,
                         } => {
-                            let Some(c) = self.channels.iter().find(|c| c.id == *channel) else {
+                            let Some(c) = channels.get(channel) else {
                                 return bad();
                             };
                             let (names, spec) = match (instrument.as_str(), c.instrument) {
@@ -347,7 +479,7 @@ impl Project {
                     let Some((min, max)) = range else {
                         return bad();
                     };
-                    if !self.channels.iter().any(|c| c.id == channel) {
+                    if !channels.contains_key(&channel) {
                         return bad();
                     }
                     let Some(end) = u64::from(*offset_tick).checked_add(*length_ticks) else {

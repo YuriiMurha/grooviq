@@ -371,3 +371,443 @@ fn future_version_wins_before_any_musical_schema_is_inspected() {
         })
     ));
 }
+fn zip_json(path: &std::path::Path, json: &str, entries: &[(&str, &[u8])]) {
+    let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    z.start_file("project.json", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    z.write_all(json.as_bytes()).unwrap();
+    for (name, bytes) in entries {
+        z.start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        z.write_all(bytes).unwrap();
+    }
+    z.finish().unwrap();
+}
+fn audio_song() -> Project {
+    let mut p = song();
+    p.arrangement.audio_assets.push(AudioAsset {
+        id: 5,
+        sample: SampleRef {
+            path: "original.wav".into(),
+            file: None,
+        },
+        source_rate: 48000,
+        source_frames: 48000,
+        original_tempo: Some(120.0),
+        original_key: Some(ProjectKey {
+            root: 0,
+            scale: "minor".into(),
+        }),
+    });
+    p.arrangement.clips[0].content = ClipContent::Audio {
+        asset: 5,
+        source_start: 0,
+        source_end: 48000,
+        gain: 1.0,
+        reverse: false,
+        fade_in: 0,
+        fade_out: 0,
+    };
+    p.next_id = 6;
+    p
+}
+fn disk_json(p: &Project) -> String {
+    let mut v = serde_json::to_value(p).unwrap();
+    v["format"] = FORMAT.into();
+    v["version"] = VERSION.into();
+    serde_json::to_string(&v).unwrap()
+}
+#[test]
+fn absent_asset_zip_entry_can_be_saved_after_loading() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("missing.grooviq");
+    let mut p = audio_song();
+    p.arrangement.audio_assets[0].sample.file = Some("samples/absent.wav".into());
+    zip_json(&path, &disk_json(&p), &[]);
+    let l = load(&path).unwrap();
+    assert_eq!(l.project.arrangement.audio_assets[0].sample.file, None);
+    assert_eq!(
+        l.project.arrangement.audio_assets[0].sample.path,
+        p.arrangement.audio_assets[0].sample.path
+    );
+    assert_eq!(l.project.arrangement.clips, p.arrangement.clips);
+    validate_save(&l.project, &l.samples).unwrap();
+    save(&l.project, &l.samples, &path).unwrap();
+    assert_eq!(load(&path).unwrap().project, l.project);
+}
+#[test]
+fn structural_audio_rate_and_duration_endpoints() {
+    for rate in [8000, 384000] {
+        for frames in [1, u64::from(rate) * 600] {
+            let mut p = audio_song();
+            p.arrangement.audio_assets[0].source_rate = rate;
+            p.arrangement.audio_assets[0].source_frames = frames;
+            if let ClipContent::Audio { source_end, .. } = &mut p.arrangement.clips[0].content {
+                *source_end = frames;
+            }
+            assert!(p.validate_arrangement().is_ok());
+        }
+    }
+    for (rate, frames) in [
+        (7999, 48000),
+        (384001, 48000),
+        (48000, 0),
+        (48000, 28_800_001),
+    ] {
+        let mut p = audio_song();
+        p.arrangement.audio_assets[0].source_rate = rate;
+        p.arrangement.audio_assets[0].source_frames = frames;
+        assert!(
+            p.validate_arrangement().is_err(),
+            "rate={rate},frames={frames}"
+        );
+    }
+}
+fn auto_song() -> Project {
+    let mut p: Project =
+        serde_json::from_str(r#"{"channels":[{"id":10,"instrument":"sampler"}]}"#).unwrap();
+    p.arrangement = song().arrangement;
+    p.arrangement.clips[0].content = ClipContent::Automation {
+        target: AutomationTarget::InstrumentParam {
+            channel: 10,
+            instrument: "sampler".into(),
+            param: grooviq_dsp::sampler::PARAM_IDS[0].into(),
+        },
+        priority: 30,
+        offset_tick: 0,
+        length_ticks: 960,
+        points: vec![
+            AutomationPoint {
+                tick: 0,
+                value: grooviq_dsp::sampler::SPEC[0].2,
+                mode: SegmentMode::Hold,
+            },
+            AutomationPoint {
+                tick: 480,
+                value: grooviq_dsp::sampler::SPEC[0].2,
+                mode: SegmentMode::Linear,
+            },
+        ],
+    };
+    p.validate();
+    p
+}
+fn refuses_only_change(base: &Project, invalid: &Project) {
+    assert!(base.validate_arrangement().is_ok());
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("last-good.grooviq");
+    save(base, &SampleFiles::new(), &path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(invalid.validate_arrangement().is_err());
+    assert!(validate_save(invalid, &SampleFiles::new()).is_err());
+    assert!(save(invalid, &SampleFiles::new(), &path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let disk = d.path().join("invalid.grooviq");
+    zip_json(&disk, &disk_json(invalid), &[]);
+    assert!(matches!(load(&disk), Err(LoadError::Corrupt(_))));
+}
+#[test]
+fn isolated_audio_guards_refuse_without_destroying_last_good() {
+    let base = audio_song();
+    for field in [
+        "end",
+        "start",
+        "fadeIn",
+        "fadeOut",
+        "gainLow",
+        "gainHigh",
+        "rateLow",
+        "rateHigh",
+        "framesZero",
+        "framesLong",
+        "tempoLow",
+        "tempoHigh",
+        "keyRoot",
+        "keyScale",
+        "extent",
+    ] {
+        let mut p = base.clone();
+        match field {
+            "rateLow" => p.arrangement.audio_assets[0].source_rate = 7999,
+            "rateHigh" => p.arrangement.audio_assets[0].source_rate = 384001,
+            "framesZero" => {
+                p.arrangement.audio_assets[0].source_frames = 0;
+                p.arrangement.clips.clear();
+            }
+            "framesLong" => p.arrangement.audio_assets[0].source_frames = 28_800_001,
+            "tempoLow" => p.arrangement.audio_assets[0].original_tempo = Some(19.9),
+            "tempoHigh" => p.arrangement.audio_assets[0].original_tempo = Some(400.1),
+            "keyRoot" => {
+                p.arrangement.audio_assets[0]
+                    .original_key
+                    .as_mut()
+                    .unwrap()
+                    .root = 12
+            }
+            "keyScale" => {
+                p.arrangement.audio_assets[0]
+                    .original_key
+                    .as_mut()
+                    .unwrap()
+                    .scale = "unknown".into()
+            }
+            "extent" => p.arrangement.clips[0].start_tick = MAX_SONG_TICKS - 1,
+            _ => {
+                if let ClipContent::Audio {
+                    source_start,
+                    source_end,
+                    fade_in,
+                    fade_out,
+                    gain,
+                    ..
+                } = &mut p.arrangement.clips[0].content
+                {
+                    match field {
+                        "end" => *source_end = 48001,
+                        "start" => *source_start = 48000,
+                        "fadeIn" => *fade_in = 48001,
+                        "fadeOut" => *fade_out = 48001,
+                        "gainLow" => *gain = -0.001,
+                        "gainHigh" => *gain = 2.001,
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+        refuses_only_change(&base, &p);
+    }
+}
+#[test]
+fn isolated_automation_guards_refuse_without_destroying_last_good() {
+    let base = auto_song();
+    for field in ["kind", "order", "tick", "end", "collision", "target"] {
+        let mut p = base.clone();
+        if field == "target" {
+            let mut c = p.arrangement.clips[0].clone();
+            c.id = 40;
+            c.start_tick = 960;
+            if let ClipContent::Automation { target, points, .. } = &mut c.content {
+                *target = AutomationTarget::InstrumentParam {
+                    channel: 10,
+                    instrument: "sampler".into(),
+                    param: "start".into(),
+                };
+                for p in points {
+                    p.value = 0.0;
+                }
+            }
+            p.arrangement.clips.push(c);
+            let mut disjoint = p.clone();
+            if let ClipContent::Automation { target, .. } =
+                &mut disjoint.arrangement.clips[1].content
+            {
+                *target = AutomationTarget::InstrumentParam {
+                    channel: 10,
+                    instrument: "sampler".into(),
+                    param: "root".into(),
+                };
+            }
+            assert!(disjoint.validate_arrangement().is_ok());
+        } else if let ClipContent::Automation {
+            target: _,
+            points,
+            offset_tick,
+            priority,
+            ..
+        } = &mut p.arrangement.clips[0].content
+        {
+            match field {
+                "kind" => p.channels[0].instrument = grooviq_engine::InstrumentKind::Synth,
+                "order" => points.swap(0, 1),
+                "tick" => points[1].tick = MAX_SONG_TICKS + 1,
+                "end" => *offset_tick = MAX_SONG_TICKS as u32,
+                "collision" => *priority = 2,
+                _ => unreachable!(),
+            }
+        }
+        refuses_only_change(&base, &p);
+    }
+}
+#[test]
+fn isolated_pattern_and_loop_guards() {
+    let base = song();
+    let mut bad = base.clone();
+    if let ClipContent::Pattern { pattern, .. } = &mut bad.arrangement.clips[0].content {
+        *pattern = 99;
+    }
+    refuses_only_change(&base, &bad);
+    for (start, end) in [(960, 960), (961, 960), (0, MAX_SONG_TICKS + 1)] {
+        let mut bad = base.clone();
+        bad.arrangement.loop_region = Some(LoopRegion {
+            start_tick: start,
+            end_tick: end,
+            enabled: true,
+        });
+        refuses_only_change(&base, &bad);
+    }
+}
+#[test]
+fn unsafe_zip_entry_is_missing_and_old_version_arrangement_is_reset() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("unsafe.grooviq");
+    for name in ["outside.wav", "samples/../outside.wav", "samples/sub/x.wav"] {
+        let mut p = audio_song();
+        p.arrangement.audio_assets[0].sample.file = Some(name.into());
+        zip_json(&path, &disk_json(&p), &[(name, &[1, 2, 3])]);
+        let l = load(&path).unwrap();
+        assert!(!l.samples.contains_key(&5));
+        assert_eq!(l.project.arrangement.audio_assets[0].sample.file, None);
+    }
+    let mut v = serde_json::to_value(audio_song()).unwrap();
+    v["format"] = FORMAT.into();
+    v["version"] = 2.into();
+    zip_json(&path, &v.to_string(), &[]);
+    let l = load(&path).unwrap();
+    assert_eq!(l.project.arrangement, Arrangement::default());
+    assert_eq!(l.project.play_mode, PlayMode::Pattern);
+}
+struct ResourceAllocator;
+thread_local! {static ALLOCATION:std::cell::Cell<Option<(usize,usize)>>=const {std::cell::Cell::new(None)};}
+unsafe impl std::alloc::GlobalAlloc for ResourceAllocator {
+    unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+        ALLOCATION
+            .try_with(|c| {
+                if let Some((n, p)) = c.get() {
+                    let n = n + l.size();
+                    c.set(Some((n, p.max(n))));
+                }
+            })
+            .ok();
+        unsafe { std::alloc::System.alloc(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+        ALLOCATION
+            .try_with(|c| {
+                if let Some((n, peak)) = c.get() {
+                    c.set(Some((n.saturating_sub(l.size()), peak)));
+                }
+            })
+            .ok();
+        unsafe { std::alloc::System.dealloc(p, l) }
+    }
+}
+#[global_allocator]
+static RESOURCE_ALLOCATOR: ResourceAllocator = ResourceAllocator;
+fn automation_zip(
+    path: &std::path::Path,
+    clips: usize,
+    points: usize,
+    last: bool,
+    unknown_target: bool,
+) {
+    let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    z.start_file(
+        "project.json",
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+    )
+    .unwrap();
+    z.write_all(br#"{"format":"grooviq-project","version":3,"channels":[{"id":10}],"arrangement":{"tracks":[{"id":2,"name":"T","color":0,"mute":false}],"clips":["#).unwrap();
+    for c in 0..clips {
+        if c > 0 {
+            z.write_all(b",").unwrap();
+        }
+        write!(
+            z,
+            r#"{{"id":{},"track":2,"name":"A","startTick":0,"muted":false,"content":{{"#,
+            100 + c
+        )
+        .unwrap();
+        if !last {
+            z.write_all(br#""type":"automation","#).unwrap();
+        }
+        z.write_all(br#""target":{"channel":10,"#).unwrap();
+        if unknown_target {
+            z.write_all(br#""unknown":["#).unwrap();
+            for n in 0..100_000 {
+                if n > 0 {
+                    z.write_all(b",").unwrap();
+                }
+                z.write_all(br#"{"nested":"ignored"}"#).unwrap();
+            }
+            z.write_all(b"],").unwrap();
+        }
+        write!(z, "\"type\":\"channelVolume\"}},\"priority\":{},\"offsetTick\":0,\"lengthTicks\":960,\"points\":[",10_000+c).unwrap();
+        let point = br#"{"tick":0,"value":1.0,"mode":"hold"}"#;
+        if points > 0 {
+            z.write_all(point).unwrap();
+            let mut chunk = Vec::new();
+            for _ in 0..1024 {
+                chunk.push(b',');
+                chunk.extend_from_slice(point);
+            }
+            let mut left = points - 1;
+            while left >= 1024 {
+                z.write_all(&chunk).unwrap();
+                left -= 1024;
+            }
+            z.write_all(&chunk[..left * (point.len() + 1)]).unwrap();
+        }
+        z.write_all(b"]").unwrap();
+        if last {
+            z.write_all(br#", "type":"automation""#).unwrap();
+        }
+        z.write_all(b"}}").unwrap();
+    }
+    z.write_all(b"]}}").unwrap();
+    z.finish().unwrap();
+}
+#[test]
+fn point_caps_stream_through_actual_load_with_bounded_allocations() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("points.grooviq");
+    for last in [false, true] {
+        automation_zip(&path, 1, 100_000, last, false);
+        ALLOCATION.with(|c| c.set(Some((0, 0))));
+        let result = load(&path);
+        let peak = ALLOCATION.with(|c| c.replace(None).unwrap().1);
+        let err = result.unwrap_err();
+        assert!(matches!(err, LoadError::Corrupt(_)));
+        let message = err.to_string();
+        assert!(message.contains("arrangement list limit"), "{message}");
+        let col: usize = message
+            .split("column ")
+            .nth(1)
+            .unwrap()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(col < 1_000_000, "late point refusal at {col}");
+        assert!(peak < 8 * 1024 * 1024, "point peak {peak}");
+        eprintln!("point resource last={last} peak={peak} error_column={col}");
+    }
+    automation_zip(&path, 61, MAX_AUTOMATION_POINTS, true, false);
+    assert_eq!(load(&path).unwrap().project.arrangement.clips.len(), 61);
+    automation_zip(&path, 62, MAX_AUTOMATION_POINTS, true, false);
+    let error = load(&path).unwrap_err().to_string();
+    assert!(error.contains("total automation point limit"), "{error}");
+    automation_zip(&path, 1, 2, true, true);
+    ALLOCATION.with(|c| c.set(Some((0, 0))));
+    let l = load(&path).unwrap();
+    let peak = ALLOCATION.with(|c| c.replace(None).unwrap().1);
+    assert_eq!(l.project.arrangement.clips.len(), 1);
+    assert!(peak < 8 * 1024 * 1024, "target peak {peak}");
+    eprintln!("target unknown resource peak={peak}");
+}
+#[test]
+fn absent_channel_entry_is_saveable_control() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("channel.grooviq");
+    let mut p = auto_song();
+    p.channels[0].sample = Some(SampleRef {
+        path: "channel.wav".into(),
+        file: Some("samples/absent.wav".into()),
+    });
+    zip_json(&path, &disk_json(&p), &[]);
+    let l = load(&path).unwrap();
+    assert_eq!(l.project.channels[0].sample.as_ref().unwrap().file, None);
+    validate_save(&l.project, &l.samples).unwrap();
+    save(&l.project, &l.samples, &path).unwrap();
+    assert_eq!(load(&path).unwrap().project, l.project);
+}

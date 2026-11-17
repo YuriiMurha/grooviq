@@ -392,7 +392,11 @@ fn plan(
     for (id, name, sample_ref) in project
         .channels
         .iter_mut()
-        .filter_map(|c| c.sample.as_mut().map(|s| (c.id, c.name.clone(), s)))
+        .filter_map(|c| {
+            c.sample
+                .as_mut()
+                .map(|s| (c.id, format!("Channel \"{}\"", c.name), s))
+        })
         .chain(
             project
                 .arrangement
@@ -403,8 +407,13 @@ fn plan(
     {
         let Some(file) = samples.get(&id) else {
             if sample_ref.file.is_some() {
+                let source = if name.starts_with("Audio asset ") {
+                    "asset"
+                } else {
+                    "channel"
+                };
                 return Err(too_big(format!(
-                    "Channel \"{}\": its sample was not loaded, so saving would lose it. Relink the sample or remove the channel first.",
+                    "{}: its sample was not loaded, so saving would lose it. Relink the sample or remove the {source} first.",
                     name
                 )));
             }
@@ -413,7 +422,7 @@ fn plan(
         let size = file.bytes.len() as u64;
         if size > limits.sample {
             return Err(too_big(format!(
-                "Channel \"{}\": its sample is {}, over the {} limit for one sample.",
+                "{}: its sample is {}, over the {} limit for one sample.",
                 name,
                 human(size),
                 human(limits.sample)
@@ -428,7 +437,7 @@ fn plan(
                 total += size;
                 if total > limits.total {
                     return Err(too_big(format!(
-                        "Channel \"{}\": its sample would take the project past the {} limit for all samples.",
+                        "{}: its sample would take the project past the {} limit for all samples.",
                         name,
                         human(limits.total)
                     )));
@@ -667,7 +676,11 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
     for (id, name, sample_ref) in project
         .channels
         .iter()
-        .filter_map(|c| c.sample.as_ref().map(|s| (c.id, c.name.clone(), s)))
+        .filter_map(|c| {
+            c.sample
+                .as_ref()
+                .map(|s| (c.id, format!("Channel \"{}\"", c.name), s))
+        })
         .chain(
             project
                 .arrangement
@@ -690,13 +703,13 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
             Some(EntryRead::TooBig { over_total }) => {
                 warnings.push(if over_total {
                     format!(
-                        "Channel \"{}\": its sample would take the project past the {} limit for all samples, so it was not loaded.",
+                        "{}: its sample would take the project past the {} limit for all samples, so it was not loaded.",
                         name,
                         human(limits.total)
                     )
                 } else {
                     format!(
-                        "Channel \"{}\": its sample is larger than {}, so it was not loaded.",
+                        "{}: its sample is larger than {}, so it was not loaded.",
                         name,
                         human(limits.sample)
                     )
@@ -708,7 +721,7 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
         }
         // Missing or unreadable entry: no bytes. The path in the file is never opened.
         warnings.push(format!(
-            "Channel \"{}\": its sample is missing from the project file. Relink it to hear it.",
+            "{}: its sample is missing from the project file. Relink it to hear it.",
             name
         ));
     }
@@ -719,6 +732,11 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
             && !skipped.contains(&channel.id)
         {
             sample_ref.file = None;
+        }
+    }
+    for asset in &mut project.arrangement.audio_assets {
+        if !samples.contains_key(&asset.id) && !skipped.contains(&asset.id) {
+            asset.sample.file = None;
         }
     }
     Ok(Loaded {
@@ -869,6 +887,52 @@ mod tests {
     thread_local! {
         /// Syncs [`sync_file`] made on this thread.
         pub(super) static SYNCED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn skipped_asset_entry_retains_refusal_and_source_bytes() {
+        let (mut p, mut files) = project_of(1);
+        p.arrangement.audio_assets.push(crate::AudioAsset {
+            id: 100,
+            sample: crate::SampleRef {
+                path: "asset.wav".into(),
+                file: None,
+            },
+            source_rate: 48000,
+            source_frames: 4,
+            original_tempo: None,
+            original_key: None,
+        });
+        files.insert(100, files[&1].clone());
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("skipped.grooviq");
+        save(&p, &files, &path).unwrap();
+        let good = fs::read(&path).unwrap();
+        let loaded = load_with_limits(
+            &path,
+            Limits {
+                sample: 1,
+                ..LIMITS
+            },
+        )
+        .unwrap();
+        assert!(
+            loaded.project.channels[0]
+                .sample
+                .as_ref()
+                .unwrap()
+                .file
+                .is_some()
+        );
+        assert!(
+            loaded.project.arrangement.audio_assets[0]
+                .sample
+                .file
+                .is_some()
+        );
+        assert!(validate_save(&loaded.project, &loaded.samples).is_err());
+        assert!(save(&loaded.project, &loaded.samples, &path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), good);
     }
 
     #[test]
