@@ -1,6 +1,6 @@
-//! Micro-benchmarks of the instruments' inner loops: one 64-frame block (the engine's block)
-//! with 1, 4 or 16 voices sounding. `cargo bench -p grooviq-dsp`; divan also counts the
-//! allocations inside each timed block, which must stay at zero.
+//! Instrument kernels at 64 frames with 1, 4 or 16 voices, and effect kernels at 64/128 frames.
+//! `cargo bench -p grooviq-dsp`; divan reports allocations inside each timed block,
+//! which must stay at zero (the realtime suite enforces that requirement).
 
 use std::sync::Arc;
 
@@ -121,19 +121,25 @@ fn character_delay<const N: usize>(bencher: Bencher, name: &str) {
     for (i, v) in preset(name).unwrap() {
         device.set_param(i, v);
     }
-    let mut frame = 0usize;
-    for _ in 0..800 {
-        let mut l = [0.2; N];
-        let mut r = [-0.1; N];
-        device.process(&mut l, &mut r, None, &[]);
-    }
-    bencher.bench_local(move || {
-        let mut l =
-            std::array::from_fn::<_, N, _>(|i| (((frame + i) % 97) as f32 / 97.0 - 0.5) * 0.5);
-        let mut r =
-            std::array::from_fn::<_, N, _>(|i| (((frame + i) % 73) as f32 / 73.0 - 0.5) * 0.4);
-        frame = frame.wrapping_add(N);
+    let inputs: Vec<([f32; N], [f32; N])> = (0..64)
+        .map(|block| {
+            let l = std::array::from_fn(|i| (((block * N + i) % 97) as f32 / 97.0 - 0.5) * 0.5);
+            let r = std::array::from_fn(|i| (((block * N + i) % 73) as f32 / 73.0 - 0.5) * 0.4);
+            (l, r)
+        })
+        .collect();
+    let mut next = 0;
+    let (mut l, mut r) = ([0.0; N], [0.0; N]);
+    let mut render = || {
+        l.copy_from_slice(&inputs[next].0);
+        r.copy_from_slice(&inputs[next].1);
+        next = (next + 1) % inputs.len();
         device.process(black_box(&mut l), black_box(&mut r), None, &[]);
-        black_box((l, r));
-    });
+        black_box((&l, &r));
+    };
+    // Charge the repeat/feedback paths with the measured signal, not a constant DC input.
+    for _ in 0..(SR as usize * 4).div_ceil(N) {
+        render();
+    }
+    bencher.bench_local(render);
 }
