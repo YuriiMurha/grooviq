@@ -137,6 +137,15 @@ describe("record", () => {
 
 
 describe("non-Latin Mod shortcuts", () => {
+  it.each([
+    [";", "KeyZ", "undo"],
+    ["Dead", "KeyS", "save"],
+    ["Unidentified", "KeyZ", "undo"],
+  ])("falls back for %s on %s", (letter, code, action) => {
+    expect(shortcutFor(key(letter, { metaKey: true, code }), "MacIntel")).toBe(action);
+    expect(shortcutFor(key(letter, { ctrlKey: true, code }), "Win32")).toBe(action);
+  });
+
   for (const platform of ["MacIntel", "Win32", "Linux x86_64"]) {
     const mod = platform === "MacIntel" ? { metaKey: true } : { ctrlKey: true };
     for (const letter of ["і", "σ"]) {
