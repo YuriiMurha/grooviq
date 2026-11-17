@@ -1052,7 +1052,10 @@ fn a_v1_file_opens_and_sounds_the_same() {
                 seq(960, 1, 48, 0.9, 240),
             ],
         },
+        // The file's 4/4 (M1's engine had no time signature: it counted 4/4).
+        time_signature: (p.time_signature.beats, p.time_signature.unit),
     };
+    assert_eq!(p.time_signature, TimeSignature { beats: 4, unit: 4 });
     assert_eq!(engine_state(p, &decoded.samples), m1);
 
     // Saving writes version 2, with the new fields.
