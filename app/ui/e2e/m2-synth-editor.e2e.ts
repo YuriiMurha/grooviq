@@ -564,8 +564,12 @@ test.describe("stepped parameters", () => {
     const at = await centre(oct);
     await app.mouse.move(at.x, at.y);
     await app.mouse.down();
-    // Down through the negative half steps, a few pixels at a time.
-    for (let i = 1; i <= 30; i++) await app.mouse.move(at.x, at.y + i * 2);
+    // Down through the negative half steps, a few pixels at a time. The preview goes out at most
+    // once per animation frame and a release drops an unsent one, so the drag has to span a frame:
+    // wait for the first live value (as a real drag does) before it carries on and lets go.
+    for (let i = 1; i <= 15; i++) await app.mouse.move(at.x, at.y + i * 2);
+    await expect.poll(async () => (await liveCalls(mock, "osc1_octave")).length).toBeGreaterThan(0);
+    for (let i = 16; i <= 30; i++) await app.mouse.move(at.x, at.y + i * 2);
     await app.mouse.up();
     await expect.poll(() => paramEdits(mock)).toHaveLength(1);
     const lives = (await liveCalls(mock, "osc1_octave")).map((c) => c.args.value as number);
