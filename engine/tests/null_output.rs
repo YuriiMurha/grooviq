@@ -85,26 +85,41 @@ fn the_silent_output_lists_and_opens_only_its_own_device() {
     assert_eq!(cpal_backends_created(), 0);
 }
 
+/// The frame counter, read between two clock reads: the counter was sampled somewhere inside
+/// `(before, after)`, which is all a separate `Instant::now()` can say about when.
+fn frames_between_clock_reads(c: &Mutex<Controller>) -> (Instant, u64, Instant) {
+    let before = Instant::now();
+    let frames = frames(c);
+    (before, frames, Instant::now())
+}
+
 #[test]
 fn the_silent_output_renders_in_real_time() {
     let (out, c, _events) = start_silent();
     // Past the first callbacks, then one measured second.
     thread::sleep(Duration::from_millis(50));
-    let (f0, t0) = (frames(&c), Instant::now());
+    let (t0_before, f0, t0_after) = frames_between_clock_reads(&c);
     thread::sleep(Duration::from_millis(1_000));
-    let (f1, t1) = (frames(&c), Instant::now());
+    let (t1_before, f1, t1_after) = frames_between_clock_reads(&c);
     drop(out);
     let rendered = (f1 - f0) as f64;
-    let expected = t1.duration_since(t0).as_secs_f64() * 48_000.0;
-    // Paced, not as fast as it can: within two 256-frame callbacks of the clock on the fast
-    // side; on the slow side a busy CI runner may lose some.
+    // The counters were sampled somewhere inside their brackets, so the elapsed time is only
+    // known to lie between these two. A test thread descheduled between a counter read and
+    // its clock read moves the time within the bracket, never outside it.
+    let at_least = t1_before.duration_since(t0_after).as_secs_f64() * 48_000.0;
+    let at_most = t1_after.duration_since(t0_before).as_secs_f64() * 48_000.0;
+    // Paced, not as fast as it can, and not catching a stall up in a burst: the backend renders
+    // at most the clock's frames plus two 256-frame callbacks (the one in flight and the one a
+    // late wake-up may owe) over any stretch, however busy the machine.
     assert!(
-        rendered <= expected + 512.0,
-        "{rendered} frames in {expected} frames' time: too fast"
+        rendered <= at_most + 512.0,
+        "{rendered} frames in at most {at_most} frames' time: too fast"
     );
+    // The slow side is the machine's to lose: a starved thread drops callbacks (as a device
+    // does), so only a gross shortfall means the pacing is broken.
     assert!(
-        rendered >= expected * 0.7,
-        "{rendered} frames in {expected} frames' time: too slow"
+        rendered >= at_least * 0.5,
+        "{rendered} frames in at least {at_least} frames' time: too slow"
     );
 }
 
