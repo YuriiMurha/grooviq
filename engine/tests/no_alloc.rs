@@ -12,8 +12,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use grooviq_engine::{
     AudioOutput, AudioSlot, ChannelId, ChannelMix, ChannelSetup, Command, EngineConfig,
-    EngineState, OutputBackend, OutputChoice, OutputInfo, OutputKind, PatternData, SampleBuf,
-    SeqNote, engine, engine_with, run_silent,
+    EngineState, OutputBackend, OutputChoice, OutputInfo, OutputKind, PatternData, RecordEvent,
+    SampleBuf, SeqNote, engine, engine_with, run_silent,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -668,5 +668,58 @@ fn recording_never_allocates() {
         Arc::strong_count(&a),
         3,
         "the test and channel 2's state and node: the removed node was freed"
+    );
+}
+
+#[test]
+fn a_waiting_recording_barrier_never_allocates() {
+    let state = || EngineState {
+        channels: vec![ChannelSetup::synth(
+            ChannelId(1),
+            Vec::new(),
+            ChannelMix::default(),
+        )],
+        ..EngineState::default()
+    };
+    let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state());
+    let mut buf = vec![0f32; 64 * 2];
+    let note = |on| Command::ChannelNote {
+        channel: ChannelId(1),
+        key: 60,
+        velocity: 0.9,
+        on,
+    };
+    c.send(Command::SetRecording { on: true }).unwrap();
+    c.send(Command::Play).unwrap();
+    // Fill the recording queue, never drained.
+    for i in 0..1_100 {
+        c.send(note(i % 2 == 0)).unwrap();
+        if i % 100 == 99 {
+            realtime(|| p.process(&mut buf, 2));
+        }
+    }
+    realtime(|| p.process(&mut buf, 2));
+    assert!(c.record_dropped() > 0, "the queue is full");
+    // A new state parks its barrier; recording goes on in the new take.
+    c.load_state(state()).unwrap();
+    let mark = c.record_mark();
+    c.send(Command::Play).unwrap();
+    for _ in 0..4 {
+        c.send(note(true)).unwrap();
+        c.send(note(false)).unwrap();
+        realtime(|| p.process(&mut buf, 2));
+    }
+    // Room again: the barrier goes out from the next push or block start.
+    let mut taken = Vec::new();
+    c.take_recorded(&mut taken);
+    c.send(note(true)).unwrap();
+    realtime(|| p.process(&mut buf, 2));
+    c.check_health();
+    taken.clear();
+    c.take_recorded(&mut taken);
+    assert_eq!(
+        taken.first(),
+        Some(&RecordEvent::Mark { id: mark }),
+        "{taken:?}"
     );
 }

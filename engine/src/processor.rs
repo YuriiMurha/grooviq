@@ -252,6 +252,8 @@ impl AudioProcessor {
     /// note): synth notes in `events`, channel notes in their channel's buffer. Every other
     /// command applies now, at the block start. Returns the synth's event count.
     fn drain(&mut self, start: u64, end: u64) -> usize {
+        // First: no event recorded in this block may go ahead of a waiting barrier.
+        self.recorder.flush_mark();
         let mut count = 0;
         let mut last_offset = 0;
         // Bounded: a producer that keeps pushing cannot hold the audio thread here.
@@ -292,6 +294,7 @@ impl AudioProcessor {
             };
             match msg {
                 Msg::ReplaceGraph(graph) => self.replace_graph(graph, start),
+                Msg::RecordMark(id) => self.recorder.mark(id),
                 Msg::AddChannel(node) => {
                     let refused = if self.faulted {
                         Some(node)

@@ -30,17 +30,45 @@ pub enum RecordEvent {
     /// The take ended (recording switched off, or the transport stopped or restarted): a note
     /// still held ends here.
     End { tick: u64, position: u32 },
+    /// A barrier: [`crate::Controller::load_state`] queued it behind the state, so every event
+    /// before it belongs to the state before, every event after it to the new one. `id` is
+    /// [`crate::Controller::record_mark`]. Never lost: a mark that finds the queue full waits,
+    /// and later events are dropped (counted) rather than overtake it.
+    Mark { id: u32 },
 }
 
 /// The audio thread's end of the recording queue.
 pub(crate) struct Recorder {
     tx: Producer<RecordEvent>,
     on: bool,
+    /// A mark that did not fit in the queue yet.
+    pending_mark: Option<u32>,
 }
 
 impl Recorder {
     pub(crate) fn new(tx: Producer<RecordEvent>) -> Self {
-        Self { tx, on: false }
+        Self {
+            tx,
+            on: false,
+            pending_mark: None,
+        }
+    }
+
+    /// Queues the barrier `id` (see [`RecordEvent::Mark`]), whatever recording does. A newer
+    /// mark replaces one still waiting.
+    pub(crate) fn mark(&mut self, id: u32) {
+        self.pending_mark = Some(id);
+        self.flush_mark();
+    }
+
+    /// Sends a waiting mark if the queue has room. Called at the start of every block and
+    /// before every event, so a mark goes out as soon as the queue drains.
+    pub(crate) fn flush_mark(&mut self) {
+        if let Some(id) = self.pending_mark
+            && self.tx.push(RecordEvent::Mark { id }).is_ok()
+        {
+            self.pending_mark = None;
+        }
     }
 
     /// Whether a take is running: recording is on and the transport plays.
@@ -88,10 +116,57 @@ impl Recorder {
         self.push(event, live);
     }
 
-    /// Real-time safe: a full queue drops the event and counts it, never waits.
+    /// Real-time safe: a full queue drops the event and counts it, never waits. A waiting mark
+    /// goes first: the controller drains on its own thread and can free room between any two
+    /// pushes, so the mark is retried here, and while it still does not fit the event is
+    /// dropped (counted) rather than overtake it.
     fn push(&mut self, event: RecordEvent, live: &LiveShared) {
-        if self.tx.push(event).is_err() {
+        self.flush_mark();
+        if self.pending_mark.is_some() || self.tx.push(event).is_err() {
             live.count_record_drop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(key: u8) -> RecordEvent {
+        RecordEvent::Note {
+            channel: ChannelId(1),
+            key,
+            velocity: 1.0,
+            on: true,
+            tick: 0,
+            position: 0,
+        }
+    }
+
+    /// The controller drains on its own thread, so room can appear between two pushes of one
+    /// block: a parked mark must still go out before the next event, or that event must be
+    /// refused (and counted).
+    #[test]
+    fn mid_block_consumer_cannot_overtake_mark() {
+        let (tx, mut rx) = rtrb::RingBuffer::new(4);
+        let live = LiveShared::default();
+        let mut r = Recorder::new(tx);
+        for key in 0..4 {
+            r.push(event(key), &live);
+        }
+        r.mark(7);
+        assert_eq!(
+            rx.pop(),
+            Ok(event(0)),
+            "the consumer frees one slot mid-block"
+        );
+        r.push(event(9), &live);
+        let rest: Vec<RecordEvent> = std::iter::from_fn(|| rx.pop().ok()).collect();
+        assert_eq!(
+            rest,
+            [event(1), event(2), event(3), RecordEvent::Mark { id: 7 }],
+            "the mark took the free slot; the later event did not overtake it"
+        );
+        assert_eq!(live.record_dropped(), 1, "the refused event is counted");
     }
 }

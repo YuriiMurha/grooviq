@@ -103,6 +103,8 @@ pub struct Controller {
     /// Counts `reconfigure` calls. Every graph carries the generation it was built in, and the
     /// processor drops a replacement from an earlier one.
     generation: u64,
+    /// The id of the last recording barrier `load_state` queued (see [`Self::record_mark`]).
+    record_mark: u32,
     /// Faults already answered with a restart (queued by `check_health`, or done by
     /// `reconfigure`).
     seen_faults: u32,
@@ -131,6 +133,7 @@ impl Controller {
             synth: synth_defaults(),
             state,
             generation: 0,
+            record_mark: 0,
             seen_faults: 0,
             restart_owed: false,
             seen_guard_hits: 0,
@@ -270,7 +273,7 @@ impl Controller {
     }
 
     /// Replaces the whole state: stops the transport, sets the tempo and the time signature,
-    /// then swaps in one graph
+    /// queues a recording barrier ([`Self::record_mark`]), then swaps in one graph
     /// built from `state` (cutting every note; the test tone and the synth keep their
     /// settings). Checked
     /// like [`Self::add_channel`] and [`Self::set_pattern`], and refused as a whole
@@ -278,25 +281,51 @@ impl Controller {
     /// [`MAX_CHANNELS`], `Rejected` for a value that is not finite).
     pub fn load_state(&mut self, state: EngineState) -> Result<(), ControlError> {
         let state = state.checked()?;
-        if self.commands.slots() < 4 {
+        if self.commands.slots() < 5 {
             return Err(ControlError::Full);
         }
         // The old state (and the samples only it held) is freed here, on this thread.
         let _old = std::mem::replace(&mut self.state, state);
         let graph = self.build_graph();
-        // Only this thread pushes, and the queue had room for all three.
+        // Only this thread pushes, and the queue had room for all five.
         let command = |cmd| Msg::Command { due: 0, cmd };
         let tempo = Command::SetTempo {
             bpm: self.state.bpm,
         };
         let (beats, unit) = self.state.time_signature;
         let signature = Command::SetTimeSignature { beats, unit };
+        self.record_mark = self.record_mark.wrapping_add(1);
         let queued = self.commands.push(command(Command::Stop)).is_ok()
             && self.commands.push(command(tempo)).is_ok()
             && self.commands.push(command(signature)).is_ok()
-            && self.push(Msg::ReplaceGraph(graph)).is_ok();
+            && self.push(Msg::ReplaceGraph(graph)).is_ok()
+            && self.push(Msg::RecordMark(self.record_mark)).is_ok();
         debug_assert!(queued);
         Ok(())
+    }
+
+    /// Queues `cmd` (checked as [`Self::send`] does), then a recording barrier, both or
+    /// neither. In the recording queue, everything recorded before the command applied comes
+    /// before [`crate::RecordEvent::Mark`] with the returned id (the End a `SetRecording { on:
+    /// false }` makes included), and everything after it after.
+    pub fn send_marked(&mut self, cmd: Command) -> Result<u32, ControlError> {
+        if self.commands.slots() < 2 {
+            return Err(ControlError::Full);
+        }
+        self.send_at(0, cmd)?;
+        let id = self.record_mark.wrapping_add(1);
+        self.record_mark = id;
+        // Only this thread pushes, and the queue had room for both.
+        let queued = self.push(Msg::RecordMark(id));
+        debug_assert!(queued.is_ok());
+        Ok(id)
+    }
+
+    /// The id of the last recording barrier queued (by [`Self::load_state`] or
+    /// [`Self::send_marked`]): in the recording queue, every event before
+    /// [`crate::RecordEvent::Mark`] with this id came before it, every event after it after.
+    pub fn record_mark(&self) -> u32 {
+        self.record_mark
     }
 
     fn channel_index(&self, id: ChannelId) -> Result<usize, ControlError> {
@@ -324,6 +353,45 @@ impl Controller {
         params
             .into_iter()
             .all(|(index, value)| self.send(Command::SetSynthParam { index, value }).is_ok())
+    }
+
+    /// Sends `SetChannelParam` for every `(index, value)` of `params`, all or none: refused
+    /// (nothing sent) if the channel is unknown, an index is not one of its instrument's, a value
+    /// is not finite, or the queue has no room for all of them.
+    pub fn set_channel_params(
+        &mut self,
+        channel: ChannelId,
+        params: &[(u32, f32)],
+    ) -> Result<(), ControlError> {
+        let kind = self
+            .state
+            .channel(channel)
+            .ok_or(ControlError::UnknownChannel)?
+            .instrument
+            .kind();
+        let spec = kind.spec();
+        if params
+            .iter()
+            .any(|&(index, value)| index as usize >= spec.len() || !value.is_finite())
+        {
+            return Err(ControlError::Rejected);
+        }
+        if self.commands.slots() < params.len() {
+            return Err(ControlError::Full);
+        }
+        for &(index, value) in params {
+            // Checked above, and the queue only gains room while we push.
+            let sent = self.send_at(
+                0,
+                Command::SetChannelParam {
+                    channel,
+                    index,
+                    value,
+                },
+            );
+            debug_assert!(sent.is_ok(), "{sent:?}");
+        }
+        Ok(())
     }
 
     /// The latest live state.
@@ -540,6 +608,47 @@ mod tests {
     /// (the processor itself is never run, so nothing overwrites it).
     fn pretend(c: &Controller, faults: u32, guard_hits: u32) {
         c.live.publish([0.0; 2], false, 0, faults, guard_hits);
+    }
+
+    #[test]
+    fn channel_params_are_sent_all_or_none() {
+        let (mut c, _p) = controller();
+        let id = ChannelId(1);
+        c.add_channel(ChannelSetup::synth(
+            id,
+            Vec::new(),
+            crate::ChannelMix::default(),
+        ))
+        .unwrap();
+        let params: Vec<(u32, f32)> = (0..40).map(|i| (i, -1e9)).collect();
+        c.set_channel_params(id, &params).unwrap();
+        let spec = InstrumentKind::Synth.spec();
+        let mins: Vec<f32> = spec.iter().map(|&(min, _, _)| min).collect();
+        assert_eq!(
+            c.state().channels[0].instrument.params(),
+            mins.as_slice(),
+            "clamped"
+        );
+
+        let before = c.state().clone();
+        let free = c.commands.slots();
+        for bad in [vec![(0, 1.0), (40, 1.0)], vec![(0, 1.0), (1, f32::NAN)]] {
+            assert_eq!(c.set_channel_params(id, &bad), Err(ControlError::Rejected));
+        }
+        assert_eq!(
+            c.set_channel_params(ChannelId(9), &[(0, 1.0)]),
+            Err(ControlError::UnknownChannel)
+        );
+        // Fill the queue until 39 slots are left: 40 values do not fit, so none is sent.
+        while c.commands.slots() > 39 {
+            c.send(Command::SetTempo { bpm: 120.0 }).unwrap();
+        }
+        let tempo = c.state().bpm;
+        assert_eq!(c.set_channel_params(id, &params), Err(ControlError::Full));
+        assert_eq!(c.commands.slots(), 39);
+        assert_eq!(c.state().channels, before.channels);
+        assert_eq!(tempo, 120.0);
+        assert!(free > 39);
     }
 
     #[test]

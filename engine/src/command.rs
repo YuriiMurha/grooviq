@@ -188,13 +188,15 @@ pub(crate) enum Msg {
     },
     /// The pattern to play; the old one goes back through the trash queue.
     SetPattern(Box<PatternData>),
+    /// Queues [`crate::RecordEvent::Mark`] with this id in the recording queue.
+    RecordMark(u32),
 }
 
 impl Msg {
     /// Whether applying the message may hand something back through the trash queue: such a
     /// message waits while the processor holds a parked item (it has room for only one).
     pub(crate) fn makes_trash(&self) -> bool {
-        !matches!(self, Self::Command { .. })
+        !matches!(self, Self::Command { .. } | Self::RecordMark(_))
     }
 }
 
@@ -206,8 +208,8 @@ impl Msg {
 ///   channel added or removed, a sample, a pattern, the tone, a synth, mix, sampler or channel
 ///   parameter, a choke group), and a note-on that a later message would have cut (a new graph
 ///   or `AllSoundOff` for any note; a removal or a new sample for a note on that channel).
-/// * Kept: the transport commands and the recording, metronome and time-signature switches (the
-///   processor owns them, so they outlive the graph; `AllSoundOff` keeps only its `Stop`, its
+/// * Kept: the transport commands, the recording, metronome and time-signature switches and the
+///   recording barriers (the processor owns them, so they outlive the graph; `AllSoundOff` keeps only its `Stop`, its
 ///   fade, choke and tone-off being in the rebuilt graph), the other notes (note-offs always:
 ///   one that finds no note does nothing), and the test hooks.
 pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
@@ -227,6 +229,10 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
                 continue;
             }
             Msg::AddChannel(_) | Msg::SetPattern(_) => continue,
+            Msg::RecordMark(id) => {
+                kept.push(Msg::RecordMark(id));
+                continue;
+            }
             Msg::Command { due, cmd } => (due, cmd),
         };
         let cmd = match cmd {

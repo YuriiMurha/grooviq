@@ -3,8 +3,9 @@
 //! At startup it creates the engine, plays it on the saved output (silent: nothing sounds
 //! until the UI asks), starts the live-state stream for the meters and two threads: one
 //! forwards output events, one checks the engine's health every 250 ms. Both log what happened
-//! and emit it to the UI as `audio-event`. The UI talks back through the async commands in
-//! [`commands`]. Started with `GROOVIQ_AUDIO=null` it opens no audio device at all (see
+//! and emit it to the UI as `audio-event`; a third moves recorded live notes into the pattern
+//! (see [`notes_cmds`]). The UI talks back through the async commands in [`commands`],
+//! `project_cmds` and [`notes_cmds`]. Started with `GROOVIQ_AUDIO=null` it opens no audio device at all (see
 //! [`output_mode`]): the silent mode for QA runs.
 
 mod audio_log;
@@ -14,6 +15,7 @@ mod display;
 mod events;
 mod exit;
 mod menu;
+mod notes_cmds;
 mod output_mode;
 pub mod panic_hook;
 mod project_cmds;
@@ -31,7 +33,7 @@ use grooviq_project::recovery::{Recovery, RecoveryDir};
 use grooviq_project::session::Session;
 use settings::Settings;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
@@ -82,6 +84,8 @@ pub(crate) struct Audio {
     /// so the UI can ask once it listens (`autosave_status`); the failure event only carries
     /// later changes.
     autosave: Arc<Mutex<AutosaveStatus>>,
+    /// The channel a MIDI keyboard plays ([`notes_cmds::NO_CHANNEL`]: none).
+    selected_channel: notes_cmds::SelectedChannel,
 }
 
 /// Locks `mutex` even if a thread panicked while holding it.
@@ -177,6 +181,15 @@ fn start_audio(app: &AppHandle) -> Audio {
         let (controller, log, app) = (Arc::clone(&controller), Arc::clone(&log), app.clone());
         move || watch_health(&controller, &log, &app)
     });
+    spawn_named("grooviq-recorder", {
+        let (session, controller, log, app) = (
+            Arc::clone(&session),
+            Arc::clone(&controller),
+            Arc::clone(&log),
+            app.clone(),
+        );
+        move || notes_cmds::record_loop(&session, &controller, &log, &app)
+    });
     if autosave_on {
         spawn_named("grooviq-autosave", {
             let (session, recovery, log, status, app) = (
@@ -205,6 +218,7 @@ fn start_audio(app: &AppHandle) -> Audio {
         export_running: AtomicBool::new(false),
         exit: exit::ExitState::default(),
         autosave: autosave_status,
+        selected_channel: Arc::new(AtomicU32::new(notes_cmds::NO_CHANNEL)),
     }
 }
 
@@ -397,6 +411,15 @@ pub fn run() {
             project_cmds::recovery_restore,
             project_cmds::recovery_discard,
             project_cmds::app_exit,
+            notes_cmds::pattern_notes,
+            notes_cmds::notes_edit,
+            notes_cmds::channel_add_synth,
+            notes_cmds::channel_note,
+            notes_cmds::channel_param_live,
+            notes_cmds::channel_select,
+            notes_cmds::channel_waveform,
+            notes_cmds::record_set,
+            notes_cmds::metronome_set,
         ])
         .build(tauri::generate_context!())
         .expect("the Tauri app builds");
