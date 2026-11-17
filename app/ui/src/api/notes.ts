@@ -132,6 +132,22 @@ export const channelWaveform = (channel: number, points: number) =>
 export const recordSet = (on: boolean) => invoke<ProjectView>("record_set", { on });
 export const metronomeSet = (on: boolean) => invoke<null>("metronome_set", { on });
 
+/** One MIDI input as the settings show it. */
+export interface MidiInput {
+  name: string;
+  enabled: boolean;
+}
+
+/** The MIDI keyboards plugged in now, with whether each plays. */
+export const midiInputs = () => invoke<MidiInput[]>("midi_inputs");
+/** Switches a MIDI keyboard on or off; the shell remembers it by name. */
+export const midiSetEnabled = (name: string, enabled: boolean) => invoke<null>("midi_set_enabled", { name, enabled });
+
+/** A keyboard was plugged in or out, or switched on or off: ask `midiInputs` again. */
+export function onMidiInputsChanged(handler: () => void): Promise<UnlistenFn> {
+  return listen<null>("midi-inputs-changed", () => handler());
+}
+
 /** Recording switched itself off because recorded notes did not fit in the pattern. */
 export interface RecordingStopped {
   reason: "noteCap" | "noteIds" | "engineBusy" | "error";

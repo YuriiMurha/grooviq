@@ -196,6 +196,13 @@ input {
   color: var(--muted);
 }
 
+.midi-empty,
+.midi-problem {
+  margin: 0;
+  padding: 6px 8px;
+  color: var(--muted);
+}
+
 .guard {
   display: flex;
   align-items: center;

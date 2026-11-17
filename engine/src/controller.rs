@@ -14,6 +14,7 @@ use crate::state::{
 use crate::{EngineConfig, QUEUE_CAPACITY};
 use grooviq_dsp::sampler::SampleBuf;
 use rtrb::{Consumer, Producer};
+use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
@@ -100,6 +101,9 @@ pub struct Controller {
     tone: ToneState,
     synth: Vec<f32>,
     state: EngineState,
+    /// Which channel each id is now, see [`Self::channel_instance`].
+    instances: BTreeMap<ChannelId, u64>,
+    next_instance: u64,
     /// Counts `reconfigure` calls. Every graph carries the generation it was built in, and the
     /// processor drops a replacement from an earlier one.
     generation: u64,
@@ -123,7 +127,7 @@ impl Controller {
         live: Arc<LiveShared>,
         state: EngineState,
     ) -> Self {
-        Self {
+        let mut controller = Self {
             commands,
             trash,
             recorded,
@@ -132,6 +136,8 @@ impl Controller {
             tone: ToneState::default(),
             synth: synth_defaults(),
             state,
+            instances: BTreeMap::new(),
+            next_instance: 0,
             generation: 0,
             record_mark: 0,
             seen_faults: 0,
@@ -139,7 +145,26 @@ impl Controller {
             seen_guard_hits: 0,
             #[cfg(test)]
             replay_panics: std::cell::Cell::new(0),
+        };
+        controller.renew_instances();
+        controller
+    }
+
+    /// Gives every channel of the state a new instance number.
+    fn renew_instances(&mut self) {
+        self.instances.clear();
+        for channel in &self.state.channels {
+            self.next_instance += 1;
+            self.instances.insert(channel.id, self.next_instance);
         }
+    }
+
+    /// Which channel `id` is now: a number that is new for every channel added (also by
+    /// [`Self::load_state`]) and never reused, so a caller that kept it can tell the channel it
+    /// meant from another that took the same id later. `None` if there is no such channel.
+    pub fn channel_instance(&self, id: ChannelId) -> Option<u64> {
+        self.state.channel(id)?;
+        self.instances.get(&id).copied()
     }
 
     /// Queues `cmd` for the next block, with its values clamped into range. Gives it back if
@@ -228,6 +253,8 @@ impl Controller {
         }))
         .map_err(|_| ControlError::Rejected)?;
         self.push(Msg::AddChannel(node))?;
+        self.next_instance += 1;
+        self.instances.insert(setup.id, self.next_instance);
         self.state.channels.push(setup);
         Ok(())
     }
@@ -237,6 +264,7 @@ impl Controller {
         let index = self.channel_index(id)?;
         self.push(Msg::RemoveChannel(id))?;
         self.state.channels.remove(index);
+        self.instances.remove(&id);
         Ok(())
     }
 
@@ -286,6 +314,7 @@ impl Controller {
         }
         // The old state (and the samples only it held) is freed here, on this thread.
         let _old = std::mem::replace(&mut self.state, state);
+        self.renew_instances();
         let graph = self.build_graph();
         // Only this thread pushes, and the queue had room for all five.
         let command = |cmd| Msg::Command { due: 0, cmd };
@@ -491,6 +520,7 @@ impl Controller {
             return graph;
         }
         self.state.channels.clear();
+        self.instances.clear();
         let mut graph = Box::new(Graph::new(self.sample_rate, self.generation));
         graph.set_pattern(Box::new(self.state.pattern.clone()));
         graph
@@ -608,6 +638,59 @@ mod tests {
     /// (the processor itself is never run, so nothing overwrites it).
     fn pretend(c: &Controller, faults: u32, guard_hits: u32) {
         c.live.publish([0.0; 2], false, 0, faults, guard_hits);
+    }
+
+    #[test]
+    fn instance_storage_is_bounded_by_the_live_channels() {
+        let (mut c, mut p) = controller();
+        for id in 1000..2000 {
+            c.free_trash();
+            c.add_channel(setup(id)).unwrap();
+            p.process(&mut [0.0; 512], 2);
+            c.remove_channel(ChannelId(id)).unwrap();
+            p.process(&mut [0.0; 512], 2);
+        }
+        assert!(
+            c.instances.len() <= MAX_CHANNELS,
+            "{} dead instance entries kept",
+            c.instances.len()
+        );
+    }
+
+    #[test]
+    fn a_channel_is_a_new_instance_each_time_its_id_is_added() {
+        let (mut c, _p) = controller();
+        assert_eq!(c.channel_instance(ChannelId(1)), None);
+        c.add_channel(setup(1)).unwrap();
+        c.add_channel(setup(2)).unwrap();
+        let (first, other) = (
+            c.channel_instance(ChannelId(1)).unwrap(),
+            c.channel_instance(ChannelId(2)).unwrap(),
+        );
+        assert_ne!(first, other);
+        // Settings and notes do not make a channel another one.
+        c.send(Command::SetChannelMix {
+            channel: ChannelId(1),
+            mix: crate::ChannelMix::default(),
+        })
+        .unwrap();
+        assert_eq!(c.channel_instance(ChannelId(1)), Some(first));
+        // Removed and added again under the same id: another channel.
+        c.remove_channel(ChannelId(1)).unwrap();
+        assert_eq!(c.channel_instance(ChannelId(1)), None);
+        c.add_channel(setup(1)).unwrap();
+        let again = c.channel_instance(ChannelId(1)).unwrap();
+        assert!(again != first && again != other);
+        assert_eq!(c.channel_instance(ChannelId(2)), Some(other));
+        // A new state makes every channel new, even one with the same id.
+        let state = EngineState {
+            channels: vec![setup(1)],
+            ..EngineState::default()
+        };
+        c.load_state(state).unwrap();
+        let replaced = c.channel_instance(ChannelId(1)).unwrap();
+        assert!(replaced != again && replaced != first && replaced != other);
+        assert_eq!(c.channel_instance(ChannelId(2)), None);
     }
 
     #[test]
@@ -829,6 +912,7 @@ mod tests {
         pretend(&c, 2, 0);
         assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 2 }]);
         assert!(c.state.channels.is_empty());
+        assert!(c.instances.is_empty(), "no channel, no instance");
         assert_eq!(c.state.pattern.length, 7);
         assert!(c.send(tune).is_err());
     }

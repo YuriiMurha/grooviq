@@ -16,6 +16,9 @@ pub struct Settings {
     /// Draw the interface at the display's full rate (120 Hz on ProMotion) instead of WebKit's
     /// 60 fps cap. macOS only; off by default (twice the frames costs battery).
     pub high_refresh: bool,
+    /// MIDI inputs the person switched off, by name. Every input is on until it is listed here;
+    /// a name stays while its device is unplugged.
+    pub midi_disabled: Vec<String>,
 }
 
 impl Default for Settings {
@@ -24,6 +27,7 @@ impl Default for Settings {
             output: None,
             guard: true,
             high_refresh: false,
+            midi_disabled: Vec::new(),
         }
     }
 }
@@ -95,6 +99,7 @@ mod tests {
                 output: None,
                 guard: true,
                 high_refresh: false,
+                midi_disabled: Vec::new(),
             }
         );
         let (level, message) = note.unwrap();
@@ -122,6 +127,7 @@ mod tests {
             output: Some("BuiltInSpeakerDevice".into()),
             guard: false,
             high_refresh: true,
+            midi_disabled: vec!["USB Keyboard".into(), "Pads".into()],
         };
         save(&path, &saved).unwrap();
         assert_eq!(load(&path), (saved.clone(), None));
@@ -138,7 +144,8 @@ mod tests {
     #[test]
     fn missing_fields_take_their_defaults() {
         let path = dir("partial").join("settings.json");
-        // A file from before `highRefresh` existed loads with it off.
+        // A file from before `highRefresh` and `midiDisabled` existed loads with them off: every
+        // MIDI input on.
         std::fs::write(&path, br#"{ "output": "usb-dac", "guard": false }"#).unwrap();
         assert_eq!(
             load(&path),
@@ -147,6 +154,7 @@ mod tests {
                     output: Some("usb-dac".into()),
                     guard: false,
                     high_refresh: false,
+                    midi_disabled: Vec::new(),
                 },
                 None
             )
