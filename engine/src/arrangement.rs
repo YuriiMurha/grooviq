@@ -1,5 +1,5 @@
 //! Control-thread compilation of linked pattern clips. Never call from the audio callback.
-use crate::{ChannelId, PatternData, STEP_TICKS};
+use crate::{ChannelId, PatternData, STEP_TICKS, SeqNote};
 use std::fmt;
 
 pub const MAX_SONG_TICKS: u64 = 38_400_000;
@@ -59,6 +59,25 @@ fn reserved<T>(count: usize) -> Result<Vec<T>, ArrangementError> {
     Ok(v)
 }
 
+// Half-open onset windows exclude held notes from before a trimmed start.
+fn visible<'a, 'b>(
+    index: &'a [(usize, &'b SeqNote)],
+    start: u64,
+    end: u64,
+) -> &'a [(usize, &'b SeqNote)] {
+    let lo = if start == 0 {
+        0
+    } else {
+        index.partition_point(|(_, n)| u64::from(n.tick) < start)
+    };
+    let hi = if index.last().is_none_or(|(_, n)| u64::from(n.tick) < end) {
+        index.len()
+    } else {
+        index.partition_point(|(_, n)| u64::from(n.tick) < end)
+    };
+    &index[lo..hi]
+}
+
 /// Validates every supplied pattern and clip, including unused/muted sources, before
 /// expanding. The output budget is the smaller of `max_notes` and [`MAX_SONG_NOTES`].
 /// Pattern notes must start inside their source, have positive duration at most 256 steps,
@@ -91,9 +110,12 @@ pub fn compile_pattern_clips(
                 });
             }
         }
-        sources.push((*id, p));
+        let mut index = reserved(p.notes.len())?;
+        index.extend(p.notes.iter().enumerate());
+        index.sort_unstable_by_key(|(ordinal, n)| (n.tick, *ordinal));
+        sources.push((*id, p, index));
     }
-    sources.sort_unstable_by_key(|(id, _)| *id);
+    sources.sort_unstable_by_key(|(id, _, _)| *id);
     for pair in sources.windows(2) {
         if pair[0].0 == pair[1].0 {
             return Err(ArrangementError::DuplicatePattern(pair[0].0));
@@ -110,7 +132,7 @@ pub fn compile_pattern_clips(
             return Err(ArrangementError::InvalidClip(c.id));
         }
         if sources
-            .binary_search_by_key(&c.pattern, |(id, _)| *id)
+            .binary_search_by_key(&c.pattern, |(id, _, _)| *id)
             .is_err()
         {
             return Err(ArrangementError::UnknownPattern(c.pattern));
@@ -127,38 +149,48 @@ pub fn compile_pattern_clips(
     let limit = max_notes.min(MAX_SONG_NOTES);
     let mut count = 0usize;
     for c in clips.iter().filter(|c| !c.muted) {
-        let p = sources[sources
-            .binary_search_by_key(&c.pattern, |(id, _)| *id)
-            .unwrap()]
-        .1;
+        let (_, p, index) = &sources[sources
+            .binary_search_by_key(&c.pattern, |(id, _, _)| *id)
+            .unwrap()];
         let period = u64::from(p.length);
-        for n in &p.notes {
-            let first = (u64::from(n.tick) + period - u64::from(c.offset) % period) % period;
-            if first < c.length {
-                let occurrences = 1 + (c.length - 1 - first) / period;
-                count = count
-                    .checked_add(
-                        usize::try_from(occurrences)
-                            .map_err(|_| ArrangementError::TooManyNotes { limit })?,
-                    )
-                    .filter(|n| *n <= limit)
-                    .ok_or(ArrangementError::TooManyNotes { limit })?;
-            }
-        }
+        let phase = u64::from(c.offset) % period;
+        let remainder = c.length % period;
+        let first_width = remainder.min(period - phase);
+        let partial = visible(index, phase, phase + first_width).len()
+            + visible(index, 0, remainder - first_width).len();
+        let occurrences = (c.length / period)
+            .checked_mul(
+                u64::try_from(index.len()).map_err(|_| ArrangementError::TooManyNotes { limit })?,
+            )
+            .and_then(|n| n.checked_add(partial as u64))
+            .ok_or(ArrangementError::TooManyNotes { limit })?;
+        count = count
+            .checked_add(
+                usize::try_from(occurrences)
+                    .map_err(|_| ArrangementError::TooManyNotes { limit })?,
+            )
+            .filter(|n| *n <= limit)
+            .ok_or(ArrangementError::TooManyNotes { limit })?;
     }
-    // Carry the original traversal ordinal so an allocation-free unstable sort still
-    // preserves exact ties, independent of the sorting algorithm or platform.
+    // The source ordinal survives tick indexing; total output sorting requires no scratch
+    // allocation, and exact ties retain original source order on every platform.
     let mut expanded = reserved(count)?;
     for c in clips.iter().filter(|c| !c.muted) {
-        let p = sources[sources
-            .binary_search_by_key(&c.pattern, |(id, _)| *id)
-            .unwrap()]
-        .1;
+        let (_, p, index) = &sources[sources
+            .binary_search_by_key(&c.pattern, |(id, _, _)| *id)
+            .unwrap()];
+        if index.is_empty() {
+            continue;
+        }
         let period = u64::from(p.length);
-        for n in &p.notes {
-            let mut local = (u64::from(n.tick) + period - u64::from(c.offset) % period) % period;
-            while local < c.length {
-                let ordinal = expanded.len();
+        let mut phase = u64::from(c.offset) % period;
+        let mut base = 0;
+        // Only the first/last partial windows can emit nothing. Every intervening full
+        // period emits at least one note, so this loop is bounded by output + two windows.
+        while base < c.length {
+            let width = (c.length - base).min(period - phase);
+            for &(ordinal, n) in visible(index, phase, phase + width) {
+                let local = base + u64::from(n.tick) - phase;
                 expanded.push((
                     SongNote {
                         tick: c.start + local,
@@ -171,12 +203,12 @@ pub fn compile_pattern_clips(
                     },
                     ordinal,
                 ));
-                local = local
-                    .checked_add(period)
-                    .ok_or(ArrangementError::InvalidClip(c.id))?;
             }
+            base += width;
+            phase = 0;
         }
     }
+    debug_assert_eq!(expanded.len(), count);
     expanded.sort_unstable_by_key(|(n, ordinal)| {
         (n.tick, n.clip_id, n.channel, n.slide, n.key, *ordinal)
     });

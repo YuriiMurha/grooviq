@@ -91,6 +91,12 @@ fn muted_and_empty_preserve_extent_and_still_validate() {
             .length,
         30
     );
+    assert!(
+        compile_pattern_clips(&pattern(vec![note(0, 1)]), &[c], 0)
+            .unwrap()
+            .notes
+            .is_empty()
+    );
     c.pattern = 99;
     assert!(matches!(
         compile_pattern_clips(&[], &[c], 0),
@@ -100,12 +106,24 @@ fn muted_and_empty_preserve_extent_and_still_validate() {
 #[test]
 fn refuses_invalid_data_even_unused_or_muted() {
     let c = clip(1, 0, 16, 0);
-    assert!(compile_pattern_clips(&pattern(vec![]), &[c, c], 10).is_err());
+    assert_eq!(
+        compile_pattern_clips(&pattern(vec![]), &[c, c], 10),
+        Err(ArrangementError::DuplicateClip(1))
+    );
     let mut p = pattern(vec![note(0, 1)]);
-    assert!(compile_pattern_clips(&[p[0].clone(), p[0].clone()], &[], 0).is_err());
+    assert_eq!(
+        compile_pattern_clips(&[p[0].clone(), p[0].clone()], &[], 0),
+        Err(ArrangementError::DuplicatePattern(7))
+    );
     for velocity in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
         p[0].1.notes[0].velocity = velocity;
-        assert!(compile_pattern_clips(&p, &[], 0).is_err());
+        assert_eq!(
+            compile_pattern_clips(&p, &[], 0),
+            Err(ArrangementError::InvalidNote {
+                pattern: 7,
+                index: 0
+            })
+        );
     }
     for n in [
         note(16, 1),
@@ -116,10 +134,16 @@ fn refuses_invalid_data_even_unused_or_muted() {
             ..note(0, 1)
         },
     ] {
-        assert!(compile_pattern_clips(&pattern(vec![n]), &[], 0).is_err());
+        assert_eq!(
+            compile_pattern_clips(&pattern(vec![n]), &[], 0),
+            Err(ArrangementError::InvalidNote {
+                pattern: 7,
+                index: 0
+            })
+        );
     }
     for length in [0, 256 * STEP_TICKS + 1] {
-        assert!(
+        assert_eq!(
             compile_pattern_clips(
                 &[(
                     7,
@@ -130,8 +154,8 @@ fn refuses_invalid_data_even_unused_or_muted() {
                 )],
                 &[],
                 0
-            )
-            .is_err()
+            ),
+            Err(ArrangementError::InvalidPattern(7))
         );
     }
 }
@@ -143,9 +167,23 @@ fn tick_clip_and_expansion_limits_are_atomic() {
         clip(1, MAX_SONG_TICKS, 1, 0),
         clip(1, 0, 0, 0),
     ] {
-        assert!(compile_pattern_clips(&p, &[c], 10).is_err());
+        assert_eq!(
+            compile_pattern_clips(&p, &[c], 10),
+            Err(ArrangementError::InvalidClip(1))
+        );
     }
-    assert!(compile_pattern_clips(&p, &vec![clip(1, 0, 1, 0); 100_001], 0).is_err());
+    let clips: Vec<_> = (0..100_001).map(|id| clip(id, 0, 1, 1)).collect();
+    assert_eq!(
+        compile_pattern_clips(&p, &clips, 0),
+        Err(ArrangementError::TooManyClips)
+    );
+    assert_eq!(
+        compile_pattern_clips(&p, &clips[..100_000], 0).unwrap(),
+        ArrangementData {
+            length: 1,
+            notes: vec![]
+        }
+    );
     assert_eq!(
         compile_pattern_clips(&p, &[clip(1, 0, 48, 0)], 2),
         Err(ArrangementError::TooManyNotes { limit: 2 })
@@ -157,7 +195,12 @@ fn tick_clip_and_expansion_limits_are_atomic() {
             .len(),
         3
     );
-    assert!(compile_pattern_clips(&p, &[clip(1, 0, MAX_SONG_TICKS, 0)], usize::MAX).is_err());
+    assert_eq!(
+        compile_pattern_clips(&p, &[clip(1, 0, MAX_SONG_TICKS, 0)], usize::MAX),
+        Err(ArrangementError::TooManyNotes {
+            limit: MAX_SONG_NOTES
+        })
+    );
     assert_eq!(
         compile_pattern_clips(&pattern(vec![]), &[clip(1, 0, MAX_SONG_TICKS, u32::MAX)], 0)
             .unwrap()
@@ -175,5 +218,111 @@ fn exact_million_note_budget_is_accepted() {
     assert_eq!(
         compile_pattern_clips(&p, &[clip(1, 0, 16_000_001, 0)], usize::MAX),
         Err(ArrangementError::TooManyNotes { limit: 1_000_000 })
+    );
+}
+
+#[test]
+fn full_sort_contract_conflicts_at_every_level() {
+    let make = |channel, key, slide, velocity| SeqNote {
+        channel: ChannelId(channel),
+        key,
+        slide,
+        velocity,
+        ..note(0, 1)
+    };
+    // Deliberately opposite key/channel order, with a slide's key below a plain key.
+    let p = pattern(vec![
+        make(2, 10, false, 0.1),
+        make(1, 20, true, 0.2),
+        make(1, 80, false, 0.3),
+        make(1, 40, false, 0.4),
+        make(1, 40, false, 0.5),
+    ]);
+    let s = compile_pattern_clips(&p, &[clip(9, 0, 17, 0), clip(2, 1, 16, 0)], 20).unwrap();
+    let signatures: Vec<_> = s
+        .notes
+        .iter()
+        .map(|n| (n.tick, n.clip_id, n.channel.0, n.slide, n.key, n.velocity))
+        .collect();
+    let group = |tick, id| {
+        vec![
+            (tick, id, 1, false, 40, 0.4),
+            (tick, id, 1, false, 40, 0.5),
+            (tick, id, 1, false, 80, 0.3),
+            (tick, id, 1, true, 20, 0.2),
+            (tick, id, 2, false, 10, 0.1),
+        ]
+    };
+    let mut expected = group(0, 9);
+    expected.extend(group(1, 2));
+    expected.extend(group(16, 9));
+    assert_eq!(signatures, expected);
+    // Same tick, conflicting clip IDs: clip ID precedes all source-note keys.
+    let same = compile_pattern_clips(&p, &[clip(9, 0, 1, 0), clip(2, 0, 1, 0)], 20).unwrap();
+    assert_eq!(
+        same.notes.iter().map(|n| n.clip_id).collect::<Vec<_>>(),
+        vec![2, 2, 2, 2, 2, 9, 9, 9, 9, 9]
+    );
+}
+
+#[test]
+fn phase_windows_exact_budget_and_one_lower() {
+    let p = pattern(vec![note(0, 2), note(3, 2), note(7, 2), note(15, 2)]);
+    // Source [6,26): 7,15,16,19,23. Source [14,19): 15,16 (19 excluded).
+    for (offset, length, expected) in [
+        (6, 20, vec![1, 9, 10, 13, 17]),
+        (38, 20, vec![1, 9, 10, 13, 17]),
+        (30, 5, vec![1, 2]),
+        (3, 1, vec![0]),
+    ] {
+        let n = expected.len();
+        let s = compile_pattern_clips(&p, &[clip(1, 0, length, offset)], n).unwrap();
+        assert_eq!(s.notes.iter().map(|n| n.tick).collect::<Vec<_>>(), expected);
+        assert_eq!(
+            compile_pattern_clips(&p, &[clip(1, 0, length, offset)], n - 1),
+            Err(ArrangementError::TooManyNotes { limit: n - 1 })
+        );
+    }
+}
+
+#[test]
+fn inclusive_source_and_note_length_maxima() {
+    let max = 256 * STEP_TICKS;
+    let p = vec![(
+        7,
+        PatternData {
+            length: max,
+            notes: vec![note(0, max)],
+        },
+    )];
+    let s = compile_pattern_clips(&p, &[clip(0, 0, u64::from(max), 0)], 1).unwrap();
+    assert_eq!((s.notes[0].tick, s.notes[0].length), (0, u64::from(max)));
+    let mut invalid = p.clone();
+    invalid[0].1.notes[0].length = max + 1;
+    assert_eq!(
+        compile_pattern_clips(&invalid, &[], 0),
+        Err(ArrangementError::InvalidNote {
+            pattern: 7,
+            index: 0
+        })
+    );
+}
+
+#[test]
+fn sparse_source_many_empty_clips() {
+    let p = vec![(
+        7,
+        PatternData {
+            length: 256 * STEP_TICKS,
+            notes: vec![note(60_000, 1); 100_000],
+        },
+    )];
+    let clips: Vec<_> = (0..10_000).map(|id| clip(id, 0, 1, 0)).collect();
+    assert_eq!(
+        compile_pattern_clips(&p, &clips, 0).unwrap(),
+        ArrangementData {
+            length: 1,
+            notes: vec![]
+        }
     );
 }
