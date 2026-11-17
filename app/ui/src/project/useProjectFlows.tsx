@@ -9,6 +9,7 @@ import {
   projectOpen,
   projectSave,
   projectSaveAs,
+  projectView,
   recoveryDiscard,
   recoveryRestore,
   recoveryStatus,
@@ -107,6 +108,8 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
       adopt(await enqueue(() => projectSaveAs(path)));
       return true;
     } catch (e) {
+      // A rename may have succeeded before directory sync failed.
+      await enqueue(projectView).then(adopt).catch(() => {});
       fail(e);
       return false;
     }
@@ -122,7 +125,8 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
       adopt(await enqueue(projectSave));
       return true;
     } catch (e) {
-      // Including "already being saved": a toast, and the app stays as it was.
+      // A rename may have succeeded before directory sync failed.
+      await enqueue(projectView).then(adopt).catch(() => {});
       fail(e);
       return false;
     }

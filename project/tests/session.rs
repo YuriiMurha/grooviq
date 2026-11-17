@@ -3200,3 +3200,67 @@ fn an_owed_record_off_keeps_refusing_past_a_replacement_s_barrier() {
     assert_eq!((stopped.reason, stopped.dropped), ("engineBusy", 1));
     assert_eq!(session.project().patterns[0].notes, notes);
 }
+
+#[test]
+fn directory_failure_keeps_new_bytes_and_reports_uncertainty() {
+    struct Refuse;
+    impl Disk for Refuse {
+        fn sync_folder(&mut self, _: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::other("folder open/sync refused"))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("song.grooviq");
+    let backups = dir.path().join("backups");
+    let (mut session, _, _processor) = rig();
+    session.save(Some(&path), &backups).unwrap();
+    let old_bytes = std::fs::read(&path).unwrap();
+    session
+        .apply(Edit::SetTempo { bpm: 137.0 }, Instant::now())
+        .unwrap();
+    let job = session.begin_save(None).unwrap();
+    let error = job.write_on(&backups, &mut Refuse).unwrap_err();
+    assert!(error.to_string().contains("written"));
+    assert_eq!(load(&path).unwrap().project.bpm, 137.0);
+    assert!(error.directory_unconfirmed());
+    session.save_unconfirmed(&job);
+    assert!(session.view().dirty);
+    assert_eq!(session.path(), Some(path.as_path()));
+    let folder = grooviq_project::backup::backup_folder(&path, &backups).unwrap();
+    let copies: Vec<_> = std::fs::read_dir(folder)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(copies.len(), 1);
+    assert_eq!(std::fs::read(&copies[0]).unwrap(), old_bytes);
+    session.save(None, &backups).unwrap();
+    assert!(!session.view().dirty);
+}
+
+#[test]
+fn a_clean_save_as_warning_records_the_new_path_and_keeps_close_protection() {
+    struct Refuse;
+    impl Disk for Refuse {
+        fn sync_folder(&mut self, _: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::other("directory sync refused"))
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let old = root.path().join("old.grooviq");
+    let new = root.path().join("new.grooviq");
+    let backups = root.path().join("backups");
+    let (mut session, _, _processor) = rig();
+    session.save(Some(&old), &backups).unwrap();
+    let job = session.begin_save(Some(&new)).unwrap();
+    assert!(
+        job.write_on(&backups, &mut Refuse)
+            .unwrap_err()
+            .directory_unconfirmed()
+    );
+    session.save_unconfirmed(&job);
+    assert_eq!(session.path(), Some(new.as_path()));
+    assert!(session.needs_confirmation());
+    assert!(load(&new).is_ok());
+    session.save(None, &backups).unwrap();
+    assert!(!session.needs_confirmation());
+}

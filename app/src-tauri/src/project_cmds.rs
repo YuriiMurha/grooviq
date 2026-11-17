@@ -353,14 +353,24 @@ async fn save_to(audio: &Audio, path: Option<PathBuf>) -> Result<ProjectView, St
         .map_err(|e| e.to_string())?;
     let backups = audio.backups.clone();
     let written = blocking(move || {
-        job.write(&backups).map_err(|e| e.to_string())?;
-        Ok(job)
+        let result = job.write(&backups);
+        Ok((job, result))
     })
     .await;
     let (view, clean) = {
         let mut session = session(audio);
         let job = match written {
-            Ok(job) => job,
+            Ok((job, result)) => {
+                if let Err(e) = result {
+                    if e.directory_unconfirmed() {
+                        session.save_unconfirmed(&job);
+                    } else {
+                        session.save_failed();
+                    }
+                    return Err(e.to_string());
+                }
+                job
+            }
             Err(e) => {
                 session.save_failed();
                 return Err(e);

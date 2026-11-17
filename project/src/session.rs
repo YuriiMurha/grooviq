@@ -439,6 +439,13 @@ pub struct SaveJob {
     generation: u64,
 }
 
+impl SessionError {
+    /// A completed rename whose directory sync failed.
+    pub fn directory_unconfirmed(&self) -> bool {
+        matches!(self, Self::Save(e) if crate::file::directory_unconfirmed(e))
+    }
+}
+
 impl SaveJob {
     /// Saves: writes the new file beside the old one, then backs up the file it replaces
     /// (keeping [`MAX_BACKUPS`] in `backups`), then puts the new one in place. A save that is
@@ -1780,6 +1787,20 @@ impl Session {
         true
     }
 
+    /// Records disk facts after rename without clearing dirty or autosave protection.
+    pub fn save_unconfirmed(&mut self, job: &SaveJob) {
+        self.saving = false;
+        if job.generation != self.generation {
+            return;
+        }
+        self.path = Some(job.path.clone());
+        self.project.name = job.project.name.clone();
+        if self.revision == self.saved_revision {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        self.pending_since.get_or_insert_with(Instant::now);
+    }
+
     /// Records that the job from [`Self::begin_save`] was not written: the next save may start.
     pub fn save_failed(&mut self) {
         self.saving = false;
@@ -1790,7 +1811,11 @@ impl Session {
     pub fn save(&mut self, path: Option<&Path>, backups: &Path) -> Result<PathBuf, SessionError> {
         let job = self.begin_save(path)?;
         if let Err(e) = job.write(backups) {
-            self.save_failed();
+            if e.directory_unconfirmed() {
+                self.save_unconfirmed(&job);
+            } else {
+                self.save_failed();
+            }
             return Err(e);
         }
         self.finish_save(&job);

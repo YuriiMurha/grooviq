@@ -19,7 +19,9 @@
 //! [`MAX_BACKUPS`] are kept) or discards it (it is deleted). Quitting without choosing, or
 //! crashing again, never loses it.
 
-use crate::file::{SampleFiles, save, sync_folder};
+use crate::file::{
+    Disk, RealDisk, SampleFiles, confirm_directory, directory_unconfirmed, stage_save,
+};
 use crate::model::{EXTENSION, Project};
 use crate::session::MAX_BACKUPS;
 use serde::{Deserialize, Serialize};
@@ -117,21 +119,18 @@ fn is_numbered(name: &str, prefix: &str, extension: &str) -> bool {
 
 /// Writes `bytes` to `path` so that `path` is always either what it was or all of `bytes`:
 /// a temp file beside it, flushed and synced, renamed over it, then the folder synced.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn write_atomic(path: &Path, bytes: &[u8], disk: &mut impl Disk) -> io::Result<()> {
     let tmp = grooviq_engine::sibling(path, ".tmp");
     let written = (|| {
         let mut file = File::create(&tmp)?;
         file.write_all(bytes)?;
         file.flush()?;
-        file.sync_all()?;
+        disk.sync(&file)?;
         drop(file);
-        fs::rename(&tmp, path)
+        disk.rename(&tmp, path)
     })();
     match written {
-        Ok(()) => {
-            sync_folder(path);
-            Ok(())
-        }
+        Ok(()) => confirm_directory(disk, path),
         Err(e) => {
             let _ = fs::remove_file(&tmp);
             Err(e)
@@ -302,7 +301,7 @@ impl RecoveryDir {
         // Without its metadata the project is still offered (untitled, dated by the file),
         // so a failed write here is not worth losing it over.
         if let Ok(json) = serde_json::to_vec(&meta) {
-            let _ = write_atomic(&file.with_extension("json"), &json);
+            let _ = write_atomic(&file.with_extension("json"), &json, &mut RealDisk);
         }
         fs::rename(autosave, &file)
     }
@@ -382,7 +381,8 @@ impl RecoveryDir {
     /// Writes an autosave (atomically, through `save`, to a new file name), then commits it by
     /// atomically replacing `autosave.json` with `original`, the time and that file's name. See
     /// the module docs: at every moment of a crash the folder holds a whole pair. On an error
-    /// the new file is removed and the old pair stays.
+    /// before metadata rename the new file is removed and the old pair stays. A
+    /// post-rename durability warning retains both files, including the referenced snapshot.
     pub fn write_autosave(
         &self,
         project: &Project,
@@ -403,10 +403,21 @@ impl RecoveryDir {
         original: Option<&Path>,
         between: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
+        self.write_autosave_on(project, samples, original, between, &mut RealDisk)
+    }
+
+    fn write_autosave_on(
+        &self,
+        project: &Project,
+        samples: &SampleFiles,
+        original: Option<&Path>,
+        between: impl FnOnce() -> io::Result<()>,
+        disk: &mut impl Disk,
+    ) -> io::Result<()> {
         let number = self.written.fetch_add(1, Ordering::AcqRel) + 1;
         let name = format!("{AUTOSAVE}{number}.{EXTENSION}");
         let file = self.root.join(&name);
-        save(project, samples, &file)?;
+        stage_save(project, samples, &file, disk)?.commit(disk)?;
         let committed = between().and_then(|()| {
             let meta = Meta {
                 original: original.map(Path::to_path_buf),
@@ -414,10 +425,14 @@ impl RecoveryDir {
                 file: Some(name.clone()),
             };
             let json = serde_json::to_vec(&meta).map_err(io::Error::other)?;
-            write_atomic(&self.root.join(META), &json)
+            write_atomic(&self.root.join(META), &json, disk)
         });
         if let Err(e) = committed {
-            let _ = fs::remove_file(&file);
+            // Metadata may already name this file. Retain both snapshots until a
+            // later confirmed commit makes cleanup safe.
+            if !directory_unconfirmed(&e) {
+                let _ = fs::remove_file(&file);
+            }
             return Err(e);
         }
         // The old autosave is only an older copy now; one that cannot be removed is taken
@@ -472,6 +487,102 @@ impl RecoveryDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failures_at_snapshot_and_metadata_boundaries_keep_a_valid_pair() {
+        for boundary in 1..=6 {
+            struct FailAt {
+                count: usize,
+                boundary: usize,
+            }
+            impl Disk for FailAt {
+                fn sync(&mut self, file: &File) -> io::Result<()> {
+                    self.count += 1;
+                    if self.count == self.boundary {
+                        return Err(io::Error::other("sync refused"));
+                    }
+                    file.sync_all()
+                }
+                fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
+                    self.count += 1;
+                    if self.count == self.boundary {
+                        return Err(io::Error::other("rename refused"));
+                    }
+                    fs::rename(from, to)
+                }
+                fn sync_folder(&mut self, _: &Path) -> io::Result<()> {
+                    self.count += 1;
+                    if self.count == self.boundary {
+                        return Err(io::Error::other("directory refused"));
+                    }
+                    Ok(())
+                }
+            }
+            let root = tempfile::tempdir().unwrap();
+            let (dir, _) = RecoveryDir::start(root.path()).unwrap();
+            dir.write_autosave(&Project::new(), &SampleFiles::new(), None)
+                .unwrap();
+            let old = fs::read(root.path().join(META)).unwrap();
+            let result = dir.write_autosave_on(
+                &Project::new(),
+                &SampleFiles::new(),
+                None,
+                || Ok(()),
+                &mut FailAt { count: 0, boundary },
+            );
+            let error = result.unwrap_err();
+            assert_eq!(
+                directory_unconfirmed(&error),
+                boundary == 3 || boundary == 6
+            );
+            let meta = read_meta(&root.path().join(META)).unwrap();
+            assert!(root.path().join(meta.file.unwrap()).is_file());
+            if boundary < 6 {
+                assert_eq!(fs::read(root.path().join(META)).unwrap(), old);
+            }
+            dir.write_autosave(&Project::new(), &SampleFiles::new(), None)
+                .unwrap();
+            assert_eq!(dir.numbered(AUTOSAVE).len(), 1);
+        }
+    }
+
+    #[test]
+    fn metadata_directory_warning_retains_both_snapshots_until_retry() {
+        struct RefuseMetadata;
+        impl crate::file::Disk for RefuseMetadata {
+            fn sync_folder(&mut self, path: &Path) -> io::Result<()> {
+                if path.ends_with(META) {
+                    Err(io::Error::other("folder sync refused"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let (dir, _) = RecoveryDir::start(root.path()).unwrap();
+        dir.write_autosave(&Project::new(), &SampleFiles::new(), None)
+            .unwrap();
+        let mut newer = Project::new();
+        newer.bpm = 137.0;
+        let error = dir
+            .write_autosave_on(
+                &newer,
+                &SampleFiles::new(),
+                Some(Path::new("new.grooviq")),
+                || Ok(()),
+                &mut RefuseMetadata,
+            )
+            .unwrap_err();
+        assert!(crate::file::directory_unconfirmed(&error));
+        let meta = read_meta(&root.path().join(META)).unwrap();
+        let referenced = root.path().join(meta.file.unwrap());
+        assert_eq!(crate::file::load(&referenced).unwrap().project.bpm, 137.0);
+        assert_eq!(meta.original, Some(PathBuf::from("new.grooviq")));
+        assert_eq!(dir.numbered(AUTOSAVE).len(), 2);
+        dir.write_autosave(&Project::new(), &SampleFiles::new(), None)
+            .unwrap();
+        assert_eq!(dir.numbered(AUTOSAVE).len(), 1);
+    }
 
     #[test]
     fn a_failed_pid_write_still_offers_the_recovery_and_keeps_autosave_on() {
