@@ -490,6 +490,17 @@ pub struct Session {
     owed_disarm: bool,
     /// The current pattern's note changes, for undo and redo.
     history: NoteHistory,
+    /// How many of `pending` belong to a take that ended (the engine's `End` came after them):
+    /// they join that take's undo step, which then closes; the rest start the next one.
+    take_end: Option<usize>,
+}
+
+/// What committing waiting recorded notes did.
+enum Commit {
+    /// Added (the pattern's new revision, if any note was).
+    Done(Option<u32>),
+    /// The engine's queue was full: the notes wait for the next collect.
+    Busy,
 }
 
 fn lock(controller: &Mutex<Controller>) -> MutexGuard<'_, Controller> {
@@ -528,6 +539,7 @@ impl Session {
             pending: Vec::new(),
             owed_disarm: false,
             history: NoteHistory::default(),
+            take_end: None,
         };
         // A fresh queue always has room for a whole state.
         let synced = session.sync_engine();
@@ -947,6 +959,16 @@ impl Session {
         &mut self,
         change: impl FnOnce(&mut Pattern) -> Result<(), SessionError>,
     ) -> Result<bool, SessionError> {
+        self.edit_pattern_as(false, change)
+    }
+
+    /// [`Self::edit_pattern`]; with `take`, the note change is a recorded take's commit and joins
+    /// the take's undo step while the take runs.
+    fn edit_pattern_as(
+        &mut self,
+        take: bool,
+        change: impl FnOnce(&mut Pattern) -> Result<(), SessionError>,
+    ) -> Result<bool, SessionError> {
         let mut pattern = self.current().clone();
         change(&mut pattern)?;
         if pattern == *self.current() {
@@ -957,8 +979,10 @@ impl Session {
             pattern.revision = pattern.revision.wrapping_add(1);
         }
         self.keep_pattern(pattern)?;
-        if let Some(notes) = notes {
-            self.history.push(notes);
+        match notes {
+            Some(notes) if take => self.history.record(notes),
+            Some(notes) => self.history.push(notes),
+            None => {}
         }
         Ok(true)
     }
@@ -1153,7 +1177,7 @@ impl Session {
     /// nothing (only unknown ids) leaves the revision and the dirty state alone.
     pub fn edit_notes(&mut self, edit: NotesEdit, now: Instant) -> Result<NotesAck, SessionError> {
         let stale = edit.base_revision != self.current().revision;
-        let applied = self.apply_notes(&edit, now)?;
+        let applied = self.apply_notes(&edit, false, now)?;
         Ok(NotesAck {
             revision: self.current().revision,
             added_ids: applied.added_ids,
@@ -1163,9 +1187,11 @@ impl Session {
         })
     }
 
+    /// Applies `edit` (with `take`, as a recorded take's commit: see [`Self::edit_pattern_as`]).
     fn apply_notes(
         &mut self,
         edit: &NotesEdit,
+        take: bool,
         now: Instant,
     ) -> Result<notes::Applied, SessionError> {
         let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
@@ -1173,7 +1199,7 @@ impl Session {
         let bar = u32::from(sig.beats) * 3840 / u32::from(sig.unit.max(1));
         let steps = self.current().steps;
         let mut applied = None;
-        let changed = self.edit_pattern(|p| {
+        let changed = self.edit_pattern_as(take, |p| {
             applied = Some(notes::apply(p, edit, &channels, bar)?);
             Ok(())
         })?;
@@ -1264,9 +1290,34 @@ impl Session {
         if self.owed_disarm {
             self.send_disarm();
         }
-        let fed = self.recorder.feed(events);
-        self.pending.extend(fed);
+        // A take ends at the engine's `End` (recording off, the transport stopped): the notes
+        // completed up to the last one here, and those still waiting, belong to the take that
+        // ended; the ones after it to the next take. (Two takes ended within one poll share a
+        // step.)
+        match events
+            .iter()
+            .rposition(|e| matches!(e, RecordEvent::End { .. }))
+        {
+            Some(end) => {
+                let ended = self.recorder.feed(&events[..=end]);
+                self.pending.extend(ended);
+                self.take_end = Some(self.pending.len());
+                let next = self.recorder.feed(&events[end + 1..]);
+                self.pending.extend(next);
+            }
+            None => {
+                let fed = self.recorder.feed(events);
+                self.pending.extend(fed);
+            }
+        }
         let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
+        if let Some(end) = self.take_end {
+            let kept = self.pending[..end]
+                .iter()
+                .filter(|n| channels.contains(&n.channel))
+                .count();
+            self.take_end = Some(kept);
+        }
         self.pending.retain(|n| channels.contains(&n.channel));
         // What fits: the note cap, and the ids left (the used-up mark is never handed out).
         let pattern = self.current();
@@ -1279,12 +1330,16 @@ impl Session {
         };
         let mut dropped = self.pending.len().saturating_sub(fits);
         self.pending.truncate(fits);
+        if let Some(end) = &mut self.take_end {
+            *end = (*end).min(fits);
+        }
 
         let mut out = Recorded::default();
         let mut error = None;
         match self.commit_pending(now) {
             Ok(revision) => out.revision = revision,
-            Err((e, lost)) => {
+            Err((e, lost, revision)) => {
+                out.revision = revision;
                 dropped += lost;
                 reason = "error";
                 error = Some(e);
@@ -1335,6 +1390,8 @@ impl Session {
     /// engine's barrier behind the switch is read, every recorded note is refused and counted.
     fn disarm(&mut self) {
         self.recording = false;
+        // Every note it keeps is in: the take ends here.
+        self.history.end_take();
         self.recorder.refuse_until_mark(None);
         self.send_disarm();
     }
@@ -1351,27 +1408,56 @@ impl Session {
         }
     }
 
-    /// Adds the waiting recorded notes as one edit. A full engine queue keeps them for the next
-    /// collect (`Ok(None)`); any other refusal loses them and says how many.
-    fn commit_pending(&mut self, now: Instant) -> Result<Option<u32>, (SessionError, usize)> {
-        if self.pending.is_empty() {
-            return Ok(None);
+    /// Adds the waiting recorded notes: those of a take that ended join its undo step, which
+    /// closes, and the rest go in as the running take's. A full engine queue keeps what is not
+    /// in yet for the next collect; any other refusal loses it and says how many (with the
+    /// revision of what did go in).
+    fn commit_pending(
+        &mut self,
+        now: Instant,
+    ) -> Result<Option<u32>, (SessionError, usize, Option<u32>)> {
+        let mut revision = None;
+        if let Some(end) = self.take_end {
+            match self
+                .commit_first(end, now)
+                .map_err(|(e, lost)| (e, lost, None))?
+            {
+                Commit::Busy => return Ok(None),
+                Commit::Done(r) => revision = r,
+            }
+            self.take_end = None;
+            self.history.end_take();
+        }
+        match self.commit_first(self.pending.len(), now) {
+            Ok(Commit::Done(r)) => Ok(r.or(revision)),
+            Ok(Commit::Busy) => Ok(revision),
+            Err((e, lost)) => Err((e, lost, revision)),
+        }
+    }
+
+    /// Adds the first `n` waiting recorded notes as one edit, a recorded take's commit.
+    fn commit_first(&mut self, n: usize, now: Instant) -> Result<Commit, (SessionError, usize)> {
+        if n == 0 {
+            return Ok(Commit::Done(None));
         }
         let edit = NotesEdit {
             base_revision: self.current().revision,
-            add: self.pending.clone(),
+            add: self.pending[..n].to_vec(),
             update: Vec::new(),
             delete: Vec::new(),
         };
-        match self.apply_notes(&edit, now) {
+        match self.apply_notes(&edit, true, now) {
             Ok(applied) => {
-                self.pending.clear();
-                Ok((!applied.added_ids.is_empty()).then(|| self.current().revision))
+                self.pending.drain(..n);
+                Ok(Commit::Done(
+                    (!applied.added_ids.is_empty()).then(|| self.current().revision),
+                ))
             }
-            Err(SessionError::Engine(_)) => Ok(None),
+            Err(SessionError::Engine(_)) => Ok(Commit::Busy),
             Err(e) => {
                 let lost = self.pending.len();
                 self.pending.clear();
+                self.take_end = None;
                 Err((e, lost))
             }
         }
@@ -1465,6 +1551,7 @@ impl Session {
             self.recorder.await_mark(mark);
         }
         self.pending.clear();
+        self.take_end = None;
         self.history.clear();
         self.project = project;
         self.files = files;

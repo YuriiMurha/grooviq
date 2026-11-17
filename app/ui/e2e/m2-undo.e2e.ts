@@ -92,6 +92,25 @@ test.describe("undo and redo", () => {
     expect(await count(mock, "notes_undo")).toBe(before);
   });
 
+  test("a_recorded_take_undoes_in_one_step", async ({ app, mock }) => {
+    // Two notes played on the typing keyboard in one take, each committed on its own.
+    await app.getByRole("button", { name: "Record" }).click();
+    await app.getByRole("button", { name: "Play" }).click();
+    for (const [key, at] of [["z", 0], ["x", 960]] as const) {
+      await mock.eval(`(m) => m.hold(${at})`);
+      await app.keyboard.down(key);
+      await mock.eval(`(m) => m.hold(${at + 480})`);
+      await app.keyboard.up(key);
+    }
+    await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 480, 48], [1, 960, 480, 50]]);
+    await app.getByRole("button", { name: "Stop" }).click();
+    await app.keyboard.press(UNDO);
+    await expect.poll(() => sessionNotes(mock)).toEqual([]);
+    await expect.poll(() => mock.view().then((v) => v.canUndo)).toBe(false);
+    await app.keyboard.press(REDO);
+    await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 480, 48], [1, 960, 480, 50]]);
+  });
+
   test("undo_is_ignored_while_typing_in_the_bpm_field", async ({ app, mock }) => {
     await clickCell(app, 0, 0);
     await expect.poll(() => sessionNotes(mock).then((n) => n.length)).toBe(1);

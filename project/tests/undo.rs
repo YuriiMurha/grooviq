@@ -6,7 +6,9 @@ use grooviq_engine::{AudioProcessor, Command, Controller, EngineConfig, RecordEv
 use grooviq_project::notes::{NewNote, NotesAck, NotesEdit};
 use grooviq_project::session::{Edit, Session, SessionError};
 use grooviq_project::undo::MAX_UNDO;
-use grooviq_project::{Loaded, Note, Project, compile_pattern, decode_samples};
+use grooviq_project::{
+    Loaded, MAX_NOTES_PER_PATTERN, Note, Project, compile_pattern, decode_samples,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -248,27 +250,6 @@ fn record_chord(
     let mut events = Vec::new();
     controller.lock().unwrap().take_recorded(&mut events);
     session.collect_recorded(&events, Instant::now()).revision
-}
-
-#[test]
-fn a_recorded_take_undoes_in_one_step() {
-    let (mut session, controller, mut processor, ch, before) = three_notes();
-    session.set_recording(true).unwrap();
-    start_take(&mut session, &controller, &mut processor);
-    record_chord(&mut session, &controller, &mut processor, ch, &[60, 64, 67]).unwrap();
-    assert_eq!(notes(&session).len(), 6);
-
-    undo(&mut session);
-    assert_eq!(notes(&session), before, "the whole take goes in one step");
-    // Undo leaves the recorder alone: recording is still on and the next take lands.
-    assert!(session.view().recording);
-    record_chord(&mut session, &controller, &mut processor, ch, &[72]).unwrap();
-    let after = notes(&session);
-    assert_eq!(after.len(), 4, "{after:?}");
-    assert!(after.iter().any(|n| n.key == 72));
-    // The new take cleared redo.
-    assert!(!session.view().can_redo);
-    assert_eq!(session.redo_notes(Instant::now()).unwrap(), None);
 }
 
 #[test]
@@ -518,17 +499,302 @@ fn undo_and_redo_never_pass_the_note_cap_or_reuse_ids() {
     assert!(!now.contains(&fresh[0]));
 }
 
+/// The keys of the current pattern's notes, sorted (the three-note fixture holds 60, 62, 64).
+fn keys(session: &Session) -> Vec<u8> {
+    let mut keys: Vec<u8> = notes(session).iter().map(|n| n.key).collect();
+    keys.sort_unstable();
+    keys
+}
+
+/// Undoes until nothing is left, counting the steps.
+fn undo_all(session: &mut Session) -> usize {
+    let mut steps = 0;
+    while session.undo_notes(Instant::now()).unwrap().is_some() {
+        steps += 1;
+    }
+    steps
+}
+
 #[test]
-fn a_recorded_note_of_a_channel_is_kept_by_another_channels_undo() {
-    // Two takes on two channels are two entries; undoing the newer keeps the older.
+fn a_take_over_several_polls_undoes_in_one_step() {
+    let (mut session, controller, mut processor, ch, before) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    // Three polls of the recorder, each adding notes: one take.
+    record_chord(&mut session, &controller, &mut processor, ch, &[70, 74]).unwrap();
+    record_chord(&mut session, &controller, &mut processor, ch, &[71]).unwrap();
+    record_chord(&mut session, &controller, &mut processor, ch, &[72, 76, 79]).unwrap();
+    let recorded = notes(&session);
+    assert_eq!(recorded.len(), 9);
+
+    let ack = undo(&mut session);
+    assert_eq!(notes(&session), before, "the whole take goes in one step");
+    assert_eq!(ack.view.pattern.steps, 16);
+    assert!(!session.view().can_undo);
+    redo(&mut session);
+    assert_eq!(notes(&session), recorded, "and comes back with its ids");
+    assert!(session.view().recording, "recording is left alone");
+}
+
+#[test]
+fn recording_off_ends_the_take() {
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    // A key still held when Record goes off ends there, in the take it started in.
+    session.live_note(ch, 71, 0.8, true).unwrap();
+    render(&mut processor, 4);
+    session.set_recording(false).unwrap();
+    render(&mut processor, 2);
+    session.live_note(ch, 71, 0.0, false).unwrap();
+    render(&mut processor, 2);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    session
+        .collect_recorded(&events, Instant::now())
+        .revision
+        .unwrap();
+    assert_eq!(keys(&session), vec![60, 62, 64, 70, 71]);
+    // The next take is a step of its own.
+    session.set_recording(true).unwrap();
+    record_chord(&mut session, &controller, &mut processor, ch, &[72]).unwrap();
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64, 70, 71]);
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64]);
+}
+
+#[test]
+fn notes_after_the_end_in_the_same_poll_start_the_next_take() {
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    // Off and on again, and a note played, all before the recorder's next poll: the poll
+    // holds the first take's end, then the second take's note.
+    session.live_note(ch, 71, 0.8, true).unwrap();
+    render(&mut processor, 2);
+    session.set_recording(false).unwrap();
+    render(&mut processor, 2);
+    session.live_note(ch, 71, 0.0, false).unwrap();
+    session.set_recording(true).unwrap();
+    session.live_note(ch, 72, 0.8, true).unwrap();
+    render(&mut processor, 2);
+    session.live_note(ch, 72, 0.0, false).unwrap();
+    render(&mut processor, 2);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    assert!(
+        events.iter().any(|e| matches!(e, RecordEvent::End { .. })),
+        "{events:?}"
+    );
+    session
+        .collect_recorded(&events, Instant::now())
+        .revision
+        .unwrap();
+    assert_eq!(keys(&session), vec![60, 62, 64, 70, 71, 72]);
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64, 70, 71]);
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64]);
+}
+
+#[test]
+fn stopping_the_transport_ends_the_take() {
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    controller.lock().unwrap().send(Command::Stop).unwrap();
+    render(&mut processor, 2);
+    // Recording stays on; the next Play starts the next take.
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[72]).unwrap();
+    assert!(session.view().recording);
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64, 70]);
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64]);
+}
+
+#[test]
+fn an_edit_ends_the_take() {
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    // A piano-roll edit while the take runs.
+    add_notes(&mut session, vec![melodic(ch, 0, 90)]);
+    record_chord(&mut session, &controller, &mut processor, ch, &[71]).unwrap();
+    // A step edit on another channel while the take runs.
+    let drums = add_synth(&mut session);
+    session
+        .apply(
+            Edit::ToggleStep {
+                channel: drums,
+                step: 3,
+            },
+            Instant::now(),
+        )
+        .unwrap();
+    record_chord(&mut session, &controller, &mut processor, ch, &[72]).unwrap();
+
+    undo(&mut session);
+    assert!(!keys(&session).contains(&72));
+    assert!(keys(&session).contains(&71));
+    undo(&mut session);
+    assert_eq!(
+        session.view().pattern.cells[&drums][3],
+        None,
+        "the step edit"
+    );
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64, 70, 90]);
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64, 70], "the roll edit");
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64]);
+}
+
+#[test]
+fn undo_during_a_take_undoes_what_was_recorded_and_closes_it() {
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    // An older step, so a take that stayed open could only fold into it.
+    add_notes(&mut session, vec![melodic(ch, 0, 90)]);
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    record_chord(&mut session, &controller, &mut processor, ch, &[71]).unwrap();
+    undo(&mut session);
+    assert_eq!(
+        keys(&session),
+        vec![60, 62, 64, 90],
+        "what was recorded so far"
+    );
+    // The take records on: its next notes are a new step, and redo is gone.
+    record_chord(&mut session, &controller, &mut processor, ch, &[72]).unwrap();
+    assert!(!session.view().can_redo);
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64, 90]);
+    undo(&mut session);
+    assert_eq!(
+        keys(&session),
+        vec![60, 62, 64],
+        "the older step is its own"
+    );
+    assert!(!session.view().can_undo);
+}
+
+#[test]
+fn opening_a_project_mid_take_starts_afresh() {
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    // The same project again, as a new one: the history is gone, and so is the take.
+    let loaded = Loaded {
+        project: session.project().clone(),
+        samples: HashMap::new(),
+        warnings: Vec::new(),
+    };
+    let decoded = decode_samples(&loaded);
+    session
+        .open(Path::new("/p/again.grooviq"), loaded, decoded)
+        .unwrap();
+    assert!(!session.view().can_undo);
+    let opened = keys(&session);
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[72]).unwrap();
+    assert_eq!(undo_all(&mut session), 1);
+    assert_eq!(keys(&session), opened);
+}
+
+#[test]
+fn removing_a_channel_mid_take_starts_afresh() {
     let (mut session, controller, mut processor, ch, _) = three_notes();
     let other = add_synth(&mut session);
     session.set_recording(true).unwrap();
     start_take(&mut session, &controller, &mut processor);
-    record_chord(&mut session, &controller, &mut processor, ch, &[50]).unwrap();
-    record_chord(&mut session, &controller, &mut processor, other, &[51]).unwrap();
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    session
+        .apply(Edit::RemoveChannel { channel: other }, Instant::now())
+        .unwrap();
+    record_chord(&mut session, &controller, &mut processor, ch, &[72]).unwrap();
+    assert_eq!(undo_all(&mut session), 1);
+    assert_eq!(keys(&session), vec![60, 62, 64, 70]);
+}
+
+#[test]
+fn recording_switching_itself_off_ends_the_take() {
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    // One note short of the cap.
+    let fill: Vec<NewNote> = (0..(MAX_NOTES_PER_PATTERN - 4) as u32)
+        .map(|i| NewNote {
+            channel: ch,
+            tick: (i % 3_840) + 10,
+            length: 1,
+            key: 20,
+            velocity: 0.5,
+            slide: false,
+        })
+        .collect();
+    add_notes(&mut session, fill);
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    // Two more: one fits, recording switches itself off.
+    for key in [71, 72] {
+        session.live_note(ch, key, 0.8, true).unwrap();
+    }
+    render(&mut processor, 4);
+    for key in [71, 72] {
+        session.live_note(ch, key, 0.0, false).unwrap();
+    }
+    render(&mut processor, 2);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    let got = session.collect_recorded(&events, Instant::now());
+    assert_eq!(got.stopped.map(|s| s.reason), Some("noteCap"));
+    assert!(!session.view().recording);
+    // The take, with the note that fit, is one step; the fill another.
     undo(&mut session);
-    let keys: Vec<(u32, u8)> = notes(&session).iter().map(|n| (n.channel, n.key)).collect();
-    assert!(keys.contains(&(ch, 50)), "{keys:?}");
-    assert!(!keys.iter().any(|&(c, _)| c == other), "{keys:?}");
+    assert_eq!(notes(&session).len(), MAX_NOTES_PER_PATTERN - 1);
+    assert!(!keys(&session).iter().any(|&k| k >= 70));
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64]);
+}
+
+#[test]
+fn a_take_that_grew_the_pattern_undoes_to_its_starting_length() {
+    let (mut session, controller, mut processor, ch, before) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    assert_eq!(session.view().pattern.steps, 16);
+    // 16 steps at 140 BPM last about 1286 blocks: a note held across the loop's end runs past
+    // it and grows the pattern to the next bar, in a later poll of the same take.
+    render(&mut processor, 1_240);
+    session.live_note(ch, 71, 0.8, true).unwrap();
+    render(&mut processor, 120);
+    session.live_note(ch, 71, 0.0, false).unwrap();
+    render(&mut processor, 2);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    session
+        .collect_recorded(&events, Instant::now())
+        .revision
+        .unwrap();
+    assert_eq!(session.view().pattern.steps, 32);
+    // And one more poll after the growth.
+    record_chord(&mut session, &controller, &mut processor, ch, &[72]).unwrap();
+
+    let ack = undo(&mut session);
+    assert_eq!(notes(&session), before);
+    assert_eq!(
+        ack.view.pattern.steps, 16,
+        "the length the take started from"
+    );
+    let ack = redo(&mut session);
+    assert_eq!(ack.view.pattern.steps, 32);
 }

@@ -196,7 +196,7 @@ export function installMockTauri(seed: MockSeed): void {
     liveParams: new Map<string, number>(),
     dialogCalls: [] as { kind: string; options: unknown }[],
     /** Note changes for undo and redo (undo.rs): the notes and length before and after each. */
-    history: { undo: [] as NoteChange[], redo: [] as NoteChange[] },
+    history: { undo: [] as NoteChange[], redo: [] as NoteChange[], take: false },
   };
 
   // --- Events (the event plugin, as @tauri-apps/api/mocks implements it). ---
@@ -311,8 +311,9 @@ export function installMockTauri(seed: MockSeed): void {
     emit("notes-changed", s.notesRevision);
   };
   /** Changes the pattern; `true` if anything changed. A note change bumps the notes revision
-   * and is one step of the undo history (undo.rs), which forgets what redo could make. */
-  const editPattern = (change: (p: Project["pattern"]) => void) => {
+   * and is one step of the undo history (undo.rs), which forgets what redo could make. With
+   * `take`, it is a recorded note: it joins the running take's step (until the take ends). */
+  const editPattern = (change: (p: Project["pattern"]) => void, take = false) => {
     const before = JSON.stringify(s.project.pattern);
     const notesBefore = JSON.stringify(s.project.pattern.notes);
     const prev = s.project.pattern;
@@ -321,9 +322,16 @@ export function installMockTauri(seed: MockSeed): void {
     if (JSON.stringify(next) === before) return false;
     s.project.pattern = next;
     if (JSON.stringify(next.notes) !== notesBefore) {
-      s.history.undo.push({ before: clone(prev.notes), after: clone(next.notes), stepsBefore: prev.steps, stepsAfter: next.steps });
-      if (s.history.undo.length > MAX_UNDO) s.history.undo.shift();
-      s.history.redo = [];
+      const top = s.history.undo[s.history.undo.length - 1];
+      if (take && s.history.take && top) {
+        top.after = clone(next.notes);
+        top.stepsAfter = next.steps;
+      } else {
+        s.history.undo.push({ before: clone(prev.notes), after: clone(next.notes), stepsBefore: prev.steps, stepsAfter: next.steps });
+        if (s.history.undo.length > MAX_UNDO) s.history.undo.shift();
+        s.history.redo = [];
+      }
+      s.history.take = take;
       notesChanged();
     }
     return true;
@@ -339,6 +347,7 @@ export function installMockTauri(seed: MockSeed): void {
     const [was, to] = undo ? [change.stepsAfter, change.stepsBefore] : [change.stepsBefore, change.stepsAfter];
     if (pat.steps === was) pat.steps = to;
     (undo ? s.history.redo : s.history.undo).push(change);
+    s.history.take = false;
     notesChanged();
     changed();
     return { revision: s.notesRevision, addedIds: [], ignoredIds: [], reload: true, view: view() };
@@ -346,6 +355,7 @@ export function installMockTauri(seed: MockSeed): void {
   const clearHistory = () => {
     s.history.undo = [];
     s.history.redo = [];
+    s.history.take = false;
   };
   const nextNoteId = () => Math.max(0, ...s.project.pattern.notes.map((n) => n.id ?? 0)) + 1;
   const noteBase = (channel: number, tick: number, velocity: number): MockNote => ({
@@ -580,6 +590,8 @@ export function installMockTauri(seed: MockSeed): void {
     const end = ticksNow();
     for (const key of [...s.recordOpen.keys()]) closeRecorded(key, end);
     s.recordOpen.clear();
+    // The take ends with the transport.
+    s.history.take = false;
     s.transport = { playing: false, startMs: 0, startTicks: 0, held: null };
   };
 
@@ -711,6 +723,7 @@ export function installMockTauri(seed: MockSeed): void {
     // At the note cap the note is not added: recording switches off and says so (session.rs).
     if (s.project.pattern.notes.length >= MAX_NOTES) {
       s.recording = false;
+      s.history.take = false;
       emit("recording-stopped", {
         reason: "noteCap",
         dropped: 1,
@@ -731,7 +744,7 @@ export function installMockTauri(seed: MockSeed): void {
       };
       pat.notes.push(n);
       growToNotes(pat, [n]);
-    });
+    }, true);
     changed();
   };
 
@@ -867,6 +880,8 @@ export function installMockTauri(seed: MockSeed): void {
     record_set: (a) => {
       const on = Boolean(a.on);
       if (!on) for (const key of [...s.recordOpen.keys()]) closeRecorded(key, ticksNow());
+      // Switching recording ends the take.
+      s.history.take = false;
       s.recording = on;
       return view();
     },
