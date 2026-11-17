@@ -67,7 +67,8 @@ export function shortcutFor(event: ShortcutEvent, platform: string, typingKeyboa
   if (mod) {
     // Keep printed ASCII letters on QWERTZ/AZERTY; physical positions only rescue
     // layouts whose delivered key is not an ASCII letter.
-    const modKey = /^[a-z]$/.test(key) ? key : /^Key[A-Z]$/.test(event.code ?? "") ? event.code!.slice(3).toLowerCase() : key;
+    const codeLetter = /^Key([A-Z])$/.exec(event.code ?? "")?.[1]?.toLowerCase();
+    const modKey = /^[a-z]$/.test(key) ? key : (codeLetter ?? key);
     const redoY = !mac && modKey === "y" && !event.shiftKey;
     if (modKey === "z" || redoY) {
       if (isTypingTarget(event.target)) return null;
