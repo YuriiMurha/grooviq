@@ -2,34 +2,58 @@ use grooviq_dsp::{
     Device,
     bitcrusher::{Bitcrusher, PRESETS, preset},
 };
-use grooviq_golden::{SAMPLE_RATE, compare_exact, devices::test_input, read_wav, write_wav};
-fn render(name: &str, block: usize) -> Vec<f32> {
+use grooviq_golden::{compare_exact, devices::test_input, read_wav, write_wav};
+fn render(name: &str, rate: u32, block: usize) -> Vec<f32> {
+    // Use the same deterministic source fixture at every device rate so changes
+    // in device coefficients are covered independently of source generation.
     let (mut l, mut r) = test_input();
-    let mut d = Bitcrusher::new(SAMPLE_RATE as f32);
+    let mut d = Bitcrusher::new(rate as f32);
     for (i, v) in preset(name).unwrap() {
         d.set_param(i, v);
     }
-    for (a, b) in l.chunks_mut(block).zip(r.chunks_mut(block)) {
-        d.process(a, b, None, &[]);
+    let at = 15000;
+    let mut i = 0;
+    while i < l.len() {
+        if i == at {
+            for (p, v) in [(0, 2.5), (1, 2.5), (2, 0.8), (3, 0.2), (4, 1.0), (5, 0.6)] {
+                d.set_param(p, v);
+            }
+        }
+        let e = (i + block)
+            .min(l.len())
+            .min(if i < at { at } else { l.len() });
+        d.process(&mut l[i..e], &mut r[i..e], None, &[]);
+        i = e;
     }
     l.into_iter().zip(r).flat_map(|(a, b)| [a, b]).collect()
 }
 #[test]
-fn exact_presets_and_block_parity() {
-    for name in PRESETS {
-        let a = render(name, 1);
-        for block in [7, 64, 127, 128] {
-            assert_eq!(a, render(name, block));
-        }
-        let path = format!(
-            "{}/refs/bitcrusher_{}.wav",
-            env!("CARGO_MANIFEST_DIR"),
-            name.to_lowercase().replace(' ', "_")
-        );
-        if std::env::var("GOLDEN_UPDATE").as_deref() == Ok("1") {
-            write_wav(&path, &a);
-        } else {
-            compare_exact(&a, &read_wav(&path)).unwrap();
+fn exact_presets_all_rates_and_automated_block_parity() {
+    for rate in [22050, 44100, 48000, 96000, 192000] {
+        for name in PRESETS {
+            let a = render(name, rate, 1);
+            for block in [7, 64, 127, 128] {
+                let b = render(name, rate, block);
+                assert!(
+                    a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
+                    "{name} {rate} block {block}"
+                );
+            }
+            let suffix = if rate == 48000 {
+                String::new()
+            } else {
+                format!("_{rate}")
+            };
+            let path = format!(
+                "{}/refs/bitcrusher_{}{suffix}.wav",
+                env!("CARGO_MANIFEST_DIR"),
+                name.to_lowercase().replace(' ', "_")
+            );
+            if std::env::var("GOLDEN_UPDATE").as_deref() == Ok("1") {
+                write_wav(&path, &a);
+            } else {
+                compare_exact(&a, &read_wav(&path)).unwrap();
+            }
         }
     }
 }
