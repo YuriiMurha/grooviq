@@ -749,12 +749,12 @@ impl Session {
             mute: false,
             solo: false,
         };
-        lock(&self.controller).add_channel(ChannelSetup {
-            id: ChannelId(id),
-            sample: Some(Arc::clone(&sample)),
-            sampler: sampler_values(&channel),
-            mix: ChannelMix::default(),
-        })?;
+        lock(&self.controller).add_channel(ChannelSetup::sampler(
+            ChannelId(id),
+            Some(Arc::clone(&sample)),
+            sampler_values(&channel),
+            ChannelMix::default(),
+        ))?;
         self.project.channels.push(channel);
         self.project.next_id = id.saturating_add(1);
         self.files.insert(id, file);

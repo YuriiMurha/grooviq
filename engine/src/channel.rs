@@ -1,13 +1,14 @@
-//! A sampler channel in the graph: the sampler, its mix (with 5 ms gain ramps) and the notes
-//! waiting for its next block.
+//! A channel in the graph: its instrument (a sampler or the synth), its mix (with 5 ms gain
+//! ramps), its choke group and the notes waiting for its next block.
 //!
 //! Built by the controller on its own thread ([`ChannelNode::new`] allocates); everything else
 //! runs on the audio thread.
 
 use crate::BLOCK;
 use crate::graph::Ramp;
-use crate::state::{ChannelId, ChannelMix, ChannelSetup};
+use crate::state::{ChannelId, ChannelMix, ChannelSetup, Instrument};
 use grooviq_dsp::sampler::{SampleBuf, Sampler};
+use grooviq_dsp::synth::Synth;
 use grooviq_dsp::{Device, NoteEvent};
 use std::sync::Arc;
 
@@ -23,17 +24,39 @@ const NO_EVENT: NoteEvent = NoteEvent {
     slide: false,
 };
 
+/// The channel's instrument.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the node lives in a Box already; the synth is boxed for its size alone"
+)]
+enum Source {
+    Sampler(Sampler),
+    Synth(Box<Synth>),
+}
+
+impl Source {
+    fn device(&mut self) -> &mut dyn Device {
+        match self {
+            Self::Sampler(s) => s,
+            Self::Synth(s) => &mut **s,
+        }
+    }
+}
+
 pub(crate) struct ChannelNode {
     id: ChannelId,
-    sampler: Sampler,
+    source: Source,
     mix: ChannelMix,
+    /// Choke group (0: none).
+    choke: u8,
     /// Left and right gain: volume, pan law and mute/solo together.
     gain: [Ramp; 2],
     ramp_len: u32,
-    /// Output gain while fading out after `AllSoundOff`; the sampler resets when it reaches 0.
+    /// Output gain while fading out after `AllSoundOff`; the device resets when it reaches 0.
     fade: Option<Ramp>,
-    /// No voice sounds: blocks without events are skipped (the ramps and the fade still
-    /// advance, so skipping never changes the output).
+    /// A sampler with no voice sounding: blocks without events are skipped (the ramps and the
+    /// fade still advance, so skipping never changes the output). Never set for the synth,
+    /// whose LFO runs on while it is silent.
     idle: bool,
     events: [NoteEvent; CHANNEL_EVENTS],
     count: usize,
@@ -51,20 +74,29 @@ impl ChannelNode {
         setup: &ChannelSetup,
         any_solo: bool,
     ) -> Self {
-        let mut sampler = Sampler::new(sample_rate);
-        for (index, &value) in (0u32..).zip(&setup.sampler) {
-            sampler.set_param(index, value);
+        let mut source = match &setup.instrument {
+            Instrument::Sampler { sample, .. } => {
+                let mut sampler = Sampler::new(sample_rate);
+                sampler.set_sample(sample.clone());
+                Source::Sampler(sampler)
+            }
+            Instrument::Synth { .. } => Source::Synth(Box::new(Synth::new(sample_rate))),
+        };
+        let device = source.device();
+        for (index, &value) in (0u32..).zip(setup.instrument.params()) {
+            device.set_param(index, value);
         }
-        sampler.set_sample(setup.sample.clone());
         let [l, r] = setup.mix.gains(setup.mix.audible(any_solo));
+        let idle = matches!(source, Source::Sampler(_));
         Self {
             id: setup.id,
-            sampler,
+            source,
             mix: setup.mix,
+            choke: setup.choke,
             gain: [Ramp::at(l), Ramp::at(r)],
             ramp_len,
             fade: None,
-            idle: true,
+            idle,
             events: [NO_EVENT; CHANNEL_EVENTS],
             count: 0,
             #[cfg(test)]
@@ -78,6 +110,14 @@ impl ChannelNode {
 
     pub(crate) fn solo(&self) -> bool {
         self.mix.solo
+    }
+
+    pub(crate) fn choke_group(&self) -> u8 {
+        self.choke
+    }
+
+    pub(crate) fn set_choke_group(&mut self, group: u8) {
+        self.choke = group;
     }
 
     /// Stores the mix; [`Self::retarget`] then starts the ramps (solo depends on every
@@ -102,13 +142,25 @@ impl ChannelNode {
         self.gain = [Ramp::at(l), Ramp::at(r)];
     }
 
+    /// Sets a parameter of the instrument, by its index in the instrument's own `SPEC`.
     pub(crate) fn set_param(&mut self, index: u32, value: f32) {
-        self.sampler.set_param(index, value);
+        self.source.device().set_param(index, value);
     }
 
-    /// Swaps the sample (silencing the voices) and returns the old one, to be freed elsewhere.
+    /// Sets a sampler parameter; a synth channel ignores it.
+    pub(crate) fn set_sampler_param(&mut self, index: u32, value: f32) {
+        if let Source::Sampler(sampler) = &mut self.source {
+            sampler.set_param(index, value);
+        }
+    }
+
+    /// Swaps a sampler's sample (silencing the voices) and returns the old one, to be freed
+    /// elsewhere. A synth channel takes none and hands `sample` back.
     pub(crate) fn set_sample(&mut self, sample: Option<Arc<SampleBuf>>) -> Option<Arc<SampleBuf>> {
-        self.sampler.set_sample(sample)
+        match &mut self.source {
+            Source::Sampler(sampler) => sampler.set_sample(sample),
+            Source::Synth(_) => sample,
+        }
     }
 
     pub(crate) fn events_full(&self) -> bool {
@@ -132,6 +184,15 @@ impl ChannelNode {
         true
     }
 
+    /// The offsets of the note-ons queued for the next block, in order. A note-on with
+    /// velocity 0 is a note-off and is not one.
+    pub(crate) fn note_on_offsets(&self) -> impl Iterator<Item = u32> + '_ {
+        self.events[..self.count]
+            .iter()
+            .filter(|e| e.on && e.velocity > 0.0)
+            .map(|e| e.offset)
+    }
+
     /// Fades the channel out over 5 ms, then silences it (a note in those 5 ms fades too).
     pub(crate) fn fade_out(&mut self) {
         if self.fade.is_none() {
@@ -141,17 +202,24 @@ impl ChannelNode {
         }
     }
 
-    /// Renders one block into `l`/`r` (overwritten) and clears the events. Returns false, with
-    /// `l`/`r` untouched, for a silent block (nothing sounds and no note arrives), so the
-    /// caller can skip it.
-    pub(crate) fn render(&mut self, l: &mut [f32; BLOCK], r: &mut [f32; BLOCK]) -> bool {
-        let events = &self.events[..self.count];
-        self.count = 0;
+    /// Renders one block into `l`/`r` (overwritten) and clears the events. `chokes` are the
+    /// offsets, sorted and distinct, at which other channels of its choke group start notes:
+    /// the block renders in pieces split there, the instrument choking at each split (before
+    /// this channel's own notes at that offset). Returns false, with `l`/`r` untouched, for a
+    /// silent block (nothing sounds and no note arrives), so the caller can skip it.
+    pub(crate) fn render(
+        &mut self,
+        l: &mut [f32; BLOCK],
+        r: &mut [f32; BLOCK],
+        chokes: &[u32],
+    ) -> bool {
+        let count = std::mem::take(&mut self.count);
         #[cfg(test)]
         let skip = !self.never_skip;
         #[cfg(not(test))]
         let skip = true;
-        if skip && self.idle && events.is_empty() {
+        // A choke of a silent instrument does nothing.
+        if skip && self.idle && count == 0 {
             // Everything that moves with time still moves, exactly as if the block of silence
             // were rendered: the gains (a mix change completes on time) and the fade (which
             // must end, not wait to fade the next note).
@@ -166,7 +234,31 @@ impl ChannelNode {
             }
             return false;
         }
-        self.sampler.process(l, r, None, events);
+        let device = self.source.device();
+        let events = &mut self.events[..count];
+        // Each piece gets the events in it, their offsets made relative to its start.
+        let (mut start, mut first) = (0, 0);
+        for &split in chokes {
+            let split = split as usize;
+            if split > start {
+                let end = first + events[first..].partition_point(|e| (e.offset as usize) < split);
+                for e in &mut events[first..end] {
+                    e.offset -= start as u32;
+                }
+                device.process(
+                    &mut l[start..split],
+                    &mut r[start..split],
+                    None,
+                    &events[first..end],
+                );
+                (start, first) = (split, end);
+            }
+            device.choke();
+        }
+        for e in &mut events[first..] {
+            e.offset -= start as u32;
+        }
+        device.process(&mut l[start..], &mut r[start..], None, &events[first..]);
         for (a, b) in l.iter_mut().zip(r.iter_mut()) {
             *a *= self.gain[0].tick();
             *b *= self.gain[1].tick();
@@ -182,23 +274,26 @@ impl ChannelNode {
                 self.reset();
             }
         }
-        if self.sampler.active_voices() == 0 {
-            // Settles the sampler's output smoothing, as it would on its own once idle. Not a
-            // reset: a note that ended before its note-off must still take that note-off, or
-            // it cuts the next hit on the key when a block ends between the two.
-            self.sampler.settle();
-            self.idle = true;
-        } else {
-            self.idle = false;
+        if let Source::Sampler(sampler) = &mut self.source {
+            if sampler.active_voices() == 0 {
+                // Settles the sampler's output smoothing, as it would on its own once idle.
+                // Not a reset: a note that ended before its note-off must still take that
+                // note-off, or it cuts the next hit on the key when a block ends between the
+                // two.
+                sampler.settle();
+                self.idle = true;
+            } else {
+                self.idle = false;
+            }
         }
         true
     }
 
     /// Silences every voice, keeping the sample, the parameters and the mix.
     pub(crate) fn reset(&mut self) {
-        self.sampler.reset();
+        self.source.device().reset();
         self.fade = None;
-        self.idle = true;
+        self.idle = matches!(self.source, Source::Sampler(_));
     }
 }
 
@@ -215,16 +310,14 @@ mod tests {
 
     fn node(never_skip: bool) -> ChannelNode {
         let l: Vec<f32> = (0..200).map(|i| 0.9 * libm::powf(0.97, i as f32)).collect();
-        let setup = ChannelSetup {
-            id: ChannelId(1),
-            sample: Some(Arc::new(SampleBuf {
-                rate: SR,
-                r: l.clone(),
-                l,
-            })),
-            sampler: SPEC.iter().map(|&(_, _, d)| d).collect(),
-            mix: ChannelMix::default(),
-        };
+        let sample = Arc::new(SampleBuf {
+            rate: SR,
+            r: l.clone(),
+            l,
+        });
+        let params = SPEC.iter().map(|&(_, _, d)| d).collect();
+        let setup =
+            ChannelSetup::sampler(ChannelId(1), Some(sample), params, ChannelMix::default());
         let mut node = ChannelNode::new(SR, ramp_len(SR), &setup, false);
         node.never_skip = never_skip;
         node
@@ -320,12 +413,12 @@ mod tests {
             }
             let (mut sl, mut sr) = ([0.0; BLOCK], [0.0; BLOCK]);
             let (mut fl, mut fr) = ([0.0; BLOCK], [0.0; BLOCK]);
-            if !skip.render(&mut sl, &mut sr) {
+            if !skip.render(&mut sl, &mut sr, &[]) {
                 skipped += 1;
                 sl = [0.0; BLOCK];
                 sr = [0.0; BLOCK];
             }
-            assert!(full.render(&mut fl, &mut fr));
+            assert!(full.render(&mut fl, &mut fr, &[]));
             assert!(sl == fl && sr == fr, "block {block}");
         }
         assert!(skipped > 150, "the skip ran: {skipped}");

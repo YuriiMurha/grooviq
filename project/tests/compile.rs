@@ -1,7 +1,7 @@
 //! The compile step: project -> the engine's state.
 
 use grooviq_dsp::sampler::{PARAM_IDS, SPEC, SampleBuf};
-use grooviq_engine::{ChannelId, STEP_TICKS};
+use grooviq_engine::{ChannelId, ChannelSetup, InstrumentKind, STEP_TICKS};
 use grooviq_project::{
     Channel, Note, Pattern, Project, compile_pattern, engine_state, sampler_values,
 };
@@ -195,14 +195,19 @@ fn engine_state_carries_bpm_mix_samples_and_the_current_pattern() {
     assert_eq!(state.channels.len(), 2);
 
     let (c0, c1) = (&state.channels[0], &state.channels[1]);
+    let sample = |c: &ChannelSetup| {
+        assert_eq!(c.instrument.kind(), InstrumentKind::Sampler);
+        c.instrument.sample().cloned()
+    };
     assert_eq!(c0.id, ChannelId(5));
-    assert!(Arc::ptr_eq(c0.sample.as_ref().unwrap(), &buf));
+    assert_eq!(c0.choke, 0);
+    assert!(Arc::ptr_eq(sample(c0).as_ref().unwrap(), &buf));
     assert_eq!(c0.mix.volume, 0.5);
     assert_eq!(c0.mix.pan, -0.25);
     assert!(c0.mix.mute && !c0.mix.solo);
-    assert_eq!(c0.sampler, sampler_values(&p.channels[0]));
+    assert_eq!(c0.instrument.params(), sampler_values(&p.channels[0]));
     assert_eq!(c1.id, ChannelId(7));
-    assert!(c1.sample.is_none(), "no loaded sample, no buffer");
+    assert!(sample(c1).is_none(), "no loaded sample, no buffer");
     assert!(c1.mix.solo && !c1.mix.mute);
 }
 
