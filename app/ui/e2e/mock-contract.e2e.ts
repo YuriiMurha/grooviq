@@ -234,3 +234,29 @@ test.describe("recording when the pattern's note ids run out", () => {
     await expect(app.getByRole("button", { name: "Record", exact: true })).toHaveAttribute("aria-pressed", "false");
   });
 });
+
+test.describe("MIDI ownership", () => {
+  test.use({ seed: { project: twoChannels([]) } });
+  test("selection_releases_MIDI_only_and_stale_key_up_leaves_new_producers_alone", async ({ app, mock }) => {
+    await call(app, "channel_select", { channel: 1 });
+    await take(app);
+    const midi = await mock.eval<number>("(m) => m.midiNote(60, 127, true)");
+    const again = await mock.eval<number>("(m) => m.midiNote(60, 64, true)");
+    const typed = await call<number>(app, "channel_note", { channel: 1, key: 60, velocity: 0.5, on: true });
+    expect(new Set([midi, again, typed]).size).toBe(3);
+    await hold(app, 120);
+    await call(app, "channel_select", { channel: 1 });
+    expect(await recorded(app)).toEqual([]);
+    await hold(app, 240);
+    await call(app, "channel_select", { channel: 2 });
+    expect(await mock.eval("(m) => m.live()")).toEqual(["1:60"]);
+    expect(await recorded(app)).toEqual([[0, 240, 60, 1], [0, 240, 60, 64 / 127]]);
+    await mock.eval("(m) => m.midiNote(60, 0, false)");
+    expect(await mock.eval("(m) => m.live()")).toEqual(["1:60"]);
+    await hold(app, 480);
+    await call(app, "channel_note", { channel: 1, key: 60, velocity: 0, on: false, press: typed });
+    expect(await mock.eval("(m) => m.live()")).toEqual([]);
+    await call(app, "channel_select", { channel: null });
+    expect(await mock.eval("(m) => m.midiNote(60, 127, true)")).toBeNull();
+  });
+});
