@@ -197,15 +197,12 @@ fn start_audio(app: &AppHandle) -> Audio {
         move || notes_cmds::record_loop(&session, &controller, &log, &app)
     });
     let selected_channel: notes_cmds::SelectedChannel = Arc::new(AtomicU32::new(NO_CHANNEL));
-    let midi = Arc::new(Mutex::new(
-        MidiHub::new(
-            Box::new(MidirPorts::new()),
-            Arc::new(midi::ControllerSink::new(Arc::clone(&controller))),
-            Arc::clone(&selected_channel),
-            settings.midi_disabled.clone(),
-        )
-        .with_overrides(settings.midi_input_overrides.clone()),
-    ));
+    let midi = Arc::new(Mutex::new(MidiHub::from_settings(
+        Box::new(MidirPorts::new()),
+        Arc::new(midi::ControllerSink::new(Arc::clone(&controller))),
+        Arc::clone(&selected_channel),
+        &settings,
+    )));
     spawn_named("grooviq-midi", {
         let (midi, log, app) = (Arc::clone(&midi), Arc::clone(&log), app.clone());
         move || midi_cmds::poll_loop(&midi, &log, &app)

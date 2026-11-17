@@ -365,6 +365,27 @@ impl MidiHub {
         }
     }
 
+    pub(crate) fn from_settings(
+        ports: Box<dyn MidiPorts>,
+        sink: Arc<dyn CommandSink>,
+        selected: Arc<AtomicU32>,
+        settings: &crate::settings::Settings,
+    ) -> Self {
+        Self::new(ports, sink, selected, settings.midi_disabled.clone())
+            .with_overrides(settings.midi_input_overrides.clone())
+    }
+
+    pub(crate) fn switch_configured(
+        &mut self,
+        settings: &mut crate::settings::Settings,
+        id: &str,
+        enabled: bool,
+    ) -> Poll {
+        let poll = self.set_enabled(id, enabled);
+        settings.midi_input_overrides = self.input_overrides();
+        poll
+    }
+
     /// Does what the timetable says: a poll (and its result), or a retry of refused releases.
     pub fn run(&mut self, action: Action) -> Option<Poll> {
         match action {

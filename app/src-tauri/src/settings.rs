@@ -199,13 +199,12 @@ mod tests {
         let (mut saved, note) = load(&path);
         assert!(note.is_none());
         let make = |saved: &Settings| {
-            MidiHub::new(
+            MidiHub::from_settings(
                 Box::new(Ports),
                 Arc::new(Sink),
                 Arc::new(AtomicU32::new(1)),
-                saved.midi_disabled.clone(),
+                saved,
             )
-            .with_overrides(saved.midi_input_overrides.clone())
         };
         let mut hub = make(&saved);
         hub.poll();
@@ -217,7 +216,7 @@ mod tests {
                 ("other".into(), true)
             ]
         );
-        hub.set_enabled("a", true);
+        hub.switch_configured(&mut saved, "a", true);
         assert_eq!(
             hub.inputs(),
             [
@@ -226,7 +225,6 @@ mod tests {
                 ("other".into(), true)
             ]
         );
-        saved.midi_input_overrides = hub.input_overrides();
         saved.midi_input_overrides.insert("unknown".into(), false);
         save(&path, &saved).unwrap();
         let mut hub = make(&load(&path).0);

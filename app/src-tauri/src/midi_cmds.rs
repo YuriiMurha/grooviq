@@ -45,9 +45,9 @@ pub async fn midi_set_enabled(
     let mut poll = Poll::default();
     commands::apply_and_save(
         &audio,
-        || poll = lock(&audio.midi).set_enabled(&id, enabled),
+        || {},
         |settings| {
-            settings.midi_input_overrides = lock(&audio.midi).input_overrides();
+            poll = lock(&audio.midi).switch_configured(settings, &id, enabled);
         },
     );
     report(&poll, &audio.log, &app);

@@ -1869,3 +1869,20 @@ fn same_name_identity_survives_reorder_rename_and_independent_disable() {
     rig.hub.set_enabled("b", true);
     assert!(rig.ports.is_open("b"));
 }
+
+#[test]
+fn legacy_block_is_pinned_across_metadata_only_rename() {
+    let mut rig = rig(&["Keys"]);
+    rig.ports.plug("Keys");
+    rig.hub.poll();
+    assert!(!rig.ports.is_open("Keys"));
+    rig.ports.0.lock().unwrap().present[0].name = "Renamed".into();
+    assert!(rig.hub.poll().changed);
+    assert_eq!(
+        rig.hub.input_views(),
+        [("Keys".into(), "Renamed".into(), false)]
+    );
+    assert!(!rig.ports.is_open("Keys"));
+    rig.hub.set_enabled("Keys", true);
+    assert!(rig.ports.is_open("Keys"));
+}
