@@ -143,16 +143,26 @@ impl NoteChange {
     }
 }
 
+/// One undo step, and the recorded take it holds while it is open to that take's later notes.
+#[derive(Debug)]
+struct Step {
+    change: NoteChange,
+    take: Option<u32>,
+}
+
 /// The current pattern's note changes, for undo and redo. Per project, never saved.
+///
+/// A recorded take's step stays open to the take's later notes (a note can complete long
+/// after its take's other notes, below a newer take's step) until any other note change, an
+/// undo, a redo or a clear closes every open step. Newer steps above an open one are then only
+/// other takes' additions, which never touch its notes, so folding into it keeps every inverse
+/// exact.
 #[derive(Debug, Default)]
 pub struct NoteHistory {
-    undo: VecDeque<NoteChange>,
+    undo: VecDeque<Step>,
     redo: Vec<NoteChange>,
     /// Notes held by `undo` and `redo` together.
     notes: usize,
-    /// The take (see `grooviq_engine::RecordEvent::Note`) the newest undo step holds, while
-    /// it is open: that take's next commits join it.
-    take: Option<u32>,
 }
 
 impl NoteHistory {
@@ -169,26 +179,19 @@ impl NoteHistory {
         *self = Self::default();
     }
 
-    /// Records a new change (it closes an open take): redo is cleared, and the oldest changes
-    /// drop past [`MAX_UNDO`] or [`MAX_UNDO_NOTES`].
+    /// Records a new change, which closes every open take step: redo is cleared, and the
+    /// oldest changes drop past [`MAX_UNDO`] or [`MAX_UNDO_NOTES`].
     pub(crate) fn push(&mut self, change: NoteChange) {
-        self.take = None;
-        self.notes -= self.redo.iter().map(NoteChange::size).sum::<usize>();
-        self.redo.clear();
-        self.notes += change.size();
-        self.undo.push_back(change);
-        self.trim();
+        self.close();
+        self.add(change, None);
     }
 
-    /// Records a commit of recorded take `take`: it joins that take's step while the step is
-    /// open (a take is one step however many commits it takes), or opens a new one. Another
-    /// take, any other note change, undo, redo and clearing close the step.
+    /// Records a commit of recorded take `take`: it joins that take's open step, wherever it
+    /// sits (a take is one step however many commits it takes), or opens a new step.
     pub(crate) fn record(&mut self, mut change: NoteChange, take: u32) {
-        if self.take == Some(take)
-            && let Some(top) = self.undo.back_mut()
-        {
+        if let Some(step) = self.undo.iter_mut().rev().find(|s| s.take == Some(take)) {
             let size = change.size();
-            match top.absorb(change) {
+            match step.change.absorb(change) {
                 Ok(()) => {
                     self.notes += size;
                     self.trim();
@@ -197,22 +200,38 @@ impl NoteHistory {
                 Err(back) => change = back,
             }
         }
-        self.push(change);
-        self.take = Some(take);
+        self.add(change, Some(take));
+    }
+
+    /// Adds a step (open to `take`, if any): redo is cleared (it is a note change), and the
+    /// history trimmed.
+    fn add(&mut self, change: NoteChange, take: Option<u32>) {
+        self.notes -= self.redo.iter().map(NoteChange::size).sum::<usize>();
+        self.redo.clear();
+        self.notes += change.size();
+        self.undo.push_back(Step { change, take });
+        self.trim();
+    }
+
+    /// Closes every open take step: a take's later notes start a new step.
+    fn close(&mut self) {
+        for step in &mut self.undo {
+            step.take = None;
+        }
     }
 
     /// Drops the oldest changes past [`MAX_UNDO`] or [`MAX_UNDO_NOTES`]; the newest stays.
     fn trim(&mut self) {
         while self.undo.len() > MAX_UNDO || (self.notes > MAX_UNDO_NOTES && self.undo.len() > 1) {
             if let Some(old) = self.undo.pop_front() {
-                self.notes -= old.size();
+                self.notes -= old.change.size();
             }
         }
     }
 
     /// The change undo would take back.
     pub(crate) fn next_undo(&self) -> Option<&NoteChange> {
-        self.undo.back()
+        self.undo.back().map(|s| &s.change)
     }
 
     /// The change redo would make again.
@@ -220,20 +239,36 @@ impl NoteHistory {
         self.redo.last()
     }
 
-    /// The change from [`Self::next_undo`] was undone (a running take ends there): redo can
-    /// make it again.
-    pub(crate) fn undone(&mut self) {
-        self.take = None;
-        if let Some(change) = self.undo.pop_back() {
-            self.redo.push(change);
+    /// The change from [`Self::next_undo`] was undone, with the pattern `steps` long before it
+    /// was (open takes close): redo can make it again.
+    ///
+    /// If it moved the length but the length is no longer the one it left, an older take's
+    /// late note (below it) grew the pattern further from there: that step now owns the growth
+    /// from this one's start, so undoing it later goes back to the length before both.
+    pub(crate) fn undone(&mut self, steps: u32) {
+        self.close();
+        let Some(step) = self.undo.pop_back() else {
+            return;
+        };
+        if let Some((start, left)) = step.change.length
+            && steps != left
+            && let Some(below) = self
+                .undo
+                .iter_mut()
+                .rev()
+                .find(|s| s.change.length == Some((left, steps)))
+        {
+            below.change.length = Some((start, steps));
         }
+        self.redo.push(step.change);
     }
 
-    /// The change from [`Self::next_redo`] was made again: undo can take it back.
+    /// The change from [`Self::next_redo`] was made again (open takes close): undo can take
+    /// it back.
     pub(crate) fn redone(&mut self) {
-        self.take = None;
+        self.close();
         if let Some(change) = self.redo.pop() {
-            self.undo.push_back(change);
+            self.undo.push_back(Step { change, take: None });
         }
     }
 }
@@ -286,7 +321,7 @@ mod tests {
         // Moving between the stacks keeps the count; a new change drops redo's notes.
         h.push(change(3));
         assert_eq!(h.undo.len(), 1, "the big one dropped");
-        h.undone();
+        h.undone(16);
         assert_eq!(h.notes, 3);
         h.push(change(2));
         assert_eq!((h.notes, h.redo.len()), (2, 0));
@@ -305,12 +340,12 @@ mod tests {
         h.record(add(1..3, None), 7);
         h.record(add(3..5, None), 7);
         assert_eq!(h.undo.len(), 1);
-        assert_eq!(h.undo[0].after.len(), 4);
+        assert_eq!(h.undo[0].change.after.len(), 4);
         assert_eq!(h.notes, 4);
         // An addition under an id the take already holds is not a fresh one.
         h.record(add(4..6, None), 7);
         assert_eq!(h.undo.len(), 2);
-        assert_eq!(h.undo[0].after.len(), 4);
+        assert_eq!(h.undo[0].change.after.len(), 4);
         // Another take opens its own step.
         h.record(add(6..7, None), 8);
         assert_eq!(h.undo.len(), 3);

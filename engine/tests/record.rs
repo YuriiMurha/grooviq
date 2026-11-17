@@ -64,7 +64,7 @@ fn note(on: bool) -> Command {
 const LOOP: u64 = 3_840;
 
 /// A note recorded at `tick`, in the default pattern (no resize: its position is the tick in
-/// the loop).
+/// the loop), in take 1 (the first Record-on starts it).
 fn recorded(key_on: bool, tick: u64) -> RecordEvent {
     RecordEvent::Note {
         channel: ChannelId(1),
@@ -73,7 +73,7 @@ fn recorded(key_on: bool, tick: u64) -> RecordEvent {
         on: key_on,
         tick,
         position: (tick % LOOP) as u32,
-        take: 0,
+        take: 1,
     }
 }
 
@@ -196,8 +196,8 @@ fn stop_and_record_off_push_an_end_marker() {
         [
             recorded(true, 1_200),
             end(1_600),
-            // Each End moves the take number on: this note is the second take's.
-            in_take(recorded(false, 2_000), 1),
+            // The End and the next Record-on each move the take number on.
+            in_take(recorded(false, 2_000), 3),
             end(2_560),
         ]
     );
@@ -229,14 +229,15 @@ fn the_take_number_moves_on_even_when_the_end_is_dropped() {
     assert!(
         first
             .iter()
-            .all(|e| matches!(e, RecordEvent::Note { take: 0, .. }))
+            .all(|e| matches!(e, RecordEvent::Note { take: 1, .. }))
     );
     r.c.send(note(true)).unwrap();
     let to = r.at + 64;
     r.run_to(to);
     let next = r.take();
     assert!(
-        matches!(next[..], [RecordEvent::Note { take: 1, .. }]),
+        // The dropped End moved the number on, and so did the Record-on.
+        matches!(next[..], [RecordEvent::Note { take: 3, .. }]),
         "{next:?}"
     );
 }
@@ -846,5 +847,40 @@ fn a_marked_command_with_exactly_one_free_slot_is_refused_whole() {
         r.take()
             .iter()
             .any(|e| matches!(e, RecordEvent::Note { on: true, .. }))
+    );
+}
+
+#[test]
+fn every_record_on_starts_a_new_take() {
+    let mut r = Rig::new();
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    r.c.send(note(true)).unwrap();
+    let to = r.at + 64;
+    r.run_to(to);
+    // Record-on again while it is on (a switch-off that never reached the engine was
+    // cancelled): a new take all the same.
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(note(false)).unwrap();
+    let to = r.at + 64;
+    r.run_to(to);
+    let got = r.take();
+    assert!(
+        matches!(
+            got[..],
+            [
+                RecordEvent::Note {
+                    take: 1,
+                    on: true,
+                    ..
+                },
+                RecordEvent::Note {
+                    take: 2,
+                    on: false,
+                    ..
+                }
+            ]
+        ),
+        "{got:?}"
     );
 }

@@ -1024,7 +1024,7 @@ impl Session {
         pattern.revision = pattern.revision.wrapping_add(1);
         self.keep_pattern(pattern)?;
         if undo {
-            self.history.undone();
+            self.history.undone(steps);
         } else {
             self.history.redone();
         }

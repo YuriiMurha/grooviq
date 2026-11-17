@@ -121,6 +121,24 @@ test.describe("undo and redo", () => {
     await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 480, 48], [1, 960, 480, 50]]);
   });
 
+  test("two_takes_without_an_undo_between_are_two_steps", async ({ app, mock }) => {
+    await app.getByRole("button", { name: "Record" }).click();
+    for (const [key, at] of [["z", 0], ["x", 960]] as const) {
+      // Each take: Play, one note, Stop.
+      await app.getByRole("button", { name: "Play" }).click();
+      await mock.eval(`(m) => m.hold(${at})`);
+      await app.keyboard.down(key);
+      await mock.eval(`(m) => m.hold(${at + 480})`);
+      await app.keyboard.up(key);
+      await app.getByRole("button", { name: "Stop" }).click();
+    }
+    await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 480, 48], [1, 960, 480, 50]]);
+    await app.keyboard.press(UNDO);
+    await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 480, 48]]);
+    await app.keyboard.press(UNDO);
+    await expect.poll(() => sessionNotes(mock)).toEqual([]);
+  });
+
   test("undo_is_ignored_while_typing_in_the_bpm_field", async ({ app, mock }) => {
     await clickCell(app, 0, 0);
     await expect.poll(() => sessionNotes(mock).then((n) => n.length)).toBe(1);

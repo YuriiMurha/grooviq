@@ -83,9 +83,13 @@ impl Recorder {
         self.on && transport.playing()
     }
 
-    /// Switches recording at frame `at`, ending a running take when it goes off.
+    /// Switches recording at frame `at`, ending a running take when it goes off. Every
+    /// switch on starts a new take number, even if recording was on already (a switch-off the
+    /// engine never got was cancelled).
     pub(crate) fn set(&mut self, on: bool, transport: &TransportClock, at: u64, live: &LiveShared) {
-        if !on {
+        if on {
+            self.take = self.take.wrapping_add(1);
+        } else {
             self.end(transport, at, live);
         }
         self.on = on;

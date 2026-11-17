@@ -63,6 +63,8 @@ interface NoteChange {
   before: MockNote[];
   after: MockNote[];
   length: [number, number] | null;
+  /** The recorded take the step is open to (undo.rs `Step`), or null. */
+  take?: number | null;
 }
 
 export interface MockSeed {
@@ -199,7 +201,7 @@ export function installMockTauri(seed: MockSeed): void {
     liveParams: new Map<string, number>(),
     dialogCalls: [] as { kind: string; options: unknown }[],
     /** Note changes for undo and redo (undo.rs): the notes and length before and after each. */
-    history: { undo: [] as NoteChange[], redo: [] as NoteChange[], notes: 0, take: null as number | null },
+    history: { undo: [] as NoteChange[], redo: [] as NoteChange[], notes: 0 },
   };
 
   // --- Events (the event plugin, as @tauri-apps/api/mocks implements it). ---
@@ -361,33 +363,42 @@ export function installMockTauri(seed: MockSeed): void {
     }
   };
   /** undo.rs `NoteHistory::push`. */
-  const pushHistory = (c: NoteChange) => {
+  /** undo.rs `NoteHistory::close`: every open take step closes. */
+  const closeTakes = () => {
+    for (const c of s.history.undo) c.take = null;
+  };
+  /** undo.rs `NoteHistory::add`: a note change clears redo. */
+  const addHistory = (c: NoteChange, take: number | null) => {
     const h = s.history;
-    h.take = null;
     for (const r of h.redo) h.notes -= sizeOf(r);
     h.redo = [];
+    c.take = take;
     h.notes += sizeOf(c);
     h.undo.push(c);
     trimHistory();
   };
-  /** undo.rs `NoteHistory::record`: a take's notes join its open step. */
+  /** undo.rs `NoteHistory::push`. */
+  const pushHistory = (c: NoteChange) => {
+    closeTakes();
+    addHistory(c, null);
+  };
+  /** undo.rs `NoteHistory::record`: a take's notes join its open step, wherever it sits. */
   const recordHistory = (c: NoteChange, take: number) => {
     const h = s.history;
-    const top = h.undo[h.undo.length - 1];
-    if (top && h.take === take && c.before.length === 0) {
+    const open = [...h.undo].reverse().find((step) => step.take === take);
+    if (open && c.before.length === 0) {
       let newest = -1;
-      for (const n of top.before) newest = Math.max(newest, n.id ?? 0);
-      for (const n of top.after) newest = Math.max(newest, n.id ?? 0);
+      for (const n of open.before) newest = Math.max(newest, n.id ?? 0);
+      for (const n of open.after) newest = Math.max(newest, n.id ?? 0);
       if (c.after.every((n) => (n.id ?? 0) > newest)) {
-        top.after.push(...c.after);
-        if (c.length) top.length = top.length && top.length[1] === c.length[0] ? [top.length[0], c.length[1]] : c.length;
+        open.after.push(...c.after);
+        if (c.length) open.length = open.length && open.length[1] === c.length[0] ? [open.length[0], c.length[1]] : c.length;
         h.notes += sizeOf(c);
         trimHistory();
         return;
       }
     }
-    pushHistory(c);
-    h.take = take;
+    addHistory(c, take);
   };
   /** Undo or redo (session.rs `undo_notes`): the notes go back by id, the length too if the step
    * moved it and nobody did since; the project is changed and the UI fetches the notes again. */
@@ -396,6 +407,7 @@ export function installMockTauri(seed: MockSeed): void {
     const change = (undo ? h.undo : h.redo).pop();
     if (!change) return null;
     const pat = s.project.pattern;
+    const steps = pat.steps;
     const [out, put] = undo ? [change.after, change.before] : [change.before, change.after];
     const ids = new Set([...out, ...put].map((n) => n.id));
     pat.notes = [...pat.notes.filter((n) => !ids.has(n.id)), ...clone(put)].sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
@@ -403,8 +415,14 @@ export function installMockTauri(seed: MockSeed): void {
       const [from, to] = undo ? [change.length[1], change.length[0]] : change.length;
       if (pat.steps === from) pat.steps = to;
     }
+    closeTakes();
+    // undo.rs `undone`: a late note of an older take grew the length on from this step's.
+    if (undo && change.length && steps !== change.length[1]) {
+      const below = [...h.undo].reverse().find((c) => c.length?.[0] === change.length![1] && c.length?.[1] === steps);
+      if (below) below.length = [change.length[0], steps];
+    }
+    change.take = null;
     (undo ? h.redo : h.undo).push(change);
-    h.take = null;
     notesChanged();
     changed();
     return { revision: s.notesRevision, addedIds: [], ignoredIds: [], reload: true, view: view() };
@@ -413,7 +431,6 @@ export function installMockTauri(seed: MockSeed): void {
     s.history.undo = [];
     s.history.redo = [];
     s.history.notes = 0;
-    s.history.take = null;
   };
   const nextNoteId = () => Math.max(0, ...s.project.pattern.notes.map((n) => n.id ?? 0)) + 1;
   const noteBase = (channel: number, tick: number, velocity: number): MockNote => ({
@@ -938,8 +955,8 @@ export function installMockTauri(seed: MockSeed): void {
     record_set: (a) => {
       const on = Boolean(a.on);
       if (!on) for (const key of [...s.recordOpen.keys()]) closeRecorded(key, ticksNow());
-      // Switching recording off ends a running take.
-      if (!on && s.recording && s.transport.playing) s.take += 1;
+      // Switching recording off ends a running take; every switch on starts a new one.
+      if (on || (s.recording && s.transport.playing)) s.take += 1;
       s.recording = on;
       return view();
     },

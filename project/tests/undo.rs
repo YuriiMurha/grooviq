@@ -935,3 +935,208 @@ fn a_length_set_by_hand_mid_take_keeps_the_take_whole() {
     assert_eq!(notes(&session), recorded);
     assert_eq!(ack.view.pattern.steps, 64);
 }
+
+/// Fills the engine's recording queue (without a poll) with one-tick notes of key 20 on
+/// `channel`, which never grow the pattern, until it drops an event.
+fn fill_the_recording_queue(
+    session: &Session,
+    controller: &Mutex<Controller>,
+    processor: &mut AudioProcessor,
+    channel: u32,
+) {
+    let mut sent = 0;
+    while controller.lock().unwrap().record_dropped() == 0 {
+        for _ in 0..50 {
+            session.live_note(channel, 20, 0.5, true).unwrap();
+            session.live_note(channel, 20, 0.0, false).unwrap();
+        }
+        render(processor, 1);
+        sent += 1;
+        assert!(sent < 100, "the recording queue never filled");
+    }
+}
+
+/// Holds key 71 from early in take A, fills the queue so A's End is dropped, takes A's notes
+/// in, then records take B (key 72, held for `b_blocks`) and collects it before 71 lets go.
+/// Returns the session after 71's late completion is collected.
+fn late_completion(b_blocks: usize) -> (Session, Arc<Mutex<Controller>>, AudioProcessor, u32) {
+    late_completion_after(b_blocks, |_| {})
+}
+
+/// [`late_completion`], with `between` run on the session after take B, before 71 lets go.
+fn late_completion_after(
+    b_blocks: usize,
+    between: impl FnOnce(&mut Session),
+) -> (Session, Arc<Mutex<Controller>>, AudioProcessor, u32) {
+    // 16 steps at 140 BPM last about 1286 blocks: 71, held from early in A to after B, runs
+    // past the loop's end and grows the pattern when it completes.
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    session.live_note(ch, 71, 0.8, true).unwrap();
+    render(&mut processor, 1_300);
+    fill_the_recording_queue(&session, &controller, &mut processor, ch);
+    session.set_recording(false).unwrap();
+    render(&mut processor, 2);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    assert!(
+        !events.iter().any(|e| matches!(e, RecordEvent::End { .. })),
+        "A's End was dropped"
+    );
+    session.collect_recorded(&events, Instant::now());
+    // Take B, collected while 71 (of take A) is still down.
+    session.set_recording(true).unwrap();
+    session.live_note(ch, 72, 0.8, true).unwrap();
+    render(&mut processor, b_blocks);
+    session.live_note(ch, 72, 0.0, false).unwrap();
+    render(&mut processor, 2);
+    collect(&mut session, &controller).revision.unwrap();
+    assert!(keys(&session).contains(&72) && !keys(&session).contains(&71));
+    let b_steps = session.view().pattern.steps;
+    assert_eq!(
+        b_steps,
+        if b_blocks > 1_000 { 32 } else { 16 },
+        "after take B"
+    );
+    between(&mut session);
+    // 71 lets go: it completes now, in take A.
+    session.live_note(ch, 71, 0.0, false).unwrap();
+    render(&mut processor, 2);
+    collect(&mut session, &controller).revision.unwrap();
+    assert!(keys(&session).contains(&71));
+    (session, controller, processor, ch)
+}
+
+#[test]
+fn a_late_note_joins_its_own_take_below_a_newer_one() {
+    let (mut session, _, _, _) = late_completion(4);
+    // 71 was held so long that it grew the pattern, under take B's step.
+    let grown = session.view().pattern.steps;
+    assert!(grown > 16, "{grown}");
+    undo(&mut session);
+    assert!(!keys(&session).contains(&72), "take B goes first");
+    assert!(keys(&session).contains(&71) && keys(&session).contains(&70));
+    assert_eq!(session.view().pattern.steps, grown);
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64], "then all of take A");
+    assert_eq!(session.view().pattern.steps, 16);
+    assert!(!session.view().can_undo);
+    redo(&mut session);
+    redo(&mut session);
+    assert!(keys(&session).contains(&71) && keys(&session).contains(&72));
+    assert_eq!(session.view().pattern.steps, grown);
+}
+
+#[test]
+fn a_late_growth_on_top_of_a_newer_takes_growth_undoes_to_the_start() {
+    // Take B's note is held across the loop's end: B grows the pattern first, then A's late
+    // note grows it further.
+    let (mut session, _, _, _) = late_completion(1_400);
+    let grown = session.view().pattern.steps;
+    assert!(grown > 32, "{grown}");
+    undo(&mut session);
+    assert!(!keys(&session).contains(&72));
+    assert_eq!(
+        session.view().pattern.steps,
+        grown,
+        "71 still needs the length"
+    );
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64]);
+    assert_eq!(session.view().pattern.steps, 16, "the length before take A");
+    redo(&mut session);
+    redo(&mut session);
+    assert_eq!(session.view().pattern.steps, grown);
+}
+
+#[test]
+fn a_late_note_whose_take_was_undone_is_a_new_step() {
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    session.live_note(ch, 71, 0.8, true).unwrap();
+    render(&mut processor, 2);
+    undo(&mut session);
+    assert!(session.view().can_redo);
+    session.live_note(ch, 71, 0.0, false).unwrap();
+    render(&mut processor, 2);
+    collect(&mut session, &controller).revision.unwrap();
+    assert!(!session.view().can_redo, "a note change clears redo");
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64]);
+    assert!(!session.view().can_undo);
+}
+
+#[test]
+fn a_rearm_right_after_the_self_switch_off_starts_a_new_take() {
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    let fill: Vec<NewNote> = (0..(MAX_NOTES_PER_PATTERN - 5) as u32)
+        .map(|i| NewNote {
+            channel: ch,
+            tick: (i % 3_840) + 10,
+            length: 1,
+            key: 20,
+            velocity: 0.5,
+            slide: false,
+        })
+        .collect();
+    add_notes(&mut session, fill);
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    // A, then B (fits) and C (does not) with the engine's queue full: the self-off is owed.
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    play_key(&session, &mut processor, ch, 71);
+    play_key(&session, &mut processor, ch, 72);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    while controller
+        .lock()
+        .unwrap()
+        .send(Command::SetTempo { bpm: 120.0 })
+        .is_ok()
+    {}
+    let got = session.collect_recorded(&events, Instant::now());
+    assert_eq!(got.stopped.map(|s| s.reason), Some("noteCap"));
+    // The queue drains; A is undone to make room; Record goes on again before the next poll.
+    render(&mut processor, 4);
+    undo(&mut session);
+    session.set_recording(true).unwrap();
+    render(&mut processor, 2);
+    collect(&mut session, &controller).revision.unwrap();
+    assert!(keys(&session).contains(&71), "B went in");
+    record_chord(&mut session, &controller, &mut processor, ch, &[73]).unwrap();
+    undo(&mut session);
+    assert!(!keys(&session).contains(&73));
+    assert!(keys(&session).contains(&71), "B is a step of its own");
+}
+
+#[test]
+fn an_undo_closes_an_older_take_to_its_late_notes() {
+    // Take B is undone while 71 of take A is still down: undo ends every take, so 71 is a step
+    // of its own (it clears redo), and take A's step keeps 70.
+    let (mut session, _, _, _) = late_completion_after(4, |s| {
+        undo(s);
+        assert!(!keys(s).contains(&72));
+    });
+    assert!(!session.view().can_redo);
+    undo(&mut session);
+    assert!(!keys(&session).contains(&71));
+    assert!(keys(&session).contains(&70), "take A's step is still there");
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64]);
+}
+
+#[test]
+fn a_redo_closes_an_older_take_to_its_late_notes() {
+    // Take B undone and redone while 71 of take A is still down: 71 is a step of its own.
+    let (mut session, _, _, _) = late_completion_after(4, |s| {
+        undo(s);
+        redo(s);
+    });
+    undo(&mut session);
+    assert!(!keys(&session).contains(&71));
+    assert!(keys(&session).contains(&72) && keys(&session).contains(&70));
+}
