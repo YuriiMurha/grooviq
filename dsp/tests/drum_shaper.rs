@@ -178,35 +178,39 @@ fn drum_input(n: usize) -> Vec<f32> {
 }
 #[test]
 fn steady_tones_keep_sustain_without_retriggering() {
-    for hz in [50.0, 100.0] {
-        for amp in [0.5, libm::powf(10.0, -70.0 / 20.0)] {
-            for (label, params) in [
-                ("kick", vec![(0, 6.0), (1, -3.0), (3, 0.0)]),
-                ("sustain", vec![(1, 12.0)]),
-            ] {
-                let input: Vec<f32> = (0..96000)
-                    .map(|i| amp * libm::sinf(2.0 * std::f32::consts::PI * hz * i as f32 / 48000.0))
-                    .collect();
-                let mut l = input.clone();
-                let mut r = input.clone();
-                let mut d = DrumShaper::new(48000.0);
-                for (i, v) in params {
-                    d.set_param(i, v);
-                }
-                process_chunks(&mut d, &mut l, &mut r, 128);
-                let gains: Vec<f32> = (72000..96000)
-                    .filter(|&i| input[i].abs() > amp * 0.1)
-                    .map(|i| 20.0 * libm::log10f((l[i] / input[i]).abs()))
-                    .collect();
-                let lo = gains.iter().copied().fold(f32::INFINITY, f32::min);
-                let hi = gains.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                println!(
-                    "{hz}Hz amp={amp:e} {label}: gain={lo:.6}..{hi:.6} ripple={:.6}dB",
-                    hi - lo
-                );
-                assert!(hi - lo < 0.02, "{hz}Hz {label}: ripple {}", hi - lo);
-                if label == "sustain" {
-                    assert!(lo > 11.9, "quiet sustain lost: {lo}");
+    for sr in [44100.0, 48000.0] {
+        for hz in [43.0, 55.0, 65.4, 110.0] {
+            for amp in [0.5, libm::powf(10.0, -70.0 / 20.0)] {
+                for (label, params) in [
+                    ("kick", vec![(0, 6.0), (1, -3.0), (3, 0.0)]),
+                    ("sustain", vec![(1, 12.0)]),
+                ] {
+                    let frames = (sr * 2.0) as usize;
+                    let input: Vec<f32> = (0..frames)
+                        .map(|i| amp * libm::sinf(2.0 * std::f32::consts::PI * hz * i as f32 / sr))
+                        .collect();
+                    let mut l = input.clone();
+                    let mut r = input.clone();
+                    let mut d = DrumShaper::new(sr);
+                    for (i, v) in params {
+                        d.set_param(i, v);
+                    }
+                    process_chunks(&mut d, &mut l, &mut r, 128);
+                    let gains = (frames * 3 / 4..frames)
+                        .filter(|&i| input[i].abs() > amp * 0.1)
+                        .map(|i| 20.0 * libm::log10f((l[i] / input[i]).abs()));
+                    let (lo, hi) = gains
+                        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), gain| {
+                            (lo.min(gain), hi.max(gain))
+                        });
+                    println!(
+                        "{sr}Hz {hz}Hz amp={amp:e} {label}: gain={lo:.6}..{hi:.6} ripple={:.6}dB",
+                        hi - lo
+                    );
+                    assert!(hi - lo < 0.02, "{sr}Hz {hz}Hz {label}: ripple {}", hi - lo);
+                    if label == "sustain" {
+                        assert!(lo > 11.9, "{sr}Hz {hz}Hz quiet sustain lost: {lo}");
+                    }
                 }
             }
         }

@@ -99,6 +99,10 @@ impl Device for DrumShaper {
                 if level >= self.fast[m] {
                     self.hold[m] = self.hold_samples;
                     self.fast[m] = flush(level + (self.fast[m] - level) * self.attack[m]);
+                } else if level >= self.fast[m] * 0.99 {
+                    // Sampled peaks vary with phase. Refresh near a peak without raising it;
+                    // a falling envelope releases after it moves below this 1% margin.
+                    self.hold[m] = self.hold_samples;
                 } else if self.hold[m] > 0 {
                     self.hold[m] -= 1;
                 } else {
@@ -142,6 +146,37 @@ impl Device for DrumShaper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn near_peak_hold_still_tracks_falling_envelopes() {
+        for sr in [22050.0, 48000.0, 192000.0] {
+            let mut d = DrumShaper::new(sr);
+            let mut l = [0.5; 128];
+            let mut r = l;
+            for _ in 0..(sr as usize / 128) {
+                l.fill(0.5);
+                r.fill(0.5);
+                d.process(&mut l, &mut r, None, &[]);
+            }
+            // A 6 dB/s fade must keep tracking; near-peak refresh cannot freeze a peak.
+            let mut last = 0.5;
+            for block in 0..(sr as usize / 128) {
+                for (i, (left, right)) in l.iter_mut().zip(&mut r).enumerate() {
+                    last = 0.5 * db_to_gain(-6.0 * (block * 128 + i) as f32 / sr);
+                    *left = last;
+                    *right = last;
+                }
+                d.process(&mut l, &mut r, None, &[]);
+            }
+            assert!(d.fast[0] >= last && d.fast[0] < last * 1.08);
+            // A larger drop leaves the margin immediately, then follows the normal release.
+            for _ in 0..(sr as usize / 128) {
+                l.fill(0.1);
+                r.fill(0.1);
+                d.process(&mut l, &mut r, None, &[]);
+            }
+            assert!(d.fast[0] >= 0.1 && d.fast[0] < 0.102);
+        }
+    }
     #[test]
     fn shaping_gain_flushes_subnormals_and_clears_after_tail() {
         let mut d = DrumShaper::new(48000.0);
