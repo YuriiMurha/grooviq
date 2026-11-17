@@ -3,6 +3,7 @@
 import type { Page, TestInfo } from "@playwright/test";
 import { colourDistance, expect, pixelsAt, project, test, type Mock } from "./fixture";
 import type { MockNote, MockProject } from "./mockTauri";
+import { PROD_URL } from "./ports";
 
 interface RollStats {
   bufferBuilds: number;
@@ -382,5 +383,28 @@ test.describe("renderers", () => {
       [0, 960, 60],
       [1920, 240, 62],
     ]);
+  });
+});
+
+test.describe("the production build", () => {
+  // What ships: no counters on `window`, so the renderer is read off the canvas itself.
+  test.use({ baseURL: PROD_URL, seed: { project: bass([{ id: 1, channel: 1, tick: 0, length: 960, key: 60, velocity: 1 }]) } });
+
+  test("the_production_build_draws_with_webgl2", async ({ app }) => {
+    const webgl2 = await app.evaluate(() => {
+      const c = document.createElement("canvas");
+      return c.getContext("webgl2") !== null;
+    });
+    test.skip(!webgl2, "no WebGL2 in this browser");
+    await app.keyboard.press("F7");
+    await app.keyboard.press("F6");
+    await expect(canvas(app)).toBeVisible();
+    expect(await app.evaluate(() => "__grooviqRoll" in window)).toBe(false);
+    // Give a fallback the time it would take (a microtask, a render).
+    await nextFrame(app);
+    await nextFrame(app);
+    // A canvas holding a 2D context answers null for WebGL2, and the reverse.
+    const kind = await canvas(app).evaluate((c: HTMLCanvasElement) => ({ webgl2: c.getContext("webgl2") !== null, canvas2d: c.getContext("2d") !== null }));
+    expect(kind).toEqual({ webgl2: true, canvas2d: false });
   });
 });

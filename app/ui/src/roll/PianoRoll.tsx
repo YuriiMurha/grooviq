@@ -117,9 +117,12 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
       renderer.current = made;
       built.current = { version: -1, channel: null, renderer: made };
       dirty.current = true;
-      if (made && STATS) rollStats.renderer = made.kind;
-      // Deferred: a state change straight from an effect would render in a cascade.
-      else if (!use2d) queueMicrotask(() => setUse2d(true));
+      if (made) {
+        if (STATS) rollStats.renderer = made.kind;
+      } else if (!use2d) {
+        // Deferred: a state change straight from an effect would render in a cascade.
+        queueMicrotask(() => setUse2d(true));
+      }
     };
     const onLost = (e: Event) => {
       e.preventDefault();

@@ -9,4 +9,5 @@ tests/golden/out/
 .superpowers/
 app/ui/e2e-results/
 app/ui/dist-e2e/
+app/ui/dist-prod/
 app/ui/playwright-report/
