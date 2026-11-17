@@ -8,6 +8,7 @@ import {
   type PointerEvent,
   type RefObject,
 } from "react";
+import type { WireNote } from "../api/notes";
 import type { ChannelView, Edit, PatternView } from "../api/project";
 import type { LiveFrame } from "../live/decode";
 import { useProject } from "../project/context";
@@ -22,6 +23,7 @@ import {
   cellAt,
   gridSize,
   nextFocus,
+  rollHint,
   stepHint,
   velocityFromDrag,
   type Cell,
@@ -30,6 +32,7 @@ import {
 import { readPalette, type GridRenderer, type Palette } from "./palette";
 import { createCanvasRenderer } from "./canvasRenderer";
 import { createGlRenderer } from "./glRenderer";
+import { rollInstances } from "./rollPreview";
 
 /** A step is a sixteenth: 240 ticks. */
 const TICKS_PER_STEP = 240n;
@@ -37,6 +40,8 @@ const TICKS_PER_STEP = 240n;
 const DRAG_START_PX = 3;
 /** What Alt+Up and Alt+Down change the velocity by. */
 const VELOCITY_KEY_STEP = 0.1;
+const NO_NOTES: WireNote[] = [];
+
 /** How long a lost WebGL context may stay lost before the grid gives up on it and draws in 2D. */
 export const RESTORE_WAIT_MS = 2000;
 
@@ -61,6 +66,10 @@ interface Props {
   latest: RefObject<LiveFrame | null>;
   /** The output's rate, for the latency shift of the playhead. */
   sampleRate: number;
+  /** The pattern's notes: roll channels (`ChannelView.roll`) show them instead of steps. */
+  notes?: WireNote[];
+  /** A roll channel's row was clicked (or Enter pressed on it): open the piano roll there. */
+  onOpenRoll?: (channel: number) => void;
   /** Makes the WebGL2 renderer for the canvas; `null` when WebGL2 or its shaders are not
    * available (tests pass a recording one). */
   createRenderer?: (canvas: HTMLCanvasElement) => GridRenderer | null;
@@ -87,6 +96,8 @@ interface Press {
 /** What the draw loop reads; React keeps it current without restarting the loop. */
 interface Scene {
   cells: (number | null)[][];
+  /** Per row, the roll preview's records, or `null` for a step row. */
+  roll: (Float32Array | null)[];
   inks: number[];
   layout: GridLayout;
   focus: Cell | null;
@@ -102,6 +113,8 @@ export function StepGrid({
   bpm,
   latest,
   sampleRate,
+  notes = NO_NOTES,
+  onOpenRoll = () => {},
   createRenderer = createGlRenderer,
   createFallbackRenderer = createCanvasRenderer,
 }: Props) {
@@ -110,6 +123,11 @@ export function StepGrid({
   const [focus, setFocus] = useState<Cell>({ row: 0, step: 0 });
   const [hasFocus, setHasFocus] = useState(false);
   const [dpr, setDpr] = useState(() => window.devicePixelRatio || 1);
+  // Set by keyboard moves: the focused cell is scrolled into view (long patterns, many rows).
+  const reveal = useRef(false);
+  const anchor = useRef<HTMLSpanElement>(null);
+  // The canvas had focus when WebGL2 was given up: the new 2D canvas takes it.
+  const refocus = useRef(false);
 
   const rows = channels.length;
   const steps = pattern.steps;
@@ -147,23 +165,24 @@ export function StepGrid({
       override.current = null;
       settled.current = false;
     }
+    const sceneLayout = { rows: channels.length, steps: pattern.steps, cell: CELL, gap: GAP, dpr: scale };
     scene.current = {
       cells: channels.map((c) => pattern.cells[String(c.id)] ?? []),
+      roll: channels.map((c, i) => (c.roll ? rollInstances(sceneLayout, i, notes, c.id, c.color, focusRow === i) : null)),
       inks: channels.map((c) => c.color),
-      layout: { rows: channels.length, steps: pattern.steps, cell: CELL, gap: GAP, dpr: scale },
+      layout: sceneLayout,
       focus: focusRow >= 0 ? { row: focusRow, step: focusStep } : null,
       bpm,
       sampleRate,
     };
     dirty.current = true;
-  }, [channels, pattern, scale, focusRow, focusStep, bpm, sampleRate]);
+  }, [channels, pattern, notes, scale, focusRow, focusStep, bpm, sampleRate]);
 
-  // The device pixel ratio changes with zoom and when the window moves to another screen.
   useEffect(() => {
-    const onResize = () => setDpr(window.devicePixelRatio || 1);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
+    if (!reveal.current || !hasFocus) return;
+    reveal.current = false;
+    anchor.current?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [focusRow, focusStep, hasFocus]);
 
   // The renderer: WebGL2 first, rebuilt when a lost context comes back. If WebGL2 gives no
   // renderer, or a lost context is not back within RESTORE_WAIT_MS, switch to 2D for good.
@@ -172,6 +191,7 @@ export function StepGrid({
     if (!el) return;
     let wait: ReturnType<typeof setTimeout> | undefined;
     const giveUp = () => {
+      refocus.current = document.activeElement === el;
       setHasFocus(false);
       setUse2d(true);
     };
@@ -181,6 +201,10 @@ export function StepGrid({
       const made = use2d ? factories.current.fallback(el) : factories.current.gl(el);
       renderer.current = made;
       dirty.current = true;
+      if (use2d && refocus.current) {
+        refocus.current = false;
+        el.focus();
+      }
       // Deferred: a state change straight from an effect would render in a cascade.
       if (!made) queueMicrotask(giveUp);
     };
@@ -213,8 +237,17 @@ export function StepGrid({
   useEffect(() => {
     let raf = 0;
     let shown: number | null | undefined;
+    // The device pixel ratio changes with zoom and when the window moves to another screen, and
+    // the second fires no `resize` (nor a resolution media query change) everywhere: it is read
+    // every frame instead.
+    let ratio = window.devicePixelRatio || 1;
     const tick = () => {
       raf = requestAnimationFrame(tick);
+      const nowRatio = window.devicePixelRatio || 1;
+      if (nowRatio !== ratio) {
+        ratio = nowRatio;
+        setDpr(nowRatio);
+      }
       const s = scene.current;
       const r = renderer.current;
       const p = palette.current;
@@ -235,7 +268,7 @@ export function StepGrid({
             return copy;
           })
         : s.cells;
-      r.draw(buildInstances(s.layout, shownCells, s.inks, s.focus, playhead), s.layout, p);
+      r.draw(buildInstances(s.layout, shownCells, s.inks, s.focus, playhead, s.roll), s.layout, p);
       dirty.current = false;
       shown = playhead;
     };
@@ -257,10 +290,16 @@ export function StepGrid({
 
   const setHint = (text: string) => canvas.current?.setAttribute("data-hint", text);
 
+  const hintFor = (cell: Cell | null) => {
+    const ch = cell && channelAt(cell);
+    if (!cell || !ch) return GRID_HINT;
+    return ch.roll ? rollHint(ch.name) : stepHint(ch.name, cell.step);
+  };
+
   const moveFocus = (cell: Cell) => {
+    reveal.current = true;
     setFocus(cell);
-    const ch = channelAt(cell);
-    if (ch) setHint(stepHint(ch.name, cell.step));
+    setHint(hintFor(cell));
   };
 
   const onPointerDown = (e: PointerEvent<HTMLCanvasElement>) => {
@@ -268,7 +307,8 @@ export function StepGrid({
     const cell = cellFrom(e);
     if (!cell) return;
     setFocus(cell);
-    const value = valueAt(cell);
+    // A roll channel's preview opens the piano roll on release; it never edits a step.
+    const value = channelAt(cell)?.roll ? null : valueAt(cell);
     press.current = { cell, y: e.clientY, start: value ?? 0, lit: value !== null, moved: false };
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -280,9 +320,7 @@ export function StepGrid({
   const onPointerMove = (e: PointerEvent<HTMLCanvasElement>) => {
     const p = press.current;
     if (!p) {
-      const cell = cellFrom(e);
-      const ch = cell && channelAt(cell);
-      setHint(cell && ch ? stepHint(ch.name, cell.step) : GRID_HINT);
+      setHint(hintFor(cellFrom(e)));
       return;
     }
     if (!p.lit) return;
@@ -300,6 +338,10 @@ export function StepGrid({
     if (!p || e.button !== 0) return;
     const ch = channelAt(p.cell);
     if (!ch) return;
+    if (ch.roll) {
+      onOpenRoll(ch.id);
+      return;
+    }
     if (p.moved && override.current) {
       // One edit for the whole drag; the drawn value stays until the view holds it.
       const velocity = round2(override.current.velocity);
@@ -331,13 +373,15 @@ export function StepGrid({
     const cell = cellFrom(e);
     if (!cell) return;
     const ch = channelAt(cell);
-    if (ch && valueAt(cell) !== null) void send({ kind: "clearStep", channel: ch.id, step: cell.step });
+    if (ch && !ch.roll && valueAt(cell) !== null) void send({ kind: "clearStep", channel: ch.id, step: cell.step });
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLCanvasElement>) => {
     if (rows === 0 || steps === 0) return;
     const ch = channelAt(focusCell);
-    const value = valueAt(focusCell);
+    // A roll channel's row has no steps: Enter opens the piano roll, step keys do nothing.
+    const roll = ch?.roll ?? false;
+    const value = roll ? null : valueAt(focusCell);
     if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
       e.preventDefault();
       if (ch && value !== null) {
@@ -358,7 +402,10 @@ export function StepGrid({
         return;
       case "Enter":
         e.preventDefault();
-        if (ch) void send({ kind: "toggleStep", channel: ch.id, step: focusCell.step });
+        // A held Enter repeats: one toggle per press.
+        if (e.repeat || !ch) return;
+        if (roll) onOpenRoll(ch.id);
+        else void send({ kind: "toggleStep", channel: ch.id, step: focusCell.step });
         return;
       case "Delete":
       case "Backspace":
@@ -372,12 +419,13 @@ export function StepGrid({
 
   const focusedChannel = channelAt(focusCell);
   const focusedValue = valueAt(focusCell);
-  const status =
-    hasFocus && focusedChannel
-      ? `${focusedChannel.name}, step ${focusCell.step + 1}, ${
+  const status = !hasFocus || !focusedChannel
+    ? ""
+    : focusedChannel.roll
+      ? `${focusedChannel.name}, piano-roll notes`
+      : `${focusedChannel.name}, step ${focusCell.step + 1}, ${
           focusedValue === null ? "off" : `on, velocity ${Math.round(focusedValue * 100)}%`
-        }`
-      : "";
+        }`;
 
   return (
     <div className="step-grid">
@@ -403,6 +451,17 @@ export function StepGrid({
         onKeyDown={onKeyDown}
         onFocus={() => setHasFocus(true)}
         onBlur={() => setHasFocus(false)}
+      />
+      <span
+        ref={anchor}
+        className="step-grid-anchor"
+        aria-hidden
+        style={{
+          left: EDGE + focusCell.step * (CELL + GAP),
+          top: EDGE + focusCell.row * (CELL + GAP),
+          width: CELL,
+          height: CELL,
+        }}
       />
       <span id="step-grid-keys" className="visually-hidden">
         Arrow keys move between steps. Enter adds or removes a hit, Delete clears it, Alt with Up or

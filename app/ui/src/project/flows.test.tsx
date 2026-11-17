@@ -42,6 +42,7 @@ vi.mock("../live/client", () => ({
 }));
 
 import { App } from "../App";
+import { encodeNotes } from "../api/notes";
 import type { ProjectView } from "../api/project";
 
 const VIEW: ProjectView = {
@@ -53,6 +54,9 @@ const VIEW: ProjectView = {
   channels: [],
   pattern: { id: 1, name: "Hook", steps: 16, swing: 0, cells: {} },
   autosavedAt: null,
+  key: null,
+  notesRevision: 1,
+  recording: false,
 };
 const CLEAN: ProjectView = { ...VIEW, dirty: false };
 const UNTITLED: ProjectView = { ...VIEW, name: "Untitled", path: null };
@@ -104,6 +108,8 @@ beforeEach(() => {
   reply("project_edit", (args: Args) => ({ ...VIEW, bpm: (args?.edit as { bpm: number }).bpm }));
   reply("transport_stop", null);
   reply("app_exit", null);
+  reply("pattern_notes", () => encodeNotes(1, []));
+  reply("channel_select", null);
 });
 
 describe("new_project_with_unsaved_changes_asks_first", () => {

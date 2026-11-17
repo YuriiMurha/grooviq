@@ -28,13 +28,17 @@ import { Meter } from "./meter/Meter";
 import { OutputChip } from "./output/OutputChip";
 import { OutputPopover } from "./output/OutputPopover";
 import { ProjectContext } from "./project/context";
-import { ChannelRack } from "./rack/ChannelRack";
+import { metronomeSet, recordSet } from "./api/notes";
+import { Workspace } from "./layout/Workspace";
 import { ProjectMenu } from "./project/ProjectMenu";
 import { SaveState } from "./project/SaveState";
-import { isTypingTarget, shortcutFor } from "./project/shortcuts";
+import { isTypingTarget, modalIsOpen, shortcutFor } from "./project/shortcuts";
 import { useProjectFlows } from "./project/useProjectFlows";
 import { useSession } from "./project/useSession";
 import { Toasts, type Toast } from "./toast/Toasts";
+import { KeyboardToggle } from "./transport/KeyboardToggle";
+import { MetronomeButton } from "./transport/MetronomeButton";
+import { RecordButton } from "./transport/RecordButton";
 import { TransportBar } from "./transport/TransportBar";
 
 /** How long a toast stays. */
@@ -56,6 +60,10 @@ export function App() {
   const [latencyFrames, setLatencyFrames] = useState<number | null>(null);
   const latest = useRef<LiveFrame | null>(null);
   const nextToast = useRef(0);
+  // The typing keyboard is on by default; R records only while it is off.
+  const [keyboard, setKeyboard] = useState(true);
+  const keyboardRef = useRef(true);
+  const [metronome, setMetronome] = useState(false);
 
   const refresh = useCallback(() => {
     audioOutputs().then(setOutputs, () => {});
@@ -113,6 +121,22 @@ export function App() {
     }
   }, [projectName, dirty]);
 
+  const recording = view?.recording ?? false;
+  const recordingRef = useRef(recording);
+  useEffect(() => {
+    recordingRef.current = recording;
+    keyboardRef.current = keyboard;
+  }, [recording, keyboard]);
+  const runCommand = session.context.run;
+  const toggleRecord = useCallback(() => {
+    const on = !recordingRef.current;
+    void runCommand(() => recordSet(on));
+  }, [runCommand]);
+  const toggleMetronome = () => {
+    const on = !metronome;
+    metronomeSet(on).then(() => setMetronome(on), (e: unknown) => toast(errorText(e), true));
+  };
+
   // Shortcuts. They stand aside while a dialog is open.
   const modalRef = useRef(false);
   useEffect(() => {
@@ -120,18 +144,19 @@ export function App() {
   }, [modalOpen]);
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (modalRef.current) return;
-      const action = shortcutFor(e, navigator.platform);
+      if (modalRef.current || modalIsOpen()) return;
+      const action = shortcutFor(e, navigator.platform, keyboardRef.current);
       if (!action) return;
       e.preventDefault();
       // A held key repeats: one save (or open, export...) per press, not one per repeat.
       if (e.repeat) return;
       if (action === "playStop") (playingRef.current ? stop : play)();
+      else if (action === "record") toggleRecord();
       else perform(action);
     };
     // A focused button presses itself when Space is released: play/stop took that key.
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key === " " && !modalRef.current && !isTypingTarget(e.target) && !e.ctrlKey && !e.metaKey) {
+      if (e.key === " " && !modalRef.current && !modalIsOpen() && !isTypingTarget(e.target) && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
       }
     };
@@ -141,7 +166,7 @@ export function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [perform, play, stop]);
+  }, [perform, play, stop, toggleRecord]);
 
   const loadSettings = useCallback(() => {
     audioSettings().then(
@@ -279,6 +304,13 @@ export function App() {
               onStop={stop}
               onTempo={(bpm) => void session.apply({ kind: "setTempo", bpm })}
               onSignature={(beats, unit) => void session.apply({ kind: "setTimeSignature", beats, unit })}
+              extra={
+                <>
+                  <RecordButton recording={recording} onToggle={toggleRecord} />
+                  <MetronomeButton on={metronome} onToggle={toggleMetronome} />
+                  <KeyboardToggle on={keyboard} onToggle={() => setKeyboard((on) => !on)} />
+                </>
+              }
             />
           )}
           <div className="toolbar-audio">
@@ -309,7 +341,7 @@ export function App() {
           </div>
         </header>
         <main className="stage">
-          {view && <ChannelRack latest={latest} sampleRate={sampleRate} onError={rackError} />}
+          {view && <Workspace latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} />}
         </main>
         <HintBar />
         <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />

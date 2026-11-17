@@ -1,5 +1,7 @@
-import { useRef, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
+import { channelNote, TYPING_VELOCITY } from "../api/notes";
 import { channelPreview, errorText, type ChannelView } from "../api/project";
+import { isTypingTarget } from "../project/shortcuts";
 import { Knob } from "./Knob";
 import { formatPan, formatVolume } from "./mixFormat";
 
@@ -17,19 +19,57 @@ interface Props {
   /** Asks for the file a missing sample should come from. */
   onRelink: () => void;
   onError: (message: string) => void;
+  selected: boolean;
+  onSelect: () => void;
+  /** Asks whether to remove the channel. */
+  onRemove: () => void;
 }
 
-/** One channel of the rack: mute, the name (press to hear it), volume, pan and solo. The steps
- * are drawn by the step grid beside the rows. */
-export function ChannelRow({ channel, onMix, onRelink, onError }: Props) {
-  const previewing = useRef(false);
-  const { id, name } = channel;
+/** The note a synth channel's name plays while held (C4). */
+const PREVIEW_KEY = 60;
 
-  // A preview plays only while the person holds the name down.
+/** One channel of the rack: mute, the name (press to hear it), volume, pan and solo. The steps
+ * are drawn by the step grid beside the rows. Pressing a row selects it; Delete on a focused row
+ * or its context menu asks to remove it. */
+export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSelect, onRemove }: Props) {
+  const previewing = useRef(false);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const menuItem = useRef<HTMLButtonElement>(null);
+  const { id, name } = channel;
+  const synth = channel.kind === "synth";
+
+  // A preview plays only while the person holds the name down: the sample, or the synth's C4.
   const preview = (on: boolean) => {
     if (previewing.current === on) return;
     previewing.current = on;
-    channelPreview(id, on).catch((e: unknown) => onError(errorText(e)));
+    const sent = synth ? channelNote(id, PREVIEW_KEY, on ? TYPING_VELOCITY : 0, on) : channelPreview(id, on);
+    sent.catch((e: unknown) => onError(errorText(e)));
+  };
+
+  useEffect(() => {
+    if (!menu) return;
+    menuItem.current?.focus();
+    const close = (e: Event) => {
+      if (!(e.target instanceof Node && menuItem.current?.contains(e.target))) setMenu(null);
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [menu]);
+
+  const onContextMenu = (e: MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    onSelect();
+    setMenu({ x: e.clientX, y: e.clientY });
+  };
+  const onRowKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if ((e.key === "Delete" || e.key === "Backspace") && !e.repeat && !isTypingTarget(e.target)) {
+      e.preventDefault();
+      onRemove();
+    }
   };
 
   const onPointerDown = (e: PointerEvent<HTMLButtonElement>) => {
@@ -53,10 +93,16 @@ export function ChannelRow({ channel, onMix, onRelink, onError }: Props) {
 
   return (
     <div
-      className={`channel-row${channel.mute ? " muted" : ""}`}
+      className={`channel-row${channel.mute ? " muted" : ""}${selected ? " selected" : ""}`}
       role="group"
       aria-label={name}
       style={{ "--ink": `var(--ink-${channel.color + 1})` } as CSSProperties}
+      onPointerDownCapture={(e) => {
+        if (e.button === 0) onSelect();
+      }}
+      onFocus={onSelect}
+      onKeyDown={onRowKeyDown}
+      onContextMenu={onContextMenu}
     >
       <button
         type="button"
@@ -69,7 +115,8 @@ export function ChannelRow({ channel, onMix, onRelink, onError }: Props) {
       <button
         type="button"
         className="channel-name"
-        data-hint={`Press and hold to hear ${name}. Release to stop.`}
+        aria-current={selected ? "true" : undefined}
+        data-hint={`Press and hold to hear ${name}. Release to stop. The typing keyboard plays the selected channel; Delete removes it.`}
         onPointerDown={onPointerDown}
         onPointerUp={() => preview(false)}
         onPointerCancel={() => preview(false)}
@@ -79,7 +126,7 @@ export function ChannelRow({ channel, onMix, onRelink, onError }: Props) {
         onBlur={() => preview(false)}
       >
         <span className="channel-title">{name}</span>
-        <span className="channel-sample">{channel.sampleName ?? "No sample"}</span>
+        <span className="channel-sample">{synth ? (channel.preset ?? "Synth") : (channel.sampleName ?? "No sample")}</span>
       </button>
       {channel.missing && (
         <>
@@ -132,6 +179,30 @@ export function ChannelRow({ channel, onMix, onRelink, onError }: Props) {
       >
         S
       </button>
+      {menu && (
+        <div className="menu row-menu" role="menu" aria-label={`${name} channel`} style={{ left: menu.x, top: menu.y }}>
+          <button
+            ref={menuItem}
+            type="button"
+            role="menuitem"
+            className="menu-item"
+            data-hint={`Removes ${name} with its steps and notes. It asks first.`}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" || e.key === "Tab") {
+                e.stopPropagation();
+                e.preventDefault();
+                setMenu(null);
+              }
+            }}
+            onClick={() => {
+              setMenu(null);
+              onRemove();
+            }}
+          >
+            Remove channel…
+          </button>
+        </div>
+      )}
     </div>
   );
 }

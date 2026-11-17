@@ -19,6 +19,7 @@ export interface MockProject {
   channels: MockChannel[];
   pattern: { id: number; name: string; steps: number; swing: number; notes: MockNote[] };
   nextId: number;
+  key?: { root: number; scale: string } | null;
 }
 
 export interface MockChannel {
@@ -35,12 +36,23 @@ export interface MockChannel {
   mute: boolean;
   solo: boolean;
   sampler: Record<string, number>;
+  /** Sampler unless said otherwise. */
+  kind?: "sampler" | "synth";
+  synth?: Record<string, number>;
+  preset?: string | null;
+  choke?: number;
 }
 
+/** A note. A step hit needs only channel, tick and velocity: the rest defaults to a plain step
+ * (length 240, key 60, no slide) and ids are given on load. */
 export interface MockNote {
   channel: number;
   tick: number;
   velocity: number;
+  id?: number;
+  length?: number;
+  key?: number;
+  slide?: boolean;
 }
 
 export interface MockSeed {
@@ -54,6 +66,8 @@ export interface MockSeed {
   exportMs?: number;
   /** The sampler's parameters (tests/fixtures/device-params.json); the fixture fills it in. */
   samplerParams?: { id: string; min: number; max: number; default: number }[];
+  /** The synth's parameters (the same fixture). */
+  synthParams?: { id: string; min: number; max: number; default: number }[];
 }
 
 export function installMockTauri(seed: MockSeed): void {
@@ -65,6 +79,16 @@ export function installMockTauri(seed: MockSeed): void {
   const DEFAULT_VELOCITY = 0.8;
   if (!seed.samplerParams?.length) throw new Error("the mock needs the sampler's parameters");
   const PARAMS: [string, number, number, number][] = seed.samplerParams.map((p) => [p.id, p.min, p.max, p.default]);
+  const SYNTH_PARAMS: [string, number, number, number][] = (seed.synthParams ?? []).map((p) => [p.id, p.min, p.max, p.default]);
+  // project/src (Task 6 and 7): presets (grooviq_dsp::synth::PRESETS), ranges, the notes wire format.
+  const PRESETS = ["Init", "808 Glide", "Sub Bass", "Reese", "Bell Keys", "Dark Pad", "Pluck", "Trap Lead"];
+  const SCALES = [
+    "major", "minor", "harmonic_minor", "melodic_minor", "dorian", "phrygian", "lydian", "mixolydian",
+    "locrian", "major_pentatonic", "minor_pentatonic", "blues",
+  ];
+  const MAX_CHOKE = 16;
+  const MAX_NOTES = 100_000;
+  const NOTES_MAGIC = 0x314e5147;
   const SILENT_OUTPUT = {
     id: "null",
     name: "Silent (QA mode)",
@@ -90,6 +114,20 @@ export function installMockTauri(seed: MockSeed): void {
     const has = anyCase ? extension(path).toLowerCase() === ext : extension(path) === ext;
     return has ? path : `${path}.${ext}`;
   };
+  /** Ids for notes without one, and the plain-step defaults (a project as Task 6 loads it). */
+  const normalise = (p: Project): Project => {
+    let next = Math.max(0, ...p.pattern.notes.map((n) => n.id ?? 0)) + 1;
+    p.pattern.notes = p.pattern.notes.map((n) => ({
+      id: n.id ?? next++,
+      channel: n.channel,
+      tick: n.tick,
+      length: n.length ?? STEP_TICKS,
+      key: n.key ?? 60,
+      velocity: n.velocity,
+      slide: n.slide ?? false,
+    }));
+    return p;
+  };
   const emptyProject = (): Project => ({
     name: "Untitled",
     bpm: 140,
@@ -103,7 +141,7 @@ export function installMockTauri(seed: MockSeed): void {
   const files = new Map<string, MockFile>(Object.entries(seed.files ?? {}));
   const calls: { cmd: string; args: unknown; at: number }[] = [];
   const s = {
-    project: seed.project ? clone(seed.project) : emptyProject(),
+    project: normalise(seed.project ? clone(seed.project) : emptyProject()),
     path: null as string | null,
     revision: 0,
     savedRevision: 0,
@@ -118,6 +156,18 @@ export function installMockTauri(seed: MockSeed): void {
     tone: false,
     previews: new Map<number, boolean>(),
     dialogs: [] as unknown[],
+    /** Bumped by every note change (Pattern.revision, starts at 1 on load). */
+    notesRevision: 1,
+    recording: false,
+    metronome: false,
+    /** The channel MIDI plays (`channel_select`). */
+    selected: null as number | null,
+    /** Live notes sounding now, "channel:key" -> velocity (`channel_note`). */
+    live: new Map<string, number>(),
+    /** Notes being recorded: "channel:key" -> where and how hard they started. */
+    recordOpen: new Map<string, { tick: number; velocity: number }>(),
+    /** `channel_param_live` calls, last value per "channel:param". */
+    liveParams: new Map<string, number>(),
     dialogCalls: [] as { kind: string; options: unknown }[],
   };
 
@@ -152,7 +202,12 @@ export function installMockTauri(seed: MockSeed): void {
     s.autosavedAt = null;
   };
   const samplerValues = (c: MockChannel) =>
-    Object.fromEntries(PARAMS.map(([id, , , def]) => [id, c.sampler[id] ?? def]));
+    c.kind === "synth" ? {} : Object.fromEntries(PARAMS.map(([id, , , def]) => [id, c.sampler[id] ?? def]));
+  const synthValues = (c: MockChannel) =>
+    c.kind === "synth" ? Object.fromEntries(SYNTH_PARAMS.map(([id, , , def]) => [id, c.synth?.[id] ?? def])) : {};
+  /** Global Constraints: a plain step is on a step, a step long, key 60, no slide. */
+  const plain = (n: MockNote) => n.tick % STEP_TICKS === 0 && n.length === STEP_TICKS && n.key === 60 && !n.slide;
+  const isRoll = (id: number) => s.project.pattern.notes.some((n) => n.channel === id && !plain(n));
   // session.rs: missing = a sample reference without decoded bytes. The path is never opened.
   const missing = (c: MockChannel) => c.sample !== null && c.embedded === false;
   const view = () => {
@@ -163,7 +218,7 @@ export function installMockTauri(seed: MockSeed): void {
     for (const n of p.pattern.notes) {
       const step = n.tick / STEP_TICKS;
       const row = cells[String(n.channel)];
-      if (n.tick % STEP_TICKS === 0 && step < steps && row) row[step] = n.velocity;
+      if (plain(n) && step < steps && row) row[step] = n.velocity;
     }
     return {
       name: s.path ? stem(s.path) : p.name,
@@ -182,9 +237,17 @@ export function installMockTauri(seed: MockSeed): void {
         mute: c.mute,
         solo: c.solo,
         sampler: samplerValues(c),
+        kind: c.kind ?? "sampler",
+        synth: synthValues(c),
+        preset: c.preset ?? null,
+        choke: c.choke ?? 0,
+        roll: isRoll(c.id),
       })),
       pattern: { id: p.pattern.id, name: p.pattern.name, steps, swing: p.pattern.swing, cells },
       autosavedAt: s.autosavedAt,
+      key: p.key ?? null,
+      notesRevision: s.notesRevision,
+      recording: s.recording,
     };
   };
   const finite = (x: unknown, what: string): number => {
@@ -197,20 +260,59 @@ export function installMockTauri(seed: MockSeed): void {
     return i;
   };
   const stepTick = (channel: unknown, step: unknown) => {
-    channelIndex(channel);
+    const c = s.project.channels[channelIndex(channel)];
+    // session.rs (Task 7): SessionError::RollChannel.
+    if (isRoll(c.id)) throw `${c.name} has piano-roll notes. Edit them in the piano roll (F7).`;
     const steps = s.project.pattern.steps;
     const n = Number(step);
     if (!(n >= 0 && n < steps)) throw `Step ${n + 1} is past the end of the pattern (${steps} steps).`;
     return n * STEP_TICKS;
   };
-  /** Changes the pattern; `true` if anything changed. */
+  /** Changes the pattern; `true` if anything changed. A note change bumps the notes revision. */
   const editPattern = (change: (p: Project["pattern"]) => void) => {
     const before = JSON.stringify(s.project.pattern);
+    const notesBefore = JSON.stringify(s.project.pattern.notes);
     const next = clone(s.project.pattern);
     change(next);
     if (JSON.stringify(next) === before) return false;
     s.project.pattern = next;
+    if (JSON.stringify(next.notes) !== notesBefore) s.notesRevision += 1;
     return true;
+  };
+  const nextNoteId = () => Math.max(0, ...s.project.pattern.notes.map((n) => n.id ?? 0)) + 1;
+  const noteBase = (channel: number, tick: number, velocity: number): MockNote => ({
+    id: nextNoteId(),
+    channel,
+    tick,
+    length: STEP_TICKS,
+    key: 60,
+    velocity,
+    slide: false,
+  });
+  /** Grows the pattern to the end of the bar holding the last note's end (never shrinks, at
+   * most 256 steps). */
+  const growToNotes = (pat: Project["pattern"]) => {
+    const { beats, unit } = s.project.timeSignature;
+    const barTicks = (beats * 3840) / unit;
+    const end = Math.max(0, ...pat.notes.map((n) => n.tick + (n.length ?? STEP_TICKS)));
+    const steps = Math.ceil(end / barTicks) * (barTicks / STEP_TICKS);
+    pat.steps = Math.min(MAX_STEPS, Math.max(pat.steps, steps));
+  };
+  /** Clamps a note's values as `validate` does; `true` if any changed. */
+  const clampNote = (n: MockNote) => {
+    const before = JSON.stringify(n);
+    n.tick = Math.max(0, Math.trunc(n.tick));
+    n.length = Math.max(1, Math.trunc(n.length ?? 1));
+    n.key = clamp(Math.trunc(n.key ?? 60), 0, 127);
+    n.velocity = clamp(n.velocity, 0, 1);
+    n.slide = Boolean(n.slide);
+    return JSON.stringify(n) !== before;
+  };
+  const instrumentParam = (c: MockChannel, param: unknown, value: unknown) => {
+    const synth = c.kind === "synth";
+    const spec = (synth ? SYNTH_PARAMS : PARAMS).find(([id]) => id === param);
+    if (!spec) throw `The ${synth ? "synth" : "sampler"} has no setting called "${String(param)}".`;
+    return { spec, value: clamp(finite(value, `${synth ? "synth" : "sampler"} value`), spec[1], spec[2]) };
   };
   type Edit = Record<string, unknown> & { kind: string };
   const applyEdit = (e: Edit): boolean => {
@@ -218,8 +320,45 @@ export function installMockTauri(seed: MockSeed): void {
     switch (e.kind) {
       case "removeChannel": {
         const i = channelIndex(e.channel);
-        p.pattern.notes = p.pattern.notes.filter((n) => n.channel !== e.channel);
+        editPattern((pat) => {
+          pat.notes = pat.notes.filter((n) => n.channel !== e.channel);
+        });
         p.channels.splice(i, 1);
+        // The engine drops the channel's live notes with it (Task 5).
+        for (const k of [...s.live.keys()]) if (k.startsWith(`${String(e.channel)}:`)) s.live.delete(k);
+        return true;
+      }
+      case "setInstrumentParam": {
+        const c = p.channels[channelIndex(e.channel)];
+        const { spec, value } = instrumentParam(c, e.param, e.value);
+        const store = c.kind === "synth" ? (c.synth ??= {}) : c.sampler;
+        if (store[spec[0]] === value) return false;
+        store[spec[0]] = value;
+        return true;
+      }
+      case "loadSynthPreset": {
+        const c = p.channels[channelIndex(e.channel)];
+        if (c.kind !== "synth") throw `${c.name} is not a synth channel.`;
+        if (!PRESETS.includes(String(e.preset))) throw `There is no synth preset called "${String(e.preset)}".`;
+        // The mock does not know the presets' values: every parameter goes back to its default.
+        c.synth = {};
+        c.preset = String(e.preset);
+        return true;
+      }
+      case "setChoke": {
+        const c = p.channels[channelIndex(e.channel)];
+        const group = clamp(Math.trunc(Number(e.group)), 0, MAX_CHOKE);
+        if ((c.choke ?? 0) === group) return false;
+        c.choke = group;
+        return true;
+      }
+      case "setProjectKey": {
+        const k = e.key as { root: number; scale: string } | null;
+        if (k !== null && (!(k.root >= 0 && k.root <= 11) || !SCALES.includes(k.scale))) {
+          throw `${String(k.scale)} on ${String(k.root)} is not a key Grooviq knows.`;
+        }
+        if (JSON.stringify(p.key ?? null) === JSON.stringify(k)) return false;
+        p.key = k ? { root: k.root, scale: k.scale } : null;
         return true;
       }
       case "setChannelMix": {
@@ -246,9 +385,7 @@ export function installMockTauri(seed: MockSeed): void {
         return editPattern((pat) => {
           const before = pat.notes.length;
           pat.notes = pat.notes.filter((n) => !(n.channel === e.channel && n.tick === tick));
-          if (pat.notes.length === before) {
-            pat.notes.push({ channel: e.channel as number, tick, velocity: DEFAULT_VELOCITY });
-          }
+          if (pat.notes.length === before) pat.notes.push(noteBase(e.channel as number, tick, DEFAULT_VELOCITY));
         });
       }
       case "setStepVelocity": {
@@ -262,7 +399,7 @@ export function installMockTauri(seed: MockSeed): void {
               found = true;
             }
           }
-          if (!found) pat.notes.push({ channel: e.channel as number, tick, velocity });
+          if (!found) pat.notes.push(noteBase(e.channel as number, tick, velocity));
         });
       }
       case "clearStep": {
@@ -330,7 +467,8 @@ export function installMockTauri(seed: MockSeed): void {
   };
   const openProject = (p: Project, path: string | null, unsaved: boolean) => {
     stopTransport();
-    s.project = clone(p);
+    s.project = normalise(clone(p));
+    s.notesRevision += 1;
     s.path = path;
     markClean();
     if (unsaved) changed();
@@ -418,6 +556,90 @@ export function installMockTauri(seed: MockSeed): void {
   } as unknown as typeof WebSocket;
   window.WebSocket = MockWebSocket;
 
+  // --- Notes (Task 7): the wire format, edits by id, live notes and the recorder. ---
+  const encodeNotes = () => {
+    const notes = [...s.project.pattern.notes].sort(
+      (a, b) => a.tick - b.tick || a.channel - b.channel || (a.id ?? 0) - (b.id ?? 0),
+    );
+    const buf = new ArrayBuffer(16 + notes.length * 24);
+    const v = new DataView(buf);
+    v.setUint32(0, NOTES_MAGIC, true);
+    v.setUint32(4, s.notesRevision, true);
+    v.setUint32(8, notes.length, true);
+    notes.forEach((n, i) => {
+      const o = 16 + i * 24;
+      v.setUint32(o, n.id ?? 0, true);
+      v.setUint32(o + 4, n.channel, true);
+      v.setUint32(o + 8, n.tick, true);
+      v.setUint32(o + 12, n.length ?? STEP_TICKS, true);
+      v.setFloat32(o + 16, n.velocity, true);
+      v.setUint8(o + 20, n.key ?? 60);
+      v.setUint8(o + 21, n.slide ? 1 : 0);
+    });
+    return buf;
+  };
+  type WireNote = Required<MockNote>;
+  const editNotes = (e: { baseRevision: number; add: Omit<WireNote, "id">[]; update: WireNote[]; delete: number[] }) => {
+    const stale = e.baseRevision !== s.notesRevision;
+    const ignored: number[] = [];
+    const added: number[] = [];
+    let clamped = false;
+    const done = editPattern((pat) => {
+      const has = (id: number) => pat.notes.some((n) => n.id === id);
+      for (const id of e.delete) {
+        if (has(id)) pat.notes = pat.notes.filter((n) => n.id !== id);
+        else ignored.push(id);
+      }
+      for (const u of e.update) {
+        const i = pat.notes.findIndex((n) => n.id === u.id);
+        if (i < 0) {
+          ignored.push(u.id);
+          continue;
+        }
+        const n = { ...u };
+        clamped = clampNote(n) || clamped;
+        channelIndex(n.channel);
+        pat.notes[i] = n;
+      }
+      let id = Math.max(0, ...pat.notes.map((n) => n.id ?? 0)) + 1;
+      for (const a of e.add) {
+        if (pat.notes.length >= MAX_NOTES) throw `A pattern holds at most ${MAX_NOTES} notes.`;
+        channelIndex(a.channel);
+        const n: MockNote = { ...a, id: id++ };
+        clamped = clampNote(n) || clamped;
+        pat.notes.push(n);
+        added.push(n.id!);
+      }
+      growToNotes(pat);
+    });
+    if (done) changed();
+    return { revision: s.notesRevision, addedIds: added, ignoredIds: ignored, reload: stale || clamped, view: view() };
+  };
+  /** The recorder (recorder.rs): a note-on and its note-off become a note at the tick it was
+   * heard, in the loop; an open note ends when recording stops. Notes are overdubbed. */
+  const closeRecorded = (key: string, now: number) => {
+    const open = s.recordOpen.get(key);
+    if (!open) return;
+    s.recordOpen.delete(key);
+    const [channel, note] = key.split(":").map(Number);
+    if (!s.project.channels.some((c) => c.id === channel)) return;
+    const loop = s.project.pattern.steps * STEP_TICKS;
+    editPattern((pat) => {
+      pat.notes.push({
+        id: nextNoteId(),
+        channel,
+        tick: open.tick % loop,
+        length: Math.max(1, now - open.tick),
+        key: note,
+        velocity: open.velocity,
+        slide: false,
+      });
+      growToNotes(pat);
+    });
+    changed();
+    emit("notes-changed", s.notesRevision);
+  };
+
   // --- Commands. ---
   const LOOPS_MAX = 999;
   const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
@@ -476,6 +698,81 @@ export function installMockTauri(seed: MockSeed): void {
       c.embedded = true;
       changed();
       return view();
+    },
+    pattern_notes: () => encodeNotes(),
+    notes_edit: (a) => editNotes(a.edit as Parameters<typeof editNotes>[0]),
+    channel_add_synth: (a) => {
+      const preset = String(a.preset);
+      if (!PRESETS.includes(preset)) throw `There is no synth preset called "${preset}".`;
+      const p = s.project;
+      if (p.channels.length >= MAX_CHANNELS) {
+        throw `A project holds at most ${MAX_CHANNELS} channels; remove one to add another.`;
+      }
+      const last = p.channels[p.channels.length - 1];
+      p.channels.push({
+        id: p.nextId,
+        name: preset,
+        color: last ? (last.color + 1) % INKS : 0,
+        sample: null,
+        volume: 1,
+        pan: 0,
+        mute: false,
+        solo: false,
+        sampler: {},
+        kind: "synth",
+        synth: {},
+        preset,
+        choke: 0,
+      });
+      p.nextId += 1;
+      changed();
+      return view();
+    },
+    channel_note: (a) => {
+      const c = s.project.channels[channelIndex(a.channel)];
+      const key = `${c.id}:${String(a.key)}`;
+      if (a.on) {
+        s.live.set(key, a.velocity as number);
+        if (s.recording && s.transport.playing) s.recordOpen.set(key, { tick: ticksNow(), velocity: a.velocity as number });
+      } else {
+        s.live.delete(key);
+        closeRecorded(key, ticksNow());
+      }
+      return null;
+    },
+    channel_param_live: (a) => {
+      const c = s.project.channels[channelIndex(a.channel)];
+      const { spec, value } = instrumentParam(c, a.param, a.value);
+      s.liveParams.set(`${c.id}:${spec[0]}`, value);
+      return null;
+    },
+    channel_select: (a) => {
+      if (a.channel !== null) channelIndex(a.channel);
+      s.selected = a.channel as number | null;
+      return null;
+    },
+    channel_waveform: (a) => {
+      const c = s.project.channels[channelIndex(a.channel)];
+      if (c.kind === "synth" || c.sample === null || c.embedded === false) throw `${c.name} has no sample to draw.`;
+      const points = a.points as number;
+      const buf = new ArrayBuffer(points * 8);
+      const v = new DataView(buf);
+      for (let i = 0; i < points; i++) {
+        const amp = Math.exp((-4 * i) / Math.max(1, points));
+        v.setFloat32(i * 8, -amp, true);
+        v.setFloat32(i * 8 + 4, amp, true);
+      }
+      return buf;
+    },
+    record_set: (a) => {
+      const on = Boolean(a.on);
+      if (!on) for (const key of [...s.recordOpen.keys()]) closeRecorded(key, ticksNow());
+      s.recording = on;
+      return view();
+    },
+    metronome_set: (a) => {
+      s.metronome = Boolean(a.on);
+      return null;
     },
     channel_preview: (a) => {
       channelIndex(a.channel);
@@ -609,7 +906,30 @@ export function installMockTauri(seed: MockSeed): void {
     setSwing: fields({ swing: f32 }),
     setTempo: fields({ bpm: f32 }),
     setTimeSignature: fields({ beats: u8, unit: u8 }),
+    setInstrumentParam: fields({ channel: u32, param: str, value: f32 }),
+    loadSynthPreset: fields({ channel: u32, preset: str }),
+    setChoke: fields({ channel: u32, group: u8 }),
+    setProjectKey: (v) => {
+      const key = (v as { key?: unknown } | null)?.key;
+      return key === null ? null : fields({ root: u8, scale: str })(key);
+    },
   };
+  const optional = (check: Check): Check => (v) => (v === null || v === undefined ? null : check(v));
+  const list = (check: Check): Check => (v) => {
+    if (!Array.isArray(v)) return `invalid type: ${JSON.stringify(v ?? null)}, expected a sequence`;
+    for (const item of v) {
+      const why = check(item);
+      if (why) return why;
+    }
+    return null;
+  };
+  const newNote = fields({ channel: u32, tick: u32, length: u32, key: u8, velocity: f32, slide: bool });
+  const notesEditArg: Check = fields({
+    baseRevision: u32,
+    add: list(newNote),
+    update: list(fields({ id: u32, channel: u32, tick: u32, length: u32, key: u8, velocity: f32, slide: bool })),
+    delete: list(u32),
+  });
   const edit: Check = (v) => {
     const kind = (v as { kind?: unknown } | null)?.kind;
     const check = typeof kind === "string" ? EDITS[kind] : undefined;
@@ -629,6 +949,14 @@ export function installMockTauri(seed: MockSeed): void {
     channel_add: { path: str },
     channel_set_sample: { channel: u32, path: str },
     channel_preview: { channel: u32, on: bool },
+    notes_edit: { edit: notesEditArg },
+    channel_add_synth: { preset: str },
+    channel_note: { channel: u32, key: u8, velocity: f32, on: bool },
+    channel_param_live: { channel: u32, param: str, value: f32 },
+    channel_select: { channel: optional(u32) },
+    channel_waveform: { channel: u32, points: u32 },
+    record_set: { on: bool },
+    metronome_set: { on: bool },
     project_open: { path: str },
     project_save_as: { path: str },
     project_export: { path: str, options: exportOptions },
@@ -642,7 +970,9 @@ export function installMockTauri(seed: MockSeed): void {
       const why = check((args ?? {})[name]);
       if (why) throw `invalid args \`${name}\` for command \`${cmd}\`: ${why}`;
     }
-    return clone(await handler(args ?? {}));
+    const result = await handler(args ?? {});
+    // A raw `tauri::ipc::Response` arrives as an ArrayBuffer.
+    return result instanceof ArrayBuffer ? result.slice(0) : clone(result);
   };
 
   const w = window as unknown as Record<string, unknown>;
@@ -691,6 +1021,10 @@ export function installMockTauri(seed: MockSeed): void {
       if (drop) emit("tauri://drag-drop", { paths, position: { x: 400, y: 300 } });
       else emit("tauri://drag-leave", null);
     },
+    /** The notes as the engine holds them. */
+    notes: () => clone(s.project.pattern.notes),
+    /** Live notes sounding now, as "channel:key". */
+    live: () => [...s.live.keys()],
     autosave: () => {
       s.autosavedAt = Math.floor(Date.now() / 1000);
       emit("project-autosaved", s.autosavedAt);

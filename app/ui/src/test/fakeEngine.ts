@@ -1,3 +1,4 @@
+import { encodeNotes } from "../api/notes";
 import type { ChannelView, Edit, ProjectView } from "../api/project";
 
 type Args = Record<string, unknown> | undefined;
@@ -80,6 +81,11 @@ export function createFakeEngine(initial: ProjectView) {
           mute: false,
           solo: false,
           sampler: {},
+          kind: "sampler",
+          synth: {},
+          preset: null,
+          choke: 0,
+          roll: false,
         };
         view.channels = [...view.channels, channel];
         view.pattern.cells[String(id)] = Array(view.pattern.steps).fill(null);
@@ -94,7 +100,11 @@ export function createFakeEngine(initial: ProjectView) {
         return touch();
       }
       case "channel_preview":
+      case "channel_select":
+      case "channel_note":
         return null;
+      case "pattern_notes":
+        return encodeNotes(view.notesRevision, []);
       default:
         throw new Error(`no fake for ${cmd}`);
     }
@@ -129,6 +139,11 @@ export function channel(id: number, name: string, extra: Partial<ChannelView> = 
     mute: false,
     solo: false,
     sampler: {},
+    kind: "sampler",
+    synth: {},
+    preset: null,
+    choke: 0,
+    roll: false,
     ...extra,
   };
 }
@@ -159,5 +174,8 @@ export function project(
       ),
     },
     autosavedAt: null,
+    key: null,
+    notesRevision: 1,
+    recording: false,
   };
 }

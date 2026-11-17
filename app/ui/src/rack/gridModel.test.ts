@@ -159,3 +159,17 @@ describe("nextFocus", () => {
     expect(nextFocus({ row: 5, step: 40 }, "ArrowRight", 3, 16)).toEqual({ row: 2, step: 0 });
   });
 });
+
+describe("roll rows", () => {
+  it("roll_rows_replace_their_steps_with_the_preview", async () => {
+    const { rollInstances } = await import("./rollPreview");
+    const layout: GridLayout = { rows: 3, steps: 4, cell: 28, gap: 6, dpr: 1 };
+    const note = { id: 1, channel: 7, tick: 240, length: 480, velocity: 1, key: 62, slide: false };
+    const preview = rollInstances(layout, 1, [note], 7, 2, false);
+    const out = buildInstances(layout, [[0.5], [1, 1, 1, 1], []], [0, 2, 3], null, null, [null, preview]);
+    // Rows 0 and 2 keep a record per step; row 1 is its well and one bar, and none of its steps.
+    expect(out.length).toBe((4 + 2 + 4) * STRIDE);
+    expect(Array.from(out.subarray(4 * STRIDE, 6 * STRIDE))).toEqual(Array.from(preview));
+    expect(out[6 * STRIDE + 1]).toBe(2 * 34);
+  });
+});

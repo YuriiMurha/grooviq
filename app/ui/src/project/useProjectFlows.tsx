@@ -19,7 +19,7 @@ import {
 import { formatClock } from "./ago";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ExportDialog } from "./ExportDialog";
-import type { Action } from "./shortcuts";
+import type { MenuAction } from "./shortcuts";
 
 const PROJECT_FILTER = [{ name: "Grooviq project", extensions: ["grooviq"] }];
 
@@ -132,7 +132,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: 
   }, [fail]);
 
   const perform = useCallback(
-    (action: Exclude<Action, "playStop">) => {
+    (action: MenuAction) => {
       if (action === "export") {
         setExporting(true);
         return;

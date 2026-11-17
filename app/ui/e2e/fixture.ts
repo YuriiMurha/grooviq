@@ -4,11 +4,11 @@ import { installMockTauri, type MockChannel, type MockProject, type MockSeed } f
 
 /** The sampler's parameter ids, ranges and defaults, as the engine has them (the fixture the
  * Rust tests keep in step with `grooviq_dsp::sampler`). */
-const SAMPLER_PARAMS = (
-  JSON.parse(readFileSync(new URL("../../../tests/fixtures/device-params.json", import.meta.url), "utf8")) as {
-    sampler: MockSeed["samplerParams"];
-  }
-).sampler;
+const DEVICE_PARAMS = JSON.parse(
+  readFileSync(new URL("../../../tests/fixtures/device-params.json", import.meta.url), "utf8"),
+) as { sampler: MockSeed["samplerParams"]; synth: MockSeed["synthParams"] };
+const SAMPLER_PARAMS = DEVICE_PARAMS.sampler;
+const SYNTH_PARAMS = DEVICE_PARAMS.synth;
 
 // Grid geometry (src/rack/gridModel.ts): 28 px cells, 6 px gaps, 4 px edge.
 const CELL = 28;
@@ -55,7 +55,15 @@ export function soundsFor(names: string[]): MockSeed["files"] {
 export interface Mock {
   /** Every command the UI sent, in order. */
   calls: (cmd?: string) => Promise<{ cmd: string; args: Record<string, unknown> }[]>;
-  view: () => Promise<{ dirty: boolean; path: string | null; bpm: number; pattern: { steps: number; swing: number; cells: Record<string, (number | null)[]> }; channels: { id: number; name: string; volume: number; mute: boolean }[] }>;
+  view: () => Promise<{
+    dirty: boolean;
+    path: string | null;
+    bpm: number;
+    recording: boolean;
+    notesRevision: number;
+    pattern: { steps: number; swing: number; cells: Record<string, (number | null)[]> };
+    channels: { id: number; name: string; volume: number; mute: boolean; kind: string; preset: string | null; roll: boolean }[];
+  }>;
   eval: <T>(fn: string) => Promise<T>;
 }
 
@@ -71,7 +79,7 @@ export const test = base.extend<{ seed: MockSeed; app: Page; mock: Mock }>({
       if (m.type() === "error" || m.type() === "warning") consoleErrors.push(`${m.type()}: ${m.text()}`);
     });
     page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
-    await page.addInitScript(installMockTauri, { samplerParams: SAMPLER_PARAMS, ...seed });
+    await page.addInitScript(installMockTauri, { samplerParams: SAMPLER_PARAMS, synthParams: SYNTH_PARAMS, ...seed });
     await page.goto("/");
     await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
     await use(page);
