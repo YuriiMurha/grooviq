@@ -349,6 +349,16 @@ impl AudioProcessor {
                     } => {
                         self.with_graph(|g| g.set_sampler_param(channel, index, value));
                     }
+                    Command::SetChannelParam {
+                        channel,
+                        index,
+                        value,
+                    } => {
+                        self.with_graph(|g| g.set_channel_param(channel, index, value));
+                    }
+                    Command::SetChoke { channel, group } => {
+                        self.with_graph(|g| g.set_choke(channel, group));
+                    }
                     Command::Play => {
                         if !self.transport.playing() {
                             self.play(start, None);
@@ -523,12 +533,12 @@ mod tests {
     }
 
     fn node(id: u32) -> Box<ChannelNode> {
-        let setup = ChannelSetup {
-            id: ChannelId(id),
-            sample: Some(sample()),
-            sampler: Vec::new(),
-            mix: ChannelMix::default(),
-        }
+        let setup = ChannelSetup::sampler(
+            ChannelId(id),
+            Some(sample()),
+            Vec::new(),
+            ChannelMix::default(),
+        )
         .checked()
         .unwrap();
         Box::new(ChannelNode::new(SR, ramp_len(SR), &setup, false))
