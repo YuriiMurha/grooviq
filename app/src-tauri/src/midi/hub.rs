@@ -17,9 +17,10 @@ pub trait CommandSink: Send + Sync {
     /// sent (no such channel, or the engine did not take it).
     fn press(&self, channel: u32, key: u8, velocity: f32) -> Option<u64>;
 
-    /// Releases `key` on `channel`, which was pressed on `instance`. Nothing if the channel is
-    /// another one by now (the engine cut those notes when it went).
-    fn release(&self, channel: u32, key: u8, instance: u64);
+    /// Releases `key` on `channel`, which was pressed on `instance`, `count` times: the engine
+    /// pairs the n-th release of a key with its n-th press, so every press it took needs one.
+    /// Nothing if the channel is another one by now (the engine cut those notes when it went).
+    fn release(&self, channel: u32, key: u8, instance: u64, count: u32);
 
     /// Tries again what the engine refused earlier. Called after every message and by the poll.
     fn retry(&self) {}
@@ -28,7 +29,7 @@ pub trait CommandSink: Send + Sync {
 /// What a player does to the engine; the hub's goes to a sink, a lone player's is collected.
 trait Out {
     fn press(&mut self, channel: u32, key: u8, velocity: f32) -> Option<u64>;
-    fn release(&mut self, channel: u32, key: u8, instance: u64);
+    fn release(&mut self, channel: u32, key: u8, instance: u64, count: u32);
 }
 
 struct ToSink<'a>(&'a dyn CommandSink);
@@ -37,8 +38,8 @@ impl Out for ToSink<'_> {
     fn press(&mut self, channel: u32, key: u8, velocity: f32) -> Option<u64> {
         self.0.press(channel, key, velocity)
     }
-    fn release(&mut self, channel: u32, key: u8, instance: u64) {
-        self.0.release(channel, key, instance);
+    fn release(&mut self, channel: u32, key: u8, instance: u64, count: u32) {
+        self.0.release(channel, key, instance, count);
     }
 }
 
@@ -51,46 +52,70 @@ impl Out for Collect {
         self.0.push(note(channel, key, velocity, true));
         Some(0)
     }
-    fn release(&mut self, channel: u32, key: u8, _instance: u64) {
-        self.0.push(note(channel, key, 0.0, false));
+    fn release(&mut self, channel: u32, key: u8, _instance: u64, count: u32) {
+        for _ in 0..count {
+            self.0.push(note(channel, key, 0.0, false));
+        }
     }
 }
 
-/// Which keyboards own each key on each engine channel, counted across all inputs: the engine is
-/// told to release a key only when the last keyboard holding or sustaining it lets go. Each key
-/// is counted for the channel instance it was pressed on; owners of an earlier instance are stale
-/// and count for nothing.
+/// Which keyboards own each key on each engine channel, counted across all inputs, and how many
+/// presses the engine took of it: the engine is told to release a key only when the last
+/// keyboard holding or sustaining it lets go, and then once per press it took (it pairs the n-th
+/// release with the n-th press). Each key is counted for the channel instance it was pressed
+/// on; owners of an earlier instance are stale and count for nothing.
 #[derive(Debug, Default)]
 struct Ledger {
-    /// (channel, key) to the instance and how many inputs own the key on it.
-    owners: BTreeMap<(u32, u8), (u64, u32)>,
+    owners: BTreeMap<(u32, u8), Held>,
+}
+
+#[derive(Debug)]
+struct Held {
+    instance: u64,
+    /// Inputs holding or sustaining the key.
+    owners: u32,
+    /// Presses the engine took that no release was sent for yet.
+    presses: u32,
 }
 
 impl Ledger {
-    fn acquire(&mut self, channel: u32, key: u8, instance: u64) {
-        let owners = self.owners.entry((channel, key)).or_insert((instance, 0));
-        if owners.0 != instance {
+    /// The engine took a press of `key` on `instance`; `new_owner` if an input that did not hold
+    /// it presses it.
+    fn press(&mut self, channel: u32, key: u8, instance: u64, new_owner: bool) {
+        let held = self.owners.entry((channel, key)).or_insert(Held {
+            instance,
+            owners: 0,
+            presses: 0,
+        });
+        if held.instance != instance {
             // Whoever held it before held another channel's key.
-            *owners = (instance, 0);
+            *held = Held {
+                instance,
+                owners: 0,
+                presses: 0,
+            };
         }
-        owners.1 += 1;
+        held.presses += 1;
+        held.owners += u32::from(new_owner);
     }
 
-    /// One owner of `key` on `instance` lets go: whether it was the last. A stale owner (the
-    /// key is now another instance's) is never the last.
-    fn release(&mut self, channel: u32, key: u8, instance: u64) -> bool {
-        match self.owners.get_mut(&(channel, key)) {
-            Some((current, count)) if *current == instance => {
-                if *count > 1 {
-                    *count -= 1;
-                    false
-                } else {
-                    self.owners.remove(&(channel, key));
-                    true
-                }
-            }
-            _ => false,
+    /// One owner of `key` on `instance` lets go: how many releases the engine is owed, which is
+    /// nothing until the last owner lets go. A stale owner (the key is now another instance's)
+    /// owes nothing.
+    fn release(&mut self, channel: u32, key: u8, instance: u64) -> u32 {
+        let Some(held) = self.owners.get_mut(&(channel, key)) else {
+            return 0;
+        };
+        if held.instance != instance {
+            return 0;
         }
+        held.owners = held.owners.saturating_sub(1);
+        if held.owners > 0 {
+            return 0;
+        }
+        let presses = held.presses;
+        self.owners.remove(&(channel, key));
+        presses
     }
 }
 
@@ -157,10 +182,8 @@ impl Player {
                     let before = self.held.remove(&key).or(self.down.get(&key).copied());
                     self.down.insert(key, instance);
                     // Down or pedal-held on this instance already: still this player's key,
-                    // only sounded again.
-                    if before != Some(instance) {
-                        ledger.acquire(channel, key, instance);
-                    }
+                    // only sounded again (and owed another release).
+                    ledger.press(channel, key, instance, before != Some(instance));
                 }
             }
             MidiMessage::NoteOff { key } => {
@@ -207,10 +230,12 @@ impl Player {
     }
 }
 
-/// One owner no longer holds `key`: the engine hears it only if no other input does.
+/// One owner no longer holds `key`: the engine hears it only if no other input does, and then
+/// once for every press it took.
 fn disown(ledger: &mut Ledger, out: &mut dyn Out, channel: u32, key: u8, instance: u64) {
-    if ledger.release(channel, key, instance) {
-        out.release(channel, key, instance);
+    let count = ledger.release(channel, key, instance);
+    if count > 0 {
+        out.release(channel, key, instance, count);
     }
 }
 
@@ -504,7 +529,7 @@ mod tests {
             self.check();
             Some(0)
         }
-        fn release(&self, _: u32, _: u8, _: u64) {
+        fn release(&self, _: u32, _: u8, _: u64, _: u32) {
             self.check();
         }
         fn retry(&self) {

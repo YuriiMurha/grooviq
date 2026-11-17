@@ -49,7 +49,7 @@ fn release_now(
         .unwrap()
         .channel_instance(ChannelId(channel))
         .expect("a channel");
-    sink.release(channel, key, instance);
+    sink.release(channel, key, instance, 1);
 }
 
 /// A sorted copy: the order of releases within one message is not part of the contract.
@@ -114,7 +114,8 @@ fn a_key_pressed_again_under_the_pedal_stays_on_until_it_is_let_go() {
         [on(1, 60, 90.0 / 127.0)]
     );
     assert_eq!(player.handle(MidiMessage::Sustain(false), Some(1)), []);
-    assert_eq!(player.handle(up(60), Some(1)), [off(1, 60)]);
+    // The engine took two presses of the key, so it is owed two releases.
+    assert_eq!(player.handle(up(60), Some(1)), [off(1, 60), off(1, 60)]);
 }
 
 #[test]
@@ -290,8 +291,10 @@ impl CommandSink for Recorded {
         self.push(on(channel, key, velocity));
         Some(0)
     }
-    fn release(&self, channel: u32, key: u8, _instance: u64) {
-        self.push(off(channel, key));
+    fn release(&self, channel: u32, key: u8, _instance: u64, count: u32) {
+        for _ in 0..count {
+            self.push(off(channel, key));
+        }
     }
 }
 
@@ -479,13 +482,13 @@ fn a_key_another_keyboard_sustains_is_not_released_by_the_first() {
         !heard.contains(&off(1, 60)),
         "silenced Keys' note: {heard:?}"
     );
-    // The pedal lifting is the last owner letting go.
+    // The pedal lifting is the last owner letting go: one release for each press.
     rig.ports.send("Keys", &[CONTROL, 64, 0]);
-    assert_eq!(rig.sent.take(), [off(1, 60)]);
+    assert_eq!(rig.sent.take(), [off(1, 60), off(1, 60)]);
 }
 
 #[test]
-fn the_last_keyboard_to_let_go_releases_the_key_once() {
+fn the_last_keyboard_to_let_go_releases_the_key_for_every_press() {
     let rig = two_keyboards();
     rig.ports.send("Keys", &[NOTE_ON, 60, 100]);
     rig.ports.send("Pads", &[NOTE_ON, 60, 100]);
@@ -493,7 +496,8 @@ fn the_last_keyboard_to_let_go_releases_the_key_once() {
     rig.ports.send("Pads", &[NOTE_OFF, 60, 0]);
     assert_eq!(rig.sent.take(), [], "Keys still holds it");
     rig.ports.send("Keys", &[NOTE_OFF, 60, 0]);
-    assert_eq!(rig.sent.take(), [off(1, 60)]);
+    // Two keyboards pressed it: the engine took two presses and is owed two releases.
+    assert_eq!(rig.sent.take(), [off(1, 60), off(1, 60)]);
     // Different keys never share an owner.
     rig.ports.send("Keys", &[NOTE_ON, 62, 100]);
     rig.ports.send("Pads", &[NOTE_ON, 64, 100]);
@@ -514,18 +518,21 @@ fn unplugging_or_disabling_one_keyboard_keeps_the_key_the_other_holds() {
     rig.hub.poll();
     assert_eq!(rig.sent.take(), [], "Pads still holds both keys");
     rig.hub.set_enabled("Pads", false);
-    assert_eq!(sorted(rig.sent.take()), [off(1, 60), off(1, 64)]);
+    assert_eq!(
+        sorted(rig.sent.take()),
+        [off(1, 60), off(1, 60), off(1, 64)]
+    );
 }
 
 #[test]
-fn a_channel_change_releases_a_shared_key_once() {
+fn a_channel_change_releases_a_shared_key_for_every_press() {
     let mut rig = two_keyboards();
     rig.ports.send("Keys", &[NOTE_ON, 60, 100]);
     rig.ports.send("Pads", &[NOTE_ON, 60, 100]);
     rig.sent.take();
     rig.selected.store(5, Ordering::Release);
     rig.hub.release_stale();
-    assert_eq!(rig.sent.take(), [off(1, 60)]);
+    assert_eq!(rig.sent.take(), [off(1, 60), off(1, 60)]);
     // The same key on the new channel is its own key.
     rig.ports.send("Keys", &[NOTE_ON, 60, 100]);
     rig.ports.send("Keys", &[NOTE_OFF, 60, 0]);
@@ -607,7 +614,7 @@ mod engine_queue {
     }
 
     #[test]
-    fn a_note_pressed_again_cancels_the_release_still_owed() {
+    fn a_note_pressed_again_leaves_the_release_still_owed_to_end_the_older_note() {
         let (controller, mut processor) = recording_engine();
         let sink = ControllerSink::new(Arc::clone(&controller));
         sink.press(1, 60, 1.0);
@@ -617,13 +624,14 @@ mod engine_queue {
         release_now(&sink, &controller, 1, 60);
         assert_eq!(sink.owed(), 1);
         run(&mut processor, 4);
-        // The key goes down again before the owed release was delivered: that late off would cut
-        // the new note.
-        sink.press(1, 60, 1.0);
-        assert_eq!(sink.owed(), 0);
+        // The key goes down again before the owed release was delivered. The release stays
+        // owed: the engine pairs it with the older press, so it ends that note, not this one.
+        assert!(sink.press(1, 60, 1.0).is_some());
+        assert_eq!(sink.owed(), 1);
         sink.retry();
+        assert_eq!(sink.owed(), 0);
         run(&mut processor, 2);
-        assert_eq!(heard(&controller), [(60, true)]);
+        assert_eq!(heard(&controller), [(60, true), (60, false)]);
     }
 
     #[test]
@@ -639,7 +647,7 @@ mod engine_queue {
             .unwrap();
         run(&mut processor, 2);
         // Refused because the channel is gone, not because the queue is full.
-        sink.release(1, 60, instance);
+        sink.release(1, 60, instance, 1);
         assert_eq!(sink.owed(), 0);
     }
 
@@ -696,7 +704,8 @@ fn a_concurrent_last_release_cannot_cut_a_new_owner() {
             self.sent.push(on(channel, key, velocity));
             Some(0)
         }
-        fn release(&self, channel: u32, key: u8, _instance: u64) {
+        fn release(&self, channel: u32, key: u8, _instance: u64, count: u32) {
+            assert_eq!(count, 1);
             if std::mem::take(&mut *self.armed.lock().unwrap()) {
                 *self.held.lock().unwrap() = true;
                 self.reached.notify_all();
@@ -1223,5 +1232,327 @@ mod engine_queue_edges {
             )),
             "the new note was left ringing"
         );
+    }
+}
+
+// ---- what a refused release does to the voices, in every voice mode ----
+
+/// The instruments pair the n-th note-off of a key with the n-th note-on of that key (a ticket
+/// each), so a key that was pressed twice needs two releases, and a late release ends the older
+/// note, never the newer one. These tests play press, refused release, re-press and release
+/// through a hub on a real engine, rendered offline, and listen to what is left sounding.
+mod voices {
+    use super::*;
+    use grooviq_app::midi::ControllerSink;
+    use grooviq_engine::{
+        AudioProcessor, ChannelMix, ChannelSetup, Controller, EngineConfig, SampleBuf, engine,
+    };
+
+    #[derive(Clone, Copy, Debug)]
+    enum Kind {
+        Sampler,
+        Synth,
+    }
+
+    /// The index of the parameter `id` in the fixture the Rust tests keep in step with the
+    /// devices.
+    fn index(kind: Kind, id: &str) -> u32 {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/device-params.json"
+        );
+        let fixture: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let list = match kind {
+            Kind::Sampler => "sampler",
+            Kind::Synth => "synth",
+        };
+        fixture[list]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|p| p["id"] == id)
+            .unwrap_or_else(|| panic!("no parameter {id}")) as u32
+    }
+
+    struct Rig {
+        controller: Arc<Mutex<Controller>>,
+        processor: AudioProcessor,
+        sink: Arc<ControllerSink>,
+        ports: Fake,
+        hub: MidiHub,
+        /// How many commands the queue holds.
+        capacity: usize,
+    }
+
+    /// Frames in a rendered block.
+    const BLOCK: usize = 512;
+    const RATE: usize = 48_000;
+
+    fn rig(kind: Kind, mode: f32) -> Rig {
+        let (mut controller, processor) = engine(EngineConfig {
+            sample_rate: RATE as f32,
+        });
+        let channel = ChannelId(1);
+        let setup = match kind {
+            Kind::Sampler => {
+                // A long steady sample: nothing ends by itself while a note is held.
+                let sample = SampleBuf {
+                    rate: RATE as f32,
+                    l: vec![0.5; RATE * 20],
+                    r: vec![0.5; RATE * 20],
+                };
+                ChannelSetup::sampler(
+                    channel,
+                    Some(Arc::new(sample)),
+                    Vec::new(),
+                    ChannelMix::default(),
+                )
+            }
+            Kind::Synth => ChannelSetup::synth(channel, Vec::new(), ChannelMix::default()),
+        };
+        controller.add_channel(setup).unwrap();
+        match kind {
+            Kind::Sampler => {
+                // Gate mode: a note-off releases the note (the default plays one-shot).
+                for (id, value) in [("one_shot", 0.0), ("voice_mode", mode)] {
+                    controller
+                        .send(Command::SetSamplerParam {
+                            channel,
+                            index: index(kind, id),
+                            value,
+                        })
+                        .unwrap();
+                }
+            }
+            Kind::Synth => controller
+                .send(Command::SetChannelParam {
+                    channel,
+                    index: index(kind, "voice_mode"),
+                    value: mode,
+                })
+                .unwrap(),
+        }
+        let controller = Arc::new(Mutex::new(controller));
+        let sink = Arc::new(ControllerSink::new(Arc::clone(&controller)));
+        let ports = Fake::default();
+        ports.plug("Keys");
+        let mut hub = MidiHub::new(
+            Box::new(ports.clone()),
+            Arc::clone(&sink) as Arc<dyn CommandSink>,
+            Arc::new(AtomicU32::new(1)),
+            Vec::new(),
+        );
+        hub.poll();
+        let mut rig = Rig {
+            controller,
+            processor,
+            sink,
+            ports,
+            hub,
+            capacity: 0,
+        };
+        // The setup commands go first; then what an empty queue holds.
+        rig.render(4);
+        rig.capacity = rig.fill(usize::MAX);
+        rig.render(4);
+        rig
+    }
+
+    impl Rig {
+        /// Renders `blocks` blocks; the loudest sample of the last one.
+        fn render(&mut self, blocks: usize) -> f32 {
+            let mut peak = 0.0f32;
+            for _ in 0..blocks {
+                let mut out = [0.0f32; BLOCK * 2];
+                self.processor.process(&mut out, 2);
+                peak = out.iter().fold(0.0, |peak, v| peak.max(v.abs()));
+            }
+            peak
+        }
+
+        /// Renders `seconds` and gives the loudest sample of the last 200 ms.
+        fn listen(&mut self, seconds: f32) -> f32 {
+            let blocks = (seconds * RATE as f32) as usize / BLOCK;
+            let mut peak = 0.0f32;
+            for i in 0..blocks {
+                let block = self.render(1);
+                if i + 200 * RATE / 1000 / BLOCK >= blocks {
+                    peak = peak.max(block);
+                }
+            }
+            peak
+        }
+
+        /// Fills the queue with harmless commands until `n` are in (or it is full); how many.
+        fn fill(&mut self, n: usize) -> usize {
+            let mut c = self.controller.lock().unwrap();
+            let mut sent = 0;
+            while sent < n && c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {
+                sent += 1;
+            }
+            sent
+        }
+
+        fn key(&self, on: bool) {
+            let status = if on { NOTE_ON } else { NOTE_OFF };
+            self.ports.send("Keys", &[status, 60, 100]);
+        }
+    }
+
+    const AUDIBLE: f32 = 1e-3;
+    const SILENT: f32 = 1e-4;
+
+    /// Notes a failure instead of stopping at it, so one run names every mode that breaks.
+    fn check(failures: &mut Vec<String>, ok: bool, what: String) {
+        if !ok {
+            failures.push(what);
+        }
+    }
+
+    fn modes() -> Vec<(Kind, f32)> {
+        [Kind::Sampler, Kind::Synth]
+            .into_iter()
+            .flat_map(|kind| [0.0, 1.0, 2.0].map(move |mode| (kind, mode)))
+            .collect()
+    }
+
+    /// The release is refused (queue full), the key is pressed again once there is room, and let
+    /// go: while it is held the new note sounds, afterwards nothing does.
+    #[test]
+    fn a_re_press_after_a_refused_release_keeps_the_newest_note_until_it_is_let_go() {
+        let mut failures = Vec::new();
+        for (kind, mode) in modes() {
+            let mut rig = rig(kind, mode);
+            rig.key(true);
+            assert!(
+                rig.listen(0.4) > AUDIBLE,
+                "{kind:?} {mode}: the first note sounds"
+            );
+            rig.fill(usize::MAX);
+            rig.key(false);
+            check(
+                &mut failures,
+                rig.sink.owed() == 1,
+                format!("{kind:?} {mode}: the release is owed"),
+            );
+            rig.render(4);
+            rig.key(true);
+            check(
+                &mut failures,
+                rig.listen(1.5) > AUDIBLE,
+                format!("{kind:?} {mode}: the older release cut the newer note"),
+            );
+            rig.key(false);
+            check(
+                &mut failures,
+                rig.listen(3.0) < SILENT,
+                format!("{kind:?} {mode}: a voice is left sounding"),
+            );
+            check(
+                &mut failures,
+                rig.sink.owed() == 0,
+                format!("{kind:?} {mode}: a release is still owed"),
+            );
+        }
+        assert_eq!(failures, Vec::<String>::new());
+    }
+
+    /// The re-press is refused too (the queue is still full): the old note must still end.
+    #[test]
+    fn a_re_press_the_full_queue_refused_does_not_lose_the_owed_release() {
+        let mut failures = Vec::new();
+        for (kind, mode) in modes() {
+            let mut rig = rig(kind, mode);
+            rig.key(true);
+            rig.render(4);
+            rig.fill(usize::MAX);
+            rig.key(false);
+            rig.key(true);
+            rig.key(false);
+            rig.render(4);
+            rig.hub.retry_owed();
+            check(
+                &mut failures,
+                rig.listen(3.0) < SILENT,
+                format!("{kind:?} {mode}: the first note rings for ever"),
+            );
+            check(
+                &mut failures,
+                rig.sink.owed() == 0,
+                format!("{kind:?} {mode}: a release is still owed"),
+            );
+        }
+        assert_eq!(failures, Vec::<String>::new());
+    }
+
+    /// There is room for the re-press but not for the release the debt needs: both releases
+    /// are owed, and both arrive.
+    #[test]
+    fn a_re_press_with_one_free_slot_and_two_owed_releases_ends_both_notes() {
+        let mut failures = Vec::new();
+        for (kind, mode) in modes() {
+            let mut rig = rig(kind, mode);
+            rig.key(true);
+            rig.render(4);
+            rig.fill(usize::MAX);
+            rig.key(false);
+            rig.render(4);
+            // One slot: the second press gets it, the debt and the next release do not.
+            let capacity = rig.capacity;
+            rig.fill(capacity - 1);
+            rig.key(true);
+            rig.key(false);
+            check(
+                &mut failures,
+                rig.sink.owed() == 2,
+                format!("{kind:?} {mode}: two releases are owed"),
+            );
+            rig.render(4);
+            rig.hub.retry_owed();
+            check(
+                &mut failures,
+                rig.listen(3.0) < SILENT,
+                format!("{kind:?} {mode}: a voice is left sounding"),
+            );
+            check(
+                &mut failures,
+                rig.sink.owed() == 0,
+                format!("{kind:?} {mode}: a release is still owed"),
+            );
+        }
+        assert_eq!(failures, Vec::<String>::new());
+    }
+
+    /// A key two keyboards hold is two notes in the engine: letting go of the last takes two
+    /// releases.
+    #[test]
+    fn a_key_two_keyboards_pressed_ends_both_notes_when_the_last_lets_go() {
+        let mut failures = Vec::new();
+        for (kind, mode) in modes() {
+            let mut rig = rig(kind, mode);
+            rig.ports.plug("Pads");
+            rig.hub.poll();
+            rig.key(true);
+            rig.ports.send("Pads", &[NOTE_ON, 60, 100]);
+            check(
+                &mut failures,
+                rig.listen(0.4) > AUDIBLE,
+                format!("{kind:?} {mode}: the notes sound"),
+            );
+            rig.ports.send("Pads", &[NOTE_OFF, 60, 0]);
+            check(
+                &mut failures,
+                rig.listen(1.0) > AUDIBLE,
+                format!("{kind:?} {mode}: Keys still holds the key"),
+            );
+            rig.key(false);
+            check(
+                &mut failures,
+                rig.listen(3.0) < SILENT,
+                format!("{kind:?} {mode}: a voice is left sounding"),
+            );
+        }
+        assert_eq!(failures, Vec::<String>::new());
     }
 }
