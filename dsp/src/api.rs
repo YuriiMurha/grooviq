@@ -17,6 +17,10 @@ pub struct NoteEvent {
     pub on: bool,
     /// FL-style slide note: glide from the previous note's pitch to this one (mono/legato voices).
     pub slide: bool,
+    /// The note's identity, the same on its note-on and its note-off: a note-off ends the note
+    /// whose note-on carried its id (and key), and nothing if that note never started or has
+    /// already ended. Notes held at once need distinct ids.
+    pub id: u64,
 }
 
 pub trait Device: Send {

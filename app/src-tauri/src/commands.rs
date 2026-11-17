@@ -4,7 +4,7 @@
 use crate::audio_log::{Level, LogEntry};
 use crate::events::{OutputDto, output_dto};
 use crate::{Audio, lock, settings};
-use grooviq_engine::{Command, OutputChoice};
+use grooviq_engine::{Command, NoteId, OutputChoice};
 use serde::Serialize;
 use std::sync::Mutex;
 use tauri::State;
@@ -118,6 +118,8 @@ pub async fn synth_note(audio: State<'_, Audio>, key: u8, on: bool) -> Result<()
             key,
             velocity: NOTE_VELOCITY,
             on,
+            // One note per key on this test path: the key names it.
+            id: NoteId(u64::from(key)),
         },
     )
 }

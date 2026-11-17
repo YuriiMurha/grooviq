@@ -6,7 +6,7 @@
 
 use grooviq_dsp::sampler::SPEC;
 use grooviq_engine::{
-    BLOCK, ChannelId, ChannelMix, ChannelSetup, Command, EngineConfig, EngineState, PPQ,
+    BLOCK, ChannelId, ChannelMix, ChannelSetup, Command, EngineConfig, EngineState, NoteId, PPQ,
     PatternData, STEP_TICKS, SampleBuf, SeqNote, engine_with, render_offline_with, ticks_to_frames,
 };
 use std::sync::Arc;
@@ -830,6 +830,7 @@ fn all_sound_off_queued_before_a_rate_change_stops_and_keeps_a_later_tone() {
         key: 60,
         velocity: 1.0,
         on: true,
+        id: NoteId(60),
     };
     c.send(click).unwrap();
     c.send(Command::AllSoundOff).unwrap();

@@ -159,6 +159,69 @@ test.describe("the typing keyboard", () => {
   });
 });
 
+test.describe("a typing note and a synth row's preview on one key", () => {
+  test.use({ seed: { project: withBass(), files: soundsFor(KIT) } });
+
+  /** The presses the mock engine holds, as ids. */
+  const presses = (mock: Mock) => mock.eval<number[]>("(m) => [...m.state.presses.keys()]");
+  const releases = async (mock: Mock) =>
+    (await mock.calls("channel_note")).filter((c) => !c.args.on).map((c) => c.args.press);
+
+  /** Holds Z on Bass as C4 (press 1), then holds Bass's name, which previews C4 (press 2). */
+  async function both(app: Page, mock: Mock) {
+    await selectChannel(app, mock, "Bass", 4);
+    // Unfocus the name (Bass stays selected): WebKit does not focus a pressed button, so a
+    // focused name would blur on the press and stop its preview (#185).
+    await app.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await app.keyboard.press("Equal");
+    await app.keyboard.down("z");
+    await expect.poll(() => presses(mock)).toEqual([1]);
+    const box = (await nameButton(app, "Bass").boundingBox())!;
+    await app.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await app.mouse.down();
+  }
+
+  for (const previewFirst of [true, false]) {
+    test(`each_release_ends_its_own_press_${previewFirst ? "preview" : "typing"}_first`, async ({ app, mock }) => {
+      await both(app, mock);
+      await expect.poll(() => presses(mock)).toEqual([1, 2]);
+      expect(await live(mock)).toEqual(["4:60"]);
+      if (previewFirst) await app.mouse.up();
+      else await app.keyboard.up("z");
+      // The release named its own press; the other note still sounds.
+      await expect.poll(() => releases(mock)).toEqual([previewFirst ? 2 : 1]);
+      expect(await presses(mock)).toEqual([previewFirst ? 1 : 2]);
+      expect(await live(mock)).toEqual(["4:60"]);
+      if (previewFirst) await app.keyboard.up("z");
+      else await app.mouse.up();
+      await expect.poll(() => live(mock)).toEqual([]);
+      expect(await releases(mock)).toEqual(previewFirst ? [2, 1] : [1, 2]);
+    });
+  }
+
+  test("a_refused_preview_releases_nothing_and_the_typing_note_ends_on_its_own", async ({ app, mock }) => {
+    await selectChannel(app, mock, "Bass", 4);
+    // Unfocus the name (Bass stays selected): WebKit does not focus a pressed button, so a
+    // focused name would blur on the press and stop its preview (#185).
+    await app.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await app.keyboard.press("Equal");
+    await app.keyboard.down("z");
+    await expect.poll(() => presses(mock)).toEqual([1]);
+    // The engine refuses the preview's note-on (its queue is full): no press is made.
+    await mock.eval(`(m) => m.refuseNext("channel_note", "The engine is busy.")`);
+    const box = (await nameButton(app, "Bass").boundingBox())!;
+    await app.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await app.mouse.down();
+    await expect.poll(async () => (await mock.calls("channel_note")).length).toBe(2);
+    await app.mouse.up();
+    expect(await live(mock)).toEqual(["4:60"]);
+    await app.keyboard.up("z");
+    await expect.poll(() => live(mock)).toEqual([]);
+    // One release, of the typing press: the refused preview had nothing to release.
+    expect(await releases(mock)).toEqual([1]);
+  });
+});
+
 test.describe("synth channels", () => {
   test.use({ seed: kitSeed });
 
@@ -691,7 +754,7 @@ test.describe("the mock follows Task 7 (fix round 1)", () => {
     await call(app, "record_set", { on: true });
     await call(app, "transport_play");
     await mock.eval("(m) => m.hold(480)");
-    await call(app, "channel_note", { channel: 1, key: 48, velocity: 0.8, on: true });
+    const press = await call(app, "channel_note", { channel: 1, key: 48, velocity: 0.8, on: true });
     await mock.eval("(m) => m.hold(960)");
     await call(app, "transport_stop");
     const recorded = () => mock.eval("(m) => m.notes().filter((n) => n.key === 48)");
@@ -699,7 +762,7 @@ test.describe("the mock follows Task 7 (fix round 1)", () => {
     expect(await recorded()).toEqual(one);
     expect(await mock.eval<number>("(m) => m.state.recordOpen.size")).toBe(0);
     // The key comes up after the stop: nothing changes, nothing doubles.
-    await call(app, "channel_note", { channel: 1, key: 48, velocity: 0, on: false });
+    await call(app, "channel_note", { channel: 1, key: 48, velocity: 0, on: false, press });
     expect(await recorded()).toEqual(one);
   });
 });

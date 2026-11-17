@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent, type RefObject } from "react";
-import { channelNote, TYPING_VELOCITY } from "../api/notes";
+import { channelNoteOff, channelNoteOn, TYPING_VELOCITY } from "../api/notes";
 import { errorText } from "../api/project";
+import { Press } from "../keyboard/press";
 
 const BLACK = new Set([1, 3, 6, 8, 10]);
 const KEYS = Array.from({ length: 128 }, (_, i) => 127 - i);
@@ -21,7 +22,7 @@ interface Props {
  * stops, the project is replaced or the channel changes. */
 export function KeyColumn({ channel, keyAt, strip, onError, releaseKeys }: Props) {
   const [held, setHeld] = useState<number | null>(null);
-  const sounding = useRef<{ channel: number; key: number } | null>(null);
+  const sounding = useRef<{ channel: number; key: number; press: Press } | null>(null);
   const report = useRef(onError);
   useEffect(() => {
     report.current = onError;
@@ -33,14 +34,16 @@ export function KeyColumn({ channel, keyAt, strip, onError, releaseKeys }: Props
     sounding.current = null;
     setHeld(null);
     // Best effort: the channel may just have been removed.
-    channelNote(s.channel, s.key, 0, false).catch(() => {});
+    void s.press.release((id) => channelNoteOff(s.channel, s.key, id));
   }, []);
   const play = (key: number) => {
     if (channel === null || key < 0 || key > 127 || sounding.current?.key === key) return;
     release();
-    sounding.current = { channel, key };
+    const press = new Press(channelNoteOn(channel, key, TYPING_VELOCITY), (e: unknown) =>
+      report.current(errorText(e)),
+    );
+    sounding.current = { channel, key, press };
     setHeld(key);
-    channelNote(channel, key, TYPING_VELOCITY, true).catch((e: unknown) => report.current(errorText(e)));
   };
   const keyOf = (e: PointerEvent<HTMLDivElement>) => keyAt(e.clientY - e.currentTarget.getBoundingClientRect().top);
 

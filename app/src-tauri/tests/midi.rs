@@ -1,8 +1,8 @@
 //! MIDI keyboards: the player (held keys, pedal, selected channel) and the hub (plug, unplug,
 //! disabled inputs), with a fake set of ports and a sink that records the engine's commands.
 
-use grooviq_app::midi::{CommandSink, MidiHub, MidiMessage, MidiPorts, NO_CHANNEL, Player};
-use grooviq_engine::{ChannelId, Command};
+use grooviq_app::midi::{CommandSink, MidiHub, MidiMessage, MidiPorts, NO_CHANNEL};
+use grooviq_engine::{ChannelId, Command, NoteId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -11,12 +11,14 @@ const NOTE_ON: u8 = 0x90;
 const NOTE_OFF: u8 = 0x80;
 const CONTROL: u8 = 0xB0;
 
+/// A note command with no id: what [`plain`] makes of one, for tests that look past ids.
 fn on(channel: u32, key: u8, velocity: f32) -> Command {
     Command::ChannelNote {
         channel: ChannelId(channel),
         key,
         velocity,
         on: true,
+        id: NoteId(0),
     }
 }
 
@@ -26,6 +28,61 @@ fn off(channel: u32, key: u8) -> Command {
         key,
         velocity: 0.0,
         on: false,
+        id: NoteId(0),
+    }
+}
+
+/// The note's id, or the command itself if it is no note.
+fn id_of(cmd: Command) -> NoteId {
+    match cmd {
+        Command::ChannelNote { id, .. } => id,
+        other => panic!("not a note: {other:?}"),
+    }
+}
+
+/// The commands with their note ids cleared.
+fn plain(commands: Vec<Command>) -> Vec<Command> {
+    commands
+        .into_iter()
+        .map(|c| match c {
+            Command::ChannelNote {
+                channel,
+                key,
+                velocity,
+                on,
+                ..
+            } => Command::ChannelNote {
+                channel,
+                key,
+                velocity,
+                on,
+                id: NoteId(0),
+            },
+            other => other,
+        })
+        .collect()
+}
+
+/// A player whose commands come without ids, to compare with [`on`] and [`off`]; `raw` keeps
+/// them.
+#[derive(Default)]
+struct Player(grooviq_app::midi::Player);
+
+impl Player {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn handle(&mut self, msg: MidiMessage, channel: Option<u32>) -> Vec<Command> {
+        plain(self.raw(msg, channel))
+    }
+
+    fn raw(&mut self, msg: MidiMessage, channel: Option<u32>) -> Vec<Command> {
+        self.0.handle(msg, channel)
+    }
+
+    fn select(&mut self, channel: Option<u32>) -> Vec<Command> {
+        plain(self.0.select(channel))
     }
 }
 
@@ -37,7 +94,12 @@ fn up(key: u8) -> MidiMessage {
     MidiMessage::NoteOff { key }
 }
 
-/// Lets go of a key on the channel as it is now.
+/// The id these tests give a key's one press on the sink.
+fn press_id(key: u8) -> NoteId {
+    NoteId(u64::from(key))
+}
+
+/// Lets go of a key's press [`press_id`] on the channel as it is now.
 fn release_now(
     sink: &grooviq_app::midi::ControllerSink,
     controller: &Mutex<grooviq_engine::Controller>,
@@ -49,7 +111,7 @@ fn release_now(
         .unwrap()
         .channel_instance(ChannelId(channel))
         .expect("a channel");
-    sink.release(channel, key, instance, 1);
+    sink.release(channel, key, instance, &[press_id(key)]);
 }
 
 /// A sorted copy: the order of releases within one message is not part of the contract.
@@ -116,6 +178,28 @@ fn a_key_pressed_again_under_the_pedal_stays_on_until_it_is_let_go() {
     assert_eq!(player.handle(MidiMessage::Sustain(false), Some(1)), []);
     // The engine took two presses of the key, so it is owed two releases.
     assert_eq!(player.handle(up(60), Some(1)), [off(1, 60), off(1, 60)]);
+}
+
+#[test]
+fn every_release_names_the_press_it_ends() {
+    // Pressed, let go under the pedal, pressed again: two notes on one key, each with an id of
+    // its own, and the two releases name exactly those, oldest first.
+    let mut player = Player::new();
+    player.raw(MidiMessage::Sustain(true), Some(1));
+    let first = player.raw(down(60, 100), Some(1));
+    player.raw(up(60), Some(1));
+    let second = player.raw(down(60, 90), Some(1));
+    player.raw(MidiMessage::Sustain(false), Some(1));
+    let offs = player.raw(up(60), Some(1));
+    let ids = |c: &[Command]| c.iter().map(|&c| id_of(c)).collect::<Vec<_>>();
+    let pressed = [ids(&first), ids(&second)].concat();
+    assert_eq!(pressed.len(), 2);
+    assert_ne!(pressed[0], pressed[1], "each press is a note of its own");
+    assert_eq!(ids(&offs), pressed);
+    // A new press is a new note again.
+    let third = player.raw(down(60, 100), Some(1));
+    assert!(!pressed.contains(&id_of(third[0])));
+    assert_eq!(ids(&player.raw(up(60), Some(1))), ids(&third));
 }
 
 #[test]
@@ -276,6 +360,10 @@ struct Recorded(Mutex<Vec<Command>>);
 
 impl Recorded {
     fn take(&self) -> Vec<Command> {
+        plain(self.take_raw())
+    }
+
+    fn take_raw(&self) -> Vec<Command> {
         std::mem::take(&mut self.0.lock().unwrap())
     }
 }
@@ -287,14 +375,33 @@ impl Recorded {
 }
 
 impl CommandSink for Recorded {
-    fn press(&self, channel: u32, key: u8, velocity: f32) -> Option<u64> {
-        self.push(on(channel, key, velocity));
+    fn press(&self, channel: u32, key: u8, velocity: f32, id: NoteId) -> Option<u64> {
+        self.push(with_id(on(channel, key, velocity), id));
         Some(0)
     }
-    fn release(&self, channel: u32, key: u8, _instance: u64, count: u32) {
-        for _ in 0..count {
-            self.push(off(channel, key));
+    fn release(&self, channel: u32, key: u8, _instance: u64, ids: &[NoteId]) {
+        for &id in ids {
+            self.push(with_id(off(channel, key), id));
         }
+    }
+}
+
+fn with_id(cmd: Command, with: NoteId) -> Command {
+    match cmd {
+        Command::ChannelNote {
+            channel,
+            key,
+            velocity,
+            on,
+            ..
+        } => Command::ChannelNote {
+            channel,
+            key,
+            velocity,
+            on,
+            id: with,
+        },
+        other => other,
     }
 }
 
@@ -492,12 +599,15 @@ fn the_last_keyboard_to_let_go_releases_the_key_for_every_press() {
     let rig = two_keyboards();
     rig.ports.send("Keys", &[NOTE_ON, 60, 100]);
     rig.ports.send("Pads", &[NOTE_ON, 60, 100]);
-    rig.sent.take();
+    let presses: Vec<NoteId> = rig.sent.take_raw().into_iter().map(id_of).collect();
     rig.ports.send("Pads", &[NOTE_OFF, 60, 0]);
     assert_eq!(rig.sent.take(), [], "Keys still holds it");
     rig.ports.send("Keys", &[NOTE_OFF, 60, 0]);
-    // Two keyboards pressed it: the engine took two presses and is owed two releases.
-    assert_eq!(rig.sent.take(), [off(1, 60), off(1, 60)]);
+    // Two keyboards pressed it: the engine took two presses and is owed a release of each.
+    let releases = rig.sent.take_raw();
+    assert_eq!(plain(releases.clone()), [off(1, 60), off(1, 60)]);
+    assert_eq!(releases.into_iter().map(id_of).collect::<Vec<_>>(), presses);
+    assert_ne!(presses[0], presses[1]);
     // Different keys never share an owner.
     rig.ports.send("Keys", &[NOTE_ON, 62, 100]);
     rig.ports.send("Pads", &[NOTE_ON, 64, 100]);
@@ -594,7 +704,7 @@ mod engine_queue {
     fn a_release_the_full_queue_refused_is_delivered_when_it_has_room() {
         let (controller, mut processor) = recording_engine();
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.press(1, 60, 1.0);
+        sink.press(1, 60, 1.0, press_id(60));
         run(&mut processor, 2);
         assert_eq!(heard(&controller), [(60, true)]);
 
@@ -617,7 +727,7 @@ mod engine_queue {
     fn a_note_pressed_again_leaves_the_release_still_owed_to_end_the_older_note() {
         let (controller, mut processor) = recording_engine();
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.press(1, 60, 1.0);
+        sink.press(1, 60, 1.0, press_id(60));
         run(&mut processor, 2);
         heard(&controller);
         fill(&controller);
@@ -626,7 +736,7 @@ mod engine_queue {
         run(&mut processor, 4);
         // The key goes down again before the owed release was delivered. The release stays
         // owed: the engine pairs it with the older press, so it ends that note, not this one.
-        assert!(sink.press(1, 60, 1.0).is_some());
+        assert!(sink.press(1, 60, 1.0, NoteId(1_060)).is_some());
         assert_eq!(sink.owed(), 1);
         sink.retry();
         assert_eq!(sink.owed(), 0);
@@ -638,7 +748,7 @@ mod engine_queue {
     fn a_release_for_a_removed_channel_is_dropped_not_kept() {
         let (controller, mut processor) = recording_engine();
         let sink = ControllerSink::new(Arc::clone(&controller));
-        let instance = sink.press(1, 60, 1.0).expect("pressed");
+        let instance = sink.press(1, 60, 1.0, press_id(60)).expect("pressed");
         run(&mut processor, 2);
         controller
             .lock()
@@ -647,7 +757,7 @@ mod engine_queue {
             .unwrap();
         run(&mut processor, 2);
         // Refused because the channel is gone, not because the queue is full.
-        sink.release(1, 60, instance, 1);
+        sink.release(1, 60, instance, &[press_id(60)]);
         assert_eq!(sink.owed(), 0);
     }
 
@@ -655,7 +765,7 @@ mod engine_queue {
     fn an_owed_release_is_dropped_once_its_channel_is_removed() {
         let (controller, mut processor) = recording_engine();
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.press(1, 60, 1.0);
+        sink.press(1, 60, 1.0, press_id(60));
         run(&mut processor, 2);
         fill(&controller);
         release_now(&sink, &controller, 1, 60);
@@ -698,14 +808,14 @@ fn a_concurrent_last_release_cannot_cut_a_new_owner() {
         on_arrived: Mutex<bool>,
     }
     impl CommandSink for HoldOff {
-        fn press(&self, channel: u32, key: u8, velocity: f32) -> Option<u64> {
+        fn press(&self, channel: u32, key: u8, velocity: f32, _: NoteId) -> Option<u64> {
             *self.on_arrived.lock().unwrap() = true;
             self.on_seen.notify_all();
             self.sent.push(on(channel, key, velocity));
             Some(0)
         }
-        fn release(&self, channel: u32, key: u8, _instance: u64, count: u32) {
-            assert_eq!(count, 1);
+        fn release(&self, channel: u32, key: u8, _instance: u64, ids: &[NoteId]) {
+            assert_eq!(ids.len(), 1);
             if std::mem::take(&mut *self.armed.lock().unwrap()) {
                 *self.held.lock().unwrap() = true;
                 self.reached.notify_all();
@@ -821,7 +931,7 @@ mod engine_queue_edges {
     fn the_1025th_release_is_not_forgotten() {
         let (controller, mut processor) = setup(9);
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.press(9, 127, 1.0);
+        sink.press(9, 127, 1.0, press_id(127));
         run(&mut processor);
         heard(&controller);
         fill(&controller);
@@ -859,7 +969,7 @@ mod engine_queue_edges {
     fn an_owed_release_does_not_cross_to_a_channel_made_afterwards() {
         let (controller, mut processor) = setup(1);
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.press(1, 60, 1.0);
+        sink.press(1, 60, 1.0, press_id(60));
         run(&mut processor);
         heard(&controller);
         fill(&controller);
@@ -905,7 +1015,7 @@ mod engine_queue_edges {
     fn a_new_debt_on_a_reused_id_forgets_the_old_channels_keys() {
         let (controller, mut processor) = setup(1);
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.press(1, 60, 1.0);
+        sink.press(1, 60, 1.0, press_id(60));
         run(&mut processor);
         heard(&controller);
         fill(&controller);
@@ -930,7 +1040,7 @@ mod engine_queue_edges {
             .unwrap();
         run(&mut processor);
         controller.lock().unwrap().send(on(1, 60, 1.0)).unwrap();
-        sink.press(1, 62, 1.0);
+        sink.press(1, 62, 1.0, press_id(62));
         run(&mut processor);
         heard(&controller);
         fill(&controller);
@@ -1456,6 +1566,82 @@ mod voices {
             );
         }
         assert_eq!(failures, Vec::<String>::new());
+    }
+
+    /// The release is refused (queue full), then the graph panics and is rebuilt, which keeps
+    /// the channel instance, so the release is still owed. The key is pressed again; the old
+    /// release, delivered after that press, names a note the rebuilt instrument never started:
+    /// the new note sounds until it is let go.
+    #[test]
+    fn a_release_owed_across_a_panic_recovery_does_not_cut_the_next_note() {
+        let mut failures = Vec::new();
+        for (kind, mode) in modes() {
+            let mut rig = rig(kind, mode);
+            rig.key(true);
+            rig.render(4);
+            rig.fill(usize::MAX);
+            rig.key(false);
+            rig.render(4);
+            rig.controller
+                .lock()
+                .unwrap()
+                .send(Command::InjectPanic)
+                .unwrap();
+            rig.render(1);
+            rig.controller.lock().unwrap().check_health();
+            rig.render(1);
+            check(
+                &mut failures,
+                rig.sink.owed() == 1,
+                format!("{kind:?} {mode}: the release is still owed to this instance"),
+            );
+            rig.key(true);
+            check(
+                &mut failures,
+                rig.sink.owed() == 0,
+                format!("{kind:?} {mode}: the press handed over the owed release"),
+            );
+            check(
+                &mut failures,
+                rig.listen(1.5) > AUDIBLE,
+                format!("{kind:?} {mode}: the pre-recovery release cut the new note"),
+            );
+            rig.key(false);
+            check(
+                &mut failures,
+                rig.listen(3.0) < SILENT,
+                format!("{kind:?} {mode}: a voice is left sounding"),
+            );
+        }
+        assert_eq!(failures, Vec::<String>::new());
+    }
+
+    /// Two releases of one key are owed (a loud older press, a quiet newer one) and the queue
+    /// has room for exactly one: the older debt is paid first, so the loud note ends and the
+    /// quiet one sounds on until the next retry.
+    #[test]
+    fn review_partial_debt_payment_is_oldest_first() {
+        let mut rig = rig(Kind::Sampler, 0.0);
+        let instance = rig.sink.press(1, 60, 1.0, NoteId(1)).expect("pressed");
+        rig.sink.press(1, 60, 0.2, NoteId(2)).expect("pressed");
+        let both = rig.listen(0.4);
+        rig.fill(usize::MAX);
+        rig.sink.release(1, 60, instance, &[NoteId(1), NoteId(2)]);
+        assert_eq!(rig.sink.owed(), 2);
+        rig.render(4);
+        let room = rig.capacity - 1;
+        assert_eq!(rig.fill(room), room);
+        rig.sink.retry();
+        assert_eq!(rig.sink.owed(), 1, "one release fit");
+        let left = rig.listen(1.0);
+        assert!(
+            (left - both / 6.0).abs() < 1e-3,
+            "the quiet newer note sounds on: {left} (both: {both})"
+        );
+        rig.render(8);
+        rig.sink.retry();
+        assert_eq!(rig.sink.owed(), 0);
+        assert!(rig.listen(1.0) < SILENT);
     }
 
     /// The re-press is refused too (the queue is still full): the old note must still end.

@@ -484,3 +484,94 @@ mod notes_m2 {
         }
     }
 }
+
+mod nested_notes {
+    use super::drums_4ch::{first_difference, golden_dir, read_f32};
+    use grooviq_engine::{
+        Command, EngineConfig, ExportOptions, WavFormat, export_wav, render_offline_with,
+    };
+    use grooviq_golden::nested::LOOPS;
+    use grooviq_golden::{SAMPLE_RATE, decode_samples, kit_dir, nested_notes_project};
+    use grooviq_project::engine_state;
+    use std::sync::atomic::AtomicBool;
+
+    /// Same-key notes nested both ways on a sampler and the synth in poly mode (fast and slow
+    /// attack), exported as the app does. Pins each note-off ending its own note and the key
+    /// sounding until its last held note ends; must match on macOS and Windows.
+    #[test]
+    fn nested_notes_export_bit_identical_to_their_golden_file() {
+        let out = golden_dir().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let (project, files) = nested_notes_project(&kit_dir());
+        let state = engine_state(&project, &decode_samples(&files));
+        let wav = out.join("nested_notes.wav");
+        let options = ExportOptions {
+            sample_rate: SAMPLE_RATE,
+            format: WavFormat::Float32,
+            loops: LOOPS,
+            max_tail_seconds: 1.0,
+        };
+        let report = export_wav(state, &options, &wav, &mut |_| {}, &AtomicBool::new(false))
+            .expect("export");
+        assert!(
+            report.peak > 0.1 && report.peak < 1.0,
+            "peak {}",
+            report.peak
+        );
+
+        let reference = golden_dir().join("refs").join("nested_notes.wav");
+        if std::env::var("GOLDEN_UPDATE").as_deref() == Ok("1") {
+            std::fs::copy(&wav, &reference).unwrap();
+            println!("golden file updated: explain why in the commit message");
+            return;
+        }
+        let actual_bytes = std::fs::read(&wav).unwrap();
+        let reference_bytes = std::fs::read(&reference).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {} ({e}); create it with GOLDEN_UPDATE=1",
+                reference.display()
+            )
+        });
+        if actual_bytes != reference_bytes {
+            panic!(
+                "the export is not byte-identical to {} ({} vs {} bytes); first difference: {}",
+                reference.display(),
+                actual_bytes.len(),
+                reference_bytes.len(),
+                first_difference(&read_f32(&wav), &read_f32(&reference))
+            );
+        }
+    }
+
+    #[test]
+    fn nested_notes_are_identical_at_callback_sizes_37_64_512() {
+        let (project, files) = nested_notes_project(&kit_dir());
+        let state = engine_state(&project, &decode_samples(&files));
+        let render = |callback| {
+            let config = EngineConfig {
+                sample_rate: SAMPLE_RATE as f32,
+            };
+            let events = [(0, Command::PlayLoops { loops: LOOPS })];
+            render_offline_with(
+                config,
+                state.clone(),
+                &events,
+                3 * SAMPLE_RATE as usize,
+                callback,
+            )
+        };
+        let reference = render(64);
+        assert!(reference.iter().any(|x| x.abs() > 0.1), "silent render");
+        for callback in [37, 512] {
+            let other = render(callback);
+            assert!(
+                other
+                    .iter()
+                    .zip(&reference)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "callback size {callback} differs: {}",
+                first_difference(&other, &reference)
+            );
+        }
+    }
+}

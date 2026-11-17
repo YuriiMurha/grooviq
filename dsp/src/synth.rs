@@ -62,6 +62,10 @@ const VEL_RAMP_MS: f32 = 3.0;
 /// any level. With faster attacks the new note starts from scratch instead, like a note from
 /// silence, while the old one rings out (poly) or fades out over STEAL_FADE_MS (mono, legato).
 const IN_PLACE_ATTACK_MS: f32 = 6.0;
+/// Poly mode: older notes of a key, still held, that a voice also plays for (a key struck
+/// again before its note ended). A voice that already plays for that many takes no more: the
+/// next press of its key gets a voice of its own, so no held note is ever forgotten.
+const OWNED: usize = 7;
 /// Crossfade / glide time (linear) for knob moves that would otherwise step the sound: filter
 /// type, unison layout, LFO destination and tuning.
 const XFADE_MS: f32 = 5.0;
@@ -902,7 +906,7 @@ impl Lfo {
 #[derive(Clone, Copy, Debug)]
 struct Pending {
     key: u8,
-    ticket: u32,
+    id: u64,
     vel: f32,
     gate: bool,
     from: Option<f32>,
@@ -987,13 +991,62 @@ struct Ctx {
     vel_ramp: u32,
 }
 
+/// Ids of held notes, oldest first, at most [`OWNED`].
+#[derive(Clone, Copy, Debug, Default)]
+struct Owners {
+    ids: [u64; OWNED],
+    len: u8,
+}
+
+impl Owners {
+    /// Adds `id` as the newest. Callers check [`Self::room`] first.
+    fn push(&mut self, id: u64) {
+        let len = usize::from(self.len);
+        debug_assert!(len < OWNED, "a full owner list takes no more");
+        if len < OWNED {
+            self.ids[len] = id;
+            self.len += 1;
+        }
+    }
+
+    /// How many more it takes.
+    fn room(&self) -> usize {
+        OWNED - usize::from(self.len)
+    }
+
+    /// Removes `id`; whether it was there.
+    fn remove(&mut self, id: u64) -> bool {
+        let len = usize::from(self.len);
+        let Some(i) = self.ids[..len].iter().position(|&o| o == id) else {
+            return false;
+        };
+        self.ids.copy_within(i + 1..len, i);
+        self.len -= 1;
+        true
+    }
+
+    /// Takes the newest.
+    fn pop(&mut self) -> Option<u64> {
+        let len = self.len.checked_sub(1)?;
+        self.len = len;
+        Some(self.ids[usize::from(len)])
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u64> + '_ {
+        self.ids[..usize::from(self.len)].iter().copied()
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Voice {
     active: bool,
     gate: bool,
     key: u8,
-    /// The note's ticket on its key: the n-th note-on of a key owns that key's n-th note-off.
-    ticket: u32,
+    /// The id of the note it plays: only that note's note-off ends it.
+    id: u64,
+    /// Poly mode: the older notes of its key it also plays for, still held. When `id` ends, the
+    /// newest of them takes over and the voice sounds on; it releases when the last one ends.
+    older: Owners,
     vel_amp: f32,
     vel_flt: f32,
     /// After an in-place retrigger the velocity gains ramp to `vel_to` by `vel_step` per sample
@@ -1047,7 +1100,8 @@ impl Voice {
             active: false,
             gate: false,
             key: 60,
-            ticket: 0,
+            id: 0,
+            older: Owners::default(),
             vel_amp: 1.0,
             vel_flt: 1.0,
             vel_to: (1.0, 1.0),
@@ -1099,7 +1153,8 @@ impl Voice {
         self.active = true;
         self.gate = p.gate;
         self.key = p.key;
-        self.ticket = p.ticket;
+        self.id = p.id;
+        self.older = Owners::default();
         (self.vel_amp, self.vel_flt) = vel_curves(p.vel);
         self.vel_left = 0;
         self.age = age;
@@ -1215,13 +1270,9 @@ pub struct Synth {
     drive_cache: (f32, f32, f32),
     mode: u8,
     age: u64,
-    /// Mono and legato: the held notes `(key, ticket)`, oldest first; the top one sounds.
-    stack: [(u8, u32); 16],
+    /// Mono and legato: the held notes `(key, id)`, oldest first; the top one sounds.
+    stack: [(u8, u64); 16],
     stack_len: usize,
-    /// Note-ons and note-offs so far per key: a key's n-th note-off belongs to its n-th
-    /// note-on, so a late note-off never ends a newer note on its key.
-    ons: [u32; 128],
-    offs: [u32; 128],
     last_pitch: Option<f32>,
     last_voice: usize,
     fresh: bool,
@@ -1303,8 +1354,6 @@ impl Synth {
             age: 0,
             stack: [(0, 0); 16],
             stack_len: 0,
-            ons: [0; 128],
-            offs: [0; 128],
             last_pitch: None,
             last_voice: 0,
             fresh: true,
@@ -1571,25 +1620,19 @@ impl Synth {
 
     fn handle(&mut self, e: NoteEvent) {
         let key = e.key.min(127);
-        let k = key as usize;
         if e.on && e.velocity > 0.0 {
-            let ticket = self.ons[k];
-            self.ons[k] = ticket.wrapping_add(1);
             if self.mode == 0 {
-                self.poly_on(key, ticket, e.velocity, e.slide);
+                self.poly_on(key, e.id, e.velocity, e.slide);
             } else {
-                self.mono_on(key, ticket, e.velocity, e.slide);
+                self.mono_on(key, e.id, e.velocity, e.slide);
             }
             self.last_pitch = Some(key as f32);
-        } else if self.offs[k] != self.ons[k] {
-            // (a note-off with no held note on its key, after a reset, belongs to nothing)
-            let ticket = self.offs[k];
-            self.offs[k] = ticket.wrapping_add(1);
-            if self.mode == 0 {
-                self.poly_off(key, ticket);
-            } else {
-                self.mono_off(key, ticket);
-            }
+        } else if self.mode == 0 {
+            // A note-off ends the note its id names. One whose note never started, or already
+            // ended (released, stolen, choked, slid away, after a reset), finds nothing.
+            self.poly_off(key, e.id);
+        } else {
+            self.mono_off(key, e.id);
         }
     }
 
@@ -1627,7 +1670,7 @@ impl Synth {
         self.fade_out(i, j);
     }
 
-    fn poly_on(&mut self, key: u8, ticket: u32, vel: f32, slide: bool) {
+    fn poly_on(&mut self, key: u8, id: u64, vel: f32, slide: bool) {
         let age = self.next_age();
         let sr = self.cx.sr;
         if slide {
@@ -1640,7 +1683,9 @@ impl Synth {
                 let v = &mut self.voices[i];
                 v.glide_to(key as f32, ms, sr);
                 v.key = key;
-                v.ticket = ticket;
+                v.id = id;
+                // (the notes of its old key no longer own it: their note-offs find nothing)
+                v.older = Owners::default();
                 v.age = age;
                 self.last_voice = i;
                 return;
@@ -1649,7 +1694,7 @@ impl Synth {
         let from = if slide { self.last_pitch } else { None };
         let pend = Pending {
             key,
-            ticket,
+            id,
             vel,
             gate: true,
             from,
@@ -1659,6 +1704,9 @@ impl Synth {
         // they are (as before; the new velocity ramps in). With fast attacks, restarting it in
         // place would jump its level mid-cycle, so the old note rings out (released if still
         // held) and the new one gets a voice of its own, with the same attack as any note.
+        // Either way the key keeps one voice, which also plays for the key's older notes still
+        // held: a short note inside a long one hands the voice back to the long one. A voice
+        // that plays for as many as it can keep is left alone: the new note gets its own.
         if !slide
             && self.retrigger_in_place()
             && let Some(i) = (0..NUM_VOICES)
@@ -1667,21 +1715,45 @@ impl Synth {
                     v.active && !v.fading && v.key == key
                 })
                 .max_by_key(|&i| self.voices[i].age)
+            && !(self.voices[i].gate && self.voices[i].older.room() == 0)
         {
             let cx = self.cx;
-            self.voices[i].retrigger(key, vel, age, &cx);
-            self.voices[i].ticket = ticket;
+            let v = &mut self.voices[i];
+            if v.gate {
+                let older = v.id;
+                v.older.push(older);
+            } else {
+                v.older = Owners::default();
+            }
+            v.retrigger(key, vel, age, &cx);
+            v.id = id;
             self.last_voice = i;
             return;
         }
-        for v in self.voices.iter_mut() {
-            if v.active && v.gate && !v.fading && v.key == key {
+        // The held voices of the key with room left hand their notes to the new voice and ring
+        // out, if all of them fit in it; otherwise none does, and the new note sounds alone.
+        let joins =
+            |v: &Voice| v.active && v.gate && !v.fading && v.key == key && v.older.room() > 0;
+        let owned: usize = self
+            .voices
+            .iter()
+            .filter(|v| joins(v))
+            .map(|v| 1 + usize::from(v.older.len))
+            .sum();
+        let mut older = Owners::default();
+        if owned <= OWNED {
+            for v in self.voices.iter_mut().filter(|v| joins(v)) {
+                for o in v.older.iter() {
+                    older.push(o);
+                }
+                older.push(v.id);
                 v.release();
             }
         }
         if let Some(i) = (0..NUM_VOICES).find(|&i| !self.voices[i].active) {
             let cx = self.cx;
             self.voices[i].start(pend, &cx, age);
+            self.voices[i].older = older;
             self.last_voice = i;
             return;
         }
@@ -1699,33 +1771,35 @@ impl Synth {
         self.park(i);
         let cx = self.cx;
         self.voices[i].start(pend, &cx, age);
+        self.voices[i].older = older;
     }
 
-    fn poly_off(&mut self, key: u8, ticket: u32) {
+    /// Ends note `id` on `key`. A voice that also plays for older held notes of the key sounds
+    /// on for them (no release, no retrigger); it releases when the last of its notes ends.
+    fn poly_off(&mut self, key: u8, id: u64) {
         for v in self.voices.iter_mut() {
-            if v.active && v.gate && !v.fading && v.key == key && v.ticket == ticket {
-                v.release();
+            if !(v.active && v.gate && !v.fading && v.key == key) {
+                continue;
+            }
+            if v.id == id {
+                match v.older.pop() {
+                    Some(older) => v.id = older,
+                    None => v.release(),
+                }
+            } else {
+                v.older.remove(id);
             }
         }
     }
 
-    fn stack_remove(&mut self, key: u8) {
-        if let Some(pos) = self.stack[..self.stack_len]
-            .iter()
-            .position(|&(k, _)| k == key)
-        {
-            self.stack.copy_within(pos + 1..self.stack_len, pos);
-            self.stack_len -= 1;
-        }
-    }
-
-    fn mono_on(&mut self, key: u8, ticket: u32, vel: f32, slide: bool) {
-        self.stack_remove(key);
+    fn mono_on(&mut self, key: u8, id: u64, vel: f32, slide: bool) {
+        // A re-struck key keeps its older note in the stack: that note is still held (a long
+        // note with a shorter one inside it), and the sound returns to it when the newer ends.
         if self.stack_len == self.stack.len() {
             self.stack.copy_within(1.., 0);
             self.stack_len -= 1;
         }
-        self.stack[self.stack_len] = (key, ticket);
+        self.stack[self.stack_len] = (key, id);
         self.stack_len += 1;
 
         let age = self.next_age();
@@ -1745,7 +1819,7 @@ impl Synth {
             let v = &mut self.voices[0];
             v.glide_to(key as f32, ms, cx.sr);
             v.key = key;
-            v.ticket = ticket;
+            v.id = id;
             v.age = age;
             return;
         }
@@ -1757,7 +1831,7 @@ impl Synth {
             // slow attacks: the envelopes go on from where they are (no dip, no click)
             let v = &mut self.voices[0];
             v.retrigger(key, vel, age, &cx);
-            v.ticket = ticket;
+            v.id = id;
             v.glide_to(key as f32, ms, cx.sr);
             return;
         }
@@ -1770,7 +1844,7 @@ impl Synth {
         };
         let pend = Pending {
             key,
-            ticket,
+            id,
             vel,
             gate: true,
             from,
@@ -1799,11 +1873,10 @@ impl Synth {
         self.fade_out(0, j);
     }
 
-    fn mono_off(&mut self, key: u8, ticket: u32) {
-        // A re-struck key replaced its older entry: that note's note-off finds nothing here.
+    fn mono_off(&mut self, key: u8, id: u64) {
         if let Some(pos) = self.stack[..self.stack_len]
             .iter()
-            .position(|&e| e == (key, ticket))
+            .position(|&e| e == (key, id))
         {
             self.stack.copy_within(pos + 1..self.stack_len, pos);
             self.stack_len -= 1;
@@ -1816,12 +1889,12 @@ impl Synth {
             None
         };
         let v = &mut self.voices[0];
-        if v.active && v.gate && v.key == key && v.ticket == ticket {
+        if v.active && v.gate && v.key == key && v.id == id {
             match top {
                 Some((k, t)) => {
                     v.glide_to(k as f32, glide, sr);
                     v.key = k;
-                    v.ticket = t;
+                    v.id = t;
                 }
                 None => v.release(),
             }
@@ -1909,7 +1982,7 @@ impl Device for Synth {
 
     /// Every sounding voice fades out with the steal fade (STEAL_FADE_MS) in a fade slot and
     /// frees, so a note after the call starts on its own frame. Held keys leave the mono
-    /// priority stack (their note-offs still find nothing newer to end).
+    /// priority stack (their note-offs then find nothing).
     fn choke(&mut self) {
         for i in 0..NUM_VOICES {
             if self.voices[i].active {
@@ -1924,8 +1997,6 @@ impl Device for Synth {
             *v = Voice::new(0x9E37_79B9 ^ (i as u32).wrapping_mul(0x85EB_CA6B).wrapping_add(1));
         }
         self.stack_len = 0;
-        self.ons = [0; 128];
-        self.offs = [0; 128];
         self.last_pitch = None;
         self.lfo.phase = 0.0;
         self.lfo.out = 0.0;
@@ -2072,6 +2143,7 @@ mod tests {
                         velocity,
                         on,
                         slide,
+                        id: u64::from(key),
                     },
                 ))
             })
@@ -2137,6 +2209,7 @@ mod tests {
                         velocity: 0.9,
                         on: true,
                         slide: false,
+                        id: 48,
                     };
                     let ev: &[NoteEvent] = if c == silent { &[on] } else { &[] };
                     s.process(&mut l[c..e], &mut r[c..e], None, ev);
@@ -2195,6 +2268,7 @@ mod tests {
                     velocity: 0.9,
                     on,
                     slide: false,
+                    id: u64::from(key),
                 })
                 .collect();
             s.process(&mut l[c..e], &mut r[c..e], None, &ev);
@@ -2276,6 +2350,7 @@ mod tests {
                     velocity: 0.9,
                     on,
                     slide: false,
+                    id: u64::from(key),
                 })
                 .collect();
             s.process(&mut l[c..e], &mut r[c..e], None, &ev);
@@ -2297,6 +2372,7 @@ mod tests {
             velocity: 1.0,
             on: true,
             slide: false,
+            id: 60,
         };
         s.process(&mut l, &mut r, None, &[on]);
         s.set_param(CUTOFF as u32, 12000.0);
@@ -2364,6 +2440,7 @@ mod tests {
                             velocity: vel,
                             on: true,
                             slide: false,
+                            id: u64::from(key),
                         });
                     }
                 }

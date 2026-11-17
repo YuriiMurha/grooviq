@@ -123,9 +123,13 @@ export const notesUndo = () => invoke<NotesAck | null>("notes_undo");
 export const notesRedo = () => invoke<NotesAck | null>("notes_redo");
 /** Adds a synth channel named after the preset. */
 export const channelAddSynth = (preset: string) => invoke<ProjectView>("channel_add_synth", { preset });
-/** Starts or stops a note on a channel now (typing keyboard, previews). Only from a key or a click. */
-export const channelNote = (channel: number, key: number, velocity: number, on: boolean) =>
-  invoke<null>("channel_note", { channel, key, velocity, on });
+/** Starts a note on a channel now (typing keyboard, roll keys, a synth row's preview): the press,
+ * which its release names. Only from a key or a click. */
+export const channelNoteOn = (channel: number, key: number, velocity: number) =>
+  invoke<number>("channel_note", { channel, key, velocity, on: true });
+/** Releases the press `press` of `key` on `channel` (only that note ends). */
+export const channelNoteOff = (channel: number, key: number, press: number) =>
+  invoke<null>("channel_note", { channel, key, velocity: 0, on: false, press });
 /** Sets a parameter in the engine only, while a control moves; the project changes on commit. */
 export const channelParamLive = (channel: number, param: string, value: number) =>
   invoke<null>("channel_param_live", { channel, param, value });

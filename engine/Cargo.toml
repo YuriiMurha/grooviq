@@ -48,3 +48,7 @@ tempfile = "3"
 [[test]]
 name = "panic"
 required-features = ["test-hooks"]
+
+[[test]]
+name = "note_identity"
+required-features = ["test-hooks"]

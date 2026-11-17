@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef } from "react";
-import { channelNote, TYPING_VELOCITY } from "../api/notes";
+import { channelNoteOff, channelNoteOn, TYPING_VELOCITY } from "../api/notes";
 import { errorText } from "../api/project";
 import { modalIsOpen } from "../project/shortcuts";
+import { Press } from "./press";
 import { DEFAULT_BASE, HeldKeys, accepts, keyFor, shiftOctave, type LiveNote } from "./typingKeyboard";
 
 /** The transport as the typing keyboard needs it: every change of `release` (each stop, a
@@ -21,18 +22,26 @@ export function useTypingKeyboard(
   { release, recording }: TransportEdges,
 ) {
   const held = useRef(new HeldKeys());
+  /** The press of each sounding note, by "channel:key" (one at a time per note: HeldKeys). */
+  const presses = useRef(new Map<string, Press>());
   const base = useRef(DEFAULT_BASE);
   const report = useRef(onError);
   useEffect(() => {
     report.current = onError;
   }, [onError]);
 
-  // A failed note-on is reported. A note-off is best effort: its channel may just have been
-  // removed, and the engine drops a removed channel's live notes itself.
+  // A failed note-on is reported. A note-off names its own press and is best effort: its
+  // channel may just have been removed, and the engine drops a removed channel's live notes.
   const send = useCallback((n: LiveNote, down: boolean) => {
-    channelNote(n.channel, n.key, down ? TYPING_VELOCITY : 0, down).catch((e: unknown) => {
-      if (down) report.current(errorText(e));
-    });
+    const at = `${n.channel}:${n.key}`;
+    if (down) {
+      const on = channelNoteOn(n.channel, n.key, TYPING_VELOCITY);
+      presses.current.set(at, new Press(on, (e: unknown) => report.current(errorText(e))));
+      return;
+    }
+    const press = presses.current.get(at);
+    presses.current.delete(at);
+    void press?.release((id) => channelNoteOff(n.channel, n.key, id));
   }, []);
   const releaseAll = useCallback(() => {
     for (const n of held.current.releaseAll()) send(n, false);

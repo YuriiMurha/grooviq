@@ -143,7 +143,7 @@ describe("ChannelRack", () => {
     await waitFor(() =>
       expect(engine.argsOf("channel_preview")).toEqual([
         { channel: 2, on: true },
-        { channel: 2, on: false },
+        { channel: 2, on: false, press: 1 },
       ]),
     );
     // From the keyboard: Enter held down previews, its release stops; a key repeat sends nothing.
@@ -154,7 +154,7 @@ describe("ChannelRack", () => {
     await waitFor(() => expect(engine.argsOf("channel_preview")).toHaveLength(4));
     expect(engine.argsOf("channel_preview").slice(2)).toEqual([
       { channel: 2, on: true },
-      { channel: 2, on: false },
+      { channel: 2, on: false, press: 2 },
     ]);
     // Nothing else plays.
     expect(engine.calls.filter((c) => c.cmd.startsWith("transport_"))).toEqual([]);

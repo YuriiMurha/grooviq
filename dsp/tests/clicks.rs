@@ -211,6 +211,7 @@ fn render_with(
                         velocity,
                         on,
                         slide,
+                        id: u64::from(key),
                     },
                 ))
             };

@@ -7,11 +7,51 @@ use crate::state::{
 };
 use grooviq_dsp::sampler::SampleBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Test-tone frequency range in Hz.
 const TONE_HZ: (f32, f32) = (20.0, 20_000.0);
 /// Test-tone level range in dBFS.
 const TONE_DB: (f32, f32) = (-60.0, 0.0);
+
+/// A note's identity from its note-on to its note-off: the instruments end the note whose
+/// note-on carried the note-off's id, and a note-off whose note never started, or already ended
+/// (stolen, choked, cut by a new graph), ends nothing. Notes held at once need distinct ids.
+///
+/// Live notes (keys, clicks, MIDI presses) take theirs from [`NoteId::live`]; the sequencer
+/// numbers its own notes with [`NoteId::SEQUENCED`] set, which a live note can never carry.
+///
+/// 64 bits: one id per note, never handed out twice in practice (2^63 notes of each kind), so a
+/// note held for any time never shares its id with a later one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NoteId(pub u64);
+
+impl NoteId {
+    /// The bit of the sequencer's ids. [`crate::Controller::send`] rejects a note that has it.
+    pub const SEQUENCED: u64 = 1 << 63;
+
+    /// A new id for a live note, never handed out before in this process. Its note-on and its
+    /// note-off both carry it. (Counting from 1, it stays below 2^53, which JavaScript numbers
+    /// hold exactly, for longer than any session lasts.)
+    pub fn live() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self::live_number(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The `n`-th live id.
+    fn live_number(n: u64) -> Self {
+        Self(n & !Self::SEQUENCED)
+    }
+
+    /// The `n`-th id the sequencer gives.
+    pub(crate) fn sequenced_number(n: u64) -> Self {
+        Self(Self::SEQUENCED | (n & !Self::SEQUENCED))
+    }
+
+    fn is_live(self) -> bool {
+        self.0 & Self::SEQUENCED == 0
+    }
+}
 
 /// What the control side asks the engine to do.
 ///
@@ -48,8 +88,14 @@ pub enum Command {
     /// Switches the sine test tone; `hz` is clamped to 20..=20000 and `gain_db` to -60..=0.
     /// Every change ramps over 5 ms.
     TestTone { on: bool, hz: f32, gain_db: f32 },
-    /// Starts or releases a synth note: `key` 0..=127, `velocity` clamped to 0..=1.
-    Note { key: u8, velocity: f32, on: bool },
+    /// Starts or releases a synth note: `key` 0..=127, `velocity` clamped to 0..=1. A release
+    /// ends the note `id` names.
+    Note {
+        key: u8,
+        velocity: f32,
+        on: bool,
+        id: NoteId,
+    },
     /// Sets a synth parameter by its index in `grooviq_dsp::synth::SPEC`, clamped to its range.
     SetSynthParam { index: u32, value: f32 },
     /// Sets a channel's mix: `volume` clamped to 0..=2, `pan` to -1..=1. The gains ramp over
@@ -73,12 +119,14 @@ pub enum Command {
     /// Applies at the start of its block.
     SetChoke { channel: ChannelId, group: u8 },
     /// Starts or releases a note on a channel (a preview): `key` 0..=127, `velocity` clamped to
-    /// 0..=1. Lands on its exact frame, like [`Command::Note`].
+    /// 0..=1. Lands on its exact frame, like [`Command::Note`]. A release ends the note `id`
+    /// names.
     ChannelNote {
         channel: ChannelId,
         key: u8,
         velocity: f32,
         on: bool,
+        id: NoteId,
     },
     /// Test hook: the synth's next block contains a NaN.
     #[cfg(feature = "test-hooks")]
@@ -104,13 +152,17 @@ impl Command {
                 bpm: bpm.clamp(BPM_RANGE.0, BPM_RANGE.1),
             }),
             Self::PlayLoops { loops } => (loops > 0).then_some(self),
-            Self::Note { key, velocity, on } => {
-                (key <= 127 && velocity.is_finite()).then(|| Self::Note {
-                    key,
-                    velocity: velocity.clamp(0.0, 1.0),
-                    on,
-                })
-            }
+            Self::Note {
+                key,
+                velocity,
+                on,
+                id,
+            } => (key <= 127 && velocity.is_finite() && id.is_live()).then(|| Self::Note {
+                key,
+                velocity: velocity.clamp(0.0, 1.0),
+                on,
+                id,
+            }),
             Self::SetSynthParam { index, value } => {
                 let spec = grooviq_dsp::param_spec("synth")?;
                 let &(min, max, _) = spec.get(usize::try_from(index).ok()?)?;
@@ -147,11 +199,13 @@ impl Command {
                 key,
                 velocity,
                 on,
-            } => (key <= 127 && velocity.is_finite()).then(|| Self::ChannelNote {
+                id,
+            } => (key <= 127 && velocity.is_finite() && id.is_live()).then(|| Self::ChannelNote {
                 channel,
                 key,
                 velocity: velocity.clamp(0.0, 1.0),
                 on,
+                id,
             }),
             other => Some(other),
         }
@@ -313,6 +367,7 @@ mod tests {
                 key,
                 velocity,
                 on: true,
+                id: NoteId(7),
             }
             .clamped()
         };
@@ -321,6 +376,7 @@ mod tests {
                 key,
                 velocity,
                 on: true,
+                id: NoteId(7),
             })
         };
         assert_eq!(note(60, 5.0), note_ok(60, 1.0));
@@ -411,6 +467,7 @@ mod tests {
                 key,
                 velocity,
                 on: true,
+                id: NoteId(7),
             }
             .clamped()
         };
@@ -420,12 +477,44 @@ mod tests {
                 key,
                 velocity,
                 on: true,
+                id: NoteId(7),
             })
         };
         assert_eq!(cnote(60, 5.0), cnote_ok(60, 1.0));
         assert_eq!(cnote(60, -1.0), cnote_ok(60, 0.0));
         assert_eq!(cnote(128, 0.5), None);
         assert_eq!(cnote(60, f32::NAN), None);
+        // A live note never carries a sequencer id, so it can never end a sequenced note.
+        let sequenced = NoteId(NoteId::SEQUENCED | 7);
+        let as_sequenced = |cmd| match cmd {
+            Command::ChannelNote {
+                channel,
+                key,
+                velocity,
+                on,
+                ..
+            } => Command::ChannelNote {
+                channel,
+                key,
+                velocity,
+                on,
+                id: sequenced,
+            },
+            Command::Note {
+                key, velocity, on, ..
+            } => Command::Note {
+                key,
+                velocity,
+                on,
+                id: sequenced,
+            },
+            other => other,
+        };
+        for cmd in [cnote_ok(60, 0.5).unwrap(), note_ok(60, 0.5).unwrap()] {
+            assert_eq!(cmd.clamped(), Some(cmd));
+            assert_eq!(as_sequenced(cmd).clamped(), None);
+        }
+        assert!(NoteId::live().is_live());
 
         let choke = |group| Command::SetChoke { channel: id, group }.clamped();
         assert_eq!(
@@ -471,5 +560,23 @@ mod tests {
         for (beats, unit) in [(0, 4), (17, 4), (4, 1), (4, 3), (4, 32)] {
             assert_eq!(sig(beats, unit), None, "{beats}/{unit}");
         }
+    }
+
+    #[test]
+    fn ids_do_not_repeat_past_the_old_31_bit_wrap() {
+        // Note 0 and note 2^31 (where a 31-bit count wrapped) and their neighbours: all
+        // distinct, and each in its own half.
+        let around = [0, 1, (1 << 31) - 1, 1 << 31, (1 << 31) + 1, 1 << 32];
+        let live: Vec<NoteId> = around.iter().map(|&n| NoteId::live_number(n)).collect();
+        let seq: Vec<NoteId> = around
+            .iter()
+            .map(|&n| NoteId::sequenced_number(n))
+            .collect();
+        let mut all = [live.clone(), seq.clone()].concat();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), 2 * around.len(), "{live:?} {seq:?}");
+        assert!(live.iter().all(|id| id.is_live()));
+        assert!(seq.iter().all(|id| !id.is_live()));
     }
 }

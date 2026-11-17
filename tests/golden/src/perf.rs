@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use grooviq_dsp::synth::preset;
-use grooviq_engine::{Command, EngineConfig, EngineState, STEP_TICKS, engine_with};
+use grooviq_engine::{Command, EngineConfig, EngineState, NoteId, STEP_TICKS, engine_with};
 use grooviq_project::{SampleFiles, engine_state};
 
 use crate::{SAMPLE_RATE, decode_samples, drums_4ch_project, kit_dir};
@@ -73,6 +73,7 @@ pub fn perf_scenes() -> Vec<PerfScene> {
         key,
         velocity: 0.8,
         on: true,
+        id: NoteId(u64::from(key)),
     }));
     start.push(Command::Play);
     let beat = PerfScene {

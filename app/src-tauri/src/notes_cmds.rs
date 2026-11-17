@@ -8,7 +8,7 @@
 
 use crate::audio_log::{AudioLog, Level};
 use crate::{Audio, lock};
-use grooviq_engine::{Controller, RecordEvent};
+use grooviq_engine::{Controller, NoteId, RecordEvent};
 use grooviq_project::Pattern;
 use grooviq_project::notes::{NotesAck, NotesEdit, encode_notes};
 use grooviq_project::session::{ProjectView, Session, SessionError, waveform_peaks};
@@ -129,7 +129,8 @@ pub async fn channel_add_synth(
         .map_err(text)
 }
 
-/// Starts or releases a note on a channel now. Only from a key or a click.
+/// Starts a note on a channel now (`on`), returning its press, or releases the press `press`.
+/// Only from a key or a click.
 #[tauri::command]
 pub async fn channel_note(
     audio: State<'_, Audio>,
@@ -137,9 +138,19 @@ pub async fn channel_note(
     key: u8,
     velocity: f32,
     on: bool,
-) -> Result<(), String> {
-    lock(&audio.session)
-        .live_note(channel, key, velocity, on)
+    press: Option<u64>,
+) -> Result<Option<u64>, String> {
+    let session = lock(&audio.session);
+    if on {
+        return session
+            .live_note_on(channel, key, velocity)
+            .map(|press| Some(press.0))
+            .map_err(text);
+    }
+    let press = press.ok_or("A release names the press it ends.")?;
+    session
+        .live_note_off(channel, key, NoteId(press))
+        .map(|()| None)
         .map_err(text)
 }
 

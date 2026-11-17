@@ -148,9 +148,12 @@ export const channelAdd = (path: string) => invoke<ProjectView>("channel_add", {
 /** Points a channel at another sample (relinking a missing one). */
 export const channelSetSample = (channel: number, path: string) =>
   invoke<ProjectView>("channel_set_sample", { channel, path });
-/** Plays or stops the channel's sample for a preview. Only ever from a click or key press. */
-export const channelPreview = (channel: number, on: boolean) =>
-  invoke<null>("channel_preview", { channel, on });
+/** Plays the channel's sample for a preview: the press, which its release names. Only ever from a
+ * click or key press. */
+export const channelPreviewOn = (channel: number) => invoke<number>("channel_preview", { channel, on: true });
+/** Stops the preview `press` of `channel`. */
+export const channelPreviewOff = (channel: number, press: number) =>
+  invoke<null>("channel_preview", { channel, on: false, press });
 export const transportPlay = () => invoke<null>("transport_play");
 export const transportStop = () => invoke<null>("transport_stop");
 export const projectNew = () => invoke<ProjectView>("project_new");

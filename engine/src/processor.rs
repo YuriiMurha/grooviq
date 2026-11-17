@@ -65,6 +65,7 @@ const NO_EVENT: NoteEvent = NoteEvent {
     velocity: 0.0,
     on: false,
     slide: false,
+    id: 0,
 };
 
 /// Renders audio on the audio thread. Created by [`crate::engine`].
@@ -336,7 +337,12 @@ impl AudioProcessor {
                     self.discard(Trash::Pattern(leaving));
                 }
                 Msg::Command { due, cmd } => match cmd {
-                    Command::Note { key, velocity, on } => {
+                    Command::Note {
+                        key,
+                        velocity,
+                        on,
+                        id,
+                    } => {
                         if !self.faulted {
                             self.events[count] = NoteEvent {
                                 offset: offset(due),
@@ -344,6 +350,7 @@ impl AudioProcessor {
                                 velocity,
                                 on,
                                 slide: false,
+                                id: id.0,
                             };
                             count += 1;
                         }
@@ -353,6 +360,7 @@ impl AudioProcessor {
                         key,
                         velocity,
                         on,
+                        id,
                     } => {
                         if !self.faulted {
                             let event = NoteEvent {
@@ -361,7 +369,10 @@ impl AudioProcessor {
                                 velocity,
                                 on,
                                 slide: false,
+                                id: id.0,
                             };
+                            // A note-on a full channel drops is never heard, and its note-off,
+                            // naming a note the instrument never started, ends nothing.
                             if self.graph.channel_note(channel, event) {
                                 let at = start + u64::from(event.offset);
                                 let note = (channel, key, velocity, on);
@@ -531,6 +542,7 @@ fn meter_release(sample_rate: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::channel::{CHANNEL_EVENTS, ChannelNode};
+    use crate::command::NoteId;
     use crate::graph::ramp_len;
     use crate::state::{ChannelId, ChannelMix, ChannelSetup, PatternData};
     use grooviq_dsp::sampler::SampleBuf;
@@ -735,6 +747,7 @@ mod tests {
                 key: 60,
                 velocity: 1.0,
                 on,
+                id: NoteId(60),
             })
         };
         // One block more than the buffer holds, then a note-off.

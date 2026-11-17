@@ -33,6 +33,7 @@ fn render(
                 velocity,
                 on,
                 slide: false,
+                id: u64::from(key),
             })
             .collect();
         s.process(&mut l[c..e], &mut r[c..e], None, &ev);

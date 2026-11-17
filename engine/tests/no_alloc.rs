@@ -12,8 +12,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use grooviq_engine::{
     AudioOutput, AudioSlot, ChannelId, ChannelMix, ChannelSetup, Command, EngineConfig,
-    EngineState, OutputBackend, OutputChoice, OutputInfo, OutputKind, PatternData, RecordEvent,
-    SampleBuf, SeqNote, engine, engine_with, run_silent,
+    EngineState, NoteId, OutputBackend, OutputChoice, OutputInfo, OutputKind, PatternData,
+    RecordEvent, SampleBuf, SeqNote, engine, engine_with, run_silent,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -214,6 +214,7 @@ fn process_never_allocates() {
         key: 48,
         velocity: 0.8,
         on: true,
+        id: NoteId(48),
     })
     .unwrap();
     let mut buf = vec![0f32; 441 * 2];
@@ -248,11 +249,13 @@ fn every_command_and_channel_layout_is_allocation_free() {
             key: 40,
             velocity: 1.0,
             on: true,
+            id: NoteId(40),
         },
         Command::Note {
             key: 47,
             velocity: 0.5,
             on: true,
+            id: NoteId(47),
         },
         // A voice-mode change releases the sounding voices.
         Command::SetSynthParam {
@@ -263,6 +266,7 @@ fn every_command_and_channel_layout_is_allocation_free() {
             key: 40,
             velocity: 0.0,
             on: false,
+            id: NoteId(40),
         },
         Command::AllSoundOff,
         Command::Stop,
@@ -309,6 +313,7 @@ fn channel_messages_never_allocate_on_the_audio_thread() {
         key: 60,
         velocity: 0.9,
         on,
+        id: NoteId(60),
     };
     let mut run = |c: &mut grooviq_engine::Controller| {
         for _ in 0..4 {
@@ -473,6 +478,7 @@ fn messages_queued_before_a_rate_change_never_free_on_the_audio_thread() {
         key: 60,
         velocity: 0.9,
         on: true,
+        id: NoteId(60),
     };
     // Queued, never processed: a remove, an add, a new sample, a new pattern, a note.
     c.remove_channel(ChannelId(1)).unwrap();
@@ -564,6 +570,7 @@ fn choke_never_allocates() {
                         key: 60,
                         velocity: 0.5,
                         on: true,
+                        id: NoteId(60),
                     })
                     .unwrap();
                 }
@@ -602,6 +609,7 @@ fn recording_never_allocates() {
         key: 60,
         velocity: 0.9,
         on,
+        id: NoteId(60),
     };
     let mut run = |c: &mut grooviq_engine::Controller, callbacks: usize| {
         for _ in 0..callbacks {
@@ -688,6 +696,7 @@ fn a_waiting_recording_barrier_never_allocates() {
         key: 60,
         velocity: 0.9,
         on,
+        id: NoteId(60),
     };
     c.send(Command::SetRecording { on: true }).unwrap();
     c.send(Command::Play).unwrap();

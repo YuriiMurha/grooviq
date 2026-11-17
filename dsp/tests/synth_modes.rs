@@ -23,6 +23,7 @@ fn on(offset: u32, key: u8, slide: bool) -> NoteEvent {
         velocity: 1.0,
         on: true,
         slide,
+        id: u64::from(key),
     }
 }
 
@@ -194,6 +195,22 @@ fn off(offset: u32, key: u8) -> NoteEvent {
         velocity: 0.0,
         on: false,
         slide: false,
+        id: u64::from(key),
+    }
+}
+
+/// A note-on and note-off that name note `id` (the helpers above name each key's one note).
+fn on_n(offset: u32, key: u8, id: u32) -> NoteEvent {
+    NoteEvent {
+        id: u64::from(id),
+        ..on(offset, key, false)
+    }
+}
+
+fn off_n(offset: u32, key: u8, id: u32) -> NoteEvent {
+    NoteEvent {
+        id: u64::from(id),
+        ..off(offset, key)
     }
 }
 
@@ -250,19 +267,214 @@ fn synth_a_late_note_off_after_a_choke_leaves_the_newer_note_alone() {
     // choked note, so the new one plays on until its own.
     for mode in [0.0, 1.0, 2.0] {
         let mut s = sine_synth_in(mode);
-        render(&mut s, 4_800, &[on(0, 48, false)]);
+        render(&mut s, 4_800, &[on_n(0, 48, 1)]);
         s.choke();
-        let l = render(&mut s, 48_000, &[on(0, 48, false), off(100, 48)]);
+        let l = render(&mut s, 48_000, &[on_n(0, 48, 2), off_n(100, 48, 1)]);
         assert!(
             peak(&l[47_000..]) > 0.1,
             "mode {mode}: the newer note sounds"
         );
-        let l = render(&mut s, 48_000, &[off(0, 48)]);
+        let l = render(&mut s, 48_000, &[off_n(0, 48, 2)]);
         assert!(
             peak(&l[47_000..]) < 1e-4,
             "mode {mode}: its own note-off ends it"
         );
     }
+}
+
+#[test]
+fn synth_poly_a_re_struck_key_sounds_until_its_last_held_note_ends() {
+    // Poly mode, key 48 struck three times while held (notes 1, 2, 3), at fast and slow
+    // attacks (a new voice, or the voice retriggered in place). Whatever order the notes end
+    // in, the key sounds while any of them is held, and only the last release ends it.
+    for attack in [1.0, 20.0] {
+        for order in [[2, 3, 1], [1, 2, 3], [3, 2, 1]] {
+            let mut s = sine_synth_in(0.0);
+            s.set_param(index(&synth::PARAM_IDS, "amp_attack"), attack);
+            render(
+                &mut s,
+                9_600,
+                &[on_n(0, 48, 1), on_n(2_400, 48, 2), on_n(4_800, 48, 3)],
+            );
+            for (i, &id) in order.iter().enumerate() {
+                let l = render(&mut s, 24_000, &[off_n(0, 48, id)]);
+                let last = i + 1 == order.len();
+                let level = peak(&l[19_200..]);
+                assert_eq!(
+                    level < 1e-4,
+                    last,
+                    "attack {attack}, order {order:?}: after note {id} ended, peak {level}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn synth_poly_ten_nested_notes_keep_the_key_until_the_outermost_ends() {
+    // More nested notes on one key than a voice remembers: the inner ones end first, and the
+    // key sounds until the outermost (note 1) ends. Ended in the order struck, nothing is left
+    // sounding either.
+    for newest_first in [true, false] {
+        let mut s = sine_synth_in(0.0);
+        let ons: Vec<NoteEvent> = (1..=10).map(|id| on_n(id * 100, 48, id)).collect();
+        render(&mut s, 4_800, &ons);
+        let mut order: Vec<u32> = (1..=10).collect();
+        if newest_first {
+            order.reverse();
+        }
+        for (i, &id) in order.iter().enumerate() {
+            let l = render(&mut s, 24_000, &[off_n(0, 48, id)]);
+            let level = peak(&l[19_200..]);
+            if i + 1 == order.len() {
+                assert!(
+                    level < 1e-4,
+                    "newest first {newest_first}: all ended, peak {level}"
+                );
+            } else if newest_first {
+                assert!(
+                    level > 0.01,
+                    "note {id} ended, the outer ones hold: peak {level}"
+                );
+            }
+        }
+    }
+}
+
+/// Strikes key 48 as notes 1..=`n` (all held), then ends them in `order`: the key must sound
+/// until the last of them ends, and not after. The failures, as text.
+fn nested_releases(attack: f32, n: u32, order: &[u32]) -> Vec<String> {
+    let mut s = sine_synth_in(0.0);
+    s.set_param(index(&synth::PARAM_IDS, "amp_attack"), attack);
+    let ons: Vec<NoteEvent> = (1..=n).map(|id| on_n(id * 100, 48, id)).collect();
+    render(&mut s, 4_800, &ons);
+    let mut failures = Vec::new();
+    for (i, &id) in order.iter().enumerate() {
+        let l = render(&mut s, 24_000, &[off_n(0, 48, id)]);
+        let level = peak(&l[19_200..]);
+        let last = i + 1 == order.len();
+        if (level < 1e-4) != last {
+            failures.push(format!(
+                "attack {attack}, order {order:?}: after note {id} ended, peak {level}"
+            ));
+        }
+    }
+    failures
+}
+
+#[test]
+fn synth_poly_no_held_note_is_forgotten_past_a_full_voice() {
+    // More notes on one key than one voice keeps owners for: a press past that gets a voice of
+    // its own, so every release order keeps the key sounding until the last held note ends.
+    // The first order is the review's: note 8 is still held when 9 ends.
+    let orders: [&[u32]; 6] = [
+        &[1, 2, 3, 4, 5, 6, 7, 9, 8],
+        &[9, 8, 7, 6, 5, 4, 3, 2, 1],
+        &[1, 2, 3, 4, 5, 6, 7, 8, 9],
+        &[8, 1, 9, 2, 7, 3, 6, 4, 5],
+        &[5, 9, 4, 8, 3, 7, 2, 6, 1],
+        &[2, 4, 6, 8, 9, 7, 5, 3, 1],
+    ];
+    let mut failures = Vec::new();
+    for attack in [1.0, 20.0] {
+        for order in orders {
+            failures.extend(nested_releases(attack, 9, order));
+        }
+        // Two voices past full: notes 1..=17 in a scattered order.
+        let order: Vec<u32> = (1..=17).map(|i| (i * 7) % 17 + 1).collect();
+        failures.extend(nested_releases(attack, 17, &order));
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+#[test]
+fn synth_poly_presses_past_a_full_voice_share_one_new_voice() {
+    // 24 notes on one key: three voices of eight notes each, not a voice per note past the
+    // first eight (16 voices would then run out and steal a held note).
+    for attack in [1.0, 20.0] {
+        let mut s = sine_synth_in(0.0);
+        s.set_param(index(&synth::PARAM_IDS, "amp_attack"), attack);
+        let ons: Vec<NoteEvent> = (1..=24).map(|id| on_n(id * 100, 48, id)).collect();
+        render(&mut s, 9_600, &ons);
+        // Fast attack: each re-strike leaves the voice it took over ringing out; let those end.
+        render(&mut s, 48_000, &[]);
+        assert_eq!(voices(&s), 3.0, "attack {attack}");
+        let order: Vec<u32> = (1..=24).collect();
+        let mut failures = Vec::new();
+        for (i, &id) in order.iter().enumerate() {
+            let l = render(&mut s, 24_000, &[off_n(0, 48, id)]);
+            if (peak(&l[19_200..]) < 1e-4) != (i + 1 == order.len()) {
+                failures.push(format!("attack {attack}: after note {id}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+}
+
+#[test]
+fn synth_poly_a_slid_note_on_a_crowded_key_is_not_forgotten() {
+    // Key 48 holds seven notes on one voice; a note slides from 52 onto 48, a second voice on
+    // that key. Struck again, 48 cannot take all eight older notes into one voice, so the new
+    // note gets its own and every held note keeps its release: the slid note (released last)
+    // still sounds when the others have ended.
+    let mut s = sine_synth_in(0.0);
+    let mut ons: Vec<NoteEvent> = (1..=7).map(|id| on_n(id * 100, 48, id)).collect();
+    ons.push(on_n(1_000, 52, 100));
+    render(&mut s, 4_800, &ons);
+    let slide = NoteEvent {
+        slide: true,
+        ..on_n(0, 48, 101)
+    };
+    render(&mut s, 4_800, &[slide, on_n(2_400, 48, 8)]);
+    for id in (1..=8).chain([100]) {
+        render(
+            &mut s,
+            2_400,
+            &[off_n(0, if id == 100 { 52 } else { 48 }, id)],
+        );
+    }
+    let l = render(&mut s, 24_000, &[]);
+    assert!(
+        peak(&l[19_200..]) > 0.01,
+        "the slid note 101 still holds the key"
+    );
+    let l = render(&mut s, 24_000, &[off_n(0, 48, 101)]);
+    assert!(peak(&l[19_200..]) < 1e-4, "its release ends it");
+}
+
+#[test]
+fn synth_poly_a_released_voice_struck_again_plays_only_the_new_note() {
+    // Slow attack: 48 struck twice shares one voice (notes 1 and 2). A voice-mode switch
+    // releases it; struck again while it rings (in place), it belongs to the new note alone,
+    // whose release ends it.
+    let mut s = sine_synth_in(0.0);
+    s.set_param(index(&synth::PARAM_IDS, "amp_attack"), 20.0);
+    render(&mut s, 4_800, &[on_n(0, 48, 1), on_n(2_400, 48, 2)]);
+    let mode = index(&synth::PARAM_IDS, "voice_mode");
+    s.set_param(mode, 1.0);
+    s.set_param(mode, 0.0);
+    render(&mut s, 480, &[on_n(0, 48, 3)]);
+    let l = render(&mut s, 24_000, &[off_n(0, 48, 3)]);
+    assert!(peak(&l[19_200..]) < 1e-4, "note 3's release ended it");
+}
+
+#[test]
+fn synth_poly_a_slide_takes_the_voice_away_from_its_old_key() {
+    // 48 struck twice (notes 1 and 2), then a slide to 52 takes the voice: 52's release ends it,
+    // and the 48 notes' releases find nothing.
+    let mut s = sine_synth_in(0.0);
+    render(&mut s, 4_800, &[on_n(0, 48, 1), on_n(2_400, 48, 2)]);
+    let slide = NoteEvent {
+        slide: true,
+        ..on_n(0, 52, 3)
+    };
+    render(&mut s, 9_600, &[slide]);
+    let l = render(&mut s, 24_000, &[off_n(0, 52, 3)]);
+    assert!(
+        peak(&l[19_200..]) < 1e-4,
+        "52's release ended the slid voice"
+    );
+    assert_eq!(voices(&s), 0.0);
 }
 
 #[test]
@@ -274,14 +486,14 @@ fn synth_a_re_struck_key_keeps_its_priority() {
     for mode in [1.0, 2.0] {
         let mut s = sine_synth_in(mode);
         let events = [
-            on(0, 48, false),
-            on(4_800, 55, false),
-            on(9_600, 48, false),
-            off(14_400, 48),
-            on(19_200, 60, false),
-            off(24_000, 60),
-            off(28_800, 55),
-            off(33_600, 48),
+            on_n(0, 48, 1),
+            on_n(4_800, 55, 2),
+            on_n(9_600, 48, 3),
+            off_n(14_400, 48, 1),
+            on_n(19_200, 60, 4),
+            off_n(24_000, 60, 4),
+            off_n(28_800, 55, 2),
+            off_n(33_600, 48, 3),
         ];
         let l = render(&mut s, 81_600, &events);
         let track = pitch_track(&l[..33_600]);

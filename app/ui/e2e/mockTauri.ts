@@ -202,6 +202,11 @@ export function installMockTauri(seed: MockSeed): void {
     midi: { present: [...new Set(seed.midi?.inputs ?? [])].sort(), disabled: [...(seed.midi?.disabled ?? [])] },
     /** Live notes sounding now, "channel:key" -> velocity (`channel_note`). */
     live: new Map<string, number>(),
+    /** Live presses handed out and not released yet: press -> "channel:key" (notes_cmds.rs
+     * `channel_note`, project_cmds.rs `channel_preview`: a note-on returns its press, a release
+     * names it). */
+    presses: new Map<number, string>(),
+    nextPress: 1,
     /** Notes being recorded: "channel:key" -> where and how hard they started. */
     recordOpen: new Map<string, { tick: number; velocity: number; take: number }>(),
     /** The running take's number (engine/src/record.rs): one more after every take ends. */
@@ -1011,10 +1016,12 @@ export function installMockTauri(seed: MockSeed): void {
       if (a.on) {
         s.live.set(key, a.velocity as number);
         if (s.recording && s.transport.playing) s.recordOpen.set(key, { tick: ticksNow(), velocity: a.velocity as number, take: s.take });
-      } else {
-        s.live.delete(key);
-        closeRecorded(key, ticksNow());
+        return press(key);
       }
+      // The engine ends only the note the release names: a press it never made ends nothing.
+      if (!release(a.press, key)) return null;
+      if (![...s.presses.values()].includes(key)) s.live.delete(key);
+      closeRecorded(key, ticksNow());
       return null;
     },
     channel_param_live: (a) => {
@@ -1067,7 +1074,12 @@ export function installMockTauri(seed: MockSeed): void {
     },
     channel_preview: (a) => {
       channelIndex(a.channel);
-      s.previews.set(a.channel as number, Boolean(a.on));
+      const key = `${String(a.channel)}:preview`;
+      if (a.on) {
+        s.previews.set(a.channel as number, true);
+        return press(key);
+      }
+      if (release(a.press, key) && ![...s.presses.values()].includes(key)) s.previews.set(a.channel as number, false);
       return null;
     },
     transport_play: () => {
@@ -1168,12 +1180,28 @@ export function installMockTauri(seed: MockSeed): void {
     "plugin:window|set_title": () => null,
   };
 
+  /** A new press for a note-on of `key`. */
+  const press = (key: string) => {
+    const id = s.nextPress++;
+    s.presses.set(id, key);
+    return id;
+  };
+  /** Ends `id` if it is a press of `key`; a release must name one. */
+  const release = (id: unknown, key: string) => {
+    if (id === null || id === undefined) throw "A release names the press it ends.";
+    if (s.presses.get(id as number) !== key) return false;
+    s.presses.delete(id as number);
+    return true;
+  };
+
   // Argument types as serde reads them from the payload (the command signatures, `Edit`,
   // `ExportRequest`): a wrong type is refused before the command runs, as in the shell.
   type Check = (v: unknown) => string | null;
   const isInt = (v: unknown, max: number) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= max;
   const u8: Check = (v) => (isInt(v, 255) ? null : `invalid value: ${JSON.stringify(v)}, expected u8`);
   const u32: Check = (v) => (isInt(v, 0xffffffff) ? null : `invalid value: ${JSON.stringify(v)}, expected u32`);
+  // A u64 as JavaScript numbers carry it exactly (the presses the shell hands out stay far below).
+  const u64: Check = (v) => (isInt(v, Number.MAX_SAFE_INTEGER) ? null : `invalid value: ${JSON.stringify(v)}, expected u64`);
   // JSON has no NaN or infinity: they arrive as null.
   const f32: Check = (v) => (typeof v === "number" && Number.isFinite(v) ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected f32`);
   const bool: Check = (v) => (typeof v === "boolean" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a boolean`);
@@ -1239,10 +1267,10 @@ export function installMockTauri(seed: MockSeed): void {
     project_edit: { edit },
     channel_add: { path: str },
     channel_set_sample: { channel: u32, path: str },
-    channel_preview: { channel: u32, on: bool },
+    channel_preview: { channel: u32, on: bool, press: optional(u64) },
     notes_edit: { edit: notesEditArg },
     channel_add_synth: { preset: str },
-    channel_note: { channel: u32, key: u8, velocity: f32, on: bool },
+    channel_note: { channel: u32, key: u8, velocity: f32, on: bool, press: optional(u64) },
     channel_param_live: { channel: u32, param: str, value: f32 },
     channel_select: { channel: optional(u32) },
     midi_set_enabled: { name: str, enabled: bool },
@@ -1256,11 +1284,18 @@ export function installMockTauri(seed: MockSeed): void {
 
   /** Commands the test holds back (`holdCommand`), each until `releaseCommand`. */
   const holds = new Map<string, { promise: Promise<void>; release: () => void }>();
+  /** Commands whose next call the engine refuses (`refuseNext`), with the error it gives. */
+  const refusals = new Map<string, string>();
   const invoke = async (cmd: string, args: Record<string, unknown> = {}) => {
     calls.push({ cmd, args: clone(args ?? {}), at: performance.now() });
     // A held command waits here, before the engine sees it, until the test releases it.
     const held = holds.get(cmd);
     if (held) await held.promise;
+    const refused = refusals.get(cmd);
+    if (refused !== undefined) {
+      refusals.delete(cmd);
+      throw refused;
+    }
     const handler = commands[cmd];
     if (!handler) throw `The mock engine has no command ${cmd}`;
     for (const [name, check] of Object.entries(ARGS[cmd] ?? {})) {
@@ -1325,6 +1360,10 @@ export function installMockTauri(seed: MockSeed): void {
       const v = new DataView(data);
       v.setUint8(1, (v.getUint8(1) & ~1) | (playing ? 1 : 0));
       for (const socket of sockets) socket.onmessage?.(new MessageEvent("message", { data }));
+    },
+    /** The next call of `cmd` fails with `error`, as when the engine's queue is full. */
+    refuseNext: (cmd: string, error: string) => {
+      refusals.set(cmd, error);
     },
     /** Holds every later call of `cmd` before the engine handles it, until `releaseCommand`. */
     holdCommand: (cmd: string) => {

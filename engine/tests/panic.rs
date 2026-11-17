@@ -7,7 +7,7 @@ static A: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
 use grooviq_engine::{
     ChannelId, ChannelMix, ChannelSetup, Command, EngineConfig, EngineState, HealthEvent,
-    INJECTED_PANIC, SampleBuf, engine, engine_with, in_audio_callback,
+    INJECTED_PANIC, NoteId, SampleBuf, engine, engine_with, in_audio_callback,
 };
 use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 use std::sync::{Arc, Once};
@@ -129,6 +129,7 @@ fn a_restart_restores_the_state_the_commands_set() {
         key: 48,
         velocity: 1.0,
         on: true,
+        id: NoteId(48),
     };
     let mut buf = vec![0f32; 1024 * 2]; // 16 blocks: the AllSoundOff fade and reset are over
 
@@ -198,6 +199,7 @@ fn a_fault_cleared_by_reconfigure_is_reported_but_never_restarts_the_new_graph()
         key: 48,
         velocity: 1.0,
         on: true,
+        id: NoteId(48),
     };
     c.send(note).unwrap();
     let mut buf = vec![0f32; 1024 * 2];
@@ -271,6 +273,7 @@ fn a_panic_restart_restores_channels_samples_and_mix() {
         key: 64,
         velocity: 0.7,
         on: true,
+        id: NoteId(64),
     };
     let mut buf = vec![0f32; 1024 * 2];
 
@@ -353,6 +356,7 @@ fn a_panic_restart_restores_synth_channels() {
         key,
         velocity: 0.9,
         on: true,
+        id: NoteId(u64::from(key)),
     };
     let mut buf = vec![0f32; 1024 * 2];
     // Channel 2 sounds, then channel 3 chokes it.
