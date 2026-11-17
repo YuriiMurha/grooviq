@@ -1248,9 +1248,7 @@ impl Session {
             ),
             (false, _) => (
                 "engineBusy",
-                format!(
-                    "Recording switched itself off, and the audio engine took the switch late: {notes} not added."
-                ),
+                format!("Recording had switched itself off, so {notes} not added."),
             ),
         };
         out.stopped = Some(RecordingStopped {
