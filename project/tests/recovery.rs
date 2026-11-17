@@ -97,11 +97,15 @@ fn an_untitled_project_recovers_without_a_path_and_with_its_samples() {
             path: "/s/kick.wav".into(),
             file: None,
         }),
+        instrument: grooviq_engine::InstrumentKind::Sampler,
         sampler: Default::default(),
+        synth: Default::default(),
+        preset: None,
         volume: 1.0,
         pan: 0.0,
         mute: false,
         solo: false,
+        choke: 0,
     });
     p.next_id = 2;
     let mut samples = SampleFiles::new();

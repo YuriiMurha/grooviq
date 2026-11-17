@@ -1,11 +1,15 @@
 //! The .grooviq file: save, load, migrations, validation, backups.
 
 use grooviq_dsp::sampler::SPEC;
-use grooviq_project::{
-    Channel, FORMAT, LoadError, MAX_STEPS, Note, Pattern, Project, SampleFile, SampleFiles,
-    SampleRef, TimeSignature, VERSION, backup_before_save, load, migrate, read_sample_file, save,
-    save_with,
+use grooviq_engine::{
+    ChannelId, ChannelMix, ChannelSetup, EngineState, InstrumentKind, PatternData, SeqNote,
 };
+use grooviq_project::{
+    Channel, FORMAT, LoadError, MAX_NOTES_PER_PATTERN, MAX_STEPS, Note, Pattern, Project,
+    ProjectKey, SampleFile, SampleFiles, SampleRef, TimeSignature, VERSION, backup_before_save,
+    decode_samples, engine_state, load, migrate, read_sample_file, save, save_with,
+};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -22,21 +26,27 @@ fn channel(id: u32, name: &str, sample: Option<&str>) -> Channel {
             path: PathBuf::from(p),
             file: None,
         }),
+        instrument: InstrumentKind::Sampler,
         sampler: Default::default(),
+        synth: Default::default(),
+        preset: None,
         volume: 1.0,
         pan: 0.0,
         mute: false,
         solo: false,
+        choke: 0,
     }
 }
 
-fn note(channel: u32, tick: u32) -> Note {
+fn note(id: u32, channel: u32, tick: u32) -> Note {
     Note {
+        id,
         channel,
         tick,
         length: 240,
         key: 60,
         velocity: 0.8,
+        slide: false,
     }
 }
 
@@ -62,7 +72,8 @@ fn project() -> (Project, SampleFiles) {
     snare.mute = true;
     let empty = channel(3, "Empty", None);
     p.channels = vec![kick, snare, empty];
-    p.patterns[0].notes = vec![note(1, 0), note(2, 480), note(1, 960)];
+    p.patterns[0].notes = vec![note(1, 1, 0), note(2, 2, 480), note(3, 1, 960)];
+    p.patterns[0].next_note_id = 4;
     p.patterns[0].swing = 0.25;
     p.next_id = 10;
     let mut samples = SampleFiles::new();
@@ -253,10 +264,10 @@ fn load_rejects_non_zip_truncated_missing_json_and_newer_versions() {
     ));
     match check(
         "v2.grooviq",
-        &json_zip(r#"{"format":"grooviq-project","version":2,"somethingNew":true}"#),
+        &json_zip(r#"{"format":"grooviq-project","version":3,"somethingNew":true}"#),
     ) {
         Err(LoadError::NewerVersion { found, supported }) => {
-            assert_eq!((found, supported), (2, 1));
+            assert_eq!((found, supported), (3, 2));
         }
         other => panic!("{other:?}"),
     }
@@ -288,9 +299,13 @@ fn load_rejects_non_zip_truncated_missing_json_and_newer_versions() {
 }
 
 #[test]
-fn migrate_passes_version_1_through() {
-    let json = serde_json::json!({"format": FORMAT, "version": VERSION, "name": "x"});
-    assert_eq!(migrate(json.clone()).unwrap(), json);
+fn migrate_leaves_the_current_version_alone() {
+    let (mut p, _) = project();
+    p.patterns[0].notes[0].id = 42;
+    let before = p.clone();
+    migrate(&mut p, VERSION).unwrap();
+    assert_eq!(p, before);
+    assert!(matches!(migrate(&mut p, 0), Err(LoadError::Corrupt(_))));
 }
 
 #[test]
@@ -348,11 +363,13 @@ fn a_hand_written_v1_file_loads() {
     assert_eq!(
         pat.notes,
         vec![Note {
+            id: 1,
             channel: 1,
             tick: 240,
             length: 120,
             key: 36,
-            velocity: 0.5
+            velocity: 0.5,
+            slide: false,
         }]
     );
     assert_eq!(loaded.samples[&1].name, "kick.wav");
@@ -369,7 +386,7 @@ fn a_hand_written_v1_file_loads() {
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["format"], "grooviq-project");
-    assert_eq!(v["version"], 1);
+    assert_eq!(v["version"], 2);
     assert_eq!(v["timeSignature"]["beats"], 3);
     assert_eq!(v["currentPattern"], 2);
     assert_eq!(v["nextId"], 3);
@@ -397,16 +414,20 @@ fn validate_clamps_out_of_range_values_and_drops_orphan_notes() {
         swing: 2.0,
         notes: vec![
             Note {
+                id: 1,
                 channel: 1,
                 tick: 0,
                 length: 0,
                 key: 200,
                 velocity: 3.0,
+                slide: false,
             },
-            note(9, 0),                   // channel 9 does not exist
-            note(1, MAX_STEPS * 240),     // past the longest pattern
-            note(2, MAX_STEPS * 240 - 1), // the last tick that stays
+            note(2, 9, 0),                   // channel 9 does not exist
+            note(3, 1, MAX_STEPS * 240),     // past the longest pattern
+            note(4, 2, MAX_STEPS * 240 - 1), // the last tick that stays
         ],
+        next_note_id: 5,
+        revision: 1,
     }];
     p.current_pattern = 9;
     p.next_id = 0;
@@ -439,11 +460,13 @@ fn validate_clamps_out_of_range_values_and_drops_orphan_notes() {
     assert_eq!(
         pat.notes[0],
         Note {
+            id: 1,
             channel: 1,
             tick: 0,
             length: 1,
             key: 127,
-            velocity: 1.0
+            velocity: 1.0,
+            slide: false,
         }
     );
     assert_eq!(pat.notes[1].tick, MAX_STEPS * 240 - 1);
@@ -856,12 +879,10 @@ fn validate_replaces_non_finite_values_with_their_defaults() {
         p.next_id = 2;
         p.patterns[0].swing = bad;
         p.patterns[0].notes = vec![Note {
-            channel: 1,
-            tick: 0,
-            length: 240,
-            key: 60,
             velocity: bad,
+            ..note(1, 1, 0)
         }];
+        p.patterns[0].next_note_id = 2;
         let lines = p.validate();
         assert_eq!(p.bpm, 140.0, "{bad}");
         assert_eq!(p.channels[0].volume, 1.0, "{bad}");
@@ -897,4 +918,682 @@ fn saving_never_overwrites_the_old_file_in_place() {
         "the old file was written into"
     );
     assert_eq!(load(&path).unwrap().project.name, "A different name");
+}
+
+/// An M1 project as M1 Grooviq wrote it: two sampler channels, swing, an odd-step note and a
+/// note off the sampler's root.
+const V1_JSON: &str = r#"{
+    "format": "grooviq-project",
+    "version": 1,
+    "name": "Old beat",
+    "bpm": 96.0,
+    "timeSignature": {"beats": 4, "unit": 4},
+    "channels": [
+        {"id": 1, "name": "Kick", "color": 0,
+         "sample": {"path": "/m1/kick.wav", "file": "samples/1-kick.wav"},
+         "sampler": {"tune": -2.0, "release": 40.0}, "volume": 0.8, "pan": -0.5,
+         "mute": false, "solo": false},
+        {"id": 2, "name": "Hat", "color": 1,
+         "sample": {"path": "/m1/hat.wav", "file": "samples/2-hat.wav"},
+         "sampler": {}, "volume": 1.0, "pan": 0.25, "mute": true, "solo": false}
+    ],
+    "patterns": [
+        {"id": 3, "name": "Beat", "steps": 8, "swing": 0.5, "notes": [
+            {"channel": 2, "tick": 240, "length": 120, "key": 60, "velocity": 0.5},
+            {"channel": 1, "tick": 0, "length": 240, "key": 60, "velocity": 1.0},
+            {"channel": 1, "tick": 960, "length": 240, "key": 48, "velocity": 0.9}
+        ]}
+    ],
+    "currentPattern": 3,
+    "nextId": 4
+}"#;
+
+/// `project.json` of a saved file, parsed.
+fn saved_json(path: &Path) -> serde_json::Value {
+    let mut zip = ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+    let mut text = String::new();
+    zip.by_name("project.json")
+        .unwrap()
+        .read_to_string(&mut text)
+        .unwrap();
+    serde_json::from_str(&text).unwrap()
+}
+
+#[test]
+fn a_v1_file_opens_and_sounds_the_same() {
+    let dir = tempfile::tempdir().unwrap();
+    let (kick, hat) = (wav_bytes(64), wav_bytes(32));
+    let path = write(
+        dir.path(),
+        "m1.grooviq",
+        &zip_of(&[
+            ("project.json", V1_JSON.as_bytes()),
+            ("samples/1-kick.wav", &kick),
+            ("samples/2-hat.wav", &hat),
+        ]),
+    );
+    let loaded = load(&path).unwrap();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+
+    // The migration: every channel is a sampler in no choke group, and the notes are numbered
+    // 1..=n in the order they were stored.
+    let p = &loaded.project;
+    assert_eq!(p.key, None);
+    for c in &p.channels {
+        assert_eq!(c.instrument, InstrumentKind::Sampler);
+        assert_eq!((c.choke, c.preset.as_deref()), (0, None));
+        assert!(c.synth.is_empty());
+    }
+    let pat = &p.patterns[0];
+    let ids: Vec<(u32, u32, u32)> = pat
+        .notes
+        .iter()
+        .map(|n| (n.id, n.channel, n.tick))
+        .collect();
+    assert_eq!(ids, vec![(1, 2, 240), (2, 1, 0), (3, 1, 960)]);
+    assert!(pat.notes.iter().all(|n| !n.slide));
+    assert_eq!((pat.next_note_id, pat.revision), (4, 1));
+
+    // The engine gets exactly what M1 compiled from this file, written out by hand here.
+    let decoded = decode_samples(&loaded);
+    assert!(decoded.warnings.is_empty(), "{:?}", decoded.warnings);
+    let sampler = |overrides: &[(&str, f32)]| -> Vec<f32> {
+        grooviq_dsp::sampler::PARAM_IDS
+            .iter()
+            .zip(SPEC.iter())
+            .map(|(id, s)| {
+                overrides
+                    .iter()
+                    .find(|(name, _)| name == id)
+                    .map_or(s.2, |o| o.1)
+            })
+            .collect()
+    };
+    let seq = |tick, channel, key, velocity, length| SeqNote {
+        tick,
+        channel: ChannelId(channel),
+        key,
+        velocity,
+        length,
+        slide: false,
+    };
+    let m1 = EngineState {
+        bpm: 96.0,
+        channels: vec![
+            ChannelSetup::sampler(
+                ChannelId(1),
+                Some(decoded.samples[&1].clone()),
+                sampler(&[("tune", -2.0), ("release", 40.0)]),
+                ChannelMix {
+                    volume: 0.8,
+                    pan: -0.5,
+                    mute: false,
+                    solo: false,
+                },
+            ),
+            ChannelSetup::sampler(
+                ChannelId(2),
+                Some(decoded.samples[&2].clone()),
+                sampler(&[]),
+                ChannelMix {
+                    volume: 1.0,
+                    pan: 0.25,
+                    mute: true,
+                    solo: false,
+                },
+            ),
+        ],
+        pattern: PatternData {
+            length: 8 * 240,
+            // Swing 0.5 moves the odd-step hat 60 ticks later.
+            notes: vec![
+                seq(0, 1, 60, 1.0, 240),
+                seq(300, 2, 60, 0.5, 120),
+                seq(960, 1, 48, 0.9, 240),
+            ],
+        },
+        // The file's 4/4 (M1's engine had no time signature: it counted 4/4).
+        time_signature: (p.time_signature.beats, p.time_signature.unit),
+    };
+    assert_eq!(p.time_signature, TimeSignature { beats: 4, unit: 4 });
+    assert_eq!(engine_state(p, &decoded.samples), m1);
+
+    // Saving writes version 2, with the new fields.
+    let again = dir.path().join("again.grooviq");
+    save(p, &loaded.samples, &again).unwrap();
+    let v = saved_json(&again);
+    assert_eq!(v["version"], 2);
+    assert_eq!(v["channels"][1]["instrument"], "sampler");
+    assert_eq!(v["channels"][1]["choke"], 0);
+    assert_eq!(v["patterns"][0]["notes"][0]["id"], 1);
+    assert_eq!(v["patterns"][0]["notes"][2]["slide"], false);
+    assert_eq!(v["patterns"][0]["nextNoteId"], 4);
+    assert!(v["patterns"][0].get("revision").is_none(), "never saved");
+    let reloaded = load(&again).unwrap();
+    assert!(reloaded.warnings.is_empty(), "{:?}", reloaded.warnings);
+    assert_eq!(reloaded.project, *p);
+
+    // The migration step on its own.
+    // A v1 file with v2 fields in it (no M1 Grooviq wrote one) is still read as v1.
+    let mut v1: Project = serde_json::from_str(V1_JSON).unwrap();
+    v1.channels[0].instrument = InstrumentKind::Synth;
+    v1.patterns[0].notes[0].id = 77;
+    migrate(&mut v1, 1).unwrap();
+    assert_eq!(v1.channels[0].instrument, InstrumentKind::Sampler);
+    let ids: Vec<u32> = v1.patterns[0].notes.iter().map(|n| n.id).collect();
+    assert_eq!(ids, vec![1, 2, 3]);
+    assert_eq!(v1.patterns[0].next_note_id, 4);
+}
+
+#[test]
+fn a_v2_project_survives_save_and_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v2.grooviq");
+    let mut p = Project::new();
+    p.key = Some(ProjectKey {
+        root: 9,
+        scale: "minor".into(),
+    });
+    let mut kick = channel(1, "Kick", Some("/music/kick.wav"));
+    kick.choke = 3;
+    let mut bass = channel(2, "Bass", None);
+    bass.instrument = InstrumentKind::Synth;
+    bass.preset = Some("808 Glide".into());
+    bass.synth.insert("filter_cutoff".into(), 650.0);
+    bass.synth.insert("glide".into(), 90.0);
+    bass.synth.insert("voice_mode".into(), 2.0);
+    p.channels = vec![kick, bass];
+    p.next_id = 3;
+    let mut slide = note(8, 2, 480);
+    slide.key = 43;
+    slide.length = 960;
+    slide.slide = true;
+    p.patterns[0].notes = vec![note(1, 1, 0), note(5, 2, 0), slide];
+    p.patterns[0].next_note_id = 9;
+    p.patterns[0].revision = 7;
+    let mut samples = SampleFiles::new();
+    samples.insert(1, file("kick.wav", b"RIFF-kick-bytes"));
+    save(&p, &samples, &path).unwrap();
+
+    let v = saved_json(&path);
+    assert_eq!(v["version"], 2);
+    assert_eq!(v["key"], serde_json::json!({"root": 9, "scale": "minor"}));
+    assert_eq!(v["channels"][1]["instrument"], "synth");
+    assert_eq!(v["channels"][1]["preset"], "808 Glide");
+    assert_eq!(v["channels"][1]["synth"]["glide"], 90.0);
+    assert_eq!(v["channels"][0]["choke"], 3);
+    assert_eq!(v["patterns"][0]["notes"][2]["slide"], true);
+    assert_eq!(v["patterns"][0]["nextNoteId"], 9);
+
+    let loaded = load(&path).unwrap();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    let mut expected = p.clone();
+    expected.channels[0].sample.as_mut().unwrap().file = Some("samples/1-kick.wav".into());
+    // The revision is the session's edit counter: it is not saved and starts at 1.
+    expected.patterns[0].revision = 1;
+    assert_eq!(loaded.project, expected);
+}
+
+#[test]
+fn ids_are_repaired_and_note_count_capped() {
+    let note_json = |id: u32, tick: u32| {
+        format!(
+            r#"{{"id": {id}, "channel": 1, "tick": {tick}, "length": 240, "key": 60, "velocity": 0.8}}"#
+        )
+    };
+    let dups = [(5, 0), (5, 240), (0, 480), (7, 720)]
+        .iter()
+        .map(|&(id, tick)| note_json(id, tick))
+        .collect::<Vec<_>>()
+        .join(",");
+    let total = MAX_NOTES_PER_PATTERN + 5;
+    let huge = (1..=total as u32)
+        .map(|id| note_json(id, (id * 7) % (MAX_STEPS * 240)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let json = format!(
+        r#"{{"format": "grooviq-project", "version": 2, "name": "x",
+        "channels": [{{"id": 1, "name": "Kick", "instrument": "sampler"}}],
+        "patterns": [
+            {{"id": 2, "name": "Dups", "nextNoteId": 3, "notes": [{dups}]}},
+            {{"id": 3, "name": "Huge", "nextNoteId": {next}, "notes": [{huge}]}}
+        ],
+        "currentPattern": 2, "nextId": 4}}"#,
+        next = total + 1
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let loaded = load(&write(dir.path(), "ids.grooviq", &json_zip(&json))).unwrap();
+    assert_eq!(
+        loaded.warnings,
+        vec![
+            "Pattern \"Dups\": 2 notes had a missing or repeated id and got new ones.".to_string(),
+            format!(
+                "Pattern \"Huge\": dropped 5 notes past the limit of {MAX_NOTES_PER_PATTERN} notes per pattern."
+            ),
+        ]
+    );
+
+    // The first of two equal ids keeps it; the repaired ones count up from above the largest.
+    let d = &loaded.project.patterns[0];
+    let ids: Vec<(u32, u32)> = d.notes.iter().map(|n| (n.id, n.tick)).collect();
+    assert_eq!(ids, vec![(5, 0), (8, 240), (9, 480), (7, 720)]);
+    assert_eq!(d.next_note_id, 10, "above every id");
+
+    // The cap keeps the notes stored first.
+    let h = &loaded.project.patterns[1];
+    assert_eq!(h.notes.len(), MAX_NOTES_PER_PATTERN);
+    assert_eq!(h.notes.last().unwrap().id, MAX_NOTES_PER_PATTERN as u32);
+    let unique: HashSet<u32> = h.notes.iter().map(|n| n.id).collect();
+    assert_eq!(unique.len(), MAX_NOTES_PER_PATTERN);
+    assert_eq!(h.next_note_id, total as u32 + 1);
+
+    // An id at the top of the range leaves no room above it: the pattern is renumbered, and
+    // a note added next still gets an unused id.
+    let mut p = Project::new();
+    p.channels = vec![channel(1, "Kick", None)];
+    p.next_id = 2;
+    p.patterns[0].name = "Top".into();
+    p.patterns[0].notes = vec![
+        note(u32::MAX, 1, 0),
+        note(u32::MAX, 1, 240),
+        note(3, 1, 480),
+    ];
+    p.patterns[0].next_note_id = 1;
+    assert_eq!(
+        p.validate(),
+        vec![
+            "Pattern \"Top\": its note ids left no room for new notes; 3 notes were renumbered."
+                .to_string()
+        ]
+    );
+    let ids: Vec<u32> = p.patterns[0].notes.iter().map(|n| n.id).collect();
+    assert_eq!(ids, vec![1, 2, 3]);
+    assert_eq!(p.patterns[0].next_note_id, 4);
+    assert!(p.validate().is_empty());
+
+    // A counter at or below the largest id is moved above it without a warning: it is
+    // bookkeeping the person cannot act on.
+    p.patterns[0].next_note_id = 2;
+    assert!(p.validate().is_empty());
+    assert_eq!(p.patterns[0].next_note_id, 4);
+}
+
+#[test]
+fn out_of_range_v2_values_are_clamped_with_warnings() {
+    let json = |key: &str| {
+        format!(
+            r#"{{"format": "grooviq-project", "version": 2, "name": "x", {key}
+            "channels": [{{"id": 1, "name": "Bass", "instrument": "synth", "choke": 99,
+                "synth": {{"filter_cutoff": 1000000000.0, "glide": 50.0, "lydian_wobble": 3.0}}}}],
+            "patterns": [{{"id": 2, "name": "P", "notes": []}}],
+            "currentPattern": 2, "nextId": 3}}"#
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let loaded = load(&write(
+        dir.path(),
+        "a.grooviq",
+        &json_zip(&json(r#""key": {"root": 14, "scale": "minor"},"#)),
+    ))
+    .unwrap();
+    assert_eq!(
+        loaded.warnings,
+        vec![
+            "The project's key (root 14, scale \"minor\") is not valid; it was cleared."
+                .to_string(),
+            "Channel \"Bass\": choke group 99 is outside 0 to 16; changed to 16.".to_string(),
+            "Channel \"Bass\": synth value \"filter_cutoff\" 1000000000 is outside 20 to 20000; changed to 20000.".to_string(),
+        ]
+    );
+    let p = &loaded.project;
+    assert_eq!(p.key, None);
+    let c = &p.channels[0];
+    assert_eq!(c.instrument, InstrumentKind::Synth);
+    assert_eq!(c.choke, 16);
+    // An unknown synth parameter is dropped without a word, as unknown fields are.
+    let names: Vec<&str> = c.synth.keys().map(String::as_str).collect();
+    assert_eq!(names, vec!["filter_cutoff", "glide"]);
+    assert_eq!(
+        (c.synth["filter_cutoff"], c.synth["glide"]),
+        (20_000.0, 50.0)
+    );
+
+    // An unknown scale clears the key too; a known one is kept.
+    let loaded = load(&write(
+        dir.path(),
+        "b.grooviq",
+        &json_zip(&json(r#""key": {"root": 2, "scale": "lydianish"},"#)),
+    ))
+    .unwrap();
+    assert_eq!(loaded.project.key, None);
+    assert_eq!(
+        loaded.warnings[0],
+        "The project's key (root 2, scale \"lydianish\") is not valid; it was cleared."
+    );
+    for scale in [
+        "major",
+        "minor",
+        "harmonic_minor",
+        "melodic_minor",
+        "dorian",
+        "phrygian",
+        "lydian",
+        "mixolydian",
+        "locrian",
+        "major_pentatonic",
+        "minor_pentatonic",
+        "blues",
+    ] {
+        let mut p = Project::new();
+        p.key = Some(ProjectKey {
+            root: 11,
+            scale: scale.into(),
+        });
+        assert!(p.validate().is_empty(), "{scale}");
+        assert!(p.key.is_some(), "{scale}");
+    }
+}
+
+#[test]
+fn a_v3_file_is_refused_as_newer() {
+    let json = serde_json::json!({"format": FORMAT, "version": 3, "channels": "whatever"});
+    match migrate(&mut Project::new(), 3) {
+        Err(LoadError::NewerVersion { found, supported }) => {
+            assert_eq!((found, supported), (3, 2));
+        }
+        other => panic!("{other:?}"),
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "v3.grooviq",
+        &json_zip(&serde_json::to_string(&json).unwrap()),
+    );
+    let err = load(&path).unwrap_err();
+    assert!(matches!(
+        err,
+        LoadError::NewerVersion {
+            found: 3,
+            supported: 2
+        }
+    ));
+    assert!(
+        err.to_string().contains("newer version of Grooviq"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_save_over_the_note_cap_is_refused_and_keeps_the_old_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cap.grooviq");
+    let (p, samples) = project();
+    save(&p, &samples, &path).unwrap();
+    let before = fs::read(&path).unwrap();
+
+    // One note more than `load` keeps: saving it would lose that note on the next open.
+    let mut over = p.clone();
+    over.patterns[0].name = "Full".into();
+    over.patterns[0].notes = (1..=MAX_NOTES_PER_PATTERN as u32 + 1)
+        .map(|id| note(id, 1, 0))
+        .collect();
+    over.patterns[0].next_note_id = MAX_NOTES_PER_PATTERN as u32 + 2;
+    let err = save(&over, &samples, &path).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "Pattern \"Full\" has 100001 notes, more than the {MAX_NOTES_PER_PATTERN} a pattern can hold, so the project was not saved."
+        )
+    );
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        before,
+        "the old file is untouched"
+    );
+    assert_eq!(
+        names_in(dir.path()),
+        vec!["cap.grooviq".to_string()],
+        "no temp file left"
+    );
+
+    // Exactly at the cap saves and loads whole.
+    over.patterns[0].notes.pop();
+    save(&over, &samples, &path).unwrap();
+    let loaded = load(&path).unwrap();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    assert_eq!(
+        loaded.project.patterns[0].notes.len(),
+        MAX_NOTES_PER_PATTERN
+    );
+}
+
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn the_cap_counts_only_notes_that_can_play() {
+    // 100,000 notes of a channel that does not exist, then 100,000 past step 256, then two
+    // playable ones: the cap must not spend itself on notes cleanup drops anyway. `patterns`
+    // comes before `channels`, so the reader cannot rely on field order.
+    let orphans = std::iter::repeat_n(r#"{"channel":99,"tick":0}"#, MAX_NOTES_PER_PATTERN)
+        .collect::<Vec<_>>()
+        .join(",");
+    let far = format!(r#"{{"channel":1,"tick":{}}}"#, MAX_STEPS * 240);
+    let far = std::iter::repeat_n(far.as_str(), MAX_NOTES_PER_PATTERN)
+        .collect::<Vec<_>>()
+        .join(",");
+    let json = format!(
+        r#"{{"format":"grooviq-project","version":1,
+        "patterns":[{{"id":0,"name":"Beat","notes":[{orphans},{far},
+            {{"channel":1,"tick":0}},{{"channel":2,"tick":240}}]}}],
+        "channels":[{{"id":1,"name":"Kick"}},{{"id":2,"name":"Hat"}}],
+        "nextId":3}}"#
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let loaded = load(&write(dir.path(), "orphans.grooviq", &json_zip(&json))).unwrap();
+    assert_eq!(
+        loaded.warnings,
+        vec![
+            "Pattern \"Beat\": dropped 100000 notes of channels that do not exist.".to_string(),
+            "Pattern \"Beat\": dropped 100000 notes past step 256.".to_string(),
+        ]
+    );
+    let kept: Vec<(u32, u32, u32)> = loaded.project.patterns[0]
+        .notes
+        .iter()
+        .map(|n| (n.id, n.channel, n.tick))
+        .collect();
+    assert_eq!(
+        kept,
+        vec![(1, 1, 0), (2, 2, 240)],
+        "the playable notes survive"
+    );
+
+    // The cap still applies to playable notes, counted apart from the cleanup.
+    let playable = (0..MAX_NOTES_PER_PATTERN + 3)
+        .map(|_| r#"{"channel":1,"tick":0}"#)
+        .collect::<Vec<_>>()
+        .join(",");
+    let json = format!(
+        r#"{{"format":"grooviq-project","version":2,
+        "channels":[{{"id":1}}],"nextId":2,
+        "patterns":[{{"id":0,"name":"Full","notes":[{{"channel":7,"tick":0}},{playable}]}}]}}"#
+    );
+    let loaded = load(&write(dir.path(), "full.grooviq", &json_zip(&json))).unwrap();
+    assert_eq!(
+        loaded.warnings,
+        vec![
+            "Pattern \"Full\": dropped 1 note of a channel that does not exist.".to_string(),
+            format!(
+                "Pattern \"Full\": dropped 3 notes past the limit of {MAX_NOTES_PER_PATTERN} notes per pattern."
+            ),
+            format!(
+                "Pattern \"Full\": {MAX_NOTES_PER_PATTERN} notes had a missing or repeated id and got new ones."
+            ),
+        ]
+    );
+    assert_eq!(
+        loaded.project.patterns[0].notes.len(),
+        MAX_NOTES_PER_PATTERN
+    );
+}
+
+#[test]
+fn a_v1_file_ignores_the_fields_its_migration_supplies() {
+    // M1 never wrote these, but a v1 file that carries them (from an extension, or by hand)
+    // opened before v2 existed: migration replaces them, whatever their type.
+    let json = r#"{"format":"grooviq-project","version":1,
+        "channels":[{"id":1,"name":"Kick","instrument":"plugin"},{"id":2,"instrument":7}],
+        "patterns":[{"id":0,"name":"Beat","nextNoteId":"extension","notes":[
+            {"channel":1,"tick":0,"id":"extension"},{"channel":2,"tick":240,"id":-3}]}],
+        "nextId":3}"#;
+    let dir = tempfile::tempdir().unwrap();
+    let loaded = load(&write(dir.path(), "ext.grooviq", &json_zip(json))).unwrap();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    let p = &loaded.project;
+    assert!(
+        p.channels
+            .iter()
+            .all(|c| c.instrument == InstrumentKind::Sampler)
+    );
+    let ids: Vec<u32> = p.patterns[0].notes.iter().map(|n| n.id).collect();
+    assert_eq!(ids, vec![1, 2]);
+    assert_eq!(p.patterns[0].next_note_id, 3);
+    // The version is only known for the length of a load: afterwards ids read as ids again.
+    let note: Note = serde_json::from_str(r#"{"id": 5, "channel": 1, "tick": 0}"#).unwrap();
+    assert_eq!(note.id, 5);
+
+    // In a v2 file the same fields are the format's own, and a wrong one is damage.
+    for bad in [
+        r#""channels":[{"id":1,"instrument":"plugin"}],"patterns":[{"id":0,"notes":[]}]"#,
+        r#""channels":[{"id":1}],"patterns":[{"id":0,"nextNoteId":"x","notes":[]}]"#,
+        r#""channels":[{"id":1}],"patterns":[{"id":0,"notes":[{"channel":1,"tick":0,"id":"x"}]}]"#,
+    ] {
+        let json = format!(r#"{{"format":"grooviq-project","version":2,{bad},"nextId":2}}"#);
+        let path = write(dir.path(), "v2.grooviq", &json_zip(&json));
+        assert!(matches!(load(&path), Err(LoadError::Corrupt(_))), "{bad}");
+    }
+}
+
+/// A project document of `version` with these `channels` and `patterns` (JSON) and `extra`
+/// top-level fields (each ending in a comma).
+fn doc(version: u32, channels: &str, patterns: &str, extra: &str) -> String {
+    format!(
+        r#"{{"format":"grooviq-project","version":{version},{extra}"channels":{channels},"patterns":{patterns},"nextId":2}}"#
+    )
+}
+
+#[test]
+fn structs_written_as_arrays_are_refused_as_damage() {
+    // Grooviq writes every struct with named fields. serde would also read a struct as an array
+    // of its fields in order; a file that does so is refused, never half read (a channel kept
+    // while its notes are dropped as orphans, or a pattern whose notes go unread).
+    let note = r#"{"id":1,"channel":1,"tick":0}"#;
+    let channels = r#"[{"id":1}]"#;
+    let patterns = format!(r#"[{{"id":0,"notes":[{note}]}}]"#);
+    let cases = [
+        ("channel", "[[1]]".to_string(), patterns.clone(), ""),
+        (
+            "pattern",
+            channels.to_string(),
+            format!(r#"[[0,"P",16,0,[{note}]]]"#),
+            "",
+        ),
+        (
+            "note",
+            channels.to_string(),
+            r#"[{"id":0,"notes":[[1,1,0]]}]"#.to_string(),
+            "",
+        ),
+        (
+            "key",
+            channels.to_string(),
+            patterns.clone(),
+            r#""key":[9,"minor"],"#,
+        ),
+        (
+            "time signature",
+            channels.to_string(),
+            patterns.clone(),
+            r#""timeSignature":[3,4],"#,
+        ),
+        (
+            "sample",
+            r#"[{"id":1,"sample":["/a.wav",null]}]"#.to_string(),
+            patterns.clone(),
+            "",
+        ),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    for (what, channels, patterns, extra) in &cases {
+        for v in [1, 2] {
+            let path = write(
+                dir.path(),
+                "array.grooviq",
+                &json_zip(&doc(v, channels, patterns, extra)),
+            );
+            match load(&path) {
+                Err(LoadError::Corrupt(why)) => assert!(
+                    why.contains("an object with named fields"),
+                    "{what}, version {v}: {why}"
+                ),
+                other => panic!("{what}, version {v}: {other:?}"),
+            }
+        }
+    }
+
+    // The same file with named fields loads whole, note included.
+    let path = write(
+        dir.path(),
+        "named.grooviq",
+        &json_zip(&doc(
+            2,
+            channels,
+            &patterns,
+            r#""key":{"root":9,"scale":"minor"},"timeSignature":{"beats":3,"unit":4},"#,
+        )),
+    );
+    let loaded = load(&path).unwrap();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    assert_eq!(loaded.project.patterns[0].notes.len(), 1);
+    // A whole document that is an array is not a project at all, as before.
+    let path = write(dir.path(), "top.grooviq", &json_zip("[1, 2]"));
+    assert!(matches!(load(&path), Err(LoadError::NotAProject)));
+}
+
+#[test]
+fn the_typed_read_refuses_structs_written_as_arrays_on_its_own() {
+    // Without the first pass (a plain serde read), each struct still needs named fields.
+    let base = |channels: &str, patterns: &str, extra: &str| {
+        format!(r#"{{{extra}"channels":{channels},"patterns":{patterns}}}"#)
+    };
+    let ok = r#"[{"id":0,"notes":[{"channel":1,"tick":0}]}]"#;
+    for json in [
+        base("[[1]]", ok, ""),
+        base(r#"[{"id":1}]"#, r#"[[0,"P",16,0,[]]]"#, ""),
+        base(r#"[{"id":1}]"#, r#"[{"id":0,"notes":[[1,1,0]]}]"#, ""),
+        base(r#"[{"id":1}]"#, ok, r#""key":[9,"minor"],"#),
+        base(r#"[{"id":1}]"#, ok, r#""timeSignature":[3,4],"#),
+        base(r#"[{"id":1,"sample":["/a.wav",null]}]"#, ok, ""),
+    ] {
+        let err = serde_json::from_str::<Project>(&json).unwrap_err();
+        assert!(
+            err.to_string().contains("an object with named fields"),
+            "{json}: {err}"
+        );
+    }
+    let named = base(r#"[{"id":1}]"#, ok, r#""key":{"root":9,"scale":"minor"},"#);
+    assert_eq!(
+        serde_json::from_str::<Project>(&named).unwrap().patterns[0]
+            .notes
+            .len(),
+        1
+    );
 }

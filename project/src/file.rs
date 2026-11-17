@@ -9,13 +9,15 @@
 //! * Loading never trusts the file: sizes are capped, and a missing sample is a warning instead of
 //!   a failed project. `load` never opens a path the file names; relinking is the user's choice.
 
-use crate::model::{FORMAT, Project, VERSION};
+use crate::model::{FORMAT, MAX_NOTES_PER_PATTERN, Project, VERSION};
+use crate::reading::NoteDrops;
+use crate::{outline, reading};
+use grooviq_engine::InstrumentKind;
 use serde::Serialize;
-use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Seek, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zip::result::ZipError;
@@ -265,12 +267,24 @@ fn stage_save_with_limits_and_fault(
 /// Fails, naming the channel, when a sample is over `limits.sample`, the distinct samples
 /// together pass `limits.total` (a file `load` would then not fully open), or a channel still
 /// names a zip entry whose bytes are not here (a sample `load` skipped): saving would drop its
-/// only copy.
+/// only copy. Fails too when a pattern holds more than [`MAX_NOTES_PER_PATTERN`] notes: `load`
+/// would drop the rest.
 fn plan(
     project: &Project,
     samples: &SampleFiles,
     limits: Limits,
 ) -> io::Result<(Project, Vec<Entry>)> {
+    if let Some(p) = project
+        .patterns
+        .iter()
+        .find(|p| p.notes.len() > MAX_NOTES_PER_PATTERN)
+    {
+        return Err(too_big(format!(
+            "Pattern \"{}\" has {} notes, more than the {MAX_NOTES_PER_PATTERN} a pattern can hold, so the project was not saved.",
+            p.name,
+            p.notes.len()
+        )));
+    }
     let mut project = project.clone();
     let mut entries: Vec<Entry> = Vec::new();
     let mut total = 0u64;
@@ -486,32 +500,51 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
     file.rewind()?;
     let mut zip = ZipArchive::new(file).map_err(zip_error)?;
 
-    let json = {
-        let entry = match zip.by_name(PROJECT_JSON) {
-            Ok(entry) => entry,
-            Err(ZipError::FileNotFound) => return Err(LoadError::NotAProject),
-            Err(e) => return Err(zip_error(e)),
-        };
-        if entry.size() > MAX_JSON_BYTES {
-            return Err(LoadError::Corrupt(format!(
-                "{PROJECT_JSON} is larger than {} MB",
-                MAX_JSON_BYTES >> 20
-            )));
+    // `project.json` is read twice, streamed from the zip and never held whole: first the header,
+    // the channel ids and which patterns have notes (a newer version is refused before anything
+    // is typed), then the typed project, which keeps at most `MAX_NOTES_PER_PATTERN` notes per
+    // pattern.
+    let does_not_fit = |e: serde_json::Error| match e.classify() {
+        serde_json::error::Category::Data => {
+            LoadError::Corrupt(format!("{PROJECT_JSON} does not fit: {e}"))
         }
-        let mut text = Vec::new();
-        entry
-            .take(MAX_JSON_BYTES)
-            .read_to_end(&mut text)
-            .map_err(|e| LoadError::Corrupt(format!("{PROJECT_JSON} cannot be read: {e}")))?;
-        text
+        _ => json_error(e),
     };
-    let value: Value = serde_json::from_slice(&json)
-        .map_err(|e| LoadError::Corrupt(format!("{PROJECT_JSON} is not valid JSON: {e}")))?;
-    let value = migrate(value)?;
-    let mut project: Project = serde_json::from_value(value)
-        .map_err(|e| LoadError::Corrupt(format!("{PROJECT_JSON} does not fit: {e}")))?;
+    let outline = outline::read(project_json(&mut zip)?)
+        .map_err(does_not_fit)?
+        .ok_or(LoadError::NotAProject)?;
+    if outline.format.as_deref() != Some(FORMAT) {
+        return Err(LoadError::NotAProject);
+    }
+    let version = checked_version(outline.version)?;
+    let (project, drops) = reading::with_context(version, outline.channels, || {
+        serde_json::from_reader::<_, reading::Named<Project>>(project_json(&mut zip)?)
+            .map(|named| named.0)
+            .map_err(does_not_fit)
+    });
+    let mut project = project?;
+    migrate(&mut project, version)?;
 
-    let mut warnings = project.validate();
+    // What each pattern lost while it was read, by pattern. The typed pass read the `notes` of
+    // exactly the patterns the outline saw a `notes` key in, in order (a repeated key or another
+    // shape fails the typed pass), so the two line up.
+    let mut drops = drops.into_iter();
+    let read: Vec<NoteDrops> = outline
+        .has_notes
+        .iter()
+        .map(|&has| {
+            if has {
+                drops.next()
+            } else {
+                Some(NoteDrops::default())
+            }
+        })
+        .collect::<Option<_>>()
+        .filter(|read: &Vec<NoteDrops>| {
+            read.len() == project.patterns.len() && drops.next().is_none()
+        })
+        .ok_or_else(|| LoadError::Corrupt(format!("{PROJECT_JSON} reads differently twice")))?;
+    let mut warnings = project.validate_read(&read);
     let mut samples = SampleFiles::new();
     let mut entries: HashMap<String, EntryRead> = HashMap::new();
     // Channels whose embedded sample is too big: their entry name stays.
@@ -572,28 +605,68 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
     })
 }
 
-/// Brings a parsed `project.json` up to [`VERSION`]. Version 1 passes through unchanged; a
-/// version 2 will add its upgrade step here, one version at a time.
-pub fn migrate(json: Value) -> Result<Value, LoadError> {
-    let header = json.as_object().ok_or(LoadError::NotAProject)?;
-    if header.get("format").and_then(Value::as_str) != Some(FORMAT) {
-        return Err(LoadError::NotAProject);
-    }
-    let version = match header.get("version").and_then(Value::as_u64) {
-        Some(v) if v >= 1 => v,
-        _ => {
-            return Err(LoadError::Corrupt(
-                "its format version is missing or invalid".into(),
-            ));
-        }
+/// `project.json` from the zip, streamed and buffered, never more than [`MAX_JSON_BYTES`].
+fn project_json<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<impl Read + '_, LoadError> {
+    let entry = match zip.by_name(PROJECT_JSON) {
+        Ok(entry) => entry,
+        Err(ZipError::FileNotFound) => return Err(LoadError::NotAProject),
+        Err(e) => return Err(zip_error(e)),
     };
-    if version > u64::from(VERSION) {
-        return Err(LoadError::NewerVersion {
-            found: u32::try_from(version).unwrap_or(u32::MAX),
-            supported: VERSION,
-        });
+    if entry.size() > MAX_JSON_BYTES {
+        return Err(LoadError::Corrupt(format!(
+            "{PROJECT_JSON} is larger than {} MB",
+            MAX_JSON_BYTES >> 20
+        )));
     }
-    Ok(json)
+    Ok(BufReader::new(entry.take(MAX_JSON_BYTES)))
+}
+
+/// A broken or unreadable `project.json` (a zip checksum mismatch is an I/O error).
+fn json_error(e: serde_json::Error) -> LoadError {
+    if e.is_io() {
+        LoadError::Corrupt(format!("{PROJECT_JSON} cannot be read: {e}"))
+    } else {
+        LoadError::Corrupt(format!("{PROJECT_JSON} is not valid JSON: {e}"))
+    }
+}
+
+/// A file's format version, 1..=[`VERSION`]; above that is [`LoadError::NewerVersion`].
+fn checked_version(version: Option<u64>) -> Result<u32, LoadError> {
+    match version {
+        Some(v) if v > u64::from(VERSION) => Err(LoadError::NewerVersion {
+            found: u32::try_from(v).unwrap_or(u32::MAX),
+            supported: VERSION,
+        }),
+        Some(v) if v >= 1 => Ok(v as u32),
+        _ => Err(LoadError::Corrupt(
+            "its format version is missing or invalid".into(),
+        )),
+    }
+}
+
+/// Brings a project read from a file of format `version` up to [`VERSION`], one version at a
+/// time. `load` runs it on the typed project, never on a JSON tree, so an untrusted file is never
+/// held whole.
+///
+/// * 1 → 2: every channel is a sampler, and each pattern's notes get the ids `1..=n` in stored
+///   order, with `next_note_id` n + 1.
+///
+/// A version above [`VERSION`] is [`LoadError::NewerVersion`], 0 is [`LoadError::Corrupt`].
+pub fn migrate(project: &mut Project, version: u32) -> Result<(), LoadError> {
+    let version = checked_version(Some(u64::from(version)))?;
+    if version == 1 {
+        for channel in &mut project.channels {
+            channel.instrument = InstrumentKind::Sampler;
+        }
+        for pattern in &mut project.patterns {
+            for (note, id) in pattern.notes.iter_mut().zip(1..) {
+                note.id = id;
+            }
+            // At most `MAX_NOTES_PER_PATTERN` notes were kept: no overflow.
+            pattern.next_note_id = pattern.notes.len() as u32 + 1;
+        }
+    }
+    Ok(())
 }
 
 /// What reading a sample's zip entry gave.
@@ -695,11 +768,15 @@ mod tests {
                     path: PathBuf::from("/nowhere/x.wav"),
                     file: None,
                 }),
+                instrument: grooviq_engine::InstrumentKind::Sampler,
                 sampler: Default::default(),
+                synth: Default::default(),
+                preset: None,
                 volume: 1.0,
                 pan: 0.0,
                 mute: false,
                 solo: false,
+                choke: 0,
             });
             samples.insert(
                 id,
@@ -774,13 +851,12 @@ mod tests {
     fn a_fifo_is_refused_without_blocking() {
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("pipe.wav");
-        if !std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .is_ok_and(|s| s.success())
-        {
-            return; // no mkfifo here
-        }
+        // Not the `mkfifo` program: a child spawned here holds a copy of every open descriptor
+        // between fork and exec, and a `flock` follows the open file description, so another
+        // test's "dead" temp file would look locked for that instant (#129).
+        let name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: `name` is a valid NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(read_sample_file(&fifo).is_err()));
         assert_eq!(
