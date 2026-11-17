@@ -22,3 +22,19 @@ test("a post-rename directory warning adopts the written path, stays dirty, and 
   expect(await mock.calls("plugin:dialog|save")).toHaveLength(1);
   expect(await mock.calls("project_save")).toHaveLength(1);
 });
+
+test("an in-place Save warning refreshes a clean titled project to dirty", async ({ app, mock }) => {
+  await mock.eval("(m) => m.queueDialog('/qa/projects/Titled')");
+  await app.keyboard.press("ControlOrMeta+s");
+  await expect(app).toHaveTitle("Titled — Grooviq");
+  await expect.poll(() => mock.view().then((v) => v.dirty)).toBe(false);
+
+  await mock.eval("(m) => m.unconfirmNextSave()");
+  await app.keyboard.press("ControlOrMeta+s");
+  const warn = app.getByRole("status", { name: "Messages" }).locator(".toast.warn");
+  await expect(warn).toContainText("directory durability could not be confirmed");
+  await expect.poll(() => mock.view().then((v) => v.dirty)).toBe(true);
+  await expect(app).toHaveTitle("• Titled — Grooviq");
+  expect(await mock.calls("plugin:dialog|save")).toHaveLength(1);
+  expect(await mock.calls("project_save")).toHaveLength(1);
+});

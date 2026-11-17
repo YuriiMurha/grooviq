@@ -38,6 +38,56 @@ impl grooviq_project::file::Disk for Refuse {
         }
     }
 }
+
+#[test]
+fn an_uncertain_tick_keeps_the_open_projects_recovery() {
+    for metadata in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (dir, _) = RecoveryDir::start(root.path()).unwrap();
+        let recovery = Mutex::new(Some(dir));
+        let s = session();
+        let t0 = Instant::now();
+        edit(&s, 121.0, t0);
+        let tick = grooviq_project::autosave::autosave_tick_on(
+            &s,
+            &recovery,
+            t0 + AUTOSAVE_PERIOD,
+            || {},
+            &mut Refuse { metadata },
+        );
+        assert!(
+            matches!(&tick, AutosaveTick::Failed(_)),
+            "{metadata}: {tick:?}"
+        );
+        drop(recovery);
+        assert_eq!(next_launch(root.path()), [(None, 121.0)]);
+    }
+}
+
+#[test]
+fn a_replaced_tick_reports_cleanup_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = RecoveryDir::start(root.path()).unwrap();
+    let recovery = Mutex::new(Some(dir));
+    let s = session();
+    let t0 = Instant::now();
+    edit(&s, 121.0, t0);
+    let metadata = root.path().join("autosave.json");
+    let tick = grooviq_project::autosave::autosave_tick_on(
+        &s,
+        &recovery,
+        t0 + AUTOSAVE_PERIOD,
+        || {
+            s.lock().unwrap().new_project().unwrap();
+            // Force a real removal failure on every platform without changing permissions.
+            std::fs::remove_file(&metadata).unwrap();
+            std::fs::create_dir_all(metadata.join("occupied")).unwrap();
+        },
+        &mut Refuse { metadata: true },
+    );
+    assert!(matches!(&tick, AutosaveTick::Failed(_)), "{tick:?}");
+}
+
 #[test]
 fn replaced_uncertain_snapshot_is_not_offered_after_restart() {
     for (open, metadata) in [(false, false), (false, true), (true, false), (true, true)] {
