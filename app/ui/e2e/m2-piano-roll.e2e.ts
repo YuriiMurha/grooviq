@@ -226,6 +226,112 @@ test.describe("editing", () => {
   });
 });
 
+test.describe("held keys", () => {
+  test.use({ seed: { project: bass([]) } });
+
+  test("the_key_column_lets_go_on_blur_and_on_stop", async ({ app, mock }) => {
+    await openRoll(app);
+    const v = (await stats(app)).view;
+    const box = (await keys(app).boundingBox())!;
+    const point = (key: number) => ({ x: box.x + box.width * 0.8, y: box.y + (v.topKey - key - 0.5) * v.keyPx });
+    const live = () => mock.eval<string[]>("(m) => m.live().sort()");
+    const offs = async () => (await mock.calls("channel_note")).filter((c) => !c.args.on).map((c) => c.args.key);
+
+    // The window loses focus with C4 held: it stops, and the later pointer-up sends nothing more.
+    await app.mouse.move(point(60).x, point(60).y);
+    await app.mouse.down();
+    await expect.poll(live).toEqual(["1:60"]);
+    await app.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await expect.poll(live).toEqual([]);
+    await app.mouse.up();
+    await app.evaluate(() => new Promise((r) => setTimeout(r, 100)));
+    expect(await offs()).toEqual([60]);
+
+    // Playing, then stopped (Space) with D4 held: it stops too.
+    await app.keyboard.press("Space");
+    await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(true);
+    await app.mouse.move(point(62).x, point(62).y);
+    await app.mouse.down();
+    await expect.poll(live).toEqual(["1:62"]);
+    await app.keyboard.press("Space");
+    await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(false);
+    await expect.poll(live).toEqual([]);
+    await app.mouse.up();
+    await app.evaluate(() => new Promise((r) => setTimeout(r, 100)));
+    expect(await offs()).toEqual([60, 62]);
+  });
+});
+
+test.describe("drag previews", () => {
+  // Two notes at full velocity: a step at C4 and a step at D4 two steps later.
+  test.use({
+    seed: {
+      project: bass([
+        { id: 1, channel: 1, tick: 0, length: 240, key: 60, velocity: 1 },
+        { id: 2, channel: 1, tick: 480, length: 240, key: 62, velocity: 1 },
+      ]),
+    },
+  });
+
+  /** Whether each (tick, key) shows the channel's ink. */
+  const inked = async (page: Page, points: [number, number][]) => {
+    const want = await ink(page);
+    const px = await pixelsAt(page, canvas(page), await Promise.all(points.map(([t, k]) => local(page, t, k))));
+    return px.map((c) => colourDistance(c, want) < 40);
+  };
+
+  test("a_held_drag_moves_and_resizes_the_notes_on_screen_before_release", async ({ app, mock }, info) => {
+    await openRoll(app);
+    await tool(app, "Select").click();
+    await drag(app, await at(app, 10, 64), await at(app, 900, 59));
+    await nextFrame(app);
+    const builds = (await stats(app)).bufferBuilds;
+
+    // Grab C4 and hold it four steps on and three rows up (snapped from 950 ticks).
+    const from = await at(app, 120, 60);
+    await app.mouse.move(from.x, from.y);
+    await app.mouse.down();
+    const to = await at(app, 120 + 950, 63);
+    await app.mouse.move(to.x, to.y, { steps: 5 });
+    await nextFrame(app);
+    await shot(app, info, "held-drag");
+    // Before release: drawn at the new places only, from the same buffer, nothing sent.
+    expect(await inked(app, [[120, 60], [600, 62], [1080, 63], [1560, 65]])).toEqual([false, false, true, true]);
+    expect((await stats(app)).bufferBuilds).toBe(builds);
+    expect(await mock.calls("notes_edit")).toEqual([]);
+    // Back past the start and below key 0's reach: the group stops at tick 0, keeping its shape.
+    const back = await at(app, 120 - 2000, 61);
+    await app.mouse.move(back.x, back.y, { steps: 5 });
+    await nextFrame(app);
+    expect(await inked(app, [[120, 61], [600, 63], [120, 60], [1080, 63]])).toEqual([true, true, false, false]);
+    await app.mouse.move(to.x, to.y, { steps: 5 });
+    await app.mouse.up();
+    await expect.poll(() => notes(mock)).toEqual([
+      [960, 240, 63],
+      [1440, 240, 65],
+    ]);
+    await nextFrame(app);
+    expect(await inked(app, [[1080, 63], [1560, 65], [120, 60]])).toEqual([true, true, false]);
+
+    // Resize both from C4's right edge, held two steps longer: the preview is what is committed.
+    const edge = await at(app, 1197, 63);
+    await app.mouse.move(edge.x, edge.y);
+    await app.mouse.down();
+    const longer = await at(app, 1197 + 480, 63);
+    await app.mouse.move(longer.x, longer.y, { steps: 5 });
+    await nextFrame(app);
+    expect(await inked(app, [[1500, 63], [1980, 65], [1740, 63]])).toEqual([true, true, false]);
+    expect(await mock.calls("notes_edit")).toHaveLength(1);
+    await app.mouse.up();
+    await expect.poll(() => notes(mock)).toEqual([
+      [960, 720, 63],
+      [1440, 720, 65],
+    ]);
+    await nextFrame(app);
+    expect(await inked(app, [[1500, 63], [1980, 65], [1740, 63]])).toEqual([true, true, false]);
+  });
+});
+
 test.describe("renderers", () => {
   test.use({ seed: { project: bass([{ id: 1, channel: 1, tick: 0, length: 960, key: 60, velocity: 1 }]) } });
 

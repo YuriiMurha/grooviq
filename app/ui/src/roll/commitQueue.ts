@@ -80,7 +80,19 @@ export class CommitQueue {
 
   private mapId = (id: number) => (id < 0 ? this.real.get(id) : id);
 
-  /** The edit with the engine's ids; parts naming a note whose add never landed are dropped. */
+  /** The edit in the store's ids: temporary ids the engine has named become its ids; the rest
+   * stay temporary, as the store still holds them. */
+  private localize(edit: LocalEdit): LocalEdit {
+    const local = (id: number) => this.mapId(id) ?? id;
+    return {
+      add: edit.add,
+      update: edit.update.map((u) => ({ ...u, id: local(u.id) })),
+      delete: edit.delete.map(local),
+    };
+  }
+
+  /** The edit for the engine, which knows only its own ids: parts naming a note whose add never
+   * landed are dropped. */
   private translate(edit: LocalEdit): LocalEdit {
     const update: WireNote[] = [];
     for (const u of edit.update) {
@@ -136,11 +148,17 @@ export class CommitQueue {
     this.reload = false;
     this.api.patternNotes().then(
       ({ revision, notes }) => {
+        const selected = this.store.selectedIds();
         this.store.load(revision, notes);
-        // Edits made while the fetch ran are not in it yet: show them again on top.
-        for (const e of this.pending) this.store.apply(this.translate(e));
+        // Edits made while the fetch ran are not in it yet: show them again on top, with the
+        // temporary ids the store and the selection know them by.
+        for (const e of this.pending) this.store.apply(this.localize(e));
+        this.store.setSelection(selected);
+        const progressed = revision > this.seen;
         this.seen = Math.max(this.seen, revision);
-        this.announced = Math.min(this.announced, this.seen);
+        // A revision announced while the fetch ran is fetched next, unless the engine's own
+        // revision stopped moving (an announcement it can never reach).
+        if (!progressed) this.announced = Math.min(this.announced, this.seen);
         this.done();
       },
       (e: unknown) => {

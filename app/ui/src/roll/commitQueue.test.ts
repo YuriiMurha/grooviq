@@ -13,6 +13,9 @@ function fakeApi(server: { revision: number; notes: WireNote[] }) {
   const sent: NotesEdit[] = [];
   const replies: { resolve: (a: NotesAck) => void; reject: (e: unknown) => void }[] = [];
   let fetches = 0;
+  /** When set, fetches wait for `release` and answer with the server as it is then. */
+  let hold = false;
+  const held: (() => void)[] = [];
   const api: NotesApi = {
     notesEdit: (edit) => {
       sent.push(structuredClone(edit));
@@ -20,8 +23,17 @@ function fakeApi(server: { revision: number; notes: WireNote[] }) {
     },
     patternNotes: () => {
       fetches++;
-      return Promise.resolve(structuredClone(server));
+      if (!hold) return Promise.resolve(structuredClone(server));
+      return new Promise((resolve) => held.push(() => resolve(structuredClone(server))));
     },
+  };
+  const holdFetches = (on: boolean) => {
+    hold = on;
+  };
+  /** Answers the oldest held fetch with the server's notes now. */
+  const release = () => {
+    held.shift()!();
+    return flush();
   };
   const ack = (a: Partial<NotesAck>) => {
     replies.shift()!.resolve({ revision: 0, addedIds: [], ignoredIds: [], reload: false, view: VIEW, ...a });
@@ -31,7 +43,7 @@ function fakeApi(server: { revision: number; notes: WireNote[] }) {
     replies.shift()!.reject(e);
     return flush();
   };
-  return { api, sent, ack, fail, fetches: () => fetches, pending: () => replies.length };
+  return { api, sent, ack, fail, holdFetches, release, fetches: () => fetches, pending: () => replies.length };
 }
 
 /** Lets every settled promise run its callbacks. */
@@ -160,5 +172,61 @@ describe("commit queue", () => {
     await queue.idle();
     expect(engine.fetches()).toBe(2);
     expect(store.revision).toBe(8);
+  });
+
+  it("a_revision_announced_during_a_fetch_is_fetched_too", async () => {
+    const { store, server, engine, queue } = setup([note(1, 0)]);
+    engine.holdFetches(true);
+    // Revision 5 starts a fetch; revision 6 is announced before that fetch answers with 5.
+    server.revision = 5;
+    server.notes = [note(1, 0), note(2, 240)];
+    queue.notesChanged(5);
+    await flush();
+    expect(engine.fetches()).toBe(1);
+    queue.notesChanged(6);
+    await engine.release();
+    // The engine moved on meanwhile: the queue fetches again rather than settle at 5.
+    server.revision = 6;
+    server.notes = [note(1, 0), note(2, 240), note(3, 480)];
+    expect(engine.fetches()).toBe(2);
+    await engine.release();
+    await queue.idle();
+    expect(store.revision).toBe(6);
+    expect(store.get(3)).toEqual(note(3, 480));
+  });
+
+  it("edits_made_during_a_fetch_stay_in_the_mirror", async () => {
+    const { store, server, engine, queue } = setup([note(1, 0), note(2, 240)]);
+    engine.holdFetches(true);
+    server.revision = 5;
+    server.notes = [note(1, 0), note(2, 240), note(3, 3840, 70)];
+    queue.notesChanged(5);
+    await flush();
+    // While the fetch runs: draw a note (selected), move it, delete note 2 and move note 1.
+    queue.commit({ add: [note(-1, 480)], update: [], delete: [] });
+    store.setSelection([-1, 1]);
+    queue.commit({ add: [], update: [note(-1, 960, 62)], delete: [] });
+    queue.commit({ add: [], update: [note(1, 120)], delete: [2] });
+    await engine.release();
+    // The engine's notes, with the edits on top, temporary id and all.
+    expect(store.get(-1)).toEqual(note(-1, 960, 62));
+    expect(store.get(1)).toEqual(note(1, 120));
+    expect(store.get(2)).toBeUndefined();
+    expect(store.get(3)).toEqual(note(3, 3840, 70));
+    expect(store.selectedIds().sort()).toEqual([-1, 1]);
+
+    // Then they go out, in order, with the engine's ids.
+    expect(engine.sent[0].add).toEqual([{ channel: 1, tick: 480, length: 240, key: 60, velocity: 0.8, slide: false }]);
+    await engine.ack({ revision: 6, addedIds: [40] });
+    expect(engine.sent[1]).toMatchObject({ update: [note(40, 960, 62)], delete: [] });
+    await engine.ack({ revision: 7 });
+    expect(engine.sent[2]).toMatchObject({ update: [note(1, 120)], delete: [2] });
+    await engine.ack({ revision: 8 });
+    await queue.idle();
+    // The mirror is what the engine now holds.
+    const mirror = [1, 3, 40].map((id) => store.get(id));
+    expect(mirror).toEqual([note(1, 120), note(3, 3840, 70), note(40, 960, 62)]);
+    expect(store.count).toBe(3);
+    expect(store.selectedIds().sort((a, b) => a - b)).toEqual([1, 40]);
   });
 });

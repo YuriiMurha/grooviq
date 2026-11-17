@@ -15,6 +15,9 @@ import { endGesture, moveGesture, startGesture, EDGE_PX, type Gesture, type Poin
 import { Playhead, clampView, scrollBy, toWorld, zoomAt, type RollView } from "./view";
 
 const API: NotesApi = { notesEdit, patternNotes };
+/** The counters (`stats.ts`) are kept outside production builds only: there this is a constant
+ * `false` and the bundler drops every use. */
+const STATS = import.meta.env.MODE !== "production";
 /** How long a lost WebGL context may take to come back before the roll moves to 2D for good. */
 const RESTORE_WAIT_MS = 2000;
 const STEP_TICKS = 240;
@@ -40,11 +43,13 @@ interface Props {
   onError?: (message: string) => void;
   /** The notes commands (the bench passes its own). */
   api?: NotesApi;
+  /** Changes on every transport stop and project replacement: a held key lets go. */
+  releaseKeys?: number;
 }
 
 /** The piano roll: the channel's notes on a WebGL2 canvas (2D without it), edited with five
  * tools, beside a column of keys that plays the channel. */
-export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = false, onError = () => {}, api = API }: Props) {
+export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = false, onError = () => {}, api = API, releaseKeys = 0 }: Props) {
   const { view: project, setView } = useProject();
   const store = useMemo(() => new NoteStore(), []);
   const queue = useMemo(() => new CommitQueue(store, api), [store, api]);
@@ -112,7 +117,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
       renderer.current = made;
       built.current = { version: -1, channel: null, renderer: made };
       dirty.current = true;
-      if (made) rollStats.renderer = made.kind;
+      if (made && STATS) rollStats.renderer = made.kind;
       // Deferred: a state change straight from an effect would render in a cascade.
       else if (!use2d) queueMicrotask(() => setUse2d(true));
     };
@@ -178,7 +183,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
       if (b.version !== store.version || b.channel !== s.channel || b.renderer !== r) {
         const { data, count } = s.channel === null ? { data: new Float32Array(0), count: 0 } : buildInstances(store, s.channel);
         r.setNotes(data, count);
-        rollStats.bufferBuilds++;
+        if (STATS) rollStats.bufferBuilds++;
         built.current = { version: store.version, channel: s.channel, renderer: r };
         dirty.current = true;
         if ((count === 0) !== shownEmpty) {
@@ -234,8 +239,10 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
         },
         p,
       );
-      rollStats.draws++;
-      rollStats.view = v;
+      if (STATS) {
+        rollStats.draws++;
+        rollStats.view = v;
+      }
       dirty.current = false;
       shownPlayhead = at;
       if ((v.topKey !== keys.top || v.keyPx !== keys.px) && strip.current) {
@@ -376,7 +383,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
         </label>
       </div>
       <div className="roll-body">
-        <KeyColumn channel={channel} keyAt={keyAt} strip={strip} onError={reportKey} />
+        <KeyColumn channel={channel} keyAt={keyAt} strip={strip} onError={reportKey} releaseKeys={releaseKeys} />
         <div className="roll-wrap" ref={wrap}>
           <canvas
             key={use2d ? "2d" : "webgl2"}

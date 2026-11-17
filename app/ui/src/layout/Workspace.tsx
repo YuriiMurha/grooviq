@@ -139,6 +139,7 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }
               sampleRate={sampleRate}
               keyboard={keyboard}
               onError={onError}
+              releaseKeys={releaseKeys}
             />
           </section>
         )}

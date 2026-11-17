@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent, type RefObject } from "react";
 import { channelNote, TYPING_VELOCITY } from "../api/notes";
 import { errorText } from "../api/project";
 
@@ -12,11 +12,14 @@ interface Props {
   /** The inner strip the roll's draw loop scrolls with the notes. */
   strip: RefObject<HTMLDivElement | null>;
   onError: (message: string) => void;
+  /** Changes on every transport stop and project replacement: a held key lets go. */
+  releaseKeys: number;
 }
 
-/** The piano keys beside the roll: press one to hear it on the channel, slide to play others;
- * the key sounds until the pointer lets go (or the channel changes). */
-export function KeyColumn({ channel, keyAt, strip, onError }: Props) {
+/** The piano keys beside the roll: press one to hear it on the channel, slide to play others.
+ * The key sounds until the pointer lets go, the window loses focus or hides, the transport
+ * stops, the project is replaced or the channel changes. */
+export function KeyColumn({ channel, keyAt, strip, onError, releaseKeys }: Props) {
   const [held, setHeld] = useState<number | null>(null);
   const sounding = useRef<{ channel: number; key: number } | null>(null);
   const report = useRef(onError);
@@ -24,14 +27,14 @@ export function KeyColumn({ channel, keyAt, strip, onError }: Props) {
     report.current = onError;
   }, [onError]);
 
-  const release = () => {
+  const release = useCallback(() => {
     const s = sounding.current;
     if (!s) return;
     sounding.current = null;
     setHeld(null);
     // Best effort: the channel may just have been removed.
     channelNote(s.channel, s.key, 0, false).catch(() => {});
-  };
+  }, []);
   const play = (key: number) => {
     if (channel === null || key < 0 || key > 127 || sounding.current?.key === key) return;
     release();
@@ -42,7 +45,26 @@ export function KeyColumn({ channel, keyAt, strip, onError }: Props) {
   const keyOf = (e: PointerEvent<HTMLDivElement>) => keyAt(e.clientY - e.currentTarget.getBoundingClientRect().top);
 
   // A new channel, or leaving: let the old one go.
-  useEffect(() => release, [channel]);
+  useEffect(() => release, [channel, release]);
+  // A stop or a replaced project (not the first render).
+  const lastRelease = useRef(releaseKeys);
+  useEffect(() => {
+    if (lastRelease.current === releaseKeys) return;
+    lastRelease.current = releaseKeys;
+    release();
+  }, [releaseKeys, release]);
+  // The pointer-up may never come here once the window loses focus or hides.
+  useEffect(() => {
+    const onHidden = () => {
+      if (document.visibilityState === "hidden") release();
+    };
+    window.addEventListener("blur", release);
+    document.addEventListener("visibilitychange", onHidden);
+    return () => {
+      window.removeEventListener("blur", release);
+      document.removeEventListener("visibilitychange", onHidden);
+    };
+  }, [release]);
 
   return (
     <div

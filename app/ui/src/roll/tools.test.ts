@@ -108,6 +108,14 @@ describe("piano roll tools", () => {
     edge.gesture(at(300, 126), at(-5000, 140));
     expect(edge.edits[0]?.update).toEqual([note(1, 0, 240, 127), note(2, 360, 240, 4)]);
 
+    // Dragged down past key 0, the group stops where its lowest note reaches 0, keeping its shape.
+    const low = setup([note(1, 0, 240, 3), note(2, 480, 240, 10)], "select");
+    low.store.setSelection([1, 2]);
+    const held = low.take(startGesture(low.ctx, at(100, 3)));
+    expect(moveGesture(low.ctx, held.gesture, at(100, -7)).gesture).toMatchObject({ kind: "move", dTick: 0, dKey: -3 });
+    low.take(endGesture(low.ctx, held.gesture, at(100, -7)));
+    expect(low.edits[0]?.update).toEqual([note(1, 0, 240, 0), note(2, 480, 240, 7)]);
+
     // Grabbing an unselected note selects only it; shift adds it.
     const one = setup(notes, "select");
     one.store.setSelection([1]);
