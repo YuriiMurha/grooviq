@@ -174,11 +174,11 @@ mod drums_4ch {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicBool;
 
-    fn golden_dir() -> PathBuf {
+    pub(super) fn golden_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
 
-    fn read_f32(path: &Path) -> Vec<f32> {
+    pub(super) fn read_f32(path: &Path) -> Vec<f32> {
         hound::WavReader::open(path)
             .unwrap_or_else(|e| panic!("cannot open {} ({e})", path.display()))
             .samples::<f32>()
@@ -187,7 +187,7 @@ mod drums_4ch {
     }
 
     /// The first sample that differs, as "frame N, left/right: a vs b".
-    fn first_difference(actual: &[f32], reference: &[f32]) -> String {
+    pub(super) fn first_difference(actual: &[f32], reference: &[f32]) -> String {
         match actual
             .iter()
             .zip(reference)
@@ -328,6 +328,158 @@ mod drums_4ch {
                         .all(|(a, b)| a.to_bits() == b.to_bits()),
                 "callback size {callback} differs: {}",
                 first_difference(&other, &reference)
+            );
+        }
+    }
+}
+
+mod notes_m2 {
+    use super::drums_4ch::{first_difference, golden_dir, read_f32};
+    use grooviq_engine::{
+        Command, EngineConfig, ExportOptions, WavFormat, export_wav, render_offline_with,
+        ticks_to_frames,
+    };
+    use grooviq_golden::notes::{
+        CLOSED_HAT, KEYS, LEAD, LOOPS, OPEN_HAT, STEPS, SUB, SYNTH_808, notes_m2_project,
+    };
+    use grooviq_golden::{SAMPLE_RATE, decode_samples, kit_dir};
+    use grooviq_project::{engine_state, load, save};
+    use std::sync::atomic::AtomicBool;
+
+    /// Synth channels, a sampler with loop/filter/legato/glide, a choke group → project →
+    /// `.grooviq` (v2) → load → decode → engine state → WAV, exactly as the app does. This is
+    /// M2's acceptance file: it must match on macOS and Windows.
+    #[test]
+    fn notes_m2_exports_bit_identical_to_its_golden_file() {
+        let out = golden_dir().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let (project, files) = notes_m2_project(&kit_dir());
+        let project_path = out.join("notes_m2.grooviq");
+        save(&project, &files, &project_path).expect("save the project");
+        let loaded = load(&project_path).expect("load the project");
+        assert_eq!(loaded.warnings, Vec::<String>::new());
+        // Saving fills in each sample's entry in the file; nothing else may change.
+        let mut reloaded = loaded.project.clone();
+        for sample in reloaded
+            .channels
+            .iter_mut()
+            .filter_map(|c| c.sample.as_mut())
+        {
+            sample.file = None;
+        }
+        assert!(
+            reloaded == project,
+            "the file round trip changed the project"
+        );
+        assert_eq!(loaded.samples.len(), 3, "every sample is embedded");
+        let state = engine_state(&loaded.project, &decode_samples(&loaded.samples));
+
+        let wav = out.join("notes_m2.wav");
+        let options = ExportOptions {
+            sample_rate: SAMPLE_RATE,
+            format: WavFormat::Float32,
+            loops: LOOPS,
+            max_tail_seconds: 10.0,
+        };
+        let report = export_wav(state, &options, &wav, &mut |_| {}, &AtomicBool::new(false))
+            .expect("export");
+        assert!(
+            report.peak < 1.0,
+            "the reference clips: peak {}",
+            report.peak
+        );
+
+        let reference = golden_dir().join("refs").join("notes_m2.wav");
+        if std::env::var("GOLDEN_UPDATE").as_deref() == Ok("1") {
+            std::fs::copy(&wav, &reference).unwrap();
+            println!("golden file updated: explain why in the commit message");
+            return;
+        }
+        let actual_bytes = std::fs::read(&wav).unwrap();
+        let reference_bytes = std::fs::read(&reference).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {} ({e}); create it with GOLDEN_UPDATE=1",
+                reference.display()
+            )
+        });
+        if actual_bytes != reference_bytes {
+            panic!(
+                "the export is not byte-identical to {} ({} vs {} bytes); first difference: {}",
+                reference.display(),
+                actual_bytes.len(),
+                reference_bytes.len(),
+                first_difference(&read_f32(&wav), &read_f32(&reference))
+            );
+        }
+    }
+
+    fn render(state: grooviq_engine::EngineState, callback: usize) -> Vec<f32> {
+        let config = EngineConfig {
+            sample_rate: SAMPLE_RATE as f32,
+        };
+        let frames = 4 * SAMPLE_RATE as usize;
+        let events = [(0, Command::PlayLoops { loops: LOOPS })];
+        render_offline_with(config, state, &events, frames, callback)
+    }
+
+    #[test]
+    fn notes_m2_is_identical_at_callback_sizes_37_64_512() {
+        let (project, files) = notes_m2_project(&kit_dir());
+        let state = engine_state(&project, &decode_samples(&files));
+        let reference = render(state.clone(), 64);
+        assert!(reference.iter().any(|x| x.abs() > 0.1), "silent render");
+        for callback in [37, 512] {
+            let other = render(state.clone(), callback);
+            assert!(
+                other.len() == reference.len()
+                    && other
+                        .iter()
+                        .zip(&reference)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "callback size {callback} differs: {}",
+                first_difference(&other, &reference)
+            );
+        }
+    }
+
+    /// The reference itself, checked without listening: the pattern plus a tail of whole blocks,
+    /// a sane level, and every channel contributes.
+    #[test]
+    fn notes_m2_reference_is_sane() {
+        let reference = read_f32(&golden_dir().join("refs").join("notes_m2.wav"));
+        let (project, files) = notes_m2_project(&kit_dir());
+        let pattern = ticks_to_frames(
+            f64::from(LOOPS * STEPS * grooviq_engine::STEP_TICKS),
+            project.bpm,
+            SAMPLE_RATE as f32,
+        ) as usize;
+        let frames = reference.len() / 2;
+        assert!(frames >= pattern, "{frames} frames, pattern {pattern}");
+        assert_eq!((frames - pattern) % 64, 0, "the tail is not whole blocks");
+        assert!(
+            frames < pattern + 2 * SAMPLE_RATE as usize,
+            "a tail over 2 s"
+        );
+        let peak = reference.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(peak > 0.2 && peak < 1.0, "peak {peak}");
+
+        // Muting any one channel changes the render: every channel is heard.
+        let samples = decode_samples(&files);
+        let all = render(engine_state(&project, &samples), 512);
+        for (id, name) in [
+            (SYNTH_808, "808"),
+            (KEYS, "Keys"),
+            (LEAD, "Lead"),
+            (SUB, "Sub"),
+            (CLOSED_HAT, "Closed hat"),
+            (OPEN_HAT, "Open hat"),
+        ] {
+            let mut muted = project.clone();
+            muted.channels.iter_mut().find(|c| c.id == id).unwrap().mute = true;
+            let without = render(engine_state(&muted, &samples), 512);
+            assert!(
+                without.iter().zip(&all).any(|(a, b)| (a - b).abs() > 1e-3),
+                "muting {name} changes nothing: it is not heard"
             );
         }
     }
