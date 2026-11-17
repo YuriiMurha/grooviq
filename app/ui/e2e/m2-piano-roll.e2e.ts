@@ -4,6 +4,7 @@ import type { Page, TestInfo } from "@playwright/test";
 import { colourDistance, expect, pixelsAt, project, test, type Mock } from "./fixture";
 import type { MockNote, MockProject } from "./mockTauri";
 import { PROD_URL } from "./ports";
+import { settled } from "./rollHelpers";
 
 interface RollStats {
   bufferBuilds: number;
@@ -59,6 +60,7 @@ async function openRoll(page: Page) {
   await page.keyboard.press("F6");
   await expect(canvas(page)).toBeVisible();
   await expect.poll(async () => (await stats(page))?.draws ?? 0).toBeGreaterThan(0);
+  await settled(page);
 }
 
 async function shot(page: Page, info: TestInfo, name: string) {

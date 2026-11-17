@@ -64,6 +64,18 @@ describe("piano roll budgets", () => {
     expect(ms).toBeLessThan(8);
   });
 
+  it("builds_the_instance_buffer_with_ghosts_in_8_ms", () => {
+    // The same ten thousand notes over four channels: this channel's own plus every other one as a ghost.
+    const store = new NoteStore();
+    store.load(1, seeded(4));
+    let count = 0;
+    const ms = median(() => {
+      count = buildInstances(store, 1, { ghosts: true, inkOf: (c) => c % 6 }).count;
+    });
+    expect(count).toBe(NOTES);
+    expect(ms).toBeLessThan(8);
+  });
+
   it("hit_tests_in_0_2_ms", () => {
     const store = loaded();
     // One hit test is too quick for the timer: the budget is per test, timed over 1,000.

@@ -1,5 +1,7 @@
 import type { WireNote } from "../api/notes";
+import { stamp } from "./chords";
 import type { LocalEdit, NoteStore } from "./noteStore";
+import { moveKey, snapKey } from "./scales";
 import { snapTick } from "./snap";
 import type { RollView } from "./view";
 
@@ -9,6 +11,15 @@ import type { RollView } from "./view";
 // offsets the selected notes by it); the notes change once, at the end.
 
 export type Tool = "draw" | "paint" | "select" | "slice" | "delete";
+
+/** The tool buttons: the letter that picks each (by `KeyboardEvent.code`) and its hint. */
+export const TOOL_BUTTONS: { tool: Tool; label: string; key: string; hint: string }[] = [
+  { tool: "draw", label: "Draw", key: "KeyP", hint: "Draw: click to add a note, drag a note to move it, drag its right edge to resize it (P)." },
+  { tool: "paint", label: "Paint", key: "KeyB", hint: "Paint: drag along a row to put a note in every grid cell (B)." },
+  { tool: "select", label: "Select", key: "KeyE", hint: "Select: drag a box around notes, Shift adds to the selection; drag a selected note to move them all (E)." },
+  { tool: "slice", label: "Slice", key: "KeyC", hint: "Slice: click a note to cut it at the nearest grid line (C)." },
+  { tool: "delete", label: "Delete", key: "KeyD", hint: "Delete: click or drag over notes to delete them (D)." },
+];
 
 /** The velocity of a drawn or painted note. */
 export const DRAW_VELOCITY = 0.8;
@@ -41,28 +52,44 @@ export interface ToolContext {
   view: RollView;
   /** A new temporary (negative) id. */
   newId: () => number;
+  /** Snap to this scale: drawn, painted and moved notes land on its keys. */
+  scale?: { root: number; scale: string } | null;
+  /** New notes are slide notes. */
+  slide?: boolean;
+  /** Drawing stamps this chord instead of one note. */
+  chord?: { name: string; inversion: number } | null;
 }
 
 export type Gesture =
   | { kind: "none" }
   /** Right button (or the delete tool): deletes every note it passes over. */
   | { kind: "erase" }
-  /** Moves the selection: `dTick`, `dKey` so far. `anchor` is the grabbed note's start. */
-  | { kind: "move"; from: Pointer; anchor: number; dTick: number; dKey: number; minDTick: number; minDKey: number; maxDKey: number; moved: boolean }
+  /** Moves the selection: `dTick`, `dKey` so far. `anchor` is the grabbed note's start. `fresh`
+   * holds notes just drawn, still unsent: the release adds them where they were let go. */
+  | { kind: "move"; from: Pointer; anchor: number; fresh: WireNote[] | null; dTick: number; dKey: number; minDTick: number; minDKey: number; maxDKey: number; moved: boolean }
   /** Resizes the selection from the grabbed note's right edge (`end`): `dLength` so far. */
   | { kind: "resize"; from: Pointer; id: number; end: number; dLength: number; minLength: number; moved: boolean }
-  /** Paints a note into each grid cell of the row `key`; `cell` is the last one visited. */
-  | { kind: "paint"; key: number; cell: number }
+  /** Paints a note into each grid cell of the row `key`; `cell` is the last one visited. `fresh`
+   * holds the notes painted so far, still unsent: the release adds them. */
+  | { kind: "paint"; key: number; cell: number; fresh: WireNote[] }
   /** A selection rectangle. */
   | { kind: "box"; from: Pointer; to: Pointer; additive: boolean };
 
 export interface Step {
   gesture: Gesture;
   edit: LocalEdit | null;
+  /** Notes to show in the store now but not send: a stamp held down. The release sends them. */
+  preview?: LocalEdit;
   /** The new selection, when it changes. */
   select?: number[];
   /** The new last length, when it changes. */
   lastLength?: number;
+}
+
+/** The notes a gesture shows but has not sent (a stamp held down, a paint stroke): what a
+ * gesture that is cancelled takes back and a refetch of the engine's notes puts back. */
+export function heldNotes(g: Gesture | null): WireNote[] {
+  return g?.kind === "move" ? (g.fresh ?? []) : g?.kind === "paint" ? g.fresh : [];
 }
 
 const NONE: Step = { gesture: { kind: "none" }, edit: null };
@@ -96,15 +123,18 @@ function moveLimits(store: NoteStore, ids: number[] | null) {
   return { minDTick: -minTick, minDKey: -minKey, maxDKey: TOP_KEY - maxKey };
 }
 
-function moveOf(from: Pointer, anchor: number, limits: ReturnType<typeof moveLimits>): Gesture {
-  return { kind: "move", from, anchor, dTick: 0, dKey: 0, ...limits, moved: false };
+function moveOf(from: Pointer, anchor: number, limits: ReturnType<typeof moveLimits>, fresh: WireNote[] | null = null): Gesture {
+  return { kind: "move", from, anchor, fresh, dTick: 0, dKey: 0, ...limits, moved: false };
 }
+
+/** A row, moved to the nearest key of the scale when snapping to one. */
+const inKey = (ctx: ToolContext, key: number) => (ctx.scale ? snapKey(key, ctx.scale.root, ctx.scale.scale) : key);
 
 /** The cell `c`'s note for a paint stroke in `key`, unless a note of the channel sounds there. */
 function paintCell(ctx: ToolContext, key: number, c: number): WireNote | null {
   const tick = c * ctx.grid;
   if (c < 0 || ctx.store.hitTest(tick, key, ctx.channel) !== null) return null;
-  return { id: ctx.newId(), channel: ctx.channel, tick, length: ctx.grid, key, velocity: DRAW_VELOCITY, slide: false };
+  return { id: ctx.newId(), channel: ctx.channel, tick, length: ctx.grid, key, velocity: DRAW_VELOCITY, slide: ctx.slide ?? false };
 }
 
 function slice(ctx: ToolContext, id: number, p: Pointer): LocalEdit | null {
@@ -150,15 +180,23 @@ export function startGesture(ctx: ToolContext, p: Pointer): Step {
 
   if (tool === "select") return { gesture: { kind: "box", from: p, to: p, additive: p.shift }, edit: null };
   if (tool === "paint") {
+    const row = inKey(ctx, key);
     const c = Math.floor(p.tick / ctx.grid);
-    const n = paintCell(ctx, key, c);
-    return { gesture: { kind: "paint", key, cell: c }, edit: n ? edit({ add: [n] }) : null };
+    const n = paintCell(ctx, row, c);
+    const fresh = n ? [n] : [];
+    return { gesture: { kind: "paint", key: row, cell: c, fresh }, edit: null, preview: n ? edit({ add: [n] }) : undefined };
   }
-  // Draw: a note under the pointer, selected, and held for a drag.
+  // Draw: a note (or a chord) under the pointer, selected, and held for a drag.
   const tick = snapTick(p.tick, ctx.grid, "floor");
-  const n: WireNote = { id: ctx.newId(), channel: ctx.channel, tick, length: ctx.lastLength, key, velocity: DRAW_VELOCITY, slide: false };
-  const limits = { minDTick: -tick, minDKey: -key, maxDKey: TOP_KEY - key };
-  return { gesture: moveOf(p, tick, limits), edit: edit({ add: [n] }), select: [n.id] };
+  const root = inKey(ctx, key);
+  const at = { channel: ctx.channel, tick, length: ctx.lastLength, key: root, velocity: DRAW_VELOCITY };
+  const added = ctx.chord ? stamp(at, ctx.chord.name, ctx.chord.inversion, ctx.scale ?? undefined) : [{ ...at, slide: false }];
+  const notes: WireNote[] = added.map((a) => ({ ...a, id: ctx.newId(), slide: ctx.slide ?? false }));
+  if (!notes.length) return NONE;
+  const lo = Math.min(...notes.map((n) => n.key));
+  const hi = Math.max(...notes.map((n) => n.key));
+  const limits = { minDTick: -tick, minDKey: -lo, maxDKey: TOP_KEY - hi };
+  return { gesture: moveOf(p, tick, limits, notes), edit: null, preview: edit({ add: notes }), select: notes.map((n) => n.id) };
 }
 
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
@@ -194,7 +232,7 @@ export function moveGesture(ctx: ToolContext, g: Gesture, p: Pointer): Step {
         // Notes painted in this step are not in the store yet: never twice in one cell.
         if (n && !add.some((a) => a.tick === n.tick)) add.push(n);
       }
-      return { gesture: { ...g, cell: c }, edit: add.length ? edit({ add }) : null };
+      return { gesture: { ...g, cell: c, fresh: [...g.fresh, ...add] }, edit: null, preview: add.length ? edit({ add }) : undefined };
     }
     case "box":
       return { gesture: { ...g, to: p }, edit: null };
@@ -207,15 +245,25 @@ export function endGesture(ctx: ToolContext, g: Gesture, p: Pointer): Step {
   const done = last.gesture;
   switch (done.kind) {
     case "move": {
+      // The notes just drawn go out once, where they were let go; the others are updated.
+      if (done.fresh) {
+        const add = done.fresh.map((n) => ({ ...n, tick: n.tick + done.dTick, key: moveKey(n.key, done.dKey, ctx.scale) }));
+        return { gesture: done, edit: edit({ add }) };
+      }
       if (done.dTick === 0 && done.dKey === 0) return { gesture: done, edit: null };
       const update: WireNote[] = [];
       for (let i = 0; i < store.count; i++) {
         if (!store.selected[i]) continue;
         const n = store.note(i);
-        update.push({ ...n, tick: n.tick + done.dTick, key: n.key + done.dKey });
+        // Each voice resolves into the scale on its own, by the rule the preview is built with.
+        const moved = { ...n, tick: n.tick + done.dTick, key: moveKey(n.key, done.dKey, ctx.scale) };
+        if (moved.tick !== n.tick || moved.key !== n.key) update.push(moved);
       }
-      return { gesture: done, edit: edit({ update }) };
+      return { gesture: done, edit: update.length ? edit({ update }) : null };
     }
+    case "paint":
+      // The stroke goes out once, every cell in one edit.
+      return { gesture: done, edit: done.fresh.length ? edit({ add: done.fresh }) : null };
     case "resize": {
       if (done.dLength === 0) return { gesture: done, edit: null };
       const update: WireNote[] = [];

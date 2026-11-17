@@ -1056,6 +1056,14 @@ export function installMockTauri(seed: MockSeed): void {
     pauseLive: (on: boolean) => {
       s.livePaused = on;
     },
+    /** A note that arrives from outside the UI's edits (the recorder, as `collect_recorded`
+     * adds it): the engine bumps the notes revision and announces it. */
+    addNote: (n: { channel: number; tick: number; length: number; key: number; velocity: number }) => {
+      editPattern((pat) => {
+        pat.notes.push({ ...n, id: nextNoteId(), slide: false });
+        growToNotes(pat);
+      });
+    },
     /** The notes as the engine holds them. */
     notes: () => clone(s.project.pattern.notes),
     /** Live notes sounding now, as "channel:key". */

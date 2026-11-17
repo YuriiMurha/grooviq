@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WireNote } from "../api/notes";
-import { NoteStore } from "./noteStore";
+import { FLAG_GHOST, FLAG_SELECTED, FLAG_SLIDE, INSTANCE_STRIDE, NoteStore, buildInstances } from "./noteStore";
 
 const note = (id: number, tick: number, length: number, key: number, channel = 1, velocity = 0.8): WireNote => ({
   id,
@@ -123,5 +123,40 @@ describe("note store", () => {
     expect(s.revision).toBe(12);
     expect(s.selectedIds()).toEqual([3]);
     expect(s.count).toBe(2);
+  });
+
+  it("a_snapped_move_is_built_into_the_instances_with_the_commit_rule", () => {
+    const s = new NoteStore();
+    s.load(1, [note(1, 0, 240, 60), note(2, 0, 240, 64), note(3, 480, 240, 67)]);
+    s.setSelection([1, 2]);
+    const keys = (r: { data: Float32Array; count: number }) => Array.from({ length: r.count }, (_, i) => [r.data[i * INSTANCE_STRIDE], r.data[i * INSTANCE_STRIDE + 2]]);
+    const moved = buildInstances(s, 1, { ghosts: false, inkOf: () => 0, moved: { dTick: 240, dKey: 2, scale: { root: 0, scale: "major" } } });
+    // The selected notes are where the commit would put them (C+2 = D, E+2 = F# snapped to F); the rest stay.
+    expect(keys(moved)).toEqual([[240, 62], [240, 65], [480, 67]]);
+  });
+
+  it("instances_carry_ghosts_of_other_channels_under_the_channels_own_notes", () => {
+    const s = new NoteStore();
+    s.load(1, [note(1, 0, 240, 60), { ...note(2, 0, 240, 60, 2), slide: true }, note(3, 480, 240, 62, 3)]);
+    s.setSelection([1]);
+    const plain = buildInstances(s, 1);
+    expect(plain.count).toBe(1);
+    expect(plain.data[4]).toBe(FLAG_SELECTED);
+
+    const inks = [0, 0, 3, 5];
+    const both = buildInstances(s, 1, { ghosts: true, inkOf: (c) => inks[c] });
+    expect(both.count).toBe(3);
+    const rows = Array.from({ length: 3 }, (_, i) => [...both.data.subarray(i * INSTANCE_STRIDE, (i + 1) * INSTANCE_STRIDE)]);
+    // Ghosts first, so the channel's own notes draw on top; each ghost names its channel's ink.
+    expect(rows.map((r) => r[4])).toEqual([
+      FLAG_GHOST | FLAG_SLIDE | ((3 + 1) << 3),
+      FLAG_GHOST | ((5 + 1) << 3),
+      FLAG_SELECTED,
+    ]);
+    // A ghost is never selected, even when its id is.
+    s.setSelection([1, 2]);
+    expect(s.selectedNotes(1).map((n) => n.id)).toEqual([1]);
+    expect(s.selectedNotes().map((n) => n.id).sort()).toEqual([1, 2]);
+    expect(buildInstances(s, 1, { ghosts: true, inkOf: () => 0 }).data[4]).toBe(FLAG_GHOST | FLAG_SLIDE | (1 << 3));
   });
 });

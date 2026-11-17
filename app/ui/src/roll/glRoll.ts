@@ -11,9 +11,13 @@ import type { RollView } from "./view";
 /** The roll's colours, from the theme's custom properties. */
 export interface RollPalette {
   inks: Rgba[];
+  /** The second inks: slide notes. */
+  inksB: Rgba[];
   row: Rgba;
   rowBlack: Rgba;
   outside: Rgba;
+  /** Laid over the rows outside the project's scale. */
+  dim: Rgba;
   line: Rgba;
   beat: Rgba;
   bar: Rgba;
@@ -26,6 +30,7 @@ const TOKENS = {
   row: "--roll-row",
   rowBlack: "--roll-row-black",
   outside: "--roll-outside",
+  dim: "--roll-dim",
   line: "--roll-line",
   beat: "--roll-beat",
   bar: "--roll-bar",
@@ -38,7 +43,8 @@ export function readRollPalette(root: Element): RollPalette {
   const style = getComputedStyle(root);
   const colour = (token: string): Rgba => parseColor(style.getPropertyValue(token)) ?? [...FALLBACK];
   const named = Object.fromEntries(Object.entries(TOKENS).map(([k, t]) => [k, colour(t)])) as Record<keyof typeof TOKENS, Rgba>;
-  return { inks: [1, 2, 3, 4, 5, 6].map((n) => colour(`--ink-${n}`)), ...named };
+  const inks = (suffix: string) => [1, 2, 3, 4, 5, 6].map((n) => colour(`--ink-${n}${suffix}`));
+  return { inks: inks(""), inksB: inks("b"), ...named };
 }
 
 /** Everything a frame needs besides the notes. */
@@ -51,6 +57,8 @@ export interface RollScene {
   barTicks: number;
   /** The pattern's end: the grid past it is dimmed. */
   endTick: number;
+  /** The project's scale as twelve bits, one per pitch class from C (0: no scale, no dimming). */
+  scaleMask: number;
   /** The selection's drag so far, in ticks and keys. */
   drag: [number, number];
   /** The selection's resize so far, in ticks, and the shortest a note may get. */
@@ -75,6 +83,8 @@ const RING = 1.5;
 /** The fill of a note at velocity 0, as a share of its ink. */
 const QUIET = 0.45;
 const STEP = 240;
+/** How much of a ghost note (another channel's) shows. */
+export const GHOST_ALPHA = 0.3;
 
 const GRID_VS = `#version 300 es
 void main() {
@@ -88,7 +98,8 @@ uniform vec4 uView;      // scrollTick, topKey, tickPx, keyPx
 uniform vec2 uCanvas;    // device pixels
 uniform float uDpr;
 uniform vec3 uTime;      // beat ticks, bar ticks, end tick
-uniform vec4 uRow, uRowBlack, uOutside, uLine, uBeat, uBar;
+uniform float uScale;    // twelve bits, a pitch class each; 0 = no scale
+uniform vec4 uRow, uRowBlack, uOutside, uDim, uLine, uBeat, uBar;
 out vec4 o;
 
 float onLine(float tick, float period, float tickPx) {
@@ -106,6 +117,7 @@ void main() {
   bool black = pc == 1.0 || pc == 3.0 || pc == 6.0 || pc == 8.0 || pc == 10.0;
   vec3 c = black ? uRowBlack.rgb : uRow.rgb;
   if (key < 0.0 || key > 127.0) c = uOutside.rgb;
+  else if (uScale > 0.5 && ((int(uScale + 0.5) >> int(pc)) & 1) == 0) c = mix(c, uDim.rgb, uDim.a);
   // Row edges: a line under every row, a stronger one under each C.
   float rowEdge = fract(keyf) * uView.w * uDpr < 1.0 ? 1.0 : 0.0;
   c = mix(c, pc == 0.0 ? uBeat.rgb : uLine.rgb, rowEdge * (pc == 0.0 ? uBeat.a : uLine.a));
@@ -119,8 +131,10 @@ void main() {
 const NOTE_VS = `#version 300 es
 layout(location = 0) in vec2 aCorner;
 layout(location = 1) in vec4 aNote;   // tick, length, key, velocity
-layout(location = 2) in float aFlags; // 1 selected, 2 slide
+layout(location = 2) in float aFlags; // 1 selected, 2 slide, 4 ghost, then the ink + 1 from bit 3
 uniform vec4 uView;
+uniform vec4 uInks[12];                // the inks, then the second inks (slide)
+uniform int uOwn;                      // the channel's own ink
 uniform vec2 uSize;                    // CSS pixels
 uniform vec2 uDragDelta;               // ticks, keys
 uniform float uResizeDelta;
@@ -129,8 +143,17 @@ out vec2 vLocal;
 out vec2 vSize;
 flat out float vVelocity;
 flat out float vSelected;
+flat out float vSlide;
+flat out float vGhost;
+flat out vec3 vInk;
 void main() {
-  bool selected = (int(aFlags + 0.5) & 1) != 0;
+  int flags = int(aFlags + 0.5);
+  bool selected = (flags & 1) != 0;
+  bool slide = (flags & 2) != 0;
+  int ink = (flags >> 3) == 0 ? uOwn : (flags >> 3) - 1;
+  vInk = uInks[slide ? ink + 6 : ink].rgb;
+  vSlide = slide ? 1.0 : 0.0;
+  vGhost = (flags & 4) != 0 ? 1.0 : 0.0;
   float tick = aNote.x;
   float len = aNote.y;
   float key = aNote.z;
@@ -155,7 +178,9 @@ in vec2 vLocal;
 in vec2 vSize;
 flat in float vVelocity;
 flat in float vSelected;
-uniform vec4 uInk;
+flat in float vSlide;
+flat in float vGhost;
+flat in vec3 vInk;
 uniform vec4 uSelect;
 uniform float uDpr;
 out vec4 o;
@@ -166,8 +191,14 @@ float roundedBox(vec2 p, vec2 halfSize, float r) {
 void main() {
   vec2 h = vSize * 0.5;
   float d = roundedBox(vLocal - h, h, min(${RADIUS.toFixed(1)}, min(h.x, h.y)));
-  float cover = clamp(0.5 - d * uDpr, 0.0, 1.0);
-  vec3 c = uInk.rgb * mix(${QUIET.toFixed(2)}, 1.0, clamp(vVelocity, 0.0, 1.0));
+  if (vSlide > 0.5) {
+    // A slide note's right edge leans: from the top right corner in towards the bottom.
+    float lean = min(vSize.y, vSize.x * 0.5);
+    float run = lean / vSize.y;
+    d = max(d, (vLocal.x - (vSize.x - lean * vLocal.y / vSize.y)) / sqrt(1.0 + run * run));
+  }
+  float cover = clamp(0.5 - d * uDpr, 0.0, 1.0) * mix(1.0, ${GHOST_ALPHA.toFixed(2)}, vGhost);
+  vec3 c = vInk * mix(${QUIET.toFixed(2)}, 1.0, clamp(vVelocity, 0.0, 1.0));
   if (vSelected > 0.5 && d > -${RING.toFixed(1)}) c = uSelect.rgb;
   o = vec4(c * cover, cover);
 }`;
@@ -226,8 +257,8 @@ export function createRollRenderer(canvas: HTMLCanvasElement): RollRenderer | nu
   const notes = program(gl, NOTE_VS, NOTE_FS);
   const rect = program(gl, RECT_VS, RECT_FS);
   if (!grid || !notes || !rect) return null;
-  const ug = locations(gl, grid, ["uView", "uCanvas", "uDpr", "uTime", "uRow", "uRowBlack", "uOutside", "uLine", "uBeat", "uBar"] as const);
-  const un = locations(gl, notes, ["uView", "uSize", "uDragDelta", "uResizeDelta", "uMinLength", "uInk", "uSelect", "uDpr"] as const);
+  const ug = locations(gl, grid, ["uView", "uCanvas", "uDpr", "uTime", "uScale", "uRow", "uRowBlack", "uOutside", "uDim", "uLine", "uBeat", "uBar"] as const);
+  const un = locations(gl, notes, ["uView", "uSize", "uDragDelta", "uResizeDelta", "uMinLength", "uInks", "uOwn", "uSelect", "uDpr"] as const);
   const ur = locations(gl, rect, ["uRect", "uSize", "uColor"] as const);
 
   const quad = gl.createBuffer();
@@ -258,6 +289,7 @@ export function createRollRenderer(canvas: HTMLCanvasElement): RollRenderer | nu
 
   let count = 0;
   let capacity = 0;
+  const inkColours = new Float32Array(12 * 4);
 
   return {
     kind: "webgl2",
@@ -282,6 +314,8 @@ export function createRollRenderer(canvas: HTMLCanvasElement): RollRenderer | nu
       gl.uniform2f(ug.uCanvas, canvas.width, canvas.height);
       gl.uniform1f(ug.uDpr, s.dpr);
       gl.uniform3f(ug.uTime, s.beatTicks, s.barTicks, s.endTick);
+      gl.uniform1f(ug.uScale, s.scaleMask);
+      gl.uniform4fv(ug.uDim, p.dim);
       gl.uniform4fv(ug.uRow, p.row);
       gl.uniform4fv(ug.uRowBlack, p.rowBlack);
       gl.uniform4fv(ug.uOutside, p.outside);
@@ -300,7 +334,12 @@ export function createRollRenderer(canvas: HTMLCanvasElement): RollRenderer | nu
         gl.uniform2f(un.uDragDelta, s.drag[0], s.drag[1]);
         gl.uniform1f(un.uResizeDelta, s.resize);
         gl.uniform1f(un.uMinLength, s.minLength);
-        gl.uniform4fv(un.uInk, p.inks[s.ink] ?? FALLBACK);
+        for (let i = 0; i < 6; i++) {
+          inkColours.set(p.inks[i] ?? FALLBACK, i * 4);
+          inkColours.set(p.inksB[i] ?? FALLBACK, (i + 6) * 4);
+        }
+        gl.uniform4fv(un.uInks, inkColours);
+        gl.uniform1i(un.uOwn, Math.min(5, Math.max(0, s.ink)));
         gl.uniform4fv(un.uSelect, p.select);
         gl.uniform1f(un.uDpr, s.dpr);
         gl.bindVertexArray(noteVao);
