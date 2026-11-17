@@ -457,7 +457,24 @@ fn an_unwritable_path_reports_io_and_leaves_no_partial_file() {
 }
 
 #[test]
+fn eight_second_export_has_complete_pcm_frames() {
+    eight_second_export();
+}
+
+#[test]
+#[ignore = "4 s budget runs via make export-budget in release mode"]
 fn export_is_faster_than_real_time() {
+    #[allow(clippy::assertions_on_constants)]
+    // Runtime failure if the ignored budget is invoked in debug.
+    {
+        assert!(!cfg!(debug_assertions), "export budget requires --release");
+    }
+    let took = eight_second_export();
+    eprintln!("8 s PCM24 export: {took:?}; budget: 4 s");
+    assert!(took.as_secs_f32() < 4.0, "an 8 s export took {took:?}");
+}
+
+fn eight_second_export() -> std::time::Duration {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("eight_seconds.wav");
     // Four channels, 16 steps at 120 BPM (2 s), four loops: 8 s.
@@ -478,7 +495,12 @@ fn export_is_faster_than_real_time() {
     let report = export(&state, &options(WavFormat::Pcm24, 4), &path).unwrap();
     let took = started.elapsed();
     assert!(report.frames >= 8 * u64::from(SR));
-    assert!(took.as_secs_f32() < 4.0, "an 8 s export took {took:?}");
+    let (spec, samples) = read_i32(&path);
+    assert_eq!(spec.sample_rate, SR);
+    assert_eq!(spec.channels, 2);
+    assert_eq!(spec.bits_per_sample, 24);
+    assert_eq!(samples.len() as u64, report.frames * 2);
+    took
 }
 
 /// `seconds` of the constant `value` on both sides.
