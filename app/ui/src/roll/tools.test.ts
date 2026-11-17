@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { WireNote } from "../api/notes";
 import { NoteStore } from "./noteStore";
-import { DRAW_VELOCITY, endGesture, moveGesture, startGesture, type Pointer, type Step, type Tool, type ToolContext } from "./tools";
+import { DRAW_VELOCITY, endGesture, heldNotes, moveGesture, startGesture, type Pointer, type Step, type Tool, type ToolContext } from "./tools";
 import { toScreen, type RollView } from "./view";
 
 // 0.125 px a tick: a step (240 ticks) is 30 px wide; a key row is 14 px tall.
@@ -31,6 +31,8 @@ function setup(notes: WireNote[], tool: Tool, grid = 240, lastLength = 240) {
   const ctx: ToolContext = { store, channel: 1, tool, grid, lastLength, view: VIEW, newId: () => --temp };
   const edits: Step["edit"][] = [];
   const take = (step: Step) => {
+    // A preview shows in the store only: it is not an edit for the engine.
+    if (step.preview) store.apply(step.preview);
     if (step.edit) {
       store.apply(step.edit);
       edits.push(step.edit);
@@ -67,10 +69,10 @@ describe("piano roll tools", () => {
     ctx.grid = 60;
     gesture(at(2990, 70));
     expect(edits[2]?.add[0]).toMatchObject({ tick: 2940, key: 70 });
-    // A note drawn and dragged before release lands where it was let go: added, then moved.
+    // A note drawn and dragged before release is added once, where it was let go.
     gesture(at(4800, 72), at(5000, 72), at(5300, 73));
-    expect(edits[3]?.add[0]).toMatchObject({ tick: 4800, key: 72 });
-    expect(edits[4]?.update).toEqual([expect.objectContaining({ id: edits[3]?.add[0].id, tick: 5280, key: 73 })]);
+    expect(edits).toHaveLength(4);
+    expect(edits[3]).toEqual({ add: [expect.objectContaining({ tick: 5280, key: 73, length: 960 })], update: [], delete: [] });
   });
 
   it("drag_moves_the_selection_by_a_snapped_delta", () => {
@@ -159,6 +161,8 @@ describe("piano roll tools", () => {
     const { edits, store, gesture } = setup([note(9, 960, 240, 60)], "paint");
     // Down in step 1, across to step 6 along row 60 (the pointer wanders a row up), then back.
     gesture(at(250, 60), at(400, 60), at(800, 61), at(1500, 60), at(1300, 60));
+    // The stroke is one edit.
+    expect(edits).toHaveLength(1);
     const added = edits.flatMap((e) => e?.add ?? []);
     // One note in each cell it crossed, a cell long, in the row it started on; step 4 already
     // held note 9, and returning to a painted cell adds nothing.
@@ -213,5 +217,156 @@ describe("piano roll tools", () => {
     const d = setup([note(1, 0, 240, 60)], "delete");
     d.gesture(at(10, 60));
     expect(d.edits).toEqual([{ add: [], update: [], delete: [1] }]);
+  });
+
+  it("scale_snap_puts_drawn_painted_and_moved_notes_in_key", () => {
+    // C major: key 61 (C#) is a tie between C and D, and snaps down to 60.
+    const draw = setup([], "draw");
+    draw.ctx.scale = { root: 0, scale: "major" };
+    draw.gesture(at(10, 61));
+    expect(draw.edits[0]?.add[0]).toMatchObject({ key: 60 });
+    // Without the snap it lands where it was clicked.
+    draw.ctx.scale = null;
+    draw.gesture(at(500, 61));
+    expect(draw.edits[1]?.add[0]).toMatchObject({ key: 61 });
+
+    // Paint puts the whole stroke in the snapped row.
+    const paint = setup([], "paint");
+    paint.ctx.scale = { root: 0, scale: "major" };
+    paint.gesture(at(10, 66), at(500, 66));
+    expect(paint.edits.flatMap((e) => e?.add ?? []).map((n) => n.key)).toEqual([65, 65, 65]);
+
+    // A drag moves every voice to a key of the scale. One row up from C is C#, which snaps back
+    // down to C (and G's C# neighbour G#, down to G): nothing moves.
+    const move = setup([note(1, 0, 240, 60), note(2, 480, 240, 67)], "select");
+    move.ctx.scale = { root: 0, scale: "major" };
+    move.store.setSelection([1, 2]);
+    move.gesture(at(10, 60), at(10, 61));
+    expect(move.edits).toHaveLength(0);
+    // Two rows up is D: both move two rows.
+    move.gesture(at(10, 60), at(10, 62));
+    expect(move.edits[0]?.update.map((n) => n.key)).toEqual([62, 69]);
+  });
+
+  it("a_group_move_puts_every_voice_in_the_scale_and_keeps_to_the_keyboard", () => {
+    // C-E-G dragged up to D: moved by a whole step, E becomes F# which is not in C major and
+    // snaps down to F; G becomes A. The result is D-F-A, all in key.
+    const triad = setup([note(1, 0, 240, 60), note(2, 0, 240, 64), note(3, 0, 240, 67)], "select");
+    triad.ctx.scale = { root: 0, scale: "major" };
+    triad.store.setSelection([1, 2, 3]);
+    const held = triad.take(startGesture(triad.ctx, at(10, 60)));
+    const mid = moveGesture(triad.ctx, held.gesture, at(10, 62));
+    expect(mid.gesture).toMatchObject({ kind: "move", dKey: 2 });
+    triad.take(endGesture(triad.ctx, held.gesture, at(10, 62)));
+    expect(triad.edits[0]?.update.map((n) => n.key)).toEqual([62, 65, 69]);
+    // Without the snap the same drag moves them chromatically.
+    const free = setup([note(1, 0, 240, 60), note(2, 0, 240, 64), note(3, 0, 240, 67)], "select");
+    free.store.setSelection([1, 2, 3]);
+    free.gesture(at(10, 60), at(10, 62));
+    expect(free.edits[0]?.update.map((n) => n.key)).toEqual([62, 66, 69]);
+
+    // A note off the scale that is moved in time only keeps its key.
+    const time = setup([note(1, 0, 240, 61)], "select");
+    time.ctx.scale = { root: 0, scale: "major" };
+    time.store.setSelection([1]);
+    time.gesture(at(10, 61), at(500, 61));
+    expect(time.edits[0]?.update.map((n) => [n.tick, n.key])).toEqual([[480, 61]]);
+
+    // The top of the keyboard: the group stops where its highest voice reaches 127 and stays in key.
+    const top = setup([note(1, 0, 240, 120), note(2, 0, 240, 124), note(3, 0, 240, 126)], "select");
+    top.ctx.scale = { root: 0, scale: "major" };
+    top.store.setSelection([1, 2, 3]);
+    top.gesture(at(10, 120), at(10, 126));
+    // dKey is held to +1: 120 would be C#, which snaps back down to C and so is not updated; 124 goes
+    // to F (125) and 126 to G (127).
+    expect(top.edits[0]?.update.map((n) => n.key)).toEqual([125, 127]);
+    for (const n of top.edits[0]!.update) expect(n.key).toBeLessThanOrEqual(127);
+    // The bottom: nothing goes below 0.
+    const bottom = setup([note(1, 0, 240, 0), note(2, 0, 240, 4)], "select");
+    bottom.ctx.scale = { root: 0, scale: "major" };
+    bottom.store.setSelection([1, 2]);
+    bottom.gesture(at(10, 0), at(10, -6));
+    expect(bottom.edits).toHaveLength(0);
+  });
+
+  it("a_drawn_stamp_is_a_preview_until_release_and_commits_once", () => {
+    const { store, ctx, edits, take } = setup([], "draw");
+    ctx.chord = { name: "major", inversion: 0 };
+    const down = take(startGesture(ctx, at(960, 60)));
+    // Pressed: the chord is in the store (selected, for the drag preview) but nothing is sent.
+    expect(down.edit).toBeNull();
+    expect(down.preview?.add.map((n) => n.key)).toEqual([60, 64, 67]);
+    expect(store.count).toBe(3);
+    expect(store.selectedIds()).toEqual([-1, -2, -3]);
+    // Held and dragged: still nothing sent, the store still holds the chord where it was put.
+    const held = take(moveGesture(ctx, down.gesture, at(1440, 62)));
+    expect(held.edit).toBeNull();
+    expect(held.gesture).toMatchObject({ kind: "move", dTick: 480, dKey: 2 });
+    expect(edits).toHaveLength(0);
+    // Released: one add with every voice at its final place, under the ids the preview had.
+    take(endGesture(ctx, held.gesture, at(1440, 62)));
+    expect(edits).toEqual([
+      { add: [-1, -2, -3].map((id, i) => expect.objectContaining({ id, tick: 1440, key: [62, 66, 69][i] })), update: [], delete: [] },
+    ]);
+    expect(store.count).toBe(3);
+    expect(store.get(-1)).toMatchObject({ tick: 1440, key: 62 });
+  });
+
+  it("a_paint_stroke_is_a_preview_until_release_and_commits_once", () => {
+    const { store, ctx, edits, take } = setup([], "paint");
+    const down = take(startGesture(ctx, at(250, 60)));
+    // Pressed: the first cell shows in the store; nothing is sent.
+    expect(down.edit).toBeNull();
+    expect(store.count).toBe(1);
+    const a = take(moveGesture(ctx, down.gesture, at(800, 60)));
+    const b = take(moveGesture(ctx, a.gesture, at(1500, 60)));
+    expect(a.edit).toBeNull();
+    expect(b.edit).toBeNull();
+    expect(edits).toHaveLength(0);
+    expect(store.count).toBe(6);
+    // What a cancelled stroke has to take back, and what the store shows if it is refetched.
+    expect(heldNotes(b.gesture).map((n) => n.tick)).toEqual([240, 480, 720, 960, 1200, 1440]);
+    // Released: every cell goes out in one edit, under the ids the preview had.
+    take(endGesture(ctx, b.gesture, at(1500, 60)));
+    expect(edits).toHaveLength(1);
+    expect(edits[0]!.add.map((n) => n.id)).toEqual([-1, -2, -3, -4, -5, -6]);
+    expect(store.count).toBe(6);
+  });
+
+  it("slide_notes_are_drawn_when_the_slide_toggle_is_on", () => {
+    const draw = setup([], "draw");
+    draw.ctx.slide = true;
+    draw.gesture(at(10, 60));
+    expect(draw.edits[0]?.add[0]).toMatchObject({ slide: true });
+    const paint = setup([], "paint");
+    paint.ctx.slide = true;
+    paint.gesture(at(10, 60), at(300, 60));
+    expect(paint.edits.flatMap((e) => e?.add ?? []).every((n) => n.slide)).toBe(true);
+    // Off by default.
+    const plain = setup([], "draw");
+    plain.gesture(at(10, 60));
+    expect(plain.edits[0]?.add[0]).toMatchObject({ slide: false });
+  });
+
+  it("a_chord_stamp_adds_every_voice_selected_and_dragged_together", () => {
+    const { store, ctx, edits, gesture } = setup([], "draw");
+    ctx.chord = { name: "major", inversion: 0 };
+    gesture(at(1000, 60));
+    const added = edits[0]!.add;
+    expect(added.map((n) => [n.tick, n.key, n.length, n.id])).toEqual([
+      [960, 60, 240, -1],
+      [960, 64, 240, -2],
+      [960, 67, 240, -3],
+    ]);
+    expect(store.selectedIds()).toEqual([-1, -2, -3]);
+    // In key: D major triad on D in C major, F# snapped to F.
+    ctx.scale = { root: 0, scale: "major" };
+    gesture(at(2000, 62));
+    expect(edits[1]!.add.map((n) => n.key)).toEqual([62, 65, 69]);
+    // Dragged before release the whole chord is added once, where it was let go.
+    ctx.scale = null;
+    gesture(at(3000, 60), at(3000, 62), at(3500, 63));
+    expect(edits).toHaveLength(3);
+    expect(edits[2]!.add.map((n) => [n.tick, n.key])).toEqual([[3360, 63], [3360, 67], [3360, 70]]);
   });
 });

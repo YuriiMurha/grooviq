@@ -9,9 +9,11 @@ export interface RollStats {
   /** "webgl2" or "canvas2d". */
   renderer: string;
   view: RollView | null;
+  /** The scale the grid shows, as twelve bits from C (0 without a key). */
+  scaleMask: number;
 }
 
-export const rollStats: RollStats = { bufferBuilds: 0, draws: 0, renderer: "", view: null };
+export const rollStats: RollStats = { bufferBuilds: 0, draws: 0, renderer: "", view: null, scaleMask: 0 };
 
 // Outside production builds (`vite build --mode e2e`, the dev server, the bench) the counters
 // are on `window.__grooviqRoll`.

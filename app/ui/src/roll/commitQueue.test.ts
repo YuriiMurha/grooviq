@@ -229,4 +229,32 @@ describe("commit queue", () => {
     expect(store.count).toBe(3);
     expect(store.selectedIds().sort((a, b) => a - b)).toEqual([1, 40]);
   });
+
+  it("a_refetch_keeps_the_notes_held_by_a_gesture_and_their_selection", async () => {
+    const { store, server, engine, queue } = setup([note(1, 0)]);
+    // A chord held down: two unsent notes in the store, selected, with the gesture owning them.
+    const fresh = [note(-1, 960), note(-2, 960, 64)];
+    store.apply({ add: fresh, update: [], delete: [] });
+    store.setSelection([-1, -2]);
+    queue.setHeld(() => ({ add: fresh, update: [], delete: [] }));
+    // The engine announces a change from elsewhere: the notes are fetched and replace the store.
+    server.revision = 5;
+    server.notes = [note(1, 0), { ...note(9, 480), channel: 2 }];
+    queue.notesChanged(5);
+    await flush();
+    expect(engine.fetches()).toBe(1);
+    // The engine's notes are in; the held ones are still there, selected, and nothing was sent.
+    expect(store.revision).toBe(5);
+    expect(store.get(9)).toBeDefined();
+    expect(store.get(-1)).toEqual(fresh[0]);
+    expect(store.get(-2)).toEqual(fresh[1]);
+    expect(store.selectedIds().sort((a, b) => a - b)).toEqual([-2, -1]);
+    expect(engine.sent).toEqual([]);
+    // Nothing held, nothing added back.
+    queue.setHeld(() => null);
+    queue.notesChanged(6);
+    server.revision = 6;
+    await flush();
+    expect(store.get(-1)).toBeUndefined();
+  });
 });
