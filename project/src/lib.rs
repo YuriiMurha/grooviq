@@ -41,3 +41,5 @@ pub use model::{
     roll_channels,
 };
 pub use session::{DecodedSamples, decode_samples};
+
+pub mod audio_assets;
