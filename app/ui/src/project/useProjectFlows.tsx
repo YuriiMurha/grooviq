@@ -1,5 +1,5 @@
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   appExit,
   errorText,
@@ -65,7 +65,8 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
   const unsettledRef = useRef(unsettled);
   const settleRef = useRef(settle);
 
-  useEffect(() => {
+  // Shortcuts can arrive as soon as the project view commits, before passive effects run.
+  useLayoutEffect(() => {
     viewRef.current = view;
     unsettledRef.current = unsettled;
     settleRef.current = settle;
