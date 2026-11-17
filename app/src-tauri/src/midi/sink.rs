@@ -56,46 +56,45 @@ fn off(channel: u32, key: u8) -> Command {
 }
 
 impl CommandSink for ControllerSink {
-    fn send(&self, cmd: Command) {
+    fn press(&self, channel: u32, key: u8, velocity: f32) -> Option<u64> {
         let mut owed = lock(&self.owed);
         let mut controller = lock(&self.controller);
-        match cmd {
-            Command::ChannelNote {
-                channel,
-                key,
-                on: false,
-                ..
-            } => {
-                let id = channel.0;
-                if controller.send(cmd).is_ok() {
-                    if let Some(debt) = owed.get_mut(&id) {
-                        debt.keys &= !(1u128 << key);
-                    }
-                } else if let Some(instance) = controller.channel_instance(channel) {
-                    // Refused with the channel still there: the queue is full.
-                    let debt = owed.entry(id).or_insert(Owed { instance, keys: 0 });
-                    if debt.instance != instance {
-                        // What was owed belonged to a channel this id no longer is.
-                        *debt = Owed { instance, keys: 0 };
-                    }
-                    debt.keys |= 1u128 << key;
-                }
+        let id = ChannelId(channel);
+        let instance = controller.channel_instance(id)?;
+        // A release still owed would land after this note and cut it.
+        if let Some(debt) = owed.get_mut(&channel) {
+            debt.keys &= !(1u128 << key);
+        }
+        let note = Command::ChannelNote {
+            channel: id,
+            key,
+            velocity,
+            on: true,
+        };
+        let sent = controller.send(note).is_ok();
+        owed.retain(|_, debt| debt.keys != 0);
+        sent.then_some(instance)
+    }
+
+    fn release(&self, channel: u32, key: u8, instance: u64) {
+        let mut owed = lock(&self.owed);
+        let mut controller = lock(&self.controller);
+        // Checked under the controller's lock: the channel is still the one the key sounded on.
+        if controller.channel_instance(ChannelId(channel)) != Some(instance) {
+            return;
+        }
+        if controller.send(off(channel, key)).is_ok() {
+            if let Some(debt) = owed.get_mut(&channel) {
+                debt.keys &= !(1u128 << key);
             }
-            Command::ChannelNote {
-                channel,
-                key,
-                on: true,
-                ..
-            } => {
-                // A release still owed would land after this note and cut it.
-                if let Some(debt) = owed.get_mut(&channel.0) {
-                    debt.keys &= !(1u128 << key);
-                }
-                let _ = controller.send(cmd);
+        } else {
+            // Refused with the channel still there: the queue is full.
+            let debt = owed.entry(channel).or_insert(Owed { instance, keys: 0 });
+            if debt.instance != instance {
+                // What was owed belonged to a channel this id no longer is.
+                *debt = Owed { instance, keys: 0 };
             }
-            other => {
-                let _ = controller.send(other);
-            }
+            debt.keys |= 1u128 << key;
         }
         owed.retain(|_, debt| debt.keys != 0);
     }

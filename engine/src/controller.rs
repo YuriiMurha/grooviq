@@ -264,6 +264,7 @@ impl Controller {
         let index = self.channel_index(id)?;
         self.push(Msg::RemoveChannel(id))?;
         self.state.channels.remove(index);
+        self.instances.remove(&id);
         Ok(())
     }
 
@@ -519,6 +520,7 @@ impl Controller {
             return graph;
         }
         self.state.channels.clear();
+        self.instances.clear();
         let mut graph = Box::new(Graph::new(self.sample_rate, self.generation));
         graph.set_pattern(Box::new(self.state.pattern.clone()));
         graph
@@ -636,6 +638,23 @@ mod tests {
     /// (the processor itself is never run, so nothing overwrites it).
     fn pretend(c: &Controller, faults: u32, guard_hits: u32) {
         c.live.publish([0.0; 2], false, 0, faults, guard_hits);
+    }
+
+    #[test]
+    fn instance_storage_is_bounded_by_the_live_channels() {
+        let (mut c, mut p) = controller();
+        for id in 1000..2000 {
+            c.free_trash();
+            c.add_channel(setup(id)).unwrap();
+            p.process(&mut [0.0; 512], 2);
+            c.remove_channel(ChannelId(id)).unwrap();
+            p.process(&mut [0.0; 512], 2);
+        }
+        assert!(
+            c.instances.len() <= MAX_CHANNELS,
+            "{} dead instance entries kept",
+            c.instances.len()
+        );
     }
 
     #[test]
@@ -893,6 +912,7 @@ mod tests {
         pretend(&c, 2, 0);
         assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 2 }]);
         assert!(c.state.channels.is_empty());
+        assert!(c.instances.is_empty(), "no channel, no instance");
         assert_eq!(c.state.pattern.length, 7);
         assert!(c.send(tune).is_err());
     }

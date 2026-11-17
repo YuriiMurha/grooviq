@@ -7,38 +7,89 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-/// Where a keyboard's commands go: the engine's controller, never through the session's lock.
+/// Where a keyboard's notes go: the engine's controller, never through the session's lock.
+///
+/// A channel id is not a channel: a project opened meanwhile makes a new channel with the same
+/// id. So a key is pressed on a channel *instance*, and a release names the instance its press
+/// reached; the sink sends it only if the channel is still that instance.
 pub trait CommandSink: Send + Sync {
-    /// Hands one command to the engine.
-    fn send(&self, cmd: Command);
+    /// Starts `key` on `channel` now. The channel instance it reached; `None` if it was not
+    /// sent (no such channel, or the engine did not take it).
+    fn press(&self, channel: u32, key: u8, velocity: f32) -> Option<u64>;
+
+    /// Releases `key` on `channel`, which was pressed on `instance`. Nothing if the channel is
+    /// another one by now (the engine cut those notes when it went).
+    fn release(&self, channel: u32, key: u8, instance: u64);
 
     /// Tries again what the engine refused earlier. Called after every message and by the poll.
     fn retry(&self) {}
 }
 
+/// What a player does to the engine; the hub's goes to a sink, a lone player's is collected.
+trait Out {
+    fn press(&mut self, channel: u32, key: u8, velocity: f32) -> Option<u64>;
+    fn release(&mut self, channel: u32, key: u8, instance: u64);
+}
+
+struct ToSink<'a>(&'a dyn CommandSink);
+
+impl Out for ToSink<'_> {
+    fn press(&mut self, channel: u32, key: u8, velocity: f32) -> Option<u64> {
+        self.0.press(channel, key, velocity)
+    }
+    fn release(&mut self, channel: u32, key: u8, instance: u64) {
+        self.0.release(channel, key, instance);
+    }
+}
+
+/// Collects a lone player's commands (one instance of every channel, for ever).
+#[derive(Default)]
+struct Collect(Vec<Command>);
+
+impl Out for Collect {
+    fn press(&mut self, channel: u32, key: u8, velocity: f32) -> Option<u64> {
+        self.0.push(note(channel, key, velocity, true));
+        Some(0)
+    }
+    fn release(&mut self, channel: u32, key: u8, _instance: u64) {
+        self.0.push(note(channel, key, 0.0, false));
+    }
+}
+
 /// Which keyboards own each key on each engine channel, counted across all inputs: the engine is
-/// told to release a key only when the last keyboard holding or sustaining it lets go.
+/// told to release a key only when the last keyboard holding or sustaining it lets go. Each key
+/// is counted for the channel instance it was pressed on; owners of an earlier instance are stale
+/// and count for nothing.
 #[derive(Debug, Default)]
 struct Ledger {
-    owners: BTreeMap<(u32, u8), u32>,
+    /// (channel, key) to the instance and how many inputs own the key on it.
+    owners: BTreeMap<(u32, u8), (u64, u32)>,
 }
 
 impl Ledger {
-    fn acquire(&mut self, channel: u32, key: u8) {
-        *self.owners.entry((channel, key)).or_insert(0) += 1;
+    fn acquire(&mut self, channel: u32, key: u8, instance: u64) {
+        let owners = self.owners.entry((channel, key)).or_insert((instance, 0));
+        if owners.0 != instance {
+            // Whoever held it before held another channel's key.
+            *owners = (instance, 0);
+        }
+        owners.1 += 1;
     }
 
-    /// One owner lets go: whether it was the last.
-    fn release(&mut self, channel: u32, key: u8) -> bool {
+    /// One owner of `key` on `instance` lets go: whether it was the last. A stale owner (the
+    /// key is now another instance's) is never the last.
+    fn release(&mut self, channel: u32, key: u8, instance: u64) -> bool {
         match self.owners.get_mut(&(channel, key)) {
-            Some(count) if *count > 1 => {
-                *count -= 1;
-                false
+            Some((current, count)) if *current == instance => {
+                if *count > 1 {
+                    *count -= 1;
+                    false
+                } else {
+                    self.owners.remove(&(channel, key));
+                    true
+                }
             }
-            _ => {
-                self.owners.remove(&(channel, key));
-                true
-            }
+            _ => false,
         }
     }
 }
@@ -56,10 +107,10 @@ impl Ledger {
 pub struct Player {
     /// The channel the keys below sound on.
     channel: Option<u32>,
-    /// Keys the person holds.
-    down: BTreeSet<u8>,
+    /// Keys the person holds, with the channel instance each was pressed on.
+    down: BTreeMap<u8, u64>,
     /// Keys let go while the pedal was down: still sounding.
-    held: BTreeSet<u8>,
+    held: BTreeMap<u8, u64>,
     pedal: bool,
     /// What a player played on its own counts its keys in.
     solo: Ledger,
@@ -74,91 +125,92 @@ impl Player {
     /// A change of channel releases the old one's notes first.
     pub fn handle(&mut self, msg: MidiMessage, channel: Option<u32>) -> Vec<Command> {
         let mut ledger = std::mem::take(&mut self.solo);
-        let commands = self.handle_in(&mut ledger, msg, channel);
+        let mut out = Collect::default();
+        self.handle_in(&mut ledger, &mut out, msg, channel);
         self.solo = ledger;
-        commands
+        out.0
     }
 
     /// Moves the player to `channel`: if that is another channel, releases everything on the
     /// old one. Nothing otherwise.
     pub fn select(&mut self, channel: Option<u32>) -> Vec<Command> {
         let mut ledger = std::mem::take(&mut self.solo);
-        let commands = self.select_in(&mut ledger, channel);
+        let mut out = Collect::default();
+        self.select_in(&mut ledger, &mut out, channel);
         self.solo = ledger;
-        commands
+        out.0
     }
 
     fn handle_in(
         &mut self,
         ledger: &mut Ledger,
+        out: &mut dyn Out,
         msg: MidiMessage,
         channel: Option<u32>,
-    ) -> Vec<Command> {
-        let mut commands = self.select_in(ledger, channel);
+    ) {
+        self.select_in(ledger, out, channel);
         match msg {
             MidiMessage::NoteOn { key, velocity } => {
-                if let Some(channel) = channel {
-                    // Down or pedal-held already: still this player's key, only sounded again.
-                    if !self.down.contains(&key) && !self.held.remove(&key) {
-                        ledger.acquire(channel, key);
+                if let Some(channel) = channel
+                    && let Some(instance) = out.press(channel, key, f32::from(velocity) / 127.0)
+                {
+                    let before = self.held.remove(&key).or(self.down.get(&key).copied());
+                    self.down.insert(key, instance);
+                    // Down or pedal-held on this instance already: still this player's key,
+                    // only sounded again.
+                    if before != Some(instance) {
+                        ledger.acquire(channel, key, instance);
                     }
-                    self.down.insert(key);
-                    commands.push(note(channel, key, f32::from(velocity) / 127.0, true));
                 }
             }
             MidiMessage::NoteOff { key } => {
-                if self.down.remove(&key) {
+                if let Some(instance) = self.down.remove(&key) {
                     if self.pedal {
-                        self.held.insert(key);
+                        self.held.insert(key, instance);
                     } else if let Some(channel) = self.channel {
-                        disown(ledger, channel, key, &mut commands);
+                        disown(ledger, out, channel, key, instance);
                     }
                 }
             }
             MidiMessage::Sustain(pressed) => {
                 self.pedal = pressed;
                 if !pressed {
-                    self.release(ledger, &mut commands, false);
+                    self.release(ledger, out, false);
                 }
             }
-            MidiMessage::AllNotesOff => self.release(ledger, &mut commands, true),
+            MidiMessage::AllNotesOff => self.release(ledger, out, true),
         }
-        commands
     }
 
-    fn select_in(&mut self, ledger: &mut Ledger, channel: Option<u32>) -> Vec<Command> {
-        let mut commands = Vec::new();
+    fn select_in(&mut self, ledger: &mut Ledger, out: &mut dyn Out, channel: Option<u32>) {
         if channel != self.channel {
-            self.release(ledger, &mut commands, true);
+            self.release(ledger, out, true);
             self.channel = channel;
         }
-        commands
     }
 
     /// The input is gone or switched off: releases everything.
-    fn retire_in(&mut self, ledger: &mut Ledger) -> Vec<Command> {
-        let mut commands = Vec::new();
-        self.release(ledger, &mut commands, true);
-        commands
+    fn retire_in(&mut self, ledger: &mut Ledger, out: &mut dyn Out) {
+        self.release(ledger, out, true);
     }
 
     /// Releases the notes the pedal holds, and with `keys` the ones still down as well.
-    fn release(&mut self, ledger: &mut Ledger, commands: &mut Vec<Command>, keys: bool) {
+    fn release(&mut self, ledger: &mut Ledger, out: &mut dyn Out, keys: bool) {
         let Some(channel) = self.channel else { return };
         let mut gone = std::mem::take(&mut self.held);
         if keys {
             gone.append(&mut self.down);
         }
-        for key in gone {
-            disown(ledger, channel, key, commands);
+        for (key, instance) in gone {
+            disown(ledger, out, channel, key, instance);
         }
     }
 }
 
 /// One owner no longer holds `key`: the engine hears it only if no other input does.
-fn disown(ledger: &mut Ledger, channel: u32, key: u8, commands: &mut Vec<Command>) {
-    if ledger.release(channel, key) {
-        commands.push(note(channel, key, 0.0, false));
+fn disown(ledger: &mut Ledger, out: &mut dyn Out, channel: u32, key: u8, instance: u64) {
+    if ledger.release(channel, key, instance) {
+        out.release(channel, key, instance);
     }
 }
 
@@ -345,10 +397,9 @@ impl MidiHub {
         let channel = selected(&self.selected);
         let mut bus = lock(&self.bus);
         let Bus { ledger, players } = &mut *bus;
+        let mut out = ToSink(&*self.sink);
         for player in players.values_mut() {
-            for cmd in player.select_in(ledger, channel) {
-                self.sink.send(cmd);
-            }
+            player.select_in(ledger, &mut out, channel);
         }
     }
 
@@ -368,9 +419,7 @@ impl MidiHub {
                 let mut bus = lock(&self.bus);
                 let Bus { ledger, players } = &mut *bus;
                 if let Some(mut player) = players.remove(&name) {
-                    for cmd in player.retire_in(ledger) {
-                        self.sink.send(cmd);
-                    }
+                    player.retire_in(ledger, &mut ToSink(&*self.sink));
                 }
             }
             poll.closed.push(name);
@@ -421,10 +470,88 @@ impl MidiHub {
             let Some(player) = players.get_mut(&name) else {
                 return;
             };
-            for cmd in player.handle_in(ledger, msg, channel) {
-                sink.send(cmd);
-            }
+            player.handle_in(ledger, &mut ToSink(&*sink), msg, channel);
             sink.retry();
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sink that checks, from inside every call, that the ownership lock is still held: a
+    /// timeout cannot show mutual exclusion, this does.
+    #[derive(Default)]
+    struct HoldsTheLock {
+        bus: Mutex<Option<Arc<Mutex<Bus>>>>,
+        calls: Mutex<u32>,
+    }
+
+    impl HoldsTheLock {
+        fn check(&self) {
+            let bus = self.bus.lock().unwrap();
+            assert!(
+                bus.as_ref().unwrap().try_lock().is_err(),
+                "the ownership lock was released before the engine was told"
+            );
+            *self.calls.lock().unwrap() += 1;
+        }
+    }
+
+    impl CommandSink for HoldsTheLock {
+        fn press(&self, _: u32, _: u8, _: f32) -> Option<u64> {
+            self.check();
+            Some(0)
+        }
+        fn release(&self, _: u32, _: u8, _: u64) {
+            self.check();
+        }
+        fn retry(&self) {
+            self.check();
+        }
+    }
+
+    struct TwoPorts;
+
+    impl MidiPorts for TwoPorts {
+        fn list(&self) -> Vec<String> {
+            vec!["Keys".into(), "Pads".into()]
+        }
+        fn open(&mut self, _: &str, _: MidiSink) -> Result<(), String> {
+            Ok(())
+        }
+        fn close(&mut self, _: &str) {}
+    }
+
+    #[test]
+    fn every_command_reaches_the_engine_with_the_ownership_lock_held() {
+        let sink = Arc::new(HoldsTheLock::default());
+        let selected = Arc::new(AtomicU32::new(1));
+        let mut hub = MidiHub::new(
+            Box::new(TwoPorts),
+            Arc::clone(&sink) as Arc<dyn CommandSink>,
+            Arc::clone(&selected),
+            Vec::new(),
+        );
+        *sink.bus.lock().unwrap() = Some(Arc::clone(&hub.bus));
+        hub.poll();
+        let (mut keys, mut pads) = (hub.callback("Keys"), hub.callback("Pads"));
+        // A press, a release and the pedal, through the callbacks.
+        keys(&[0x90, 60, 100]);
+        keys(&[0x80, 60, 0]);
+        pads(&[0xB0, 64, 127]);
+        pads(&[0x90, 62, 100]);
+        pads(&[0x80, 62, 0]);
+        pads(&[0xB0, 64, 0]);
+        // A release from a change of channel, from unplugging (switching off) and a retry.
+        keys(&[0x90, 64, 100]);
+        selected.store(2, Ordering::Release);
+        hub.release_stale();
+        pads(&[0x90, 65, 100]);
+        hub.set_enabled("Pads", false);
+        hub.retry_owed();
+        // Every one of them reached the sink: presses, releases and retries.
+        assert!(*sink.calls.lock().unwrap() >= 12);
     }
 }

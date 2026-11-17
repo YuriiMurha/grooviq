@@ -37,6 +37,21 @@ fn up(key: u8) -> MidiMessage {
     MidiMessage::NoteOff { key }
 }
 
+/// Lets go of a key on the channel as it is now.
+fn release_now(
+    sink: &grooviq_app::midi::ControllerSink,
+    controller: &Mutex<grooviq_engine::Controller>,
+    channel: u32,
+    key: u8,
+) {
+    let instance = controller
+        .lock()
+        .unwrap()
+        .channel_instance(ChannelId(channel))
+        .expect("a channel");
+    sink.release(channel, key, instance);
+}
+
 /// A sorted copy: the order of releases within one message is not part of the contract.
 fn sorted(mut commands: Vec<Command>) -> Vec<Command> {
     commands.sort_by_key(|c| match c {
@@ -264,9 +279,19 @@ impl Recorded {
     }
 }
 
-impl CommandSink for Recorded {
-    fn send(&self, cmd: Command) {
+impl Recorded {
+    fn push(&self, cmd: Command) {
         self.0.lock().unwrap().push(cmd);
+    }
+}
+
+impl CommandSink for Recorded {
+    fn press(&self, channel: u32, key: u8, velocity: f32) -> Option<u64> {
+        self.push(on(channel, key, velocity));
+        Some(0)
+    }
+    fn release(&self, channel: u32, key: u8, _instance: u64) {
+        self.push(off(channel, key));
     }
 }
 
@@ -562,13 +587,13 @@ mod engine_queue {
     fn a_release_the_full_queue_refused_is_delivered_when_it_has_room() {
         let (controller, mut processor) = recording_engine();
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.send(on(1, 60, 1.0));
+        sink.press(1, 60, 1.0);
         run(&mut processor, 2);
         assert_eq!(heard(&controller), [(60, true)]);
 
         // The audio thread stalls: the queue fills and the key is let go meanwhile.
         fill(&controller);
-        sink.send(off(1, 60));
+        release_now(&sink, &controller, 1, 60);
         assert_eq!(sink.owed(), 1, "kept, not dropped");
         // It is still refused while the queue is full: nothing is lost, nothing blocks.
         sink.retry();
@@ -585,16 +610,16 @@ mod engine_queue {
     fn a_note_pressed_again_cancels_the_release_still_owed() {
         let (controller, mut processor) = recording_engine();
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.send(on(1, 60, 1.0));
+        sink.press(1, 60, 1.0);
         run(&mut processor, 2);
         heard(&controller);
         fill(&controller);
-        sink.send(off(1, 60));
+        release_now(&sink, &controller, 1, 60);
         assert_eq!(sink.owed(), 1);
         run(&mut processor, 4);
         // The key goes down again before the owed release was delivered: that late off would cut
         // the new note.
-        sink.send(on(1, 60, 1.0));
+        sink.press(1, 60, 1.0);
         assert_eq!(sink.owed(), 0);
         sink.retry();
         run(&mut processor, 2);
@@ -605,7 +630,7 @@ mod engine_queue {
     fn a_release_for_a_removed_channel_is_dropped_not_kept() {
         let (controller, mut processor) = recording_engine();
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.send(on(1, 60, 1.0));
+        let instance = sink.press(1, 60, 1.0).expect("pressed");
         run(&mut processor, 2);
         controller
             .lock()
@@ -614,7 +639,7 @@ mod engine_queue {
             .unwrap();
         run(&mut processor, 2);
         // Refused because the channel is gone, not because the queue is full.
-        sink.send(off(1, 60));
+        sink.release(1, 60, instance);
         assert_eq!(sink.owed(), 0);
     }
 
@@ -622,10 +647,10 @@ mod engine_queue {
     fn an_owed_release_is_dropped_once_its_channel_is_removed() {
         let (controller, mut processor) = recording_engine();
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.send(on(1, 60, 1.0));
+        sink.press(1, 60, 1.0);
         run(&mut processor, 2);
         fill(&controller);
-        sink.send(off(1, 60));
+        release_now(&sink, &controller, 1, 60);
         assert_eq!(sink.owed(), 1);
         // The queue drains, then the channel goes before the release is retried.
         run(&mut processor, 4);
@@ -665,26 +690,23 @@ fn a_concurrent_last_release_cannot_cut_a_new_owner() {
         on_arrived: Mutex<bool>,
     }
     impl CommandSink for HoldOff {
-        fn send(&self, cmd: Command) {
-            match cmd {
-                Command::ChannelNote { on: false, .. }
-                    if std::mem::take(&mut *self.armed.lock().unwrap()) =>
-                {
-                    *self.held.lock().unwrap() = true;
-                    self.reached.notify_all();
-                    let arrived = self.on_arrived.lock().unwrap();
-                    let _ = self
-                        .on_seen
-                        .wait_timeout_while(arrived, Duration::from_millis(300), |seen| !*seen)
-                        .unwrap();
-                }
-                Command::ChannelNote { on: true, .. } => {
-                    *self.on_arrived.lock().unwrap() = true;
-                    self.on_seen.notify_all();
-                }
-                _ => {}
+        fn press(&self, channel: u32, key: u8, velocity: f32) -> Option<u64> {
+            *self.on_arrived.lock().unwrap() = true;
+            self.on_seen.notify_all();
+            self.sent.push(on(channel, key, velocity));
+            Some(0)
+        }
+        fn release(&self, channel: u32, key: u8, _instance: u64) {
+            if std::mem::take(&mut *self.armed.lock().unwrap()) {
+                *self.held.lock().unwrap() = true;
+                self.reached.notify_all();
+                let arrived = self.on_arrived.lock().unwrap();
+                let _ = self
+                    .on_seen
+                    .wait_timeout_while(arrived, Duration::from_millis(300), |seen| !*seen)
+                    .unwrap();
             }
-            self.sent.send(cmd);
+            self.sent.push(off(channel, key));
         }
     }
 
@@ -790,18 +812,18 @@ mod engine_queue_edges {
     fn the_1025th_release_is_not_forgotten() {
         let (controller, mut processor) = setup(9);
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.send(on(9, 127, 1.0));
+        sink.press(9, 127, 1.0);
         run(&mut processor);
         heard(&controller);
         fill(&controller);
         // 8 channels x 128 keys of debt, then one more on a ninth channel.
         for channel in 1..=8 {
             for key in 0..128 {
-                sink.send(off(channel, key));
+                release_now(&sink, &controller, channel, key);
             }
         }
         assert_eq!(sink.owed(), 1024);
-        sink.send(off(9, 127));
+        release_now(&sink, &controller, 9, 127);
         // The queue holds 1,024 commands, so the debt is paid over several retries.
         let mut released = false;
         for _ in 0..4 {
@@ -828,11 +850,11 @@ mod engine_queue_edges {
     fn an_owed_release_does_not_cross_to_a_channel_made_afterwards() {
         let (controller, mut processor) = setup(1);
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.send(on(1, 60, 1.0));
+        sink.press(1, 60, 1.0);
         run(&mut processor);
         heard(&controller);
         fill(&controller);
-        sink.send(off(1, 60));
+        release_now(&sink, &controller, 1, 60);
         run(&mut processor);
         // Channel 1 is removed and made again before the release is retried.
         controller
@@ -874,11 +896,11 @@ mod engine_queue_edges {
     fn a_new_debt_on_a_reused_id_forgets_the_old_channels_keys() {
         let (controller, mut processor) = setup(1);
         let sink = ControllerSink::new(Arc::clone(&controller));
-        sink.send(on(1, 60, 1.0));
+        sink.press(1, 60, 1.0);
         run(&mut processor);
         heard(&controller);
         fill(&controller);
-        sink.send(off(1, 60));
+        release_now(&sink, &controller, 1, 60);
         run(&mut processor);
         // Channel 1 is made again; C4 sounds on it from the roll, and a key played through
         // this sink is let go while the queue is full again.
@@ -899,11 +921,11 @@ mod engine_queue_edges {
             .unwrap();
         run(&mut processor);
         controller.lock().unwrap().send(on(1, 60, 1.0)).unwrap();
-        sink.send(on(1, 62, 1.0));
+        sink.press(1, 62, 1.0);
         run(&mut processor);
         heard(&controller);
         fill(&controller);
-        sink.send(off(1, 62));
+        release_now(&sink, &controller, 1, 62);
         assert_eq!(sink.owed(), 1, "only the new channel's key is owed");
         run(&mut processor);
         sink.retry();
@@ -1056,5 +1078,150 @@ mod engine_queue_edges {
         }
         assert_eq!(polls, 3);
         assert!(wait > Duration::ZERO);
+    }
+
+    #[test]
+    fn a_key_held_across_a_project_replacement_does_not_cut_the_new_note() {
+        let (controller, mut processor) = setup(1);
+        let sink = Arc::new(ControllerSink::new(Arc::clone(&controller)));
+        let ports = Fake::default();
+        ports.plug("Keys");
+        let mut hub = MidiHub::new(
+            Box::new(ports.clone()),
+            Arc::clone(&sink) as Arc<dyn CommandSink>,
+            Arc::new(AtomicU32::new(1)),
+            Vec::new(),
+        );
+        hub.poll();
+        ports.send("Keys", &[NOTE_ON, 60, 100]);
+        run(&mut processor);
+        heard(&controller);
+        // Another project is opened: channel 1 is a new channel. C4 sounds on it from the roll.
+        let state = EngineState {
+            channels: vec![ChannelSetup::synth(
+                ChannelId(1),
+                Vec::new(),
+                ChannelMix::default(),
+            )],
+            ..EngineState::default()
+        };
+        controller.lock().unwrap().load_state(state).unwrap();
+        run(&mut processor);
+        controller.lock().unwrap().send(Command::Play).unwrap();
+        controller
+            .lock()
+            .unwrap()
+            .send(Command::SetRecording { on: true })
+            .unwrap();
+        controller.lock().unwrap().send(on(1, 60, 1.0)).unwrap();
+        run(&mut processor);
+        heard(&controller);
+
+        ports.send("Keys", &[NOTE_OFF, 60, 0]);
+        run(&mut processor);
+        assert!(
+            !heard(&controller).iter().any(|e| matches!(
+                e,
+                RecordEvent::Note {
+                    key: 60,
+                    on: false,
+                    ..
+                }
+            )),
+            "the old project's key cut the new project's note"
+        );
+    }
+
+    #[test]
+    fn a_key_held_across_a_project_replacement_owes_nothing_when_the_queue_is_full() {
+        let (controller, mut processor) = setup(1);
+        let sink = Arc::new(ControllerSink::new(Arc::clone(&controller)));
+        let ports = Fake::default();
+        ports.plug("Keys");
+        let mut hub = MidiHub::new(
+            Box::new(ports.clone()),
+            Arc::clone(&sink) as Arc<dyn CommandSink>,
+            Arc::new(AtomicU32::new(1)),
+            Vec::new(),
+        );
+        hub.poll();
+        ports.send("Keys", &[NOTE_ON, 60, 100]);
+        run(&mut processor);
+        let state = EngineState {
+            channels: vec![ChannelSetup::synth(
+                ChannelId(1),
+                Vec::new(),
+                ChannelMix::default(),
+            )],
+            ..EngineState::default()
+        };
+        controller.lock().unwrap().load_state(state).unwrap();
+        run(&mut processor);
+        fill(&controller);
+        ports.send("Keys", &[NOTE_OFF, 60, 0]);
+        assert_eq!(
+            sink.owed(),
+            0,
+            "a release of the old channel is not a debt of the new one"
+        );
+    }
+
+    #[test]
+    fn a_keyboard_holding_the_old_projects_key_does_not_disown_the_new_projects_key() {
+        let (controller, mut processor) = setup(1);
+        let sink = Arc::new(ControllerSink::new(Arc::clone(&controller)));
+        let ports = Fake::default();
+        ports.plug("Keys");
+        ports.plug("Pads");
+        let mut hub = MidiHub::new(
+            Box::new(ports.clone()),
+            Arc::clone(&sink) as Arc<dyn CommandSink>,
+            Arc::new(AtomicU32::new(1)),
+            Vec::new(),
+        );
+        hub.poll();
+        ports.send("Keys", &[NOTE_ON, 60, 100]);
+        run(&mut processor);
+        // Another project opens; Pads presses C4 on its channel 1.
+        let state = EngineState {
+            channels: vec![ChannelSetup::synth(
+                ChannelId(1),
+                Vec::new(),
+                ChannelMix::default(),
+            )],
+            ..EngineState::default()
+        };
+        controller.lock().unwrap().load_state(state).unwrap();
+        run(&mut processor);
+        controller.lock().unwrap().send(Command::Play).unwrap();
+        controller
+            .lock()
+            .unwrap()
+            .send(Command::SetRecording { on: true })
+            .unwrap();
+        ports.send("Pads", &[NOTE_ON, 60, 100]);
+        run(&mut processor);
+        heard(&controller);
+        // Keys lets go of what it pressed in the old project: the new C4 sounds on.
+        ports.send("Keys", &[NOTE_OFF, 60, 0]);
+        run(&mut processor);
+        assert!(
+            heard(&controller).is_empty(),
+            "the old key cut the new note"
+        );
+        // Pads is still the new C4's owner, and its release reaches the engine.
+        ports.send("Pads", &[NOTE_OFF, 60, 0]);
+        run(&mut processor);
+        assert!(
+            heard(&controller).iter().any(|e| matches!(
+                e,
+                RecordEvent::Note {
+                    key: 60,
+                    on: false,
+                    ..
+                }
+            )),
+            "the new note was left ringing"
+        );
     }
 }
