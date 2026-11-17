@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { errorText, projectEdit, projectView, type Edit, type ProjectView } from "../api/project";
 import type { ProjectContextValue } from "./context";
 
+/** An edit whose project was replaced before its turn came: dropped without a toast. */
+const STALE = new Error("stale edit");
+
 interface Session {
   view: ProjectView | null;
   /** When the project last became clean (opened, new, saved), in ms; for "Saved N s ago". */
@@ -38,13 +41,17 @@ export function useSession(onError: (message: string) => void) {
         adopt(await enqueue(command));
         return true;
       } catch (e) {
-        onError(errorText(e));
+        if (e !== STALE) onError(errorText(e));
         return false;
       }
     },
     [adopt, enqueue, onError],
   );
-  const apply = useCallback((edit: Edit) => run(() => projectEdit(edit)), [run]);
+  const apply = useCallback(
+    (edit: Edit, still?: () => boolean) =>
+      run(() => (still && !still() ? Promise.reject(STALE) : projectEdit(edit))),
+    [run],
+  );
 
   // The project the engine holds at start.
   useEffect(() => {

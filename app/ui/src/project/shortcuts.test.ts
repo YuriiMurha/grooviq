@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shortcutFor, type ShortcutEvent } from "./shortcuts";
+import { isTypingTarget, shortcutFor, type ShortcutEvent } from "./shortcuts";
 
 const NOT_TYPING = { tagName: "DIV", isContentEditable: false, closest: () => null };
 const INPUT = { tagName: "INPUT", isContentEditable: false, closest: () => null };
@@ -65,6 +65,14 @@ describe("shortcutFor", () => {
     expect(
       shortcutFor(key(" ", { target: { ...NOT_TYPING, closest: () => ({}) } }), "Win32"),
     ).toBeNull();
+    // A device window is not a blocking dialog: Space plays from inside it, the typing keyboard
+    // plays its channel there, and a text input inside it still takes its keys.
+    const deviceWindow = { hasAttribute: (a: string) => a === "data-device-window" };
+    const inDevice = { ...NOT_TYPING, closest: () => deviceWindow };
+    expect(shortcutFor(key(" ", { target: inDevice }), "Win32")).toBe("playStop");
+    expect(isTypingTarget(inDevice)).toBe(false);
+    expect(isTypingTarget({ ...INPUT, type: "text", closest: () => deviceWindow })).toBe(true);
+    expect(isTypingTarget({ ...NOT_TYPING, closest: () => ({ hasAttribute: () => false }) })).toBe(true);
     // Holding it down must not flip play and stop over and over.
     expect(shortcutFor(key(" ", { repeat: true }), "Win32")).toBeNull();
     // With a modifier it is not play/stop.
