@@ -98,7 +98,7 @@ fn slide(channel: u32, step: u32, steps: u32, key: u8, velocity: f32) -> Note {
 /// Channel volumes keep the sum below full scale: 808 0.5, Lead 0.8, Sub 0.45, the rest 1.
 ///
 /// * "808" (synth, preset "808 Glide"): A1 (33) at step 0 for 6 steps with a slide to C2 (36) at
-///   step 4, and E1 (28) at step 16.
+///   step 4, E1 (28) at step 16, and a slide to E2 (40) at step 24, after E1 has been released.
 /// * "Keys" (synth, "Bell Keys", volume 0.8, pan -0.3): the chord A3-C4-E4 at step 0 and F3-A3-C4
 ///   at step 16, 8 steps each.
 /// * "Lead" (synth, "Trap Lead" with its glide set to 0): an 8-note line from step 8 with one
@@ -153,10 +153,14 @@ pub fn notes_m2_project(samples_dir: &Path) -> (Project, SampleFiles) {
     open.choke = 1;
 
     let mut notes = vec![
-        // 808: a held A1 that slides up to C2, then E1.
+        // 808: a held A1 that slides up to C2 (overlapping: a legato synth glides there with or
+        // without the flag), then E1.
         note(SYNTH_808, 0, 6, 33, 1.0),
         slide(SYNTH_808, 4, 2, 36, 1.0),
         note(SYNTH_808, 16, 6, 28, 0.9),
+        // After that note's release a legato synth glides only on a slide note: this one bends up
+        // from E1 to E2, a plain note there would start at E2.
+        slide(SYNTH_808, 24, 4, 40, 0.9),
     ];
     // Keys: two chords.
     notes.extend([57, 60, 64].map(|key| note(KEYS, 0, 8, key, 0.7)));
