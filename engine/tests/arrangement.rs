@@ -357,7 +357,7 @@ fn empty_one_tick_source_many_maximum_length_clips() {
             notes: vec![],
         },
     )];
-    let clips: Vec<_> = (0..1_000)
+    let clips: Vec<_> = (0..MAX_PATTERN_CLIPS as u32)
         .map(|id| clip(id, 0, MAX_SONG_TICKS, u32::MAX))
         .collect();
     assert_eq!(
