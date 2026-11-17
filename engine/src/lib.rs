@@ -25,6 +25,7 @@
 //! the panic hook may print); the processor catches it and stays silent until the controller
 //! replaces the graph.
 
+mod arrangement;
 mod channel;
 mod command;
 mod controller;
@@ -45,6 +46,10 @@ mod transport;
 
 use std::sync::Arc;
 
+pub use arrangement::{
+    ArrangementData, ArrangementError, MAX_PATTERN_CLIPS, MAX_SONG_NOTES, MAX_SONG_TICKS,
+    PatternClip, SongNote, compile_pattern_clips,
+};
 pub use command::{Command, NoteId};
 pub use controller::{ControlError, Controller, HealthEvent};
 pub use export::{ExportError, ExportOptions, ExportReport, WavFormat, export_wav};
