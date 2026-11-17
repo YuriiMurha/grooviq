@@ -703,3 +703,62 @@ test.describe("the mock follows Task 7 (fix round 1)", () => {
     expect(await recorded()).toEqual(one);
   });
 });
+
+test.describe("stuck notes at the edges (fix round 2)", () => {
+  test.use({ seed: kitSeed });
+
+  test("stop_while_idle_releases_held_keys", async ({ app, mock }) => {
+    // Nothing plays; Stop is pressed anyway (the UI never saw a playing edge).
+    await nameButton(app, "Kick").focus();
+    await app.keyboard.down("z");
+    await expect.poll(() => live(mock)).toEqual(["1:48"]);
+    await app.getByRole("button", { name: "Stop" }).click();
+    await expect.poll(() => live(mock)).toEqual([]);
+    await app.keyboard.up("z");
+    expect(await noteCalls(mock)).toEqual([
+      [1, 48, true],
+      [1, 48, false],
+    ]);
+  });
+
+  test("an_external_stop_between_live_frames_releases_held_keys", async ({ app, mock }) => {
+    const play = app.getByRole("button", { name: "Play" });
+    // The stream stalls after an idle frame; Play is pressed and a key held; the engine stops on
+    // its own; the stream resumes with a stopped frame, the same as the last one it sent.
+    await app.waitForTimeout(100);
+    await mock.eval("(m) => m.pauseLive(true)");
+    await play.click();
+    await expect(play).toHaveAttribute("aria-pressed", "true");
+    await nameButton(app, "Kick").focus();
+    await app.keyboard.down("z");
+    await expect.poll(() => live(mock)).toEqual(["1:48"]);
+    await mock.eval("(m) => { m.state.transport.playing = false; m.pauseLive(false); }");
+    await expect(play).toHaveAttribute("aria-pressed", "false");
+    await expect.poll(() => live(mock)).toEqual([]);
+    await app.keyboard.up("z");
+    // Space now plays again (the UI knows it is stopped).
+    await app.keyboard.press("Space");
+    await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(true);
+  });
+});
+
+test.describe("stuck notes when the project is replaced (fix round 2)", () => {
+  // The other project has the same channel ids, so the selection does not change with it.
+  test.use({ seed: { ...kitSeed, files: { ...kitSeed.files, "/qa/projects/Other.grooviq": { kind: "project", project: project(KIT, { 2: [4] }) } } } });
+
+  test("opening_a_project_releases_held_keys", async ({ app, mock }) => {
+    await nameButton(app, "Kick").focus();
+    await app.keyboard.down("z");
+    await expect.poll(() => live(mock)).toEqual(["1:48"]);
+    await mock.eval("(m) => m.queueDialog('/qa/projects/Other.grooviq')");
+    await app.getByRole("button", { name: "QA beat" }).click();
+    await app.getByRole("menuitem", { name: "Open…" }).click();
+    await expect.poll(() => mock.view().then((v) => v.path)).toBe("/qa/projects/Other.grooviq");
+    await expect.poll(() => live(mock)).toEqual([]);
+    await app.keyboard.up("z");
+    expect(await noteCalls(mock)).toEqual([
+      [1, 48, true],
+      [1, 48, false],
+    ]);
+  });
+});

@@ -173,6 +173,8 @@ export function installMockTauri(seed: MockSeed): void {
     live: new Map<string, number>(),
     /** Notes being recorded: "channel:key" -> where and how hard they started. */
     recordOpen: new Map<string, { tick: number; velocity: number }>(),
+    /** Live frames are held back (a stalled stream), as `pauseLive` sets. */
+    livePaused: false,
     /** `channel_param_live` calls, last value per "channel:param". */
     liveParams: new Map<string, number>(),
     dialogCalls: [] as { kind: string; options: unknown }[],
@@ -554,6 +556,7 @@ export function installMockTauri(seed: MockSeed): void {
         this.readyState = 1;
         this.onopen?.(new Event("open"));
         this.timer = setInterval(() => {
+          if (s.livePaused) return;
           this.onmessage?.(new MessageEvent("message", { data: encodeLive() }));
         }, 16);
       }, 0);
@@ -1035,6 +1038,10 @@ export function installMockTauri(seed: MockSeed): void {
       emit("tauri://drag-over", { position: { x: 400, y: 300 } });
       if (drop) emit("tauri://drag-drop", { paths, position: { x: 400, y: 300 } });
       else emit("tauri://drag-leave", null);
+    },
+    /** Holds back live frames (`true`) or lets them flow again. */
+    pauseLive: (on: boolean) => {
+      s.livePaused = on;
     },
     /** The notes as the engine holds them. */
     notes: () => clone(s.project.pattern.notes),

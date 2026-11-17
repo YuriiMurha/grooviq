@@ -57,6 +57,12 @@ export function App() {
   const [tone, setTone] = useState(false);
   const [playing, setPlaying] = useState(false);
   const playingRef = useRef(false);
+  // Bumped whenever the transport stops (or the project is replaced): the typing keyboard lets go
+  // of every held key then.
+  const [releaseKeys, setReleaseKeys] = useState(0);
+  const releaseHeld = useCallback(() => setReleaseKeys((n) => n + 1), []);
+  // The live frame counter when Play last took effect: an older "stopped" frame says nothing.
+  const playedAtFrames = useRef(-1n);
   const [latencyFrames, setLatencyFrames] = useState<number | null>(null);
   const latest = useRef<LiveFrame | null>(null);
   const nextToast = useRef(0);
@@ -79,14 +85,15 @@ export function App() {
   const session = useSession(useCallback((message: string) => toast(message, true), [toast]));
   const { view } = session;
 
-  // A project that is replaced must not go on playing.
+  // A project that is replaced must not go on playing, nor keep notes held on its channels.
   const stopIfPlaying = useCallback(async () => {
+    releaseHeld();
     if (playingRef.current) {
       await transportStop().catch(() => {});
       playingRef.current = false;
       setPlaying(false);
     }
-  }, []);
+  }, [releaseHeld]);
   const flows = useProjectFlows({
     view,
     adopt: session.adopt,
@@ -101,11 +108,24 @@ export function App() {
     setPlaying(on);
   }, []);
   const play = useCallback(() => {
-    transportPlay().then(() => setPlayingNow(true), (e: unknown) => toast(errorText(e), true));
+    transportPlay().then(
+      () => {
+        playedAtFrames.current = latest.current?.frames ?? -1n;
+        setPlayingNow(true);
+      },
+      (e: unknown) => toast(errorText(e), true),
+    );
   }, [setPlayingNow, toast]);
   const stop = useCallback(() => {
-    transportStop().then(() => setPlayingNow(false), (e: unknown) => toast(errorText(e), true));
-  }, [setPlayingNow, toast]);
+    // Every Stop that succeeds lets go of held keys, whether or not the UI thought it played.
+    transportStop().then(
+      () => {
+        setPlayingNow(false);
+        releaseHeld();
+      },
+      (e: unknown) => toast(errorText(e), true),
+    );
+  }, [setPlayingNow, releaseHeld, toast]);
 
   // The window title: "name — Grooviq", with a bullet while there are unsaved changes.
   const projectName = view?.name;
@@ -232,6 +252,13 @@ export function App() {
           if (before?.playing !== frame.playing) {
             playingRef.current = frame.playing;
             setPlaying(frame.playing);
+            if (!frame.playing) releaseHeld();
+          } else if (!frame.playing && playingRef.current && frame.frames > playedAtFrames.current) {
+            // The engine stopped while the stream said nothing in between (a stall, a stop the UI
+            // did not ask for): the UI's own state is what disagrees, so it follows the frame.
+            playingRef.current = false;
+            setPlaying(false);
+            releaseHeld();
           }
           if (before?.outputLatencyFrames !== frame.outputLatencyFrames) {
             setLatencyFrames(frame.outputLatencyFrames);
@@ -244,7 +271,7 @@ export function App() {
       cancelled = true;
       disconnect?.();
     };
-  }, [toast]);
+  }, [toast, releaseHeld]);
 
   const current = outputs.find((o) => o.current) ?? null;
   const latencyMs =
@@ -341,7 +368,7 @@ export function App() {
           </div>
         </header>
         <main className="stage">
-          {view && <Workspace latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} playing={playing} />}
+          {view && <Workspace latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
         </main>
         <HintBar />
         <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />

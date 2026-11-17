@@ -4,21 +4,21 @@ import { errorText } from "../api/project";
 import { modalIsOpen } from "../project/shortcuts";
 import { DEFAULT_BASE, HeldKeys, accepts, keyFor, shiftOctave, type LiveNote } from "./typingKeyboard";
 
-/** The transport as the typing keyboard needs it: a stop or the end of a recording releases
- * every held key. */
+/** The transport as the typing keyboard needs it: every change of `release` (each stop, a
+ * replaced project) and the end of a recording release every held key. */
 export interface TransportEdges {
-  playing: boolean;
+  release: number;
   recording: boolean;
 }
 
 /** Plays `channel` from the computer keyboard while `on`. Every held key is released when the
  * window loses focus or is hidden, when it is switched off, when the channel changes (on the old
- * channel), when playback stops or recording ends (however that happened), and on unmount. */
+ * channel), when the transport stops (`release` changes) or recording ends, and on unmount. */
 export function useTypingKeyboard(
   on: boolean,
   channel: number | null,
   onError: (message: string) => void,
-  { playing, recording }: TransportEdges,
+  { release, recording }: TransportEdges,
 ) {
   const held = useRef(new HeldKeys());
   const base = useRef(DEFAULT_BASE);
@@ -38,13 +38,13 @@ export function useTypingKeyboard(
     for (const n of held.current.releaseAll()) send(n, false);
   }, [send]);
 
-  // Playback stopped or recording ended: the notes held across the edge end there.
-  const was = useRef({ playing, recording });
+  // The transport stopped or recording ended: the notes held across the edge end there.
+  const was = useRef({ release, recording });
   useEffect(() => {
     const before = was.current;
-    was.current = { playing, recording };
-    if ((before.playing && !playing) || (before.recording && !recording)) releaseAll();
-  }, [playing, recording, releaseAll]);
+    was.current = { release, recording };
+    if (before.release !== release || (before.recording && !recording)) releaseAll();
+  }, [release, recording, releaseAll]);
 
   // Releases whatever sounds when `on` or `channel` change and on unmount.
   useEffect(() => {
