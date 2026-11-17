@@ -1,15 +1,22 @@
 //! Undo and redo of note changes to the current pattern.
 //!
 //! Every note change (a [`crate::notes::NotesEdit`], one step edit, one recorded take) is kept
-//! as a [`NoteChange`]. A recorded take is committed poll by poll; its commits join one open
-//! step until the take ends (see [`NoteHistory::record`]). Each step holds the changed notes
-//! as they were and as they became, by id, and the length change it made, if any. Undo puts
-//! the old notes back under their own ids; redo puts the new ones back. Ids are never handed out twice (`Pattern::take_note_id` only moves
-//! forward), so a note brought back can never meet another note with its id. The history is
-//! per project and never saved.
+//! as a [`NoteChange`]: the changed notes as they were and as they became, by id. A recorded
+//! take is committed poll by poll; its commits join its step (see [`NoteHistory::record`]).
+//! Undo puts the old notes back under their own ids; redo puts the new ones back. Ids are
+//! never handed out twice (`Pattern::take_note_id` only moves forward), so a note brought back
+//! can never meet another note with its id. The history is per project and never saved.
+//!
+//! The pattern's length is kept apart from the notes, as a log ([`NoteHistory`]): the length
+//! when the history began, then, in order, every commit's growth (owned by its step) and every
+//! length set by hand. The length is always the log played through with the growth of the
+//! steps in effect, so undoing a take whose growth is interleaved with newer takes leaves the
+//! length the remaining notes produce, undoing everything leaves the first length (or the last
+//! one set by hand), and redo puts the same growth back in the same place.
 
 use crate::model::{MAX_NOTES_PER_PATTERN, Note, Pattern};
 use crate::session::SessionError;
+use grooviq_engine::STEP_TICKS;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// The most note changes undo goes back through; the oldest drops past it.
@@ -18,16 +25,33 @@ pub const MAX_UNDO: usize = 200;
 /// pattern would hold 40 million. The oldest changes drop past it; the newest always stays.
 pub const MAX_UNDO_NOTES: usize = 2_000_000;
 
-/// One note change to a pattern, and so its exact inverse.
+/// One note change to a pattern, and so its exact inverse (its length is in the log).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct NoteChange {
     /// The changed notes as they were: deleted ones in full, and updated ones' old values.
     before: Vec<Note>,
     /// The changed notes as they became: added ones in full, and updated ones' new values.
     after: Vec<Note>,
-    /// The pattern's length before and after, if the change itself moved it. A length set by
-    /// hand is not a note change and is never part of one.
-    length: Option<(u32, u32)>,
+}
+
+/// What a commit did to the length: the latest end among the notes it added or moved, and the
+/// length (in steps) that end grows the pattern to (`notes::apply`'s rule, with the bar of the
+/// time). The pattern grows to `to` if `end` is past its end then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Growth {
+    pub end: u32,
+    pub to: u32,
+}
+
+impl Growth {
+    /// The length after this growth, from `steps`.
+    fn from(self, steps: u32) -> u32 {
+        if self.end > steps * STEP_TICKS {
+            steps.max(self.to)
+        } else {
+            steps
+        }
+    }
 }
 
 impl NoteChange {
@@ -65,21 +89,12 @@ impl NoteChange {
         }
         before.sort_unstable_by_key(|n| n.id);
         after.sort_unstable_by_key(|n| n.id);
-        Some(Self {
-            before,
-            after,
-            length: (old.steps != new.steps).then_some((old.steps, new.steps)),
-        })
+        Some(Self { before, after })
     }
 
     /// Folds `next`, a later note change, into this one if `next` only adds notes newer than
     /// every note this change touched (what a recording commit does): the added notes join
     /// `after`. Otherwise changes nothing and gives `next` back.
-    ///
-    /// A length change of `next` joins this one's when it carries on from it (the length
-    /// before `next` is the one this change left); when the length was set by hand in
-    /// between, only `next`'s own change is kept, so undo never takes back a length set by
-    /// hand.
     fn absorb(&mut self, next: Self) -> Result<(), Self> {
         let newest = self.before.iter().chain(&self.after).map(|n| n.id).max();
         let fresh = next
@@ -91,11 +106,6 @@ impl NoteChange {
         }
         // Ids rise as notes are added: `after` stays sorted.
         self.after.extend(next.after);
-        self.length = match (self.length, next.length) {
-            (Some((first, left)), Some((from, to))) if from == left => Some((first, to)),
-            (_, Some(moved)) => Some(moved),
-            (own, None) => own,
-        };
         Ok(())
     }
 
@@ -104,13 +114,11 @@ impl NoteChange {
         self.before.len() + self.after.len()
     }
 
-    /// Takes `p` back to before the change (`undo`), or forward to after it.
-    ///
-    /// The notes it takes out are found by id, and the ones it puts back keep theirs. The
-    /// length moves only if the change moved it and it is still the one the change left: a
-    /// length set by hand since then stays. Refused, with `p` half changed (callers work on a copy), if the notes would
-    /// pass [`MAX_NOTES_PER_PATTERN`] (they cannot: the history is cleared by every change it
-    /// does not hold).
+    /// Takes `p`'s notes back to before the change (`undo`), or forward to after it; the
+    /// length is [`NoteHistory::length_after`]'s. The notes it takes out are found by id, and
+    /// the ones it puts back keep theirs. Refused, with `p` half changed (callers work on a
+    /// copy), if the notes would pass [`MAX_NOTES_PER_PATTERN`] (they cannot: the history is
+    /// cleared by every change it does not hold).
     pub(crate) fn apply(&self, p: &mut Pattern, undo: bool) -> Result<(), SessionError> {
         let (take, put) = if undo {
             (&self.after, &self.before)
@@ -129,28 +137,31 @@ impl NoteChange {
         p.notes.extend_from_slice(put);
         // Ids rise in the order notes are added: back in place, the pattern is as it was.
         p.notes.sort_unstable_by_key(|n| n.id);
-        if let Some((before, after)) = self.length {
-            let (from, to) = if undo {
-                (after, before)
-            } else {
-                (before, after)
-            };
-            if p.steps == from {
-                p.steps = to;
-            }
-        }
         Ok(())
     }
 }
 
-/// One undo step, and the recorded take it holds while it is open to that take's later notes.
+/// One undo step: its change, its id in the length log, and the recorded take it holds while
+/// it is open to that take's later notes.
 #[derive(Debug)]
 struct Step {
     change: NoteChange,
+    id: u64,
     take: Option<u32>,
 }
 
-/// The current pattern's note changes, for undo and redo. Per project, never saved.
+/// One entry of the length log.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Length {
+    /// A commit's growth, owned by step `owner` (`None`: a step that dropped out of the
+    /// history, whose growth stays for good).
+    Grew { owner: Option<u64>, growth: Growth },
+    /// A length set by hand. Undo never takes it back.
+    Set(u32),
+}
+
+/// The current pattern's note changes, for undo and redo, and its length log (see the module
+/// docs). Per project, never saved.
 ///
 /// A recorded take's step stays open to the take's later notes (a note can complete long
 /// after its take's other notes, below a newer take's step) until any other note change, an
@@ -160,9 +171,14 @@ struct Step {
 #[derive(Debug, Default)]
 pub struct NoteHistory {
     undo: VecDeque<Step>,
-    redo: Vec<NoteChange>,
+    redo: Vec<Step>,
     /// Notes held by `undo` and `redo` together.
     notes: usize,
+    /// The length the log starts from (when the history began, then with the entries that can
+    /// no longer change folded in).
+    base: u32,
+    log: Vec<Length>,
+    next_id: u64,
 }
 
 impl NoteHistory {
@@ -179,38 +195,80 @@ impl NoteHistory {
         *self = Self::default();
     }
 
-    /// Records a new change, which closes every open take step: redo is cleared, and the
-    /// oldest changes drop past [`MAX_UNDO`] or [`MAX_UNDO_NOTES`].
-    pub(crate) fn push(&mut self, change: NoteChange) {
-        self.close();
-        self.add(change, None);
+    fn empty(&self) -> bool {
+        self.undo.is_empty() && self.redo.is_empty()
     }
 
-    /// Records a commit of recorded take `take`: it joins that take's open step, wherever it
-    /// sits (a take is one step however many commits it takes), or opens a new step.
-    pub(crate) fn record(&mut self, mut change: NoteChange, take: u32) {
+    /// Records a new change, made from a pattern `steps` long and growing it by `growth`; it
+    /// closes every open take step. Redo is cleared, and the oldest changes drop past
+    /// [`MAX_UNDO`] or [`MAX_UNDO_NOTES`].
+    pub(crate) fn push(&mut self, change: NoteChange, steps: u32, growth: Option<Growth>) {
+        self.close();
+        let id = self.add(change, None, steps);
+        self.grew(id, growth);
+    }
+
+    /// Records a commit of recorded take `take` (made from a pattern `steps` long, growing it
+    /// by `growth`): it joins that take's open step, wherever it sits (a take is one step
+    /// however many commits it takes), or opens a new step.
+    pub(crate) fn record(
+        &mut self,
+        mut change: NoteChange,
+        take: u32,
+        steps: u32,
+        growth: Option<Growth>,
+    ) {
         if let Some(step) = self.undo.iter_mut().rev().find(|s| s.take == Some(take)) {
             let size = change.size();
             match step.change.absorb(change) {
                 Ok(()) => {
+                    let id = step.id;
                     self.notes += size;
+                    self.grew(id, growth);
                     self.trim();
                     return;
                 }
                 Err(back) => change = back,
             }
         }
-        self.add(change, Some(take));
+        let id = self.add(change, Some(take), steps);
+        self.grew(id, growth);
     }
 
-    /// Adds a step (open to `take`, if any): redo is cleared (it is a note change), and the
-    /// history trimmed.
-    fn add(&mut self, change: NoteChange, take: Option<u32>) {
-        self.notes -= self.redo.iter().map(NoteChange::size).sum::<usize>();
-        self.redo.clear();
+    /// The pattern's length was set by hand to `steps`: no undo takes it back.
+    pub(crate) fn set_length(&mut self, steps: u32) {
+        if !self.empty() {
+            self.log.push(Length::Set(steps));
+        }
+    }
+
+    fn grew(&mut self, owner: u64, growth: Option<Growth>) {
+        if let Some(growth) = growth {
+            self.log.push(Length::Grew {
+                owner: Some(owner),
+                growth,
+            });
+        }
+    }
+
+    /// Adds a step (open to `take`, if any) and returns its id: redo is cleared (it is a note
+    /// change, and the growth of what it held leaves the log), and the history trimmed. The
+    /// first step starts the log at `steps`.
+    fn add(&mut self, change: NoteChange, take: Option<u32>, steps: u32) -> u64 {
+        if self.empty() {
+            self.base = steps;
+            self.log.clear();
+        }
+        self.notes -= self.redo.iter().map(|s| s.change.size()).sum::<usize>();
+        let gone: HashSet<u64> = self.redo.drain(..).map(|s| s.id).collect();
+        self.log
+            .retain(|l| !matches!(l, Length::Grew { owner: Some(o), .. } if gone.contains(o)));
+        let id = self.next_id;
+        self.next_id += 1;
         self.notes += change.size();
-        self.undo.push_back(Step { change, take });
+        self.undo.push_back(Step { change, id, take });
         self.trim();
+        id
     }
 
     /// Closes every open take step: a take's later notes start a new step.
@@ -220,13 +278,34 @@ impl NoteHistory {
         }
     }
 
-    /// Drops the oldest changes past [`MAX_UNDO`] or [`MAX_UNDO_NOTES`]; the newest stays.
+    /// Drops the oldest changes past [`MAX_UNDO`] or [`MAX_UNDO_NOTES`] (the newest stays):
+    /// their growth stays for good, folded into the log's start.
     fn trim(&mut self) {
+        let mut dropped = HashSet::new();
         while self.undo.len() > MAX_UNDO || (self.notes > MAX_UNDO_NOTES && self.undo.len() > 1) {
             if let Some(old) = self.undo.pop_front() {
                 self.notes -= old.change.size();
+                dropped.insert(old.id);
             }
         }
+        if dropped.is_empty() {
+            return;
+        }
+        for l in &mut self.log {
+            if let Length::Grew { owner, .. } = l
+                && owner.is_some_and(|o| dropped.contains(&o))
+            {
+                *owner = None;
+            }
+        }
+        // Entries no step can take back any more: play them into the start.
+        let fixed = self
+            .log
+            .iter()
+            .take_while(|l| !matches!(l, Length::Grew { owner: Some(_), .. }))
+            .count();
+        self.base = play(self.base, &self.log[..fixed], |_| true);
+        self.log.drain(..fixed);
     }
 
     /// The change undo would take back.
@@ -236,41 +315,51 @@ impl NoteHistory {
 
     /// The change redo would make again.
     pub(crate) fn next_redo(&self) -> Option<&NoteChange> {
-        self.redo.last()
+        self.redo.last().map(|s| &s.change)
     }
 
-    /// The change from [`Self::next_undo`] was undone, with the pattern `steps` long before it
-    /// was (open takes close): redo can make it again.
-    ///
-    /// If it moved the length but the length is no longer the one it left, an older take's
-    /// late note (below it) grew the pattern further from there: that step now owns the growth
-    /// from this one's start, so undoing it later goes back to the length before both.
-    pub(crate) fn undone(&mut self, steps: u32) {
-        self.close();
-        let Some(step) = self.undo.pop_back() else {
-            return;
-        };
-        if let Some((start, left)) = step.change.length
-            && steps != left
-            && let Some(below) = self
-                .undo
-                .iter_mut()
-                .rev()
-                .find(|s| s.change.length == Some((left, steps)))
-        {
-            below.change.length = Some((start, steps));
+    /// The pattern's length once [`Self::next_undo`] is undone (`undo`), or [`Self::next_redo`]
+    /// made again: the log played through with the growth of every step in effect then.
+    pub(crate) fn length_after(&self, undo: bool) -> u32 {
+        let mut live: HashSet<u64> = self.undo.iter().map(|s| s.id).collect();
+        if undo {
+            if let Some(top) = self.undo.back() {
+                live.remove(&top.id);
+            }
+        } else if let Some(top) = self.redo.last() {
+            live.insert(top.id);
         }
-        self.redo.push(step.change);
+        play(self.base, &self.log, |owner| live.contains(&owner))
+    }
+
+    /// The change from [`Self::next_undo`] was undone (open takes close): redo can make it
+    /// again.
+    pub(crate) fn undone(&mut self) {
+        self.close();
+        if let Some(step) = self.undo.pop_back() {
+            self.redo.push(step);
+        }
     }
 
     /// The change from [`Self::next_redo`] was made again (open takes close): undo can take
     /// it back.
     pub(crate) fn redone(&mut self) {
         self.close();
-        if let Some(change) = self.redo.pop() {
-            self.undo.push_back(Step { change, take: None });
+        if let Some(mut step) = self.redo.pop() {
+            step.take = None;
+            self.undo.push_back(step);
         }
     }
+}
+
+/// Plays `log` from `base`: every length set by hand, and the growth of the steps `live` says
+/// are in effect (and of steps that left the history).
+fn play(base: u32, log: &[Length], live: impl Fn(u64) -> bool) -> u32 {
+    log.iter().fold(base, |steps, l| match *l {
+        Length::Set(set) => set,
+        Length::Grew { owner, growth } if owner.is_none_or(&live) => growth.from(steps),
+        Length::Grew { .. } => steps,
+    })
 }
 
 #[cfg(test)]
@@ -293,16 +382,22 @@ mod tests {
         NoteChange {
             before: Vec::new(),
             after: (0..notes as u32).map(note).collect(),
-            length: None,
         }
     }
 
-    fn add(ids: std::ops::Range<u32>, length: Option<(u32, u32)>) -> NoteChange {
+    fn add(ids: std::ops::Range<u32>) -> NoteChange {
         NoteChange {
             before: Vec::new(),
             after: ids.map(note).collect(),
-            length,
         }
+    }
+
+    /// Growth to `to` steps by a note ending one tick past `from` steps.
+    fn grow(from: u32, to: u32) -> Option<Growth> {
+        Some(Growth {
+            end: from * STEP_TICKS + 1,
+            to,
+        })
     }
 
     #[test]
@@ -310,26 +405,26 @@ mod tests {
         let mut h = NoteHistory::default();
         let big = MAX_UNDO_NOTES / 4;
         for _ in 0..6 {
-            h.push(change(big));
+            h.push(change(big), 16, None);
         }
         assert_eq!(h.undo.len(), 4);
         assert_eq!(h.notes, 4 * big);
         // One change over the whole budget still stays, alone.
-        h.push(change(MAX_UNDO_NOTES + 1));
+        h.push(change(MAX_UNDO_NOTES + 1), 16, None);
         assert_eq!(h.undo.len(), 1);
         assert_eq!(h.notes, MAX_UNDO_NOTES + 1);
         // Moving between the stacks keeps the count; a new change drops redo's notes.
-        h.push(change(3));
+        h.push(change(3), 16, None);
         assert_eq!(h.undo.len(), 1, "the big one dropped");
-        h.undone(16);
+        h.undone();
         assert_eq!(h.notes, 3);
-        h.push(change(2));
+        h.push(change(2), 16, None);
         assert_eq!((h.notes, h.redo.len()), (2, 0));
         // The live fixture's case (app/ui/e2e/m2-undo.e2e.ts): eleven edits of all 100,000
         // notes hold 200,000 changed notes each, and ten stay.
         h.clear();
         for _ in 0..11 {
-            h.push(change(200_000));
+            h.push(change(200_000), 16, None);
         }
         assert_eq!(h.undo.len(), 10);
     }
@@ -337,46 +432,104 @@ mod tests {
     #[test]
     fn a_take_folds_only_its_own_fresh_additions() {
         let mut h = NoteHistory::default();
-        h.record(add(1..3, None), 7);
-        h.record(add(3..5, None), 7);
+        h.record(add(1..3), 7, 16, None);
+        h.record(add(3..5), 7, 16, None);
         assert_eq!(h.undo.len(), 1);
         assert_eq!(h.undo[0].change.after.len(), 4);
         assert_eq!(h.notes, 4);
         // An addition under an id the take already holds is not a fresh one.
-        h.record(add(4..6, None), 7);
+        h.record(add(4..6), 7, 16, None);
         assert_eq!(h.undo.len(), 2);
         assert_eq!(h.undo[0].change.after.len(), 4);
         // Another take opens its own step.
-        h.record(add(6..7, None), 8);
+        h.record(add(6..7), 8, 16, None);
         assert_eq!(h.undo.len(), 3);
         // A change that is not a pure addition never folds in: it opens its own step (and the
         // take goes on there).
-        let mut update = add(1..2, None);
+        let mut update = add(1..2);
         update.before = vec![note(1)];
-        h.record(update, 8);
+        h.record(update, 8, 16, None);
         assert_eq!(h.undo.len(), 4);
-        h.record(add(9..10, None), 8);
+        h.record(add(9..10), 8, 16, None);
         assert_eq!(h.undo.len(), 4);
         // Any other change closes the take: its next commit opens a step of its own.
-        h.push(add(10..11, None));
-        h.record(add(11..12, None), 8);
+        h.push(add(10..11), 16, None);
+        h.record(add(11..12), 8, 16, None);
         assert_eq!(h.undo.len(), 6);
     }
 
     #[test]
-    fn a_take_owns_only_the_length_changes_it_made() {
-        let fold = |first: Option<(u32, u32)>, next: Option<(u32, u32)>| {
-            let mut c = add(1..2, first);
-            c.absorb(add(2..3, next)).unwrap();
-            c.length
-        };
-        assert_eq!(fold(None, None), None);
-        assert_eq!(fold(Some((16, 32)), None), Some((16, 32)));
-        assert_eq!(fold(None, Some((16, 32))), Some((16, 32)));
-        // Growing on from its own growth: one change from the take's start.
-        assert_eq!(fold(Some((16, 32)), Some((32, 48))), Some((16, 48)));
-        // The length was set by hand in between: only the later growth is the take's.
-        assert_eq!(fold(Some((16, 32)), Some((64, 80))), Some((64, 80)));
+    fn the_length_is_the_log_played_with_the_steps_in_effect() {
+        // Take A grows 16 -> 32, take B 32 -> 48, A's late note 48 -> 64, C 64 -> 80, A's
+        // next late note 80 -> 96 (the review's interleaving).
+        let mut h = NoteHistory::default();
+        h.record(add(1..2), 1, 16, grow(16, 32));
+        h.record(add(2..3), 2, 32, grow(32, 48));
+        h.record(add(3..4), 1, 48, grow(48, 64));
+        h.record(add(4..5), 3, 64, grow(64, 80));
+        h.record(add(5..6), 1, 80, grow(80, 96));
+        assert_eq!(h.undo.len(), 3);
+        // Undoing C: A's growth on top of it still needs 96; then B; then A gives 16.
+        let mut lengths = Vec::new();
+        while h.can_undo() {
+            lengths.push(h.length_after(true));
+            h.undone();
+        }
+        assert_eq!(lengths, vec![96, 96, 16]);
+        // Redo walks the same lengths back.
+        let mut back = Vec::new();
+        while h.can_redo() {
+            back.push(h.length_after(false));
+            h.redone();
+        }
+        assert_eq!(back, vec![96, 96, 96]);
+    }
+
+    #[test]
+    fn a_growth_that_did_not_grow_counts_once_an_earlier_one_is_undone() {
+        let mut h = NoteHistory::default();
+        h.push(add(1..2), 16, grow(16, 32));
+        // A note past 16 steps that did not grow the 32-step pattern.
+        h.push(add(2..3), 32, grow(16, 32));
+        h.undone();
+        h.undone();
+        // Redo only the second: its note still needs 32 steps.
+        h.redo.swap(0, 1);
+        assert_eq!(h.length_after(false), 32);
+    }
+
+    #[test]
+    fn a_length_set_by_hand_stays_and_redo_plays_over_it() {
+        let mut h = NoteHistory::default();
+        h.record(add(1..2), 1, 16, grow(16, 32));
+        h.set_length(64);
+        h.record(add(2..3), 1, 64, grow(64, 80));
+        assert_eq!(h.length_after(true), 64, "the length set by hand stays");
+        h.undone();
+        assert_eq!(h.length_after(false), 80);
+        // Set by hand after the undo: redo keeps it (the redone note lies past the end,
+        // stored and unplayed, as after any shortening).
+        h.set_length(8);
+        assert_eq!(h.length_after(false), 8);
+    }
+
+    #[test]
+    fn dropped_steps_keep_their_growth_for_good() {
+        let mut h = NoteHistory::default();
+        h.push(add(0..1), 16, grow(16, 32));
+        for i in 1..=MAX_UNDO as u32 {
+            h.push(add(i..i + 1), 32, None);
+        }
+        assert_eq!(h.undo.len(), MAX_UNDO);
+        assert_eq!(
+            h.base, 32,
+            "the first step's growth is folded into the start"
+        );
+        assert!(h.log.is_empty());
+        while h.can_undo() {
+            assert_eq!(h.length_after(true), 32);
+            h.undone();
+        }
     }
 
     #[test]

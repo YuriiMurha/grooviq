@@ -1140,3 +1140,371 @@ fn a_redo_closes_an_older_take_to_its_late_notes() {
     assert!(!keys(&session).contains(&71));
     assert!(keys(&session).contains(&72) && keys(&session).contains(&70));
 }
+
+/// A whole note of `take` (key `key`, `steps` steps long from tick 0), as the engine stamps it.
+fn inject(session: &mut Session, ch: u32, take: u32, key: u8, steps: u32) {
+    let note = |on: bool, tick: u64| RecordEvent::Note {
+        channel: grooviq_engine::ChannelId(ch),
+        key,
+        velocity: 0.8,
+        on,
+        tick,
+        position: 0,
+        take,
+    };
+    let events = [note(true, 0), note(false, u64::from(steps * 240))];
+    session
+        .collect_recorded(&events, Instant::now())
+        .revision
+        .unwrap();
+}
+
+/// The pattern as undo and redo must restore it: its notes, length and id counter.
+fn state(session: &Session) -> (Vec<Note>, u32, u32) {
+    let p = &session.project().patterns[0];
+    (p.notes.clone(), p.steps, p.next_note_id)
+}
+
+#[test]
+fn repeated_late_growth_under_newer_takes_undoes_to_the_start() {
+    // The review's stamped case: A grows to 32, B to 48, A again to 64, C to 80, A to 96.
+    let (mut s, c, mut p, ch, before) = three_notes();
+    s.set_recording(true).unwrap();
+    start_take(&mut s, &c, &mut p);
+    inject(&mut s, ch, 101, 70, 32);
+    inject(&mut s, ch, 102, 71, 48);
+    inject(&mut s, ch, 101, 72, 64);
+    inject(&mut s, ch, 103, 73, 80);
+    inject(&mut s, ch, 101, 74, 96);
+    let last = state(&s);
+    assert_eq!(s.view().pattern.steps, 96);
+    let mut lengths = Vec::new();
+    for _ in 0..3 {
+        undo(&mut s);
+        lengths.push(s.view().pattern.steps);
+    }
+    assert_eq!(notes(&s), before);
+    assert_eq!(
+        lengths,
+        vec![96, 96, 16],
+        "A's late notes need 96 until A goes"
+    );
+    for _ in 0..3 {
+        redo(&mut s);
+    }
+    assert_eq!(state(&s), last);
+}
+
+#[test]
+fn three_takes_round_trip_byte_for_byte() {
+    let (mut s, c, mut p, ch, _) = three_notes();
+    s.set_recording(true).unwrap();
+    start_take(&mut s, &c, &mut p);
+    inject(&mut s, ch, 101, 70, 1);
+    inject(&mut s, ch, 102, 71, 32);
+    inject(&mut s, ch, 103, 72, 48);
+    inject(&mut s, ch, 101, 73, 64);
+    let mut states = vec![state(&s)];
+    for _ in 0..3 {
+        undo(&mut s);
+        states.push(state(&s));
+    }
+    assert_eq!(s.view().pattern.steps, 16);
+    for i in (0..3).rev() {
+        redo(&mut s);
+        assert_eq!(state(&s), states[i], "redo to state {i}");
+    }
+}
+
+#[test]
+fn a_length_set_by_hand_between_takes_stays_through_undo_and_redo() {
+    let (mut s, c, mut p, ch, before) = three_notes();
+    s.set_recording(true).unwrap();
+    start_take(&mut s, &c, &mut p);
+    inject(&mut s, ch, 101, 70, 32);
+    inject(&mut s, ch, 102, 71, 48);
+    s.apply(Edit::SetPatternLength { steps: 64 }, Instant::now())
+        .unwrap();
+    inject(&mut s, ch, 103, 72, 80);
+    inject(&mut s, ch, 101, 73, 96);
+    let mut states = vec![state(&s)];
+    for _ in 0..3 {
+        undo(&mut s);
+        states.push(state(&s));
+    }
+    assert_eq!(notes(&s), before);
+    assert_eq!(s.view().pattern.steps, 64, "the length set by hand");
+    for i in (0..3).rev() {
+        redo(&mut s);
+        assert_eq!(state(&s), states[i], "redo to state {i}");
+    }
+}
+
+#[test]
+fn a_shorter_length_set_by_hand_after_a_take_stays() {
+    let (mut s, controller, mut processor, ch, before) = three_notes();
+    s.set_recording(true).unwrap();
+    start_take(&mut s, &controller, &mut processor);
+    render(&mut processor, 1_240);
+    s.live_note(ch, 80, 0.8, true).unwrap();
+    render(&mut processor, 120);
+    s.live_note(ch, 80, 0.0, false).unwrap();
+    render(&mut processor, 2);
+    collect(&mut s, &controller).revision.unwrap();
+    let after = notes(&s);
+    s.apply(Edit::SetPatternLength { steps: 1 }, Instant::now())
+        .unwrap();
+    undo(&mut s);
+    assert_eq!(notes(&s), before);
+    assert_eq!(s.view().pattern.steps, 1);
+    redo(&mut s);
+    assert_eq!(notes(&s), after);
+    assert_eq!(s.view().pattern.steps, 1);
+    // Notes past the end stay stored and unplayed.
+    assert!(
+        compile_pattern(s.project(), &s.project().patterns[0])
+            .notes
+            .iter()
+            .all(|n| n.tick < 240)
+    );
+}
+
+#[test]
+fn an_edit_round_trips_exactly() {
+    let (mut s, _, _, ch, before) = three_notes();
+    let mut n = before[1];
+    n.tick = 5_000;
+    n.length = 719;
+    n.key = 77;
+    n.slide = true;
+    n.velocity = f32::from_bits(0x3f00_0001);
+    edit_notes(
+        &mut s,
+        vec![melodic(ch, 6_000, 80)],
+        vec![n],
+        vec![before[0].id],
+    );
+    let after = state(&s);
+    undo(&mut s);
+    assert_eq!(notes(&s), before);
+    assert_eq!(s.view().pattern.steps, 16);
+    redo(&mut s);
+    assert_eq!(state(&s), after);
+}
+
+#[test]
+fn repeated_late_growth_on_the_real_engine_undoes_to_the_start() {
+    // The review's engine case: take A's notes complete across B's and C's growth.
+    let (mut s, c, mut p, ch, before) = three_notes();
+    s.set_recording(true).unwrap();
+    start_take(&mut s, &c, &mut p);
+    for key in [70, 71, 74] {
+        s.live_note(ch, key, 0.8, true).unwrap();
+    }
+    render(&mut p, 1_300);
+    s.live_note(ch, 70, 0.0, false).unwrap();
+    render(&mut p, 2);
+    collect(&mut s, &c).revision.unwrap();
+    assert_eq!(s.view().pattern.steps, 32);
+    s.set_recording(true).unwrap();
+    s.live_note(ch, 72, 0.8, true).unwrap();
+    render(&mut p, 2_600);
+    s.live_note(ch, 72, 0.0, false).unwrap();
+    render(&mut p, 2);
+    collect(&mut s, &c).revision.unwrap();
+    s.live_note(ch, 71, 0.0, false).unwrap();
+    render(&mut p, 2);
+    collect(&mut s, &c).revision.unwrap();
+    s.set_recording(true).unwrap();
+    s.live_note(ch, 73, 0.8, true).unwrap();
+    render(&mut p, 2_600);
+    s.live_note(ch, 73, 0.0, false).unwrap();
+    render(&mut p, 2);
+    collect(&mut s, &c).revision.unwrap();
+    render(&mut p, 1_300);
+    s.live_note(ch, 74, 0.0, false).unwrap();
+    render(&mut p, 2);
+    collect(&mut s, &c).revision.unwrap();
+    let last = state(&s);
+    let mut lengths = vec![last.1];
+    for _ in 0..3 {
+        undo(&mut s);
+        lengths.push(s.view().pattern.steps);
+    }
+    assert_eq!(notes(&s), before);
+    assert_eq!(lengths[3], 16, "all takes undone; lengths {lengths:?}");
+    for _ in 0..3 {
+        redo(&mut s);
+    }
+    assert_eq!(state(&s), last);
+}
+
+/// One block, then the control thread's upkeep (the app runs it every 250 ms): the patterns
+/// the engine replaced are freed, so a long run never fills its queues.
+fn tick(controller: &Mutex<Controller>, processor: &mut AudioProcessor) {
+    render(processor, 1);
+    controller.lock().unwrap().check_health();
+}
+
+/// A small seeded generator (xorshift64*), so the sequence test is repeatable.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// A seeded mix of takes, late notes, roll edits, lengths set by hand, undo and redo. After
+/// every step: undoing everything leaves the first notes and the length from before the
+/// history (or the last one set by hand), and redoing everything is the pattern byte for
+/// byte; undo then redo of the newest step is the pattern byte for byte.
+#[test]
+fn a_generated_sequence_keeps_the_undo_invariants() {
+    for seed in [1u64, 7, 42, 1_234, 99_991] {
+        let (mut s, c, mut p, ch, before) = three_notes();
+        s.set_recording(true).unwrap();
+        start_take(&mut s, &c, &mut p);
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+        let mut take = 1u32;
+        let mut now = 0u64;
+        let mut held: Vec<(u32, u8, u64)> = Vec::new();
+        let mut set_by_hand: Option<u32> = None;
+        for op in 0..160 {
+            now += 1 + rng.below(500);
+            let event =
+                |key: u8, on: bool, tick: u64, take: u32, position: u32| RecordEvent::Note {
+                    channel: grooviq_engine::ChannelId(ch),
+                    key,
+                    velocity: 0.8,
+                    on,
+                    tick,
+                    position,
+                    take,
+                };
+            match rng.below(10) {
+                // A key goes down in the running take.
+                0..=2 if held.len() < 8 => {
+                    let key = 30 + rng.below(60) as u8;
+                    if !held.iter().any(|h| h.1 == key) {
+                        let at = rng.below(3_840) as u32;
+                        held.push((take, key, now));
+                        let e = [event(key, true, now, take, at)];
+                        s.collect_recorded(&e, Instant::now());
+                    }
+                }
+                // A held key lets go: maybe long after, maybe in an older take (a late note).
+                0..=4 if !held.is_empty() => {
+                    let (t, key, on) = held.remove(rng.below(held.len() as u64) as usize);
+                    let off = on + 1 + rng.below(12_000);
+                    now = now.max(off);
+                    s.collect_recorded(&[event(key, false, off, t, 0)], Instant::now());
+                }
+                // The take ends; the next one starts.
+                5 => take += 1,
+                6 => {
+                    let steps = 1 + rng.below(64) as u32;
+                    s.apply(Edit::SetPatternLength { steps }, Instant::now())
+                        .unwrap();
+                    set_by_hand = Some(steps);
+                }
+                7 => {
+                    let at = rng.below(12_000) as u32;
+                    add_notes(&mut s, vec![melodic(ch, at, 100 + rng.below(20) as u8)]);
+                }
+                8 => {
+                    let _ = s.undo_notes(Instant::now()).unwrap();
+                }
+                _ => {
+                    let _ = s.redo_notes(Instant::now()).unwrap();
+                }
+            }
+            tick(&c, &mut p);
+            // Most steps check from the side (the order of takes stays as it was); every
+            // fifth undoes and redoes, which closes the open takes.
+            if op % 5 != 4 {
+                continue;
+            }
+            let here = state(&s);
+            if s.view().can_undo {
+                undo(&mut s);
+                tick(&c, &mut p);
+                redo(&mut s);
+                tick(&c, &mut p);
+                assert_eq!(state(&s), here, "seed {seed} op {op}: undo then redo");
+            }
+            let redos = s.view().can_redo;
+            let mut undone = 0;
+            while s.undo_notes(Instant::now()).unwrap().is_some() {
+                tick(&c, &mut p);
+                undone += 1;
+            }
+            assert_eq!(notes(&s), before, "seed {seed} op {op}: all undone");
+            assert_eq!(
+                s.view().pattern.steps,
+                set_by_hand.unwrap_or(16),
+                "seed {seed} op {op}: the length from before the history"
+            );
+            for _ in 0..undone {
+                redo(&mut s);
+                tick(&c, &mut p);
+            }
+            if !redos {
+                assert_eq!(state(&s), here, "seed {seed} op {op}: all redone");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_live_fixtures_length_case_matches() {
+    // app/ui/e2e/m2-undo.e2e.ts `follows_the_shells_length_log` runs the same steps on the mock.
+    let (mut s, _, _, ch, _) = three_notes();
+    let note = |tick| NewNote {
+        length: 240,
+        ..melodic(ch, tick, 60)
+    };
+    let mut lengths = Vec::new();
+    add_notes(&mut s, vec![note(5_000)]);
+    lengths.push(s.view().pattern.steps);
+    add_notes(&mut s, vec![note(10_000)]);
+    lengths.push(s.view().pattern.steps);
+    s.apply(Edit::SetPatternLength { steps: 40 }, Instant::now())
+        .unwrap();
+    add_notes(&mut s, vec![note(12_000)]);
+    lengths.push(s.view().pattern.steps);
+    for _ in 0..3 {
+        lengths.push(undo(&mut s).view.pattern.steps);
+    }
+    for _ in 0..3 {
+        lengths.push(redo(&mut s).view.pattern.steps);
+    }
+    assert_eq!(lengths, vec![32, 48, 64, 40, 40, 40, 40, 40, 64]);
+}
+
+#[test]
+fn a_note_that_did_not_grow_the_pattern_keeps_it_long_once_the_growth_goes() {
+    // Take B opens, take A grows 16 -> 32, then B's late note ends at 20 steps: inside 32, so
+    // it grows nothing then. Undoing A must leave the 32 steps B's note needs.
+    let (mut s, c, mut p, ch, before) = three_notes();
+    s.set_recording(true).unwrap();
+    start_take(&mut s, &c, &mut p);
+    inject(&mut s, ch, 201, 70, 1);
+    inject(&mut s, ch, 202, 71, 32);
+    assert_eq!(s.view().pattern.steps, 32);
+    inject(&mut s, ch, 201, 72, 20);
+    assert_eq!(s.view().pattern.steps, 32);
+    undo(&mut s);
+    assert!(!keys(&s).contains(&71));
+    assert_eq!(s.view().pattern.steps, 32, "B's late note still needs it");
+    undo(&mut s);
+    assert_eq!(notes(&s), before);
+    assert_eq!(s.view().pattern.steps, 16);
+}

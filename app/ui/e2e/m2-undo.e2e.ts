@@ -203,3 +203,39 @@ test.describe("the live fixture's history", () => {
     expect(await mock.view().then((v) => [v.canUndo, v.canRedo])).toEqual([false, true]);
   });
 });
+
+test.describe("the live fixture's pattern length", () => {
+  test.use({ seed: { project: twoChannels([]) } });
+
+  test("follows_the_shells_length_log", async ({ app }) => {
+    // undo.rs: the length is the log played through: growth of the steps in effect, and every
+    // length set by hand, which undo never takes back.
+    const lengths = await app.evaluate(async () => {
+      const ipc = (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args?: object) => Promise<unknown> } })
+        .__TAURI_INTERNALS__;
+      const view = async () => (await ipc.invoke("project_view")) as { notesRevision: number; pattern: { steps: number } };
+      const add = async (tick: number) => {
+        const v = await view();
+        const note = { channel: 1, tick, length: 240, key: 60, velocity: 0.8, slide: false };
+        await ipc.invoke("notes_edit", { edit: { baseRevision: v.notesRevision, add: [note], update: [], delete: [] } });
+        return (await view()).pattern.steps;
+      };
+      const out: number[] = [];
+      out.push(await add(5_000)); // grows 16 -> 32
+      out.push(await add(10_000)); // grows 32 -> 48
+      await ipc.invoke("project_edit", { edit: { kind: "setPatternLength", steps: 40 } });
+      out.push(await add(12_000)); // past 40 steps: grows to 64
+      for (let i = 0; i < 3; i++) {
+        await ipc.invoke("notes_undo");
+        out.push((await view()).pattern.steps);
+      }
+      for (let i = 0; i < 3; i++) {
+        await ipc.invoke("notes_redo");
+        out.push((await view()).pattern.steps);
+      }
+      return out;
+    });
+    // Undo: 40 (set by hand) stays to the start; redo plays the growth over it again.
+    expect(lengths).toEqual([32, 48, 64, 40, 40, 40, 40, 40, 64]);
+  });
+});

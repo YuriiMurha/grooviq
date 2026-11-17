@@ -23,7 +23,7 @@ use crate::model::{
 };
 use crate::notes::{self, NewNote, NotesAck, NotesEdit, encode_notes};
 use crate::recorder::Recorder;
-use crate::undo::{NoteChange, NoteHistory};
+use crate::undo::{Growth, NoteChange, NoteHistory};
 use grooviq_dsp::sampler::{self, PARAM_IDS, SPEC, SampleBuf};
 use grooviq_dsp::synth;
 use grooviq_engine::{
@@ -820,10 +820,13 @@ impl Session {
             }
             Edit::SetPatternLength { steps } => {
                 let steps = steps.clamp(1, MAX_STEPS);
-                self.edit_pattern(|p| {
+                let changed = self.edit_pattern(|p| {
                     p.steps = steps;
                     Ok(())
-                })
+                })?;
+                // Set by hand, even to the length it has: undo never takes it back.
+                self.history.set_length(steps);
+                Ok(changed)
             }
             Edit::SetSwing { swing } => {
                 let swing = finite(swing, "swing")?.clamp(0.0, 1.0);
@@ -956,18 +959,20 @@ impl Session {
         &mut self,
         change: impl FnOnce(&mut Pattern) -> Result<(), SessionError>,
     ) -> Result<bool, SessionError> {
-        self.edit_pattern_as(None, change)
+        self.edit_pattern_as(None, |p| change(p).map(|()| None))
     }
 
     /// [`Self::edit_pattern`]; with `take`, the note change is a commit of that recorded take
     /// and joins the take's undo step while it is open (see [`NoteHistory::record`]).
+    /// `change` says what its notes did to the length (see [`Growth`]).
     fn edit_pattern_as(
         &mut self,
         take: Option<u32>,
-        change: impl FnOnce(&mut Pattern) -> Result<(), SessionError>,
+        change: impl FnOnce(&mut Pattern) -> Result<Option<Growth>, SessionError>,
     ) -> Result<bool, SessionError> {
+        let steps = self.current().steps;
         let mut pattern = self.current().clone();
-        change(&mut pattern)?;
+        let growth = change(&mut pattern)?;
         if pattern == *self.current() {
             return Ok(false);
         }
@@ -976,11 +981,10 @@ impl Session {
             pattern.revision = pattern.revision.wrapping_add(1);
         }
         self.keep_pattern(pattern)?;
-        if let Some(notes) = notes {
-            match take {
-                Some(take) => self.history.record(notes, take),
-                None => self.history.push(notes),
-            }
+        match (notes, take) {
+            (Some(notes), Some(take)) => self.history.record(notes, take, steps, growth),
+            (Some(notes), None) => self.history.push(notes, steps, growth),
+            (None, _) => {}
         }
         Ok(true)
     }
@@ -1020,11 +1024,12 @@ impl Session {
         };
         let mut pattern = self.current().clone();
         change.apply(&mut pattern, undo)?;
+        pattern.steps = self.history.length_after(undo);
         let steps = self.current().steps;
         pattern.revision = pattern.revision.wrapping_add(1);
         self.keep_pattern(pattern)?;
         if undo {
-            self.history.undone(steps);
+            self.history.undone();
         } else {
             self.history.redone();
         }
@@ -1198,8 +1203,10 @@ impl Session {
         let steps = self.current().steps;
         let mut applied = None;
         let changed = self.edit_pattern_as(take, |p| {
-            applied = Some(notes::apply(p, edit, &channels, bar)?);
-            Ok(())
+            let done = notes::apply(p, edit, &channels, bar)?;
+            let growth = done.growth;
+            applied = Some(done);
+            Ok(growth)
         })?;
         if changed {
             // A longer pattern changes the project's shape.
