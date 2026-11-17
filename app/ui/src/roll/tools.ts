@@ -69,8 +69,9 @@ export type Gesture =
   | { kind: "move"; from: Pointer; anchor: number; fresh: WireNote[] | null; dTick: number; dKey: number; minDTick: number; minDKey: number; maxDKey: number; moved: boolean }
   /** Resizes the selection from the grabbed note's right edge (`end`): `dLength` so far. */
   | { kind: "resize"; from: Pointer; id: number; end: number; dLength: number; minLength: number; moved: boolean }
-  /** Paints a note into each grid cell of the row `key`; `cell` is the last one visited. */
-  | { kind: "paint"; key: number; cell: number }
+  /** Paints a note into each grid cell of the row `key`; `cell` is the last one visited. `fresh`
+   * holds the notes painted so far, still unsent: the release adds them. */
+  | { kind: "paint"; key: number; cell: number; fresh: WireNote[] }
   /** A selection rectangle. */
   | { kind: "box"; from: Pointer; to: Pointer; additive: boolean };
 
@@ -83,6 +84,12 @@ export interface Step {
   select?: number[];
   /** The new last length, when it changes. */
   lastLength?: number;
+}
+
+/** The notes a gesture shows but has not sent (a stamp held down, a paint stroke): what a
+ * gesture that is cancelled takes back and a refetch of the engine's notes puts back. */
+export function heldNotes(g: Gesture | null): WireNote[] {
+  return g?.kind === "move" ? (g.fresh ?? []) : g?.kind === "paint" ? g.fresh : [];
 }
 
 const NONE: Step = { gesture: { kind: "none" }, edit: null };
@@ -176,7 +183,8 @@ export function startGesture(ctx: ToolContext, p: Pointer): Step {
     const row = inKey(ctx, key);
     const c = Math.floor(p.tick / ctx.grid);
     const n = paintCell(ctx, row, c);
-    return { gesture: { kind: "paint", key: row, cell: c }, edit: n ? edit({ add: [n] }) : null };
+    const fresh = n ? [n] : [];
+    return { gesture: { kind: "paint", key: row, cell: c, fresh }, edit: null, preview: n ? edit({ add: [n] }) : undefined };
   }
   // Draw: a note (or a chord) under the pointer, selected, and held for a drag.
   const tick = snapTick(p.tick, ctx.grid, "floor");
@@ -224,7 +232,7 @@ export function moveGesture(ctx: ToolContext, g: Gesture, p: Pointer): Step {
         // Notes painted in this step are not in the store yet: never twice in one cell.
         if (n && !add.some((a) => a.tick === n.tick)) add.push(n);
       }
-      return { gesture: { ...g, cell: c }, edit: add.length ? edit({ add }) : null };
+      return { gesture: { ...g, cell: c, fresh: [...g.fresh, ...add] }, edit: null, preview: add.length ? edit({ add }) : undefined };
     }
     case "box":
       return { gesture: { ...g, to: p }, edit: null };
@@ -253,6 +261,9 @@ export function endGesture(ctx: ToolContext, g: Gesture, p: Pointer): Step {
       }
       return { gesture: done, edit: update.length ? edit({ update }) : null };
     }
+    case "paint":
+      // The stroke goes out once, every cell in one edit.
+      return { gesture: done, edit: done.fresh.length ? edit({ add: done.fresh }) : null };
     case "resize": {
       if (done.dLength === 0) return { gesture: done, edit: null };
       const update: WireNote[] = [];

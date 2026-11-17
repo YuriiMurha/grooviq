@@ -29,6 +29,8 @@ export class CommitQueue {
   private announced: number;
   private reload = false;
   private waiters: (() => void)[] = [];
+  /** The notes a gesture holds that were never sent (a stamp or a paint stroke being held). */
+  private held: () => LocalEdit | null = () => null;
 
   constructor(
     private store: NoteStore,
@@ -42,6 +44,12 @@ export class CommitQueue {
   /** Where failures and returned views go (the piano roll sets them once mounted). */
   setHooks(hooks: QueueHooks) {
     this.hooks = hooks;
+  }
+
+  /** What the piano roll's held gesture shows but has not sent: a fetch replaces the store, so
+   * these are put back on top of it, with the selection the gesture made. */
+  setHeld(held: () => LocalEdit | null) {
+    this.held = held;
   }
 
   commit(edit: LocalEdit) {
@@ -153,6 +161,8 @@ export class CommitQueue {
         // Edits made while the fetch ran are not in it yet: show them again on top, with the
         // temporary ids the store and the selection know them by.
         for (const e of this.pending) this.store.apply(this.localize(e));
+        const held = this.held();
+        if (held) this.store.apply(held);
         this.store.setSelection(selected);
         const progressed = revision > this.seen;
         this.seen = Math.max(this.seen, revision);

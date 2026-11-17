@@ -15,7 +15,7 @@ import { RollToolbar } from "./RollToolbar";
 import { scaleMask } from "./scales";
 import { DEFAULT_GRID, GRIDS, barTicks, gridTicks, snapTick } from "./snap";
 import { rollStats } from "./stats";
-import { endGesture, moveGesture, startGesture, EDGE_PX, TOOL_BUTTONS, type Gesture, type Pointer, type Step, type Tool, type ToolContext } from "./tools";
+import { endGesture, moveGesture, startGesture, EDGE_PX, TOOL_BUTTONS, heldNotes, type Gesture, type Pointer, type Step, type Tool, type ToolContext } from "./tools";
 import { changed, humanize, quantize, strum } from "./transforms";
 import { VelocityLane } from "./VelocityLane";
 import { Playhead, clampView, scrollBy, toWorld, zoomAt, type RollView } from "./view";
@@ -89,6 +89,13 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   const tempId = useRef(0);
   const dirty = useRef(true);
   const built = useRef<{ version: number; channel: number | null; renderer: RollRenderer | null; ghosts: string }>({ version: -1, channel: null, renderer: null, ghosts: "" });
+  // A refetch of the engine's notes must not erase what a held gesture shows.
+  useEffect(() => {
+    queue.setHeld(() => {
+      const held = heldNotes(gesture.current);
+      return held.length ? { add: held, update: [], delete: [] } : null;
+    });
+  }, [queue]);
   const pointerTick = useRef<number | null>(null);
   const humanizeSeed = useRef(1);
 
@@ -574,7 +581,8 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
 
 /** A gesture that ends without a release takes back the notes it only showed. */
 function abandon(store: NoteStore, g: Gesture | null) {
-  if (g?.kind === "move" && g.fresh) store.apply({ add: [], update: [], delete: g.fresh.map((n) => n.id) });
+  const held = heldNotes(g);
+  if (held.length) store.apply({ add: [], update: [], delete: held.map((n) => n.id) });
 }
 
 /** The pointer's look over the roll: a resize arrow on a note's right edge, a hand on a note. */

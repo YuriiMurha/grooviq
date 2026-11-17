@@ -375,7 +375,7 @@ for (const renderer of ["webgl2", "canvas2d"] as const) {
 
 
 /** Whether each (tick, key) shows a note of Bass's ink at velocity 0.8 (what a drawn note gets). */
-async function inkedAt(page: Page, points: [number, number][]) {
+async function inkedAt(page: Page, points: readonly (readonly [number, number])[]) {
   const full = await token(page, "--ink-4");
   const want = full.map((c) => c * (0.45 + 0.55 * 0.8));
   const px = await pixelsAt(page, canvas(page), await Promise.all(points.map(([t, k]) => local(page, t, k))));
@@ -466,5 +466,97 @@ test.describe("a dragged chord stamp", () => {
     expect(edits).toHaveLength(1);
     const sent = edits[0].args.edit as { add: unknown[]; update: unknown[]; delete: unknown[] };
     expect([sent.add.length, sent.update.length, sent.delete.length]).toEqual([3, 0, 0]);
+  });
+});
+
+test.describe("held gestures", () => {
+  test.use({ seed: { project: twoChannels([]) } });
+
+  const gestures = [
+    { name: "a_drawn_note", chord: "", from: [970, 60], to: [1450, 62], held: [[1500, 62]], gone: [[1000, 60]] },
+    { name: "a_stamped_chord", chord: "major", from: [970, 60], to: [1450, 62], held: [[1500, 62], [1500, 66], [1500, 69]], gone: [[1000, 60]] },
+  ] as const;
+  for (const g of gestures) {
+    test(`held_notes_survive_an_engine_refresh_${g.name}`, async ({ app, mock }) => {
+      await openRoll(app);
+      if (g.chord) await app.getByRole("combobox", { name: "Chord", exact: true }).selectOption(g.chord);
+      const from = await at(app, g.from[0], g.from[1]);
+      await app.mouse.move(from.x, from.y);
+      await app.mouse.down();
+      const to = await at(app, g.to[0], g.to[1]);
+      await app.mouse.move(to.x, to.y, { steps: 4 });
+      await nextFrame(app);
+      expect(await inkedAt(app, [...g.held])).toEqual(g.held.map(() => true));
+      // Another channel gets a note while the pointer is down: the engine announces it and the roll fetches.
+      const fetches = (await mock.calls("pattern_notes")).length;
+      await mock.eval(`(m) => m.addNote({ channel: 2, tick: 2400, length: 240, key: 70, velocity: 0.8 })`);
+      await expect.poll(async () => (await mock.calls("pattern_notes")).length).toBeGreaterThan(fetches);
+      await nextFrame(app);
+      await nextFrame(app);
+      // The held notes are still on screen, where the gesture has them, and nothing was sent.
+      expect(await inkedAt(app, [...g.held])).toEqual(g.held.map(() => true));
+      expect(await mock.calls("notes_edit")).toEqual([]);
+      await app.mouse.up();
+      await expect.poll(async () => (await mock.calls("notes_edit")).length).toBe(1);
+      await expect.poll(() => sessionNotes(mock).then((n) => n.filter((x) => x[0] === 1).length)).toBe(g.held.length);
+    });
+  }
+
+  test("held_notes_survive_an_engine_refresh_a_paint_stroke", async ({ app, mock }) => {
+    await openRoll(app);
+    await tool(app, "Paint").click();
+    const from = await at(app, 10, 64);
+    await app.mouse.move(from.x, from.y);
+    await app.mouse.down();
+    const to = await at(app, 3 * 240 + 10, 64);
+    await app.mouse.move(to.x, to.y, { steps: 6 });
+    await nextFrame(app);
+    const cells: [number, number][] = [[100, 64], [340, 64], [580, 64], [820, 64]];
+    expect(await inkedAt(app, cells)).toEqual([true, true, true, true]);
+    const fetches = (await mock.calls("pattern_notes")).length;
+    await mock.eval(`(m) => m.addNote({ channel: 2, tick: 2400, length: 240, key: 70, velocity: 0.8 })`);
+    await expect.poll(async () => (await mock.calls("pattern_notes")).length).toBeGreaterThan(fetches);
+    await nextFrame(app);
+    await nextFrame(app);
+    expect(await inkedAt(app, cells)).toEqual([true, true, true, true]);
+    expect(await mock.calls("notes_edit")).toEqual([]);
+    await app.mouse.up();
+    await expect.poll(async () => (await mock.calls("notes_edit")).length).toBe(1);
+    await expect.poll(() => sessionNotes(mock).then((n) => n.filter((x) => x[0] === 1).length)).toBe(4);
+  });
+
+  test("a_paint_stroke_is_one_edit_and_a_cancelled_one_leaves_nothing", async ({ app, mock }) => {
+    await openRoll(app);
+    await tool(app, "Paint").click();
+    const stroke = async (release: "up" | "cancel", row: number) => {
+      const from = await at(app, 10, row);
+      await app.mouse.move(from.x, from.y);
+      await app.mouse.down();
+      const to = await at(app, 3 * 240 + 10, row);
+      await app.mouse.move(to.x, to.y, { steps: 6 });
+      await nextFrame(app);
+      // Held: on screen, nothing sent.
+      expect(await inkedAt(app, [[100, row], [820, row]])).toEqual([true, true]);
+      expect(await mock.calls("notes_edit")).toEqual([]);
+      if (release === "up") await app.mouse.up();
+      else {
+        // The browser cancels the pointer (a system gesture): the roll gets pointercancel, and the
+        // button is let go afterwards.
+        await canvas(app).dispatchEvent("pointercancel");
+        await app.mouse.up();
+      }
+      await nextFrame(app);
+    };
+    // Cancelled: the stroke is taken back, and nothing was ever sent.
+    await stroke("cancel", 64);
+    expect(await inkedAt(app, [[100, 64], [820, 64]])).toEqual([false, false]);
+    expect(await mock.calls("notes_edit")).toEqual([]);
+    expect(await sessionNotes(mock)).toEqual([]);
+    // Released: one edit with all four cells.
+    await app.mouse.move(0, 0);
+    await stroke("up", 66);
+    await expect.poll(async () => (await mock.calls("notes_edit")).length).toBe(1);
+    expect(((await mock.calls("notes_edit"))[0].args.edit as { add: unknown[] }).add).toHaveLength(4);
+    expect(await sessionNotes(mock)).toHaveLength(4);
   });
 });

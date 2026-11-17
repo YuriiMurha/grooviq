@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { WireNote } from "../api/notes";
 import { NoteStore } from "./noteStore";
-import { DRAW_VELOCITY, endGesture, moveGesture, startGesture, type Pointer, type Step, type Tool, type ToolContext } from "./tools";
+import { DRAW_VELOCITY, endGesture, heldNotes, moveGesture, startGesture, type Pointer, type Step, type Tool, type ToolContext } from "./tools";
 import { toScreen, type RollView } from "./view";
 
 // 0.125 px a tick: a step (240 ticks) is 30 px wide; a key row is 14 px tall.
@@ -161,6 +161,8 @@ describe("piano roll tools", () => {
     const { edits, store, gesture } = setup([note(9, 960, 240, 60)], "paint");
     // Down in step 1, across to step 6 along row 60 (the pointer wanders a row up), then back.
     gesture(at(250, 60), at(400, 60), at(800, 61), at(1500, 60), at(1300, 60));
+    // The stroke is one edit.
+    expect(edits).toHaveLength(1);
     const added = edits.flatMap((e) => e?.add ?? []);
     // One note in each cell it crossed, a cell long, in the row it started on; step 4 already
     // held note 9, and returning to a painted cell adds nothing.
@@ -308,6 +310,27 @@ describe("piano roll tools", () => {
     ]);
     expect(store.count).toBe(3);
     expect(store.get(-1)).toMatchObject({ tick: 1440, key: 62 });
+  });
+
+  it("a_paint_stroke_is_a_preview_until_release_and_commits_once", () => {
+    const { store, ctx, edits, take } = setup([], "paint");
+    const down = take(startGesture(ctx, at(250, 60)));
+    // Pressed: the first cell shows in the store; nothing is sent.
+    expect(down.edit).toBeNull();
+    expect(store.count).toBe(1);
+    const a = take(moveGesture(ctx, down.gesture, at(800, 60)));
+    const b = take(moveGesture(ctx, a.gesture, at(1500, 60)));
+    expect(a.edit).toBeNull();
+    expect(b.edit).toBeNull();
+    expect(edits).toHaveLength(0);
+    expect(store.count).toBe(6);
+    // What a cancelled stroke has to take back, and what the store shows if it is refetched.
+    expect(heldNotes(b.gesture).map((n) => n.tick)).toEqual([240, 480, 720, 960, 1200, 1440]);
+    // Released: every cell goes out in one edit, under the ids the preview had.
+    take(endGesture(ctx, b.gesture, at(1500, 60)));
+    expect(edits).toHaveLength(1);
+    expect(edits[0]!.add.map((n) => n.id)).toEqual([-1, -2, -3, -4, -5, -6]);
+    expect(store.count).toBe(6);
   });
 
   it("slide_notes_are_drawn_when_the_slide_toggle_is_on", () => {
