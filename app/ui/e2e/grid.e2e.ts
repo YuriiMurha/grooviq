@@ -73,18 +73,21 @@ test.describe("drawing (check 1)", () => {
 });
 
 test.describe("rows line up with the grid (check 2)", () => {
-  /** Each row's centre against the centre of its grid row, in CSS pixels. */
-  async function offsets(page: Page, names: string[]) {
-    const box = await grid(page).boundingBox();
-    if (!box) throw new Error("no grid");
-    const out: number[] = [];
-    for (const [row, name] of names.entries()) {
-      const r = await page.getByRole("group", { name, exact: true }).boundingBox();
-      if (!r) throw new Error(`no row ${name}`);
-      out.push(Math.abs(r.y + r.height / 2 - (box.y + cellPoint(row, 0).y)));
-    }
-    return out;
-  }
+  /** Each row's centre against the centre of its grid row, in CSS pixels. One synchronous read in
+   * the page: separate `boundingBox` calls per row race a scroll that is still settling. */
+  const offsets = (page: Page, names: string[]) =>
+    page.evaluate(
+      ({ names, centres }) => {
+        const box = document.querySelector('canvas[aria-label="Step grid"]')?.getBoundingClientRect();
+        if (!box) throw new Error("no grid");
+        return names.map((name, row) => {
+          const r = document.querySelector(`[role="group"][aria-label="${name}"]`)?.getBoundingClientRect();
+          if (!r) throw new Error(`no row ${name}`);
+          return Math.abs(r.y + r.height / 2 - (box.y + centres[row]));
+        });
+      },
+      { names, centres: names.map((_, row) => cellPoint(row, 0).y) },
+    );
 
   for (const count of [1, 4, 12]) {
     const names = Array.from({ length: count }, (_, i) => `Sound ${i + 1}`);
