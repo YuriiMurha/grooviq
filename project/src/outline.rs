@@ -4,7 +4,10 @@
 //! anything, and the typed pass ([`crate::reading`]) knows the version and the channels whatever
 //! order the fields come in.
 //!
-//! Every value of an unexpected type counts as absent here: the typed pass reports it.
+//! Every value of an unexpected type counts as absent here: the typed pass reports it. The one
+//! exception is a channel or pattern written as an array of its fields: it is refused as the
+//! typed pass refuses it ([`crate::reading::Named`]), so the two passes never read one file two
+//! ways.
 
 use grooviq_engine::MAX_CHANNELS;
 use serde::Deserializer;
@@ -27,13 +30,18 @@ pub(crate) struct Outline {
     pub(crate) has_notes: Vec<bool>,
 }
 
-/// Reads `json` once. A document that is not an object is a `Data` error; broken JSON is a
-/// `Syntax` or `Eof` one.
-pub(crate) fn read(json: impl Read) -> serde_json::Result<Outline> {
+/// Reads `json` once: `None` if the document is not an object. A channel or pattern written as
+/// an array is a `Data` error; broken JSON is a `Syntax` or `Eof` one.
+pub(crate) fn read(json: impl Read) -> serde_json::Result<Option<Outline>> {
     let mut de = serde_json::Deserializer::from_reader(json);
-    let outline = (&mut de).deserialize_map(OutlineVisitor)?;
+    let outline = (&mut de).deserialize_any(OutlineVisitor)?;
     de.end()?;
     Ok(outline)
+}
+
+/// The refusal of a struct written as an array.
+fn not_named<E: de::Error>() -> E {
+    E::invalid_type(de::Unexpected::Seq, &crate::reading::NAMED)
 }
 
 /// The scalar visits of a lenient visitor: each one is "something else", `$default`.
@@ -77,13 +85,20 @@ fn drain_map<'de, A: MapAccess<'de>>(mut map: A) -> Result<(), A::Error> {
 struct OutlineVisitor;
 
 impl<'de> Visitor<'de> for OutlineVisitor {
-    type Value = Outline;
+    type Value = Option<Outline>;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("a project object")
+        f.write_str("any value")
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Outline, A::Error> {
+    anything_else!(Option<Outline>, None, with numbers and text);
+
+    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Option<Outline>, A::Error> {
+        drain_seq(seq)?;
+        Ok(None)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Option<Outline>, A::Error> {
         let mut outline = Outline::default();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -96,7 +111,7 @@ impl<'de> Visitor<'de> for OutlineVisitor {
                 }
             }
         }
-        Ok(outline)
+        Ok(Some(outline))
     }
 }
 
@@ -202,9 +217,8 @@ impl<'de> Visitor<'de> for Field {
 
     anything_else!(Option<u64>, None, with numbers and text);
 
-    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Option<u64>, A::Error> {
-        drain_seq(seq)?;
-        Ok(None)
+    fn visit_seq<A: SeqAccess<'de>>(self, _: A) -> Result<Option<u64>, A::Error> {
+        Err(not_named())
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Option<u64>, A::Error> {
@@ -258,9 +272,8 @@ impl<'de> Visitor<'de> for HasNotes {
 
     anything_else!(bool, false, with numbers and text);
 
-    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<bool, A::Error> {
-        drain_seq(seq)?;
-        Ok(false)
+    fn visit_seq<A: SeqAccess<'de>>(self, _: A) -> Result<bool, A::Error> {
+        Err(not_named())
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
@@ -270,5 +283,36 @@ impl<'de> Visitor<'de> for HasNotes {
             map.next_value::<IgnoredAny>()?;
         }
         Ok(has)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outline(json: &str) -> serde_json::Result<Option<Outline>> {
+        read(json.as_bytes())
+    }
+
+    #[test]
+    fn channels_and_patterns_written_as_arrays_are_refused() {
+        for json in [
+            r#"{"channels":[[1]],"patterns":[]}"#,
+            r#"{"channels":[{"id":1}],"patterns":[[0,"P",16,0,[]]]}"#,
+        ] {
+            let err = outline(json).unwrap_err();
+            assert!(err.is_data(), "{json}: {err}");
+            assert!(err.to_string().contains(crate::reading::NAMED), "{err}");
+        }
+        // Named fields are read; a document that is not an object is no outline.
+        let o = outline(
+            r#"{"format":"f","version":2,"channels":[{"id":1},{"id":1},{"id":4}],
+                "patterns":[{"id":0},{"notes":[]}]}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(o.channels, HashSet::from([1, 4]));
+        assert_eq!(o.has_notes, vec![false, true]);
+        assert!(outline("[1, 2]").unwrap().is_none());
     }
 }

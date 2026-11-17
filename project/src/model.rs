@@ -84,12 +84,12 @@ pub struct Project {
     /// 20..=400.
     #[serde(default = "default_bpm")]
     pub bpm: f32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::reading::named")]
     pub time_signature: TimeSignature,
     /// In mixing order.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::reading::named_vec")]
     pub channels: Vec<Channel>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::reading::named_vec")]
     pub patterns: Vec<Pattern>,
     /// The `id` of the pattern the engine plays.
     #[serde(default)]
@@ -99,7 +99,7 @@ pub struct Project {
     #[serde(default)]
     pub next_id: u32,
     /// The key the piano roll highlights and snaps to; `None` for no key.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::reading::named_option")]
     pub key: Option<ProjectKey>,
 }
 
@@ -143,7 +143,7 @@ pub struct Channel {
     #[serde(default = "sampler_kind", with = "instrument_kind")]
     pub instrument: InstrumentKind,
     /// A sampler's sample.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::reading::named_option")]
     pub sample: Option<SampleRef>,
     /// Sampler parameters by `grooviq_dsp::sampler::PARAM_IDS` name; absent ones are defaults.
     #[serde(default)]

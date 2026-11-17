@@ -10,12 +10,64 @@
 //!
 //! Outside a load (no context) the same deserializers read every field by its type and keep the
 //! first [`MAX_NOTES_PER_PATTERN`] notes.
+//!
+//! Every struct of the project must be written with named fields ([`Named`]): serde would also
+//! read one as an array of its fields in order, which Grooviq never writes and the first pass
+//! does not follow, so such a file is refused instead of half read.
 
 use crate::model::{MAX_NOTES_PER_PATTERN, MAX_TICKS, Note};
-use serde::de::{Deserialize, Deserializer, IgnoredAny, SeqAccess, Visitor};
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt;
+use std::marker::PhantomData;
+
+/// What a struct written another way (an array of its fields) is refused for.
+pub(crate) const NAMED: &str = "an object with named fields";
+
+/// A `T` read only from an object with named fields.
+pub(crate) struct Named<T>(pub(crate) T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Named<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Object<T>(PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for Object<T> {
+            type Value = Named<T>;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str(NAMED)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Named<T>, A::Error> {
+                T::deserialize(MapAccessDeserializer::new(map)).map(Named)
+            }
+        }
+        d.deserialize_map(Object(PhantomData))
+    }
+}
+
+/// A struct field read with [`Named`].
+pub(crate) fn named<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<T, D::Error> {
+    Named::deserialize(d).map(|n| n.0)
+}
+
+/// An optional struct field read with [`Named`].
+pub(crate) fn named_option<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    Ok(Option::<Named<T>>::deserialize(d)?.map(|n| n.0))
+}
+
+/// A list of structs, each read with [`Named`].
+pub(crate) fn named_vec<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Vec<T>, D::Error> {
+    Ok(Vec::<Named<T>>::deserialize(d)?
+        .into_iter()
+        .map(|n| n.0)
+        .collect())
+}
 
 /// The notes one `notes` list dropped while it was read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -103,7 +155,7 @@ pub(crate) fn notes<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Note>, D::Err
             let mut notes = Vec::new();
             let mut drops = NoteDrops::default();
             // One note at a time: a dropped one is never held past its check.
-            while let Some(note) = seq.next_element::<Note>()? {
+            while let Some(Named(note)) = seq.next_element::<Named<Note>>()? {
                 match known_channel(note.channel) {
                     Some(false) => drops.orphans += 1,
                     Some(true) if note.tick >= MAX_TICKS => drops.far += 1,
@@ -120,4 +172,21 @@ pub(crate) fn notes<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Note>, D::Err
         }
     }
     d.deserialize_seq(Notes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Project;
+
+    #[test]
+    fn a_project_written_as_an_array_is_refused() {
+        // `load` reads the document as `Named<Project>`.
+        let err = serde_json::from_str::<Named<Project>>(r#"["Untitled", 140]"#)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains(NAMED), "{err}");
+        let named = serde_json::from_str::<Named<Project>>(r#"{"name": "Named"}"#).unwrap();
+        assert_eq!(named.0.name, "Named");
+    }
 }

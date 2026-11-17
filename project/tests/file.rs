@@ -1478,3 +1478,119 @@ fn a_v1_file_ignores_the_fields_its_migration_supplies() {
         assert!(matches!(load(&path), Err(LoadError::Corrupt(_))), "{bad}");
     }
 }
+
+/// A project document of `version` with these `channels` and `patterns` (JSON) and `extra`
+/// top-level fields (each ending in a comma).
+fn doc(version: u32, channels: &str, patterns: &str, extra: &str) -> String {
+    format!(
+        r#"{{"format":"grooviq-project","version":{version},{extra}"channels":{channels},"patterns":{patterns},"nextId":2}}"#
+    )
+}
+
+#[test]
+fn structs_written_as_arrays_are_refused_as_damage() {
+    // Grooviq writes every struct with named fields. serde would also read a struct as an array
+    // of its fields in order; a file that does so is refused, never half read (a channel kept
+    // while its notes are dropped as orphans, or a pattern whose notes go unread).
+    let note = r#"{"id":1,"channel":1,"tick":0}"#;
+    let channels = r#"[{"id":1}]"#;
+    let patterns = format!(r#"[{{"id":0,"notes":[{note}]}}]"#);
+    let cases = [
+        ("channel", "[[1]]".to_string(), patterns.clone(), ""),
+        (
+            "pattern",
+            channels.to_string(),
+            format!(r#"[[0,"P",16,0,[{note}]]]"#),
+            "",
+        ),
+        (
+            "note",
+            channels.to_string(),
+            r#"[{"id":0,"notes":[[1,1,0]]}]"#.to_string(),
+            "",
+        ),
+        (
+            "key",
+            channels.to_string(),
+            patterns.clone(),
+            r#""key":[9,"minor"],"#,
+        ),
+        (
+            "time signature",
+            channels.to_string(),
+            patterns.clone(),
+            r#""timeSignature":[3,4],"#,
+        ),
+        (
+            "sample",
+            r#"[{"id":1,"sample":["/a.wav",null]}]"#.to_string(),
+            patterns.clone(),
+            "",
+        ),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    for (what, channels, patterns, extra) in &cases {
+        for v in [1, 2] {
+            let path = write(
+                dir.path(),
+                "array.grooviq",
+                &json_zip(&doc(v, channels, patterns, extra)),
+            );
+            match load(&path) {
+                Err(LoadError::Corrupt(why)) => assert!(
+                    why.contains("an object with named fields"),
+                    "{what}, version {v}: {why}"
+                ),
+                other => panic!("{what}, version {v}: {other:?}"),
+            }
+        }
+    }
+
+    // The same file with named fields loads whole, note included.
+    let path = write(
+        dir.path(),
+        "named.grooviq",
+        &json_zip(&doc(
+            2,
+            channels,
+            &patterns,
+            r#""key":{"root":9,"scale":"minor"},"timeSignature":{"beats":3,"unit":4},"#,
+        )),
+    );
+    let loaded = load(&path).unwrap();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    assert_eq!(loaded.project.patterns[0].notes.len(), 1);
+    // A whole document that is an array is not a project at all, as before.
+    let path = write(dir.path(), "top.grooviq", &json_zip("[1, 2]"));
+    assert!(matches!(load(&path), Err(LoadError::NotAProject)));
+}
+
+#[test]
+fn the_typed_read_refuses_structs_written_as_arrays_on_its_own() {
+    // Without the first pass (a plain serde read), each struct still needs named fields.
+    let base = |channels: &str, patterns: &str, extra: &str| {
+        format!(r#"{{{extra}"channels":{channels},"patterns":{patterns}}}"#)
+    };
+    let ok = r#"[{"id":0,"notes":[{"channel":1,"tick":0}]}]"#;
+    for json in [
+        base("[[1]]", ok, ""),
+        base(r#"[{"id":1}]"#, r#"[[0,"P",16,0,[]]]"#, ""),
+        base(r#"[{"id":1}]"#, r#"[{"id":0,"notes":[[1,1,0]]}]"#, ""),
+        base(r#"[{"id":1}]"#, ok, r#""key":[9,"minor"],"#),
+        base(r#"[{"id":1}]"#, ok, r#""timeSignature":[3,4],"#),
+        base(r#"[{"id":1,"sample":["/a.wav",null]}]"#, ok, ""),
+    ] {
+        let err = serde_json::from_str::<Project>(&json).unwrap_err();
+        assert!(
+            err.to_string().contains("an object with named fields"),
+            "{json}: {err}"
+        );
+    }
+    let named = base(r#"[{"id":1}]"#, ok, r#""key":{"root":9,"scale":"minor"},"#);
+    assert_eq!(
+        serde_json::from_str::<Project>(&named).unwrap().patterns[0]
+            .notes
+            .len(),
+        1
+    );
+}

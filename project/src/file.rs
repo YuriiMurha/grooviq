@@ -500,26 +500,27 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
     file.rewind()?;
     let mut zip = ZipArchive::new(file).map_err(zip_error)?;
 
-    // `project.json` is read twice, streamed from the zip and never held whole: first the header
-    // and the note counts (a newer version is refused before anything is typed), then the typed
-    // project, which keeps at most `MAX_NOTES_PER_PATTERN` notes per pattern.
-    let outline = outline::read(project_json(&mut zip)?).map_err(|e| match e.classify() {
-        serde_json::error::Category::Data => LoadError::NotAProject,
+    // `project.json` is read twice, streamed from the zip and never held whole: first the header,
+    // the channel ids and which patterns have notes (a newer version is refused before anything
+    // is typed), then the typed project, which keeps at most `MAX_NOTES_PER_PATTERN` notes per
+    // pattern.
+    let does_not_fit = |e: serde_json::Error| match e.classify() {
+        serde_json::error::Category::Data => {
+            LoadError::Corrupt(format!("{PROJECT_JSON} does not fit: {e}"))
+        }
         _ => json_error(e),
-    })?;
+    };
+    let outline = outline::read(project_json(&mut zip)?)
+        .map_err(does_not_fit)?
+        .ok_or(LoadError::NotAProject)?;
     if outline.format.as_deref() != Some(FORMAT) {
         return Err(LoadError::NotAProject);
     }
     let version = checked_version(outline.version)?;
     let (project, drops) = reading::with_context(version, outline.channels, || {
-        serde_json::from_reader::<_, Project>(project_json(&mut zip)?).map_err(|e| {
-            match e.classify() {
-                serde_json::error::Category::Data => {
-                    LoadError::Corrupt(format!("{PROJECT_JSON} does not fit: {e}"))
-                }
-                _ => json_error(e),
-            }
-        })
+        serde_json::from_reader::<_, reading::Named<Project>>(project_json(&mut zip)?)
+            .map(|named| named.0)
+            .map_err(does_not_fit)
     });
     let mut project = project?;
     migrate(&mut project, version)?;
