@@ -428,8 +428,14 @@ fn metadata_suffix(bytes: &[u8], align: usize) -> usize {
             }
         }
         valid[at / 8] |= 1 << (at % 8);
-        if at % align == 0 {
-            first = at;
+        // A data chunk with an odd byte count has a RIFF pad before the footer.
+        // Unfinished sizes cannot distinguish that pad from a real final zero byte;
+        // prefer the padded interpretation only beside a complete known footer.
+        let padded = at
+            .checked_sub(1)
+            .filter(|&pad| pad % 2 == 1 && pad % align == 0 && bytes[pad] == 0);
+        if let Some(audio_end) = padded.or_else(|| (at % align == 0).then_some(at)) {
+            first = audio_end;
         }
     }
     first
@@ -591,6 +597,39 @@ mod tests {
 #[cfg(test)]
 mod metadata_tests {
     use super::metadata_suffix;
+
+    #[test]
+    fn only_a_zero_pad_after_odd_complete_frames_precedes_metadata() {
+        for (audio, align, expected) in [
+            (vec![1, 2, 3, 0], 3, 3),
+            (vec![128, 128, 128, 0], 1, 3),
+            (vec![1, 2, 3, 1], 3, 12), // Nonzero byte: no legal boundary.
+            (vec![128, 128, 128, 129], 1, 4),
+            (vec![1, 2, 3, 0], 2, 4), // Removing a pad would split a frame.
+            (vec![1, 2, 0], 1, 3),    // Even byte count before the zero: no pad.
+        ] {
+            let mut bytes = audio;
+            bytes.extend_from_slice(b"_PMX\0\0\0\0");
+            assert_eq!(metadata_suffix(&bytes, align), expected);
+        }
+    }
+
+    #[test]
+    fn overlapping_list_walks_preserve_audio_when_the_budget_is_spent() {
+        // Each LIST runs to EOF; its INFO subchunks also line up with every later
+        // unit. Without a shared budget, each candidate walks the whole remainder.
+        let units = 512;
+        let total = units * 20;
+        let mut bytes = Vec::with_capacity(total);
+        for index in 0..units {
+            bytes.extend_from_slice(b"INAM");
+            bytes.extend_from_slice(&12u32.to_le_bytes());
+            bytes.extend_from_slice(b"LIST");
+            bytes.extend_from_slice(&((total - index * 20 - 16) as u32).to_le_bytes());
+            bytes.extend_from_slice(b"INFO");
+        }
+        assert_eq!(metadata_suffix(&bytes, 2), bytes.len());
+    }
 
     #[test]
     fn dense_overrun_markers_and_short_inputs_are_preserved() {

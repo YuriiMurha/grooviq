@@ -862,6 +862,38 @@ fn unfinished_known_metadata_preserves_exact_audio() {
 }
 
 #[test]
+fn unfinished_metadata_excludes_the_pad_after_odd_audio() {
+    let mut failures = Vec::new();
+    for size in [0, u32::MAX] {
+        for bits in [8u16, 24] {
+            let align = bits / 8;
+            let mut bytes = wav_with_sizes(0, 0, size);
+            bytes[28..32].copy_from_slice(&(48_000 * u32::from(align)).to_le_bytes());
+            bytes[32..34].copy_from_slice(&align.to_le_bytes());
+            bytes[34..36].copy_from_slice(&bits.to_le_bytes());
+            let audio: Vec<u8> = if bits == 8 {
+                vec![128; 3]
+            } else {
+                (1..=9).collect()
+            };
+            bytes.extend_from_slice(&audio);
+            let expected = decode_sample(&bytes, Some("wav"), 600.0).unwrap();
+            assert_eq!(expected.len(), 3);
+            bytes.push(0); // RIFF's pad is outside the data chunk.
+            bytes.extend_from_slice(&list_info(b"title"));
+            let actual = decode_sample(&bytes, Some("wav"), 600.0).unwrap();
+            if actual.l != expected.l || actual.r != expected.r {
+                failures.push((bits, size, actual.len()));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "pad or footer decoded as audio: {failures:?}"
+    );
+}
+
+#[test]
 fn unfinished_metadata_boundary_cases() {
     let known = footer_chunk(b"_PMX", b"odd");
     let mut multi = list_info(b"title");
