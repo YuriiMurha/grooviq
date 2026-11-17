@@ -2761,3 +2761,96 @@ fn a_note_held_when_recording_stops_itself_is_refused_and_counted() {
         Recorded::default()
     );
 }
+
+// --- Fix round 4: a replacement moves a running refusal to its own barrier. ---
+
+/// A session at the note cap whose automatic record-off is owed (the engine's command queue
+/// was full), with recording shown off. (The re-review's setup.)
+fn owed_at_the_cap() -> (Session, Arc<Mutex<Controller>>, AudioProcessor, u32) {
+    let (mut session, controller, mut processor) = rig();
+    let synth = add_synth(&mut session, "Init");
+    add_notes(
+        &mut session,
+        (0..100_000u32)
+            .map(|i| NewNote {
+                length: 10,
+                ..melodic(synth, (i % 64) * 240, (i % 128) as u8)
+            })
+            .collect(),
+    );
+    session.set_recording(true).unwrap();
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    settle(&mut session, &controller, &mut processor);
+    while controller
+        .lock()
+        .unwrap()
+        .send(Command::SetTempo { bpm: 120.0 })
+        .is_ok()
+    {}
+    let got = session.collect_recorded(&whole_notes(synth, 1), Instant::now());
+    assert_eq!(got.stopped.unwrap().dropped, 1);
+    assert!(!session.view().recording);
+    (session, controller, processor, synth)
+}
+
+#[test]
+fn record_on_then_open_imports_no_note_of_the_old_project() {
+    let (mut session, controller, mut processor, synth) = owed_at_the_cap();
+    render(&mut processor, 4);
+    session.set_recording(true).unwrap();
+    play_a_note(&session, &mut processor, synth);
+    // Record-on's barrier and a whole note of the old project wait, uncollected.
+    let notes = open_fixture(&mut session);
+    let got = poll(&mut session, &controller, &mut processor);
+    assert_eq!(got.revision, None, "an old project's note leaked: {got:?}");
+    assert_eq!(session.project().patterns[0].notes, notes);
+}
+
+#[test]
+fn a_replacement_never_leaves_the_refusal_waiting_for_a_superseded_barrier() {
+    let (mut session, controller, mut processor, synth) = owed_at_the_cap();
+    render(&mut processor, 4);
+    // The recording queue fills without a poll, so a waiting barrier can be replaced by a
+    // newer one before it goes out.
+    for _ in 0..512 {
+        play_a_note(&session, &mut processor, synth);
+    }
+    session.set_recording(true).unwrap();
+    let notes = open_fixture(&mut session);
+    poll(&mut session, &controller, &mut processor);
+    poll(&mut session, &controller, &mut processor);
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    play_a_note(&session, &mut processor, 1);
+    let got = poll(&mut session, &controller, &mut processor);
+    assert!(
+        got.revision.is_some(),
+        "the new project records, but the refusal never ended: {got:?}"
+    );
+    assert_eq!(session.project().patterns[0].notes.len(), notes.len() + 1);
+}
+
+#[test]
+fn an_owed_record_off_keeps_refusing_past_a_replacement_s_barrier() {
+    let (mut session, controller, mut processor, _synth) = owed_at_the_cap();
+    render(&mut processor, 4);
+    // Another project opens while the record-off is still owed; its barrier goes out.
+    let notes = open_fixture(&mut session);
+    render(&mut processor, 2);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    let barrier = controller.lock().unwrap().record_mark();
+    assert!(events.contains(&RecordEvent::Mark { id: barrier }));
+    // The command queue is full again: the record-off stays owed, the engine records on.
+    while controller
+        .lock()
+        .unwrap()
+        .send(Command::SetTempo { bpm: 120.0 })
+        .is_ok()
+    {}
+    events.extend(whole_notes(1, 1));
+    let got = session.collect_recorded(&events, Instant::now());
+    assert_eq!(got.revision, None, "{got:?}");
+    let stopped = got.stopped.expect("reported");
+    assert_eq!((stopped.reason, stopped.dropped), ("engineBusy", 1));
+    assert_eq!(session.project().patterns[0].notes, notes);
+}

@@ -750,3 +750,37 @@ fn a_marked_record_off_ends_the_take_before_its_mark() {
     );
     assert_eq!(r.c.record_mark(), id, "no mark was used up");
 }
+
+/// With exactly one free slot, a command and its barrier do not both fit: neither is queued,
+/// and no mark id is used up. (The re-review's probe.)
+#[test]
+fn a_marked_command_with_exactly_one_free_slot_is_refused_whole() {
+    let mut r = Rig::new();
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    r.run_to(1_000);
+    // The queue's capacity, found through the public API; then start over empty.
+    let mut capacity = 0;
+    while r.c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {
+        capacity += 1;
+    }
+    r.run_to(2_000);
+    for _ in 0..capacity - 1 {
+        r.c.send(Command::SetTempo { bpm: 120.0 }).unwrap();
+    }
+    let mark = r.c.record_mark();
+    assert_eq!(
+        r.c.send_marked(Command::SetRecording { on: false }),
+        Err(ControlError::Full)
+    );
+    assert_eq!(r.c.record_mark(), mark);
+    // The free slot is still free, and the record-off did not enter the queue.
+    r.c.send(note(true)).unwrap();
+    assert!(r.c.send(note(false)).is_err());
+    r.run_to(3_000);
+    assert!(
+        r.take()
+            .iter()
+            .any(|e| matches!(e, RecordEvent::Note { on: true, .. }))
+    );
+}

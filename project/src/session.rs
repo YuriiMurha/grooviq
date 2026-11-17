@@ -1249,7 +1249,7 @@ impl Session {
             (false, _) => (
                 "engineBusy",
                 format!(
-                    "Recording is off, but the audio engine had not taken the switch yet: {notes} not added."
+                    "Recording switched itself off, and the audio engine took the switch late: {notes} not added."
                 ),
             ),
         };
@@ -1381,12 +1381,18 @@ impl Session {
             p.revision = revision;
         }
         // Nothing recorded for the old project reaches this one: every event before the new
-        // state's barrier is dropped, and so are the old project's notes still waiting. A
-        // refusal running (recording switched itself off and the engine has not confirmed it)
-        // goes on to its own barrier, which comes after: the engine records until it takes
-        // the switch, and those notes are reported.
+        // state's barrier is dropped, and so are the old project's notes still waiting.
+        //
+        // The recorder always waits for the newest barrier: the engine keeps only the newest
+        // one that did not fit in a full queue, so an older one may never come. A refusal
+        // running (recording switched itself off) keeps counting: its barrier moves forward
+        // to this state's, which comes after the queued record-off or the person's own
+        // switch. Only an owed record-off, not queued yet, keeps waiting for its own barrier,
+        // which will come after this one.
         if !self.recorder.refusing() {
             self.recorder.reset_until_mark(mark);
+        } else if !self.owed_disarm {
+            self.recorder.await_mark(mark);
         }
         self.pending.clear();
         self.project = project;
