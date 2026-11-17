@@ -29,6 +29,11 @@ check: ui-install ## Everything CI runs: fmt, clippy, workspace tests, UI lint/t
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 	$(CARGO) test --workspace --all-features
+	$(MAKE) notes-edit-budget
+
+.PHONY: notes-edit-budget
+notes-edit-budget: ## Optimized 10,000-note edit budget, including undo bookkeeping
+	$(CARGO) test --release -p grooviq-project --test notes ten_thousand_notes_edit_in_under_50_ms -- --ignored --exact --nocapture
 
 check-changed: ## Only the checks the changes against origin/main need (ARGS=--plan prints the plan)
 	node scripts/check-changed.mjs $(ARGS)
