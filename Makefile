@@ -33,7 +33,8 @@ check: ui-install ## Everything CI runs: fmt, clippy, workspace tests, UI lint/t
 
 .PHONY: notes-edit-budget
 notes-edit-budget: ## Optimized 10,000-note edit budget, including undo bookkeeping
-	$(CARGO) test --release -p grooviq-project --test notes ten_thousand_notes_edit_in_under_50_ms -- --ignored --exact --nocapture
+	node --test scripts/notes-edit-budget.test.mjs
+	node scripts/notes-edit-budget.mjs
 
 check-changed: ## Only the checks the changes against origin/main need (ARGS=--plan prints the plan)
 	node scripts/check-changed.mjs $(ARGS)

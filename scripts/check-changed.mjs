@@ -164,8 +164,10 @@ if (workspace || rustCrates.size > 0) {
   const scope = workspace ? ["--workspace"] : [...rustCrates].sort().flatMap((c) => ["-p", c]);
   step("rust clippy", "cargo", ["clippy", ...scope, "--all-targets", "--all-features", "--", "-D", "warnings"]);
   step("rust tests", "cargo", ["test", ...scope, "--all-features"]);
-  if (workspace || rustCrates.has("grooviq-project"))
-    step("notes edit budget", "cargo", ["test", "--release", "-p", "grooviq-project", "--test", "notes", "ten_thousand_notes_edit_in_under_50_ms", "--", "--ignored", "--exact", "--nocapture"]);
+}
+if (workspace || rustCrates.has("grooviq-project") || changed.some((path) => path.startsWith("scripts/notes-edit-budget."))) {
+  step("notes budget runner tests", "node", ["--test", "scripts/notes-edit-budget.test.mjs"]);
+  step("notes edit budget", "node", ["scripts/notes-edit-budget.mjs"]);
 }
 if (tooling) {
   step("tooling: check-changed plans", "node", ["scripts/check-changed.mjs", "--plan", "--base", base]);
