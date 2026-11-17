@@ -835,6 +835,16 @@ impl Voices {
     fn idle(&self) -> bool {
         self.v.iter().all(|v| v.stage == Stage::Off)
     }
+
+    /// How many slots the render loop visits: the fade slots only while one is in use (the
+    /// rest are silent, so skipping them changes no output bit).
+    fn span(&self) -> usize {
+        if self.v[VOICES..].iter().any(|v| v.stage != Stage::Off) {
+            SLOTS
+        } else {
+            VOICES
+        }
+    }
 }
 
 /// The sampler device.
@@ -1016,15 +1026,22 @@ impl Device for Sampler {
         let kind = p[FILTER_TYPE] as u8;
         let (env_amount, flt_sustain) = (p[FILTER_ENV], p[FLT_SUSTAIN]);
         let mut ev = events.iter().peekable();
+        // Only events (and a choke, before the block) put voices in fade slots.
+        let mut span = voices.span();
         for f in 0..n {
+            let mut evented = false;
             while let Some(e) = ev.next_if(|e| e.offset as usize <= f) {
                 voices.event(p, *sr, buf, e);
+                evented = true;
+            }
+            if evented {
+                span = voices.span();
             }
             let fade_frames = voices.fade;
             let sustain = sustain.next();
             let log2_cutoff = cutoff.next();
             let (mut sl, mut sr_) = (0.0f32, 0.0f32);
-            for v in voices.v.iter_mut() {
+            for v in voices.v[..span].iter_mut() {
                 if v.stage == Stage::Off {
                     continue;
                 }
