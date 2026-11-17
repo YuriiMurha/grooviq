@@ -423,3 +423,118 @@ test.describe("Save while a queued roll edit is refused (#191)", () => {
     });
   }
 });
+
+/** The warning toasts showing now. */
+const warnings = (app: Page) => app.getByRole("status", { name: "Messages" }).locator(".toast.warn");
+
+test.describe("after a refused flush (pre-merge)", () => {
+  test.use({
+    seed: {
+      project: twoChannels([]),
+      files: { [B]: { kind: "project", project: twoChannels([]) } },
+    },
+  });
+
+  // A refusal stops one save; it must not stop every save after it (a project that could never be
+  // saved again).
+  for (const kind of ["edit", "undo", "redo", "busy"] as const) {
+    test(`a_save_after_a_${kind}_refusal_and_a_good_edit_goes_through`, async ({ app, mock }) => {
+      await mock.eval(`(m) => m.queueDialog("/qa/A.grooviq")`);
+      await app.keyboard.press("ControlOrMeta+s");
+      await expect.poll(() => mock.view().then((v) => v.path)).toBe("/qa/A.grooviq");
+      await openRoll(app);
+      let p = await at(app, 480, 65);
+      await app.mouse.click(p.x, p.y);
+      await expect.poll(() => sessionNotes(mock)).toEqual([[1, 480, 240, 65]]);
+
+      // The roll's next request is held, then refused; Save waits for it.
+      const cmd = kind === "undo" ? "notes_undo" : kind === "redo" ? "notes_redo" : "notes_edit";
+      const why = kind === "busy" ? "The audio engine did not take the change (busy)." : "Refused for the test.";
+      await mock.eval(`(m) => { m.holdCommand("${cmd}"); m.refuseNext("${cmd}", "${why}"); }`);
+      const sent = (await mock.calls(cmd)).length;
+      if (kind === "undo") await app.keyboard.press("ControlOrMeta+z");
+      else if (kind === "redo") await app.keyboard.press("ControlOrMeta+Shift+z");
+      else {
+        p = await at(app, 960, 65);
+        await app.mouse.click(p.x, p.y);
+      }
+      await expect.poll(async () => (await mock.calls(cmd)).length).toBe(sent + 1);
+      const before = await warnings(app).count();
+      await app.keyboard.press("ControlOrMeta+s");
+      await nextFrame(app);
+      await release(mock, cmd);
+      // The refusal, and the save that did not happen.
+      await expect(warnings(app)).toHaveCount(before + 2);
+      expect(await mock.calls("project_save")).toEqual([]);
+      expect(await mock.view().then((v) => v.dirty)).toBe(true);
+
+      // A good edit, then Save: saved, with both notes.
+      await hold(mock, "notes_edit");
+      p = await at(app, 1440, 67);
+      await app.mouse.click(p.x, p.y);
+      await app.keyboard.press("ControlOrMeta+s");
+      await nextFrame(app);
+      await release(mock, "notes_edit");
+      await expect.poll(() => sessionNotes(mock)).toEqual([
+        [1, 480, 240, 65],
+        [1, 1440, 240, 67],
+      ]);
+      await expect.poll(async () => (await mock.calls("project_save")).length).toBe(1);
+      await expect.poll(() => mock.view().then((v) => v.dirty)).toBe(false);
+      const file = await mock.eval<{ project: { pattern: { notes: unknown[] } } }>("(m) => m.file('/qa/A.grooviq')");
+      expect(file.project.pattern.notes).toHaveLength(2);
+      // And a plain Save after that.
+      await app.keyboard.press("ControlOrMeta+s");
+      await expect.poll(async () => (await mock.calls("project_save")).length).toBe(2);
+    });
+  }
+
+  for (const answer of ["Don't save", "Cancel"] as const) {
+    test(`after_a_refused_flush_the_prompt_${answer === "Cancel" ? "cancel" : "dont_save"}_still_works`, async ({ app, mock }) => {
+      await openRoll(app);
+      await delayFirstAck(app);
+      for (const tick of [480, 960]) {
+        const p = await at(app, tick, 65);
+        await app.mouse.click(p.x, p.y);
+      }
+      // The second edit is refused while Save waits for it: nothing saved, a warning.
+      await mock.eval(`(m) => { m.refuseNext("notes_edit", "Refused for the test."); m.queueDialog("/qa/A.grooviq"); }`);
+      const before = await warnings(app).count();
+      await app.keyboard.press("ControlOrMeta+s");
+      await nextFrame(app);
+      await app.evaluate(() => (window as unknown as { releaseAck: () => void }).releaseAck());
+      await expect(warnings(app)).toHaveCount(before + 2);
+      // Open B: the prompt answers as it always does.
+      await mock.eval(`(m) => m.queueDialog("${B}")`);
+      await app.keyboard.press("ControlOrMeta+o");
+      await app.getByRole("dialog", { name: "Save changes?" }).getByRole("button", { name: answer, exact: true }).click();
+      if (answer === "Don't save") {
+        await expect.poll(() => mock.view().then((v) => v.path)).toBe(B);
+        expect(await sessionNotes(mock)).toEqual([]);
+      } else {
+        await nextFrame(app);
+        expect(await mock.calls("project_open")).toEqual([]);
+        expect(await mock.view().then((v) => [v.path, v.dirty])).toEqual([null, true]);
+        expect(await sessionNotes(mock)).toEqual([[1, 480, 240, 65]]);
+      }
+      expect(await mock.calls("project_save_as")).toEqual([]);
+    });
+  }
+
+  test("a_stamp_held_before_open_is_let_go_when_the_replacement_starts", async ({ app, mock }) => {
+    await openRoll(app);
+    const p = await at(app, 480, 65);
+    await app.mouse.move(p.x, p.y);
+    await app.mouse.down();
+    await mock.eval(`(m) => m.queueDialog("${B}")`);
+    await app.keyboard.press("ControlOrMeta+o");
+    await expect.poll(() => mock.view().then((v) => v.path)).toBe(B);
+    await nextFrame(app);
+    await app.mouse.up();
+    await nextFrame(app);
+    await nextFrame(app);
+    expect(await mock.calls("notes_edit")).toEqual([]);
+    expect(await sessionNotes(mock)).toEqual([]);
+    expect(await mock.view().then((v) => v.dirty)).toBe(false);
+  });
+});
