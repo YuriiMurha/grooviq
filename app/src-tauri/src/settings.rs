@@ -1,4 +1,4 @@
-//! The user's audio settings, kept in `settings.json` in the app config dir.
+//! The user's settings, kept in `settings.json` in the app config dir.
 
 use crate::audio_log::Level;
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,9 @@ pub struct Settings {
     pub output: Option<String>,
     /// Stop playback rather than let sound move to speakers by itself.
     pub guard: bool,
+    /// Draw the interface at the display's full rate (120 Hz on ProMotion) instead of WebKit's
+    /// 60 fps cap. macOS only; off by default (twice the frames costs battery).
+    pub high_refresh: bool,
 }
 
 impl Default for Settings {
@@ -20,6 +23,7 @@ impl Default for Settings {
         Self {
             output: None,
             guard: true,
+            high_refresh: false,
         }
     }
 }
@@ -89,7 +93,8 @@ mod tests {
             settings,
             Settings {
                 output: None,
-                guard: true
+                guard: true,
+                high_refresh: false,
             }
         );
         let (level, message) = note.unwrap();
@@ -116,6 +121,7 @@ mod tests {
         let saved = Settings {
             output: Some("BuiltInSpeakerDevice".into()),
             guard: false,
+            high_refresh: true,
         };
         save(&path, &saved).unwrap();
         assert_eq!(load(&path), (saved.clone(), None));
@@ -132,13 +138,15 @@ mod tests {
     #[test]
     fn missing_fields_take_their_defaults() {
         let path = dir("partial").join("settings.json");
-        std::fs::write(&path, br#"{ "output": "usb-dac" }"#).unwrap();
+        // A file from before `highRefresh` existed loads with it off.
+        std::fs::write(&path, br#"{ "output": "usb-dac", "guard": false }"#).unwrap();
         assert_eq!(
             load(&path),
             (
                 Settings {
                     output: Some("usb-dac".into()),
-                    guard: true
+                    guard: false,
+                    high_refresh: false,
                 },
                 None
             )

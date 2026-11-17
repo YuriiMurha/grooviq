@@ -10,6 +10,7 @@ use grooviq_engine::{Command, EngineConfig, render_offline};
 
 pub mod devices;
 pub mod drums;
+pub mod perf;
 pub mod synth_presets;
 
 pub use drums::{KIT, LOOPS, decode_samples, drums_4ch_project, kit_dir};

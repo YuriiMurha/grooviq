@@ -114,7 +114,7 @@ fn adding_a_channel_names_it_after_the_file_and_gives_it_the_next_ink() {
     let state = controller.lock().unwrap().state().clone();
     let ids: Vec<u32> = state.channels.iter().map(|c| c.id.0).collect();
     assert_eq!(ids, vec![kick, snare]);
-    assert!(state.channels[0].sample.is_some());
+    assert!(state.channels[0].instrument.sample().is_some());
 }
 
 #[test]
@@ -152,6 +152,7 @@ fn toggling_a_step_adds_a_note_at_its_tick_and_sends_the_pattern() {
             key: 60,
             velocity: 0.8,
             length: 240,
+            slide: false,
         }]
     );
 }
@@ -441,7 +442,7 @@ fn mix_sampler_tempo_swing_and_signature_reach_the_model_and_the_engine() {
     assert_eq!(state.channels[0].mix.volume, 0.5);
     assert_eq!(state.channels[0].mix.pan, -0.25);
     assert!(state.channels[0].mix.mute);
-    assert_eq!(state.channels[0].sampler[1], 24.0);
+    assert_eq!(state.channels[0].instrument.params()[1], 24.0);
     assert_eq!(
         state.pattern.notes[0].tick,
         240 + 60,
@@ -986,7 +987,11 @@ fn opening_a_project_with_a_missing_sample_keeps_the_channel_and_warns() {
     assert!(!view.dirty);
 
     let state = controller.lock().unwrap().state().clone();
-    let has_sample: Vec<bool> = state.channels.iter().map(|c| c.sample.is_some()).collect();
+    let has_sample: Vec<bool> = state
+        .channels
+        .iter()
+        .map(|c| c.instrument.sample().is_some())
+        .collect();
     assert_eq!(has_sample, vec![true, false, false]);
     assert_eq!(
         state.pattern.notes.len(),
@@ -1038,7 +1043,8 @@ fn relinking_gives_the_channel_its_sample() {
     assert!(view.dirty);
     assert!(
         controller.lock().unwrap().state().channels[1]
-            .sample
+            .instrument
+            .sample()
             .is_some()
     );
     assert!(session.autosave_due(now + STRUCTURAL_DELAY));
@@ -1082,7 +1088,8 @@ fn a_saved_project_keeps_samples_whose_originals_are_gone() {
     assert!(!report.view.channels[0].missing);
     assert!(
         controller.lock().unwrap().state().channels[0]
-            .sample
+            .instrument
+            .sample()
             .is_some()
     );
 }
@@ -1379,7 +1386,11 @@ fn assert_mirror(session: &Session, controller: &Mutex<Controller>, after: &str)
                 .iter()
                 .position(|p| p == param)
                 .unwrap();
-            assert_eq!(*value, engine.sampler[index], "after {after}: {param}");
+            assert_eq!(
+                *value,
+                engine.instrument.params()[index],
+                "after {after}: {param}"
+            );
         }
     }
     let pattern = &project.patterns[0];

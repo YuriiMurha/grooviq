@@ -289,11 +289,13 @@ fn tone_sample(len: usize) -> Arc<SampleBuf> {
 
 #[test]
 fn channel_messages_never_allocate_on_the_audio_thread() {
-    let setup = |id, sample: &Arc<SampleBuf>| ChannelSetup {
-        id: ChannelId(id),
-        sample: Some(Arc::clone(sample)),
-        sampler: Vec::new(),
-        mix: ChannelMix::default(),
+    let setup = |id, sample: &Arc<SampleBuf>| {
+        ChannelSetup::sampler(
+            ChannelId(id),
+            Some(Arc::clone(sample)),
+            Vec::new(),
+            ChannelMix::default(),
+        )
     };
     let (a, b) = (tone_sample(48_000), tone_sample(4_800));
     let state = EngineState {
@@ -352,6 +354,7 @@ fn channel_messages_never_allocate_on_the_audio_thread() {
             key: 60,
             velocity: 0.8,
             length: 240,
+            slide: false,
         }],
     })
     .unwrap();
@@ -389,11 +392,13 @@ fn sequencing_never_allocates() {
         p[7] = 0.0;
         p
     };
-    let setup = |id, sampler: Vec<f32>| ChannelSetup {
-        id: ChannelId(id),
-        sample: Some(steady(4_800)),
-        sampler,
-        mix: ChannelMix::default(),
+    let setup = |id, sampler: Vec<f32>| {
+        ChannelSetup::sampler(
+            ChannelId(id),
+            Some(steady(4_800)),
+            sampler,
+            ChannelMix::default(),
+        )
     };
     // Dense: every tick of 60 on 2 channels, held across each other.
     let dense = |length: u32, hold: u32| PatternData {
@@ -406,6 +411,7 @@ fn sequencing_never_allocates() {
                     key: (36 + i % 24) as u8,
                     velocity: 0.9,
                     length: hold,
+                    slide: false,
                 })
             })
             .collect(),
@@ -447,11 +453,13 @@ fn sequencing_never_allocates() {
 
 #[test]
 fn messages_queued_before_a_rate_change_never_free_on_the_audio_thread() {
-    let setup = |id, sample: &Arc<SampleBuf>| ChannelSetup {
-        id: ChannelId(id),
-        sample: Some(Arc::clone(sample)),
-        sampler: Vec::new(),
-        mix: ChannelMix::default(),
+    let setup = |id, sample: &Arc<SampleBuf>| {
+        ChannelSetup::sampler(
+            ChannelId(id),
+            Some(Arc::clone(sample)),
+            Vec::new(),
+            ChannelMix::default(),
+        )
     };
     let (a, b) = (tone_sample(4_800), tone_sample(9_000));
     let state = EngineState {
@@ -491,4 +499,76 @@ fn messages_queued_before_a_rate_change_never_free_on_the_audio_thread() {
     assert_eq!(Arc::strong_count(&a), 1, "nothing holds the old sample");
     // The test, the state's two channels and the graph's two nodes.
     assert_eq!(Arc::strong_count(&b), 5);
+}
+
+#[test]
+fn choke_never_allocates() {
+    let sample = tone_sample(9_600);
+    let hat = |id, choke| ChannelSetup {
+        choke,
+        ..ChannelSetup::sampler(
+            ChannelId(id),
+            Some(Arc::clone(&sample)),
+            Vec::new(),
+            ChannelMix::default(),
+        )
+    };
+    let synth = ChannelSetup {
+        choke: 1,
+        ..ChannelSetup::synth(ChannelId(4), Vec::new(), ChannelMix::default())
+    };
+    // Every 30 ticks, a note on one of four channels of group 1, some of them slides.
+    let pattern = PatternData {
+        length: 3_840,
+        notes: (0..128)
+            .map(|i| SeqNote {
+                tick: i * 30,
+                channel: ChannelId(1 + i % 4),
+                key: (40 + i % 12) as u8,
+                velocity: 0.9,
+                length: 90,
+                slide: i % 3 == 0,
+            })
+            .collect(),
+    };
+    let state = EngineState {
+        bpm: 400.0,
+        channels: vec![hat(1, 1), hat(2, 1), hat(3, 1), synth],
+        pattern,
+    };
+    let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
+    let mut buf = vec![0f32; 441 * 2];
+    c.send(Command::Play).unwrap();
+    for i in 0..200u32 {
+        if i % 20 == 0 {
+            c.send(Command::SetChoke {
+                channel: ChannelId(1 + i / 20 % 4),
+                group: (i / 20 % 3) as u8,
+            })
+            .unwrap();
+            c.send(Command::SetChannelParam {
+                channel: ChannelId(4),
+                index: 20,
+                value: 300.0 + i as f32,
+            })
+            .unwrap();
+        }
+        if i == 100 {
+            // More grouped note-ons in one block than the graph records.
+            for channel in 1..=3 {
+                for _ in 0..100 {
+                    c.send(Command::ChannelNote {
+                        channel: ChannelId(channel),
+                        key: 60,
+                        velocity: 0.5,
+                        on: true,
+                    })
+                    .unwrap();
+                }
+            }
+        }
+        assert_no_alloc(|| p.process(&mut buf, 2));
+        c.check_health();
+    }
+    assert!(c.live().peak[0] > 0.05, "it sounded");
 }

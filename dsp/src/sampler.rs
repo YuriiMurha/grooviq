@@ -1,7 +1,7 @@
-//! Sampler: plays one sample per instance, polyphonically, pitched by key.
+//! Sampler: plays one sample per instance, pitched by key.
 //!
 //! Each note picks a region of the sample (`start`..`end`, optionally reversed), plays it at a
-//! rate fixed at note-on (`source_rate / engine_rate * 2^(semitones / 12)`) through a cubic
+//! rate set at note-on (`source_rate / engine_rate * 2^(semitones / 12)`) through a cubic
 //! Hermite read, and shapes it with an attack/decay/sustain/release envelope. In one-shot mode a
 //! note plays to the end of its region and ignores note-off; in gate mode note-off releases it.
 //! Loop mode repeats the region's tail (from `loop_start`, a fraction of the played region in
@@ -9,6 +9,13 @@
 //! state-variable filter (low-, high- or band-pass) whose cutoff follows its own envelope and
 //! the note's velocity. Declick adds a 2 ms fade-in and a 4 ms fade-out at the region edges,
 //! both counted in output frames.
+//!
+//! Voice modes mirror the synth's: poly (16 voices), mono and legato (one voice, slot 0, with a
+//! last-note-priority stack). Glide is linear in semitones; while a voice glides, its rate is
+//! recomputed every 16 of its frames from the pitch in the middle of those frames, and exactly at
+//! arrival. A slide note moves the newest held voice to its key without a new attack. A stolen
+//! voice, a note cut by a mono note and a choked voice fade out linearly over 3 ms in a slot of
+//! their own, so the new note starts at its exact frame.
 //!
 //! Determinism: every exp/pow/tan goes through `libm`, pan uses `sqrt`, and there is no
 //! `mul_add`, so a render is bit-identical on every platform. Filter coefficients are
@@ -72,10 +79,12 @@ pub const PARAM_IDS: [&str; PARAMS] = [
     "flt_release",
     "vel_amp",
     "vel_filter",
+    "voice_mode",
+    "glide",
 ];
 
 /// Number of parameters.
-const PARAMS: usize = 27;
+const PARAMS: usize = 29;
 
 /// `(min, max, default)` per parameter, indexed like [`PARAM_IDS`]. Switches are on at >= 0.5.
 pub const SPEC: [(f32, f32, f32); PARAMS] = [
@@ -106,6 +115,8 @@ pub const SPEC: [(f32, f32, f32); PARAMS] = [
     (1.0, 10000.0, 40.0),     // flt_release: ms
     (0.0, 1.0, 1.0),          // vel_amp: level x (1 - vel_amp + vel_amp x velocity)
     (0.0, 1.0, 0.0),          // vel_filter: cutoff x 2^(4 x vel_filter x (velocity - 1))
+    (0.0, 2.0, 0.0),          // voice_mode: 0 poly, 1 mono, 2 legato
+    (0.0, 1000.0, 0.0),       // glide: ms (mono glide, legato, and slide notes)
 ];
 
 const ROOT: usize = 0;
@@ -135,6 +146,26 @@ const FLT_SUSTAIN: usize = 23;
 const FLT_RELEASE: usize = 24;
 const VEL_AMP: usize = 25;
 const VEL_FILTER: usize = 26;
+const VOICE_MODE: usize = 27;
+const GLIDE: usize = 28;
+
+/// Slots: VOICES where notes start, then FADES where voices fade out (stolen, choked or cut by a
+/// mono note), so a new note always starts on its own frame: it is never dropped or delayed.
+const SLOTS: usize = VOICES + FADES;
+/// Fade slots: four chokes of every voice within 3 ms fit. Overload exception: only when more
+/// than FADES voices fade at once does a new fade replace the one nearest its end (the quietest),
+/// which cuts that fade short.
+const FADES: usize = 4 * VOICES;
+/// Keys held in mono and legato modes, for last-note priority (note-off ownership is tracked
+/// separately, without a bound).
+const STACK: usize = 32;
+/// Slide time when glide is 0, in ms (the synth's).
+const DEFAULT_SLIDE_MS: f32 = 60.0;
+/// Stolen, cut and choked voices fade out linearly over this time in seconds.
+const STEAL_FADE_S: f32 = 0.003;
+/// While gliding, the rate is computed for the pitch this many steps ahead: the middle of the
+/// next CONTROL_FRAMES frames.
+const GLIDE_AHEAD: f32 = (CONTROL_FRAMES as f32 - 1.0) / 2.0;
 
 /// Declick fade lengths in seconds.
 const FADE_IN_S: f32 = 0.002;
@@ -174,8 +205,23 @@ struct Voice {
     key: u8,
     /// Read position in sample frames.
     pos: f64,
-    /// Frames advanced per output frame (negative when reversed); fixed at note-on.
+    /// Frames advanced per output frame (negative when reversed); set at note-on, and while the
+    /// voice glides.
     step: f64,
+    /// What the rate is made of: `base x 2^((pitch - root (if tracking) + tune + fine) / 12)`.
+    base: f64,
+    root: f32,
+    tune: f32,
+    fine: f32,
+    track: bool,
+    /// Pitch (key units): where it is, where it glides to and how far it moves per frame.
+    pitch: f32,
+    target: f32,
+    glide_step: f32,
+    /// Frames until a glide recomputes the rate (0: this frame).
+    gctl: u8,
+    /// Fading out: frames left (0: not fading).
+    fade: u32,
     /// Region of the sample this voice plays, in frames (`start` inclusive, `end` exclusive).
     start: f64,
     end: f64,
@@ -185,9 +231,8 @@ struct Voice {
     age: u32,
     /// Note-on order, for stealing the oldest voice.
     order: u64,
-    /// Gate or loop mode: this note's note-off has not arrived yet. It stays set when the voice
-    /// ends by itself first, so that late note-off finds this note, not a newer one on its key.
-    held: bool,
+    /// The note's ticket on its key: the n-th note-on of a key owns that key's n-th note-off.
+    ticket: u32,
     /// Loop mode: the voice repeats `lo..hi` (`len` frames, a whole number) instead of ending.
     looping: bool,
     lo: f64,
@@ -214,13 +259,23 @@ impl Voice {
         key: 0,
         pos: 0.0,
         step: 1.0,
+        base: 1.0,
+        root: 60.0,
+        tune: 0.0,
+        fine: 0.0,
+        track: true,
+        pitch: 0.0,
+        target: 0.0,
+        glide_step: 0.0,
+        gctl: 0,
+        fade: 0,
         start: 0.0,
         end: 0.0,
         env: 0.0,
         vel: 0.0,
         age: 0,
         order: 0,
-        held: false,
+        ticket: 0,
         looping: false,
         lo: 0.0,
         hi: 0.0,
@@ -235,14 +290,63 @@ impl Voice {
         ic: [[0.0; 2]; 2],
     };
 
-    /// This voice, silent, but keeping its key, order and owed note-off (as a voice that ends
-    /// by itself does), so a late note-off still finds it.
-    fn quieted(&self) -> Self {
-        Self {
-            key: self.key,
-            order: self.order,
-            held: self.held,
-            ..Self::OFF
+    /// The rate (frames per output frame, signed by direction) at `pitch`.
+    fn rate(&self, pitch: f32) -> f64 {
+        let track = if self.track {
+            pitch as f64 - self.root as f64
+        } else {
+            0.0
+        };
+        let semis = track + self.tune as f64 + self.fine as f64 / 100.0;
+        let rate = self.base * libm::pow(2.0, semis / 12.0);
+        if self.step < 0.0 { -rate } else { rate }
+    }
+
+    /// Moves the pitch to `key`: linearly over `ms` (as the synth does), at once if `ms` is 0.
+    fn glide_to(&mut self, key: f32, ms: f32, sr: f32) {
+        self.target = key;
+        if ms <= 0.0 || !self.track {
+            self.pitch = key;
+            self.glide_step = 0.0;
+            self.step = self.rate(key);
+        } else {
+            self.glide_step = (key - self.pitch).abs() / (ms * 0.001 * sr).max(1.0);
+            self.gctl = 0;
+        }
+    }
+
+    /// One frame of a glide: the pitch moves one step; the rate follows at control rate, counted
+    /// from the glide's start, and exactly at arrival.
+    #[inline]
+    fn glide(&mut self) {
+        let d = self.target - self.pitch;
+        if self.glide_step <= 0.0 || d.abs() <= self.glide_step {
+            self.pitch = self.target;
+            self.step = self.rate(self.pitch);
+            return;
+        }
+        self.pitch += self.glide_step.copysign(d);
+        if self.gctl == 0 {
+            let reach = GLIDE_AHEAD * self.glide_step;
+            let ahead = (self.target - self.pitch).min(reach).max(-reach);
+            self.step = self.rate(self.pitch + ahead);
+            self.gctl = CONTROL_FRAMES;
+        }
+        self.gctl -= 1;
+    }
+
+    /// Whether the note is on and not releasing.
+    fn gate_open(&self) -> bool {
+        matches!(self.stage, Stage::Attack | Stage::Decay | Stage::Sustain)
+    }
+
+    /// Releases the note (amp and filter envelopes) if its gate is open.
+    fn release(&mut self) {
+        if self.gate_open() {
+            self.stage = Stage::Release;
+            if self.fstage != Stage::Off {
+                self.fstage = Stage::Release;
+            }
         }
     }
 
@@ -369,18 +473,66 @@ struct Coefs {
 
 /// The voice pool: separate from the buffer so `process` can borrow both at once.
 struct Voices {
-    v: [Voice; VOICES],
+    /// Notes start in `v[..VOICES]`; `v[VOICES..]` hold fading voices and owed note-offs.
+    v: [Voice; SLOTS],
     /// Note-ons so far, for stealing the oldest voice.
     counter: u64,
+    /// Note-ons and note-offs so far per key. A key's n-th note-off belongs to its n-th note-on
+    /// (ticket n), whatever happened to that note since (ended, stolen, choked, slid away or
+    /// dropped), so a late note-off never ends a newer note on its key. Notes whose ticket lies
+    /// in `offs..ons` are held (their key is down).
+    ons: [u32; 256],
+    offs: [u32; 256],
+    /// Mono and legato: the held notes `(key, ticket)`, oldest first; the top one sounds.
+    /// Beyond STACK the oldest is dropped from priority (its note-off is still its own).
+    stack: [(u8, u32); STACK],
+    stack_len: usize,
+    /// The last note-on's key: a slide with nothing held glides from it.
+    last_pitch: Option<f32>,
+    /// Slot 0 plays the mono or legato note.
+    mono: bool,
+    /// Frames a fade-out lasts (STEAL_FADE_S).
+    fade: u32,
+}
+
+/// Slide time in ms: the glide time, or DEFAULT_SLIDE_MS when glide is 0.
+fn slide_ms(p: &[f32; PARAMS]) -> f32 {
+    if p[GLIDE] > 0.0 {
+        p[GLIDE]
+    } else {
+        DEFAULT_SLIDE_MS
+    }
 }
 
 impl Voices {
-    fn note_on(&mut self, p: &[f32; PARAMS], sr: f32, buf: &SampleBuf, key: u8, velocity: f32) {
-        let len = buf.len() as f64;
-        // A buffer without a usable rate would never advance: it stays silent.
-        if len < 1.0 || !(buf.rate.is_finite() && buf.rate > 0.0) {
-            return;
+    fn new(fade: u32) -> Self {
+        Self {
+            v: [Voice::OFF; SLOTS],
+            counter: 0,
+            ons: [0; 256],
+            offs: [0; 256],
+            stack: [(0, 0); STACK],
+            stack_len: 0,
+            last_pitch: None,
+            mono: false,
+            fade,
         }
+    }
+
+    /// Starts a note in slot `i`. `glide`: the pitch it glides from and the time in ms.
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        &mut self,
+        i: usize,
+        p: &[f32; PARAMS],
+        sr: f32,
+        buf: &SampleBuf,
+        key: u8,
+        ticket: u32,
+        velocity: f32,
+        glide: Option<(f32, f32)>,
+    ) {
+        let len = buf.len() as f64;
         // The region, in either order of start and end, at least one frame long.
         let a = p[START] as f64 * len;
         let b = p[END] as f64 * len;
@@ -390,13 +542,6 @@ impl Voices {
             end = (start + 1.0).min(len);
             start = end - 1.0;
         }
-        let track = if p[PITCH_TRACK] >= 0.5 {
-            key as f64 - p[ROOT] as f64
-        } else {
-            0.0
-        };
-        let semis = track + p[TUNE] as f64 + p[FINE] as f64 / 100.0;
-        let rate = buf.rate as f64 / sr as f64 * libm::pow(2.0, semis / 12.0);
         let reverse = p[REVERSE] >= 0.5;
         // The loop: the played region's tail from `loop_start` (in play order), a whole number
         // of frames long so reads across the seam line up with the samples.
@@ -410,23 +555,6 @@ impl Voices {
         } else {
             (end - len_loop, end)
         };
-        self.counter += 1;
-        // A free voice; else the oldest silent one still owed a note-off; else the one
-        // started first.
-        let i = match self.v.iter().position(|v| v.stage == Stage::Off && !v.held) {
-            Some(i) => i,
-            None => {
-                let silent = self.v.iter().any(|v| v.stage == Stage::Off);
-                let mut oldest: Option<usize> = None;
-                for (i, v) in self.v.iter().enumerate() {
-                    let candidate = !silent || v.stage == Stage::Off;
-                    if candidate && oldest.is_none_or(|o| v.order < self.v[o].order) {
-                        oldest = Some(i);
-                    }
-                }
-                oldest.unwrap_or(0)
-            }
-        };
         let attack = p[ATTACK] > 0.0;
         let flt_attack = p[FLT_ATTACK] > 0.0;
         let vel = if velocity.is_finite() {
@@ -435,18 +563,25 @@ impl Voices {
             0.0
         };
         let vel_amp = p[VEL_AMP];
-        self.v[i] = Voice {
+        let mut v = Voice {
             stage: if attack { Stage::Attack } else { Stage::Decay },
             key,
             pos: if reverse { end - 1.0 } else { start },
-            step: if reverse { -rate } else { rate },
+            step: if reverse { -1.0 } else { 1.0 },
+            base: buf.rate as f64 / sr as f64,
+            root: p[ROOT],
+            tune: p[TUNE],
+            fine: p[FINE],
+            track: p[PITCH_TRACK] >= 0.5,
+            pitch: key as f32,
+            target: key as f32,
             start,
             end,
             env: if attack { 0.0 } else { 1.0 },
             vel: 1.0 - vel_amp + vel_amp * vel,
             age: 0,
             order: self.counter,
-            held: p[ONE_SHOT] < 0.5 || looping,
+            ticket,
             looping,
             lo,
             hi,
@@ -461,57 +596,254 @@ impl Voices {
             vel_oct: VEL_OCTAVES * p[VEL_FILTER] * (vel - 1.0),
             ..Voice::OFF
         };
+        v.step = v.rate(v.pitch);
+        if let Some((from, ms)) = glide {
+            v.pitch = from;
+            v.glide_to(key as f32, ms, sr);
+        }
+        self.v[i] = v;
     }
 
-    /// Ends one note: the oldest on `key` whose note-off has not arrived, which releases it
-    /// if it still sounds. A note-off belongs to one note-on, so a newer hit on the same key
-    /// keeps sounding (a swung note that overlaps the next one, or a note-off booked before
-    /// a tempo change), also when the older voice already ended by itself. In one-shot mode the
-    /// note plays on, but the note-off is still its own: a gate note that is owed it when
-    /// one-shot is switched on takes it, so it never ends a later note. A looping note releases
-    /// on its note-off in either mode.
-    fn note_off(&mut self, p: &[f32; PARAMS], key: u8) {
-        let mut oldest: Option<usize> = None;
-        for (i, v) in self.v.iter().enumerate() {
-            if v.key == key && v.held && oldest.is_none_or(|o| v.order < self.v[o].order) {
-                oldest = Some(i);
+    /// Moves a sounding voice out of a note slot into a fade slot, where it fades out over
+    /// STEAL_FADE_S: a free one, or with all FADES in use (the overload exception), the one
+    /// nearest the end of its fade.
+    fn park(&mut self, mut v: Voice) {
+        if v.stage == Stage::Off {
+            return;
+        }
+        if v.fade == 0 {
+            v.fade = self.fade;
+        }
+        let tail = VOICES..SLOTS;
+        let j = tail
+            .clone()
+            .find(|&j| self.v[j].stage == Stage::Off)
+            .or_else(|| tail.min_by_key(|&j| self.v[j].fade))
+            .unwrap_or(VOICES);
+        self.v[j] = v;
+    }
+
+    /// Whether the note with `ticket` on `key` is held (its note-off has not arrived).
+    fn is_down(&self, key: u8, ticket: u32) -> bool {
+        let k = key as usize;
+        ticket.wrapping_sub(self.offs[k]) < self.ons[k].wrapping_sub(self.offs[k])
+    }
+
+    /// Adds a held note to the mono priority stack (dropping the oldest when full).
+    fn push_held(&mut self, key: u8, ticket: u32) {
+        if self.stack_len == STACK {
+            self.stack.copy_within(1.., 0);
+            self.stack_len -= 1;
+        }
+        self.stack[self.stack_len] = (key, ticket);
+        self.stack_len += 1;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn poly_on(
+        &mut self,
+        p: &[f32; PARAMS],
+        sr: f32,
+        buf: &SampleBuf,
+        key: u8,
+        ticket: u32,
+        velocity: f32,
+        slide: bool,
+    ) {
+        if slide {
+            // FL-style: the newest note whose key is still down glides to the slide's key and
+            // becomes the slide note (its own note-off now matches nothing).
+            let newest = (0..VOICES)
+                .filter(|&i| {
+                    let v = &self.v[i];
+                    v.gate_open() && v.fade == 0 && self.is_down(v.key, v.ticket)
+                })
+                .max_by_key(|&i| self.v[i].order);
+            if let Some(i) = newest {
+                let order = self.counter;
+                let v = &mut self.v[i];
+                v.glide_to(key as f32, slide_ms(p), sr);
+                v.key = key;
+                v.ticket = ticket;
+                v.order = order;
+                return;
             }
         }
-        if let Some(i) = oldest {
-            let v = &mut self.v[i];
-            v.held = false;
-            let gate = p[ONE_SHOT] < 0.5 || v.looping;
-            if gate && matches!(v.stage, Stage::Attack | Stage::Decay | Stage::Sustain) {
-                v.stage = Stage::Release;
-                if v.fstage != Stage::Off {
-                    v.fstage = Stage::Release;
+        // A free voice; else the one started first, which moves to a fade slot.
+        let i = match self.v[..VOICES].iter().position(|v| v.stage == Stage::Off) {
+            Some(i) => i,
+            None => {
+                let mut oldest = 0;
+                for (i, v) in self.v[..VOICES].iter().enumerate() {
+                    if v.order < self.v[oldest].order {
+                        oldest = i;
+                    }
                 }
+                self.park(self.v[oldest]);
+                oldest
+            }
+        };
+        let glide = if slide {
+            self.last_pitch.map(|from| (from, slide_ms(p)))
+        } else {
+            None
+        };
+        self.start(i, p, sr, buf, key, ticket, velocity, glide);
+    }
+
+    /// Mono and legato note-on, as the synth's: the newest key sounds on slot 0. With a key
+    /// still held, legato and slide notes glide the sounding note to the new key without a new
+    /// attack; otherwise the new note starts afresh (gliding in mono mode when glide is on) and
+    /// the old one fades out.
+    #[allow(clippy::too_many_arguments)]
+    fn mono_on(
+        &mut self,
+        p: &[f32; PARAMS],
+        sr: f32,
+        buf: &SampleBuf,
+        key: u8,
+        ticket: u32,
+        velocity: f32,
+        slide: bool,
+        legato: bool,
+    ) {
+        let had_keys = self.stack_len > 0;
+        self.push_held(key, ticket);
+        let glide = p[GLIDE];
+        let v = self.v[0];
+        let sounding = self.mono && v.stage != Stage::Off;
+        let held = sounding && v.gate_open() && had_keys;
+        let ms = if slide { slide_ms(p) } else { glide };
+        if held && (legato || slide) {
+            let order = self.counter;
+            let v = &mut self.v[0];
+            v.glide_to(key as f32, ms, sr);
+            v.key = key;
+            v.ticket = ticket;
+            v.order = order;
+            return;
+        }
+        // A retrigger glides from a held note; after a release, legato mode only glides on
+        // slide notes.
+        let glide_now = slide || (!legato && glide > 0.0);
+        let ms = if held || glide_now { ms } else { 0.0 };
+        let from = if sounding {
+            (ms > 0.0).then_some(v.pitch)
+        } else if glide_now {
+            self.last_pitch
+        } else {
+            None
+        };
+        self.park(v);
+        let glide = from.map(|f| (f, ms));
+        self.start(0, p, sr, buf, key, ticket, velocity, glide);
+        self.mono = true;
+    }
+
+    /// Ends the note with `ticket` on `key`: the note-on this note-off belongs to. A newer hit on
+    /// the same key keeps sounding (a swung note that overlaps the next one, or a note-off booked
+    /// before a tempo change), also when the older note already ended by itself, was stolen,
+    /// choked or slid to another key. A sounding note releases (in one-shot mode it plays on; a
+    /// looping note releases in either mode). In mono and legato modes, releasing the sounding
+    /// key returns to the newest key still held, or releases the note when none is.
+    fn note_off(&mut self, p: &[f32; PARAMS], sr: f32, key: u8, ticket: u32) {
+        if let Some(j) = (0..self.stack_len).find(|&j| self.stack[j] == (key, ticket)) {
+            let top = j + 1 == self.stack_len;
+            self.stack.copy_within(j + 1..self.stack_len, j);
+            self.stack_len -= 1;
+            let v = &mut self.v[0];
+            if top && self.mono && v.gate_open() && self.stack_len > 0 {
+                let (k, t) = self.stack[self.stack_len - 1];
+                v.glide_to(k as f32, p[GLIDE], sr);
+                v.key = k;
+                v.ticket = t;
+            }
+        }
+        let gate = p[ONE_SHOT] < 0.5;
+        for v in &mut self.v {
+            if v.key == key && v.ticket == ticket && (gate || v.looping) {
+                v.release();
             }
         }
     }
 
     fn event(&mut self, p: &[f32; PARAMS], sr: f32, buf: &SampleBuf, e: &NoteEvent) {
-        if e.on {
-            self.note_on(p, sr, buf, e.key, e.velocity);
-        } else {
-            self.note_off(p, e.key);
+        let k = e.key as usize;
+        if !e.on {
+            // A note-off with no held note on its key (after a reset) belongs to nothing.
+            if self.offs[k] != self.ons[k] {
+                let ticket = self.offs[k];
+                self.offs[k] = ticket.wrapping_add(1);
+                self.note_off(p, sr, e.key, ticket);
+            }
+            return;
         }
+        // Every note-on takes its ticket, also one that cannot play, so note-offs stay paired.
+        let ticket = self.ons[k];
+        self.ons[k] = ticket.wrapping_add(1);
+        // A buffer without a usable rate would never advance: it stays silent.
+        if buf.is_empty() || !(buf.rate.is_finite() && buf.rate > 0.0) {
+            return;
+        }
+        self.counter += 1;
+        match p[VOICE_MODE] as u8 {
+            0 => self.poly_on(p, sr, buf, e.key, ticket, e.velocity, e.slide),
+            mode => self.mono_on(p, sr, buf, e.key, ticket, e.velocity, e.slide, mode == 2),
+        }
+        self.last_pitch = Some(e.key as f32);
+    }
+
+    /// The voice mode changed: the mono note (if any) is released like a note whose key let
+    /// go, and the priority stack starts empty. Every note-off still finds its note.
+    fn mode_changed(&mut self, p: &[f32; PARAMS]) {
+        if self.mono {
+            let v = &mut self.v[0];
+            if p[ONE_SHOT] < 0.5 || v.looping {
+                v.release();
+            }
+            self.mono = false;
+        }
+        self.stack_len = 0;
+    }
+
+    /// Every sounding voice fades out over STEAL_FADE_S in a fade slot, so its note slot is free
+    /// at once. Held keys leave the mono priority stack: a note after the choke never returns
+    /// to them (their note-offs still find nothing newer to end).
+    fn choke(&mut self) {
+        for i in 0..VOICES {
+            let v = self.v[i];
+            if v.stage != Stage::Off {
+                self.park(v);
+                self.v[i] = Voice::OFF;
+            }
+        }
+        self.mono = false;
+        self.stack_len = 0;
     }
 
     fn silence(&mut self) {
-        self.v = [Voice::OFF; VOICES];
+        *self = Self::new(self.fade);
     }
 
-    /// Silences every voice but keeps its key, order and owed note-off, as a voice that ends
-    /// by itself does.
+    /// Silences every voice, as a voice that ends by itself does. Held notes stay held: their
+    /// note-offs still find nothing newer to end.
     fn quiet(&mut self) {
-        for v in &mut self.v {
-            *v = v.quieted();
-        }
+        self.v = [Voice::OFF; SLOTS];
+        self.mono = false;
     }
 
     fn idle(&self) -> bool {
         self.v.iter().all(|v| v.stage == Stage::Off)
+    }
+
+    /// How many slots the render loop visits: the fade slots only while one is in use (the
+    /// rest are silent, so skipping them changes no output bit).
+    fn span(&self) -> usize {
+        if self.v[VOICES..].iter().any(|v| v.stage != Stage::Off) {
+            SLOTS
+        } else {
+            VOICES
+        }
     }
 }
 
@@ -549,10 +881,7 @@ impl Sampler {
             sample: None,
             p,
             c,
-            voices: Voices {
-                v: [Voice::OFF; VOICES],
-                counter: 0,
-            },
+            voices: Voices::new(((STEAL_FADE_S * sr).round() as u32).max(1)),
             out: c.out,
             sustain: Ramp::at(p[SUSTAIN]),
             cutoff: Ramp::at(libm::log2f(p[CUTOFF])),
@@ -572,9 +901,9 @@ impl Sampler {
     }
 
     /// Comes to rest once nothing sounds: every voice is silent and the output smoothing sits
-    /// at its target, as after [`Device::reset`]. Unlike a reset, a note that ended before its
-    /// note-off still waits for it, so that late note-off finds it rather than a newer note on
-    /// its key. Never allocates.
+    /// at its target, as after [`Device::reset`]. Unlike a reset, held notes stay held, so a
+    /// late note-off of a note that ended before it still ends nothing newer on its key. Never
+    /// allocates.
     pub fn settle(&mut self) {
         self.voices.quiet();
         self.rest();
@@ -645,10 +974,14 @@ impl Device for Sampler {
             return;
         };
         let i = index as usize;
-        if i == ROOT || i == FILTER_TYPE {
+        if i == ROOT || i == FILTER_TYPE || i == VOICE_MODE {
             v = v.round();
         }
+        let old = self.p[i];
         self.p[i] = v;
+        if i == VOICE_MODE && v != old {
+            self.voices.mode_changed(&self.p);
+        }
         self.c = coefs(&self.p, self.sr);
         match i {
             SUSTAIN => self.sustain.to(v, self.ramp),
@@ -693,14 +1026,36 @@ impl Device for Sampler {
         let kind = p[FILTER_TYPE] as u8;
         let (env_amount, flt_sustain) = (p[FILTER_ENV], p[FLT_SUSTAIN]);
         let mut ev = events.iter().peekable();
+        // Only events (and a choke, before the block) put voices in fade slots.
+        let mut span = voices.span();
         for f in 0..n {
+            let mut evented = false;
             while let Some(e) = ev.next_if(|e| e.offset as usize <= f) {
                 voices.event(p, *sr, buf, e);
+                evented = true;
             }
+            if evented {
+                span = voices.span();
+            }
+            let fade_frames = voices.fade;
             let sustain = sustain.next();
             let log2_cutoff = cutoff.next();
             let (mut sl, mut sr_) = (0.0f32, 0.0f32);
-            for v in voices.v.iter_mut() {
+            for v in voices.v[..span].iter_mut() {
+                if v.stage == Stage::Off {
+                    continue;
+                }
+                // Fading out (stolen, cut or choked): a straight line to silence, then the slot
+                // is free.
+                let mut fade = None;
+                if v.fade > 0 {
+                    v.fade -= 1;
+                    if v.fade == 0 {
+                        *v = Voice::OFF;
+                        continue;
+                    }
+                    fade = Some(v.fade as f32 / fade_frames as f32);
+                }
                 match v.stage {
                     Stage::Off => continue,
                     Stage::Attack => {
@@ -719,9 +1074,9 @@ impl Device for Sampler {
                     }
                     Stage::Sustain => {
                         v.env = sustain;
-                        // Decayed to silence: the slot is free (its note-off still finds it).
+                        // Decayed to silence: the slot is free.
                         if v.env < FREE {
-                            *v = v.quieted();
+                            *v = Voice::OFF;
                             continue;
                         }
                     }
@@ -764,7 +1119,13 @@ impl Device for Sampler {
                     v.ctl = CONTROL_FRAMES;
                 }
                 v.ctl -= 1;
+                if v.pitch != v.target {
+                    v.glide();
+                }
                 let mut amp = v.env * v.vel;
+                if let Some(fade) = fade {
+                    amp *= fade;
+                }
                 if declick {
                     if v.age < *fade_in {
                         amp *= v.age as f32 / *fade_in as f32;
@@ -812,8 +1173,8 @@ impl Device for Sampler {
                         v.wrapped = true;
                     }
                 } else if v.pos >= v.end || v.pos < v.start {
-                    // Ended by itself: a note-off it is still owed must find it.
-                    *v = v.quieted();
+                    // Ended by itself: the slot is free.
+                    *v = Voice::OFF;
                 }
             }
             for ch in 0..2 {
@@ -836,5 +1197,9 @@ impl Device for Sampler {
     fn reset(&mut self) {
         self.voices.silence();
         self.rest();
+    }
+
+    fn choke(&mut self) {
+        self.voices.choke();
     }
 }

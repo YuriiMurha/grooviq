@@ -10,6 +10,7 @@
 mod audio_log;
 mod autosave_notice;
 mod commands;
+mod display;
 mod events;
 mod exit;
 mod menu;
@@ -329,6 +330,19 @@ fn watch_health(controller: &Mutex<Controller>, log: &Mutex<AudioLog>, app: &App
     }
 }
 
+/// View > High Refresh Rate: flips the setting, saves it, ticks the item and applies it.
+#[cfg(target_os = "macos")]
+fn toggle_high_refresh(app: &AppHandle) {
+    let Some(audio) = app.try_state::<Audio>() else {
+        return;
+    };
+    let on = !lock(&audio.settings).high_refresh;
+    commands::apply_and_save(&audio, || {}, |s| s.high_refresh = on);
+    menu::set_high_refresh_checked(app, on);
+    // After the settings lock is released: it logs.
+    display::apply(app, on);
+}
+
 /// Runs the app.
 pub fn run() {
     panic_hook::install();
@@ -336,16 +350,24 @@ pub fn run() {
     // Cmd+Q through our own Quit item, so it asks about unsaved changes (see `menu`).
     #[cfg(target_os = "macos")]
     let builder = builder.menu(menu::build).on_menu_event(|app, event| {
-        if menu::is_quit(event.id().as_ref()) {
+        let id = event.id().as_ref();
+        if menu::is_quit(id) {
             // Raises a preventable `ExitRequested`, held below like a window close.
             app.exit(0);
+        } else if menu::is_high_refresh(id) {
+            toggle_high_refresh(app);
         }
     });
     let app = builder
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let audio = start_audio(app.handle());
+            let high_refresh = lock(&audio.settings).high_refresh;
             app.manage(audio);
+            if high_refresh {
+                menu::set_high_refresh_checked(app.handle(), true);
+                display::apply(app.handle(), true);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
