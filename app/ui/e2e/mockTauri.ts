@@ -749,6 +749,8 @@ export function installMockTauri(seed: MockSeed): void {
       const c = s.project.channels[channelIndex(a.channel)];
       c.sample = path;
       c.embedded = true;
+      // session.rs: the length is the new file's (a seeded length belonged to the old one).
+      delete c.frames;
       changed();
       return view();
     },

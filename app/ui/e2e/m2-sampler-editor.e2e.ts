@@ -513,3 +513,72 @@ test.describe("overlapping relinks", () => {
     expect(await mock.calls("channel_waveform")).toHaveLength(2);
   });
 });
+
+for (const [side, reverse] of [["left", 0], ["right", 0], ["left", 1], ["right", 1]] as const) {
+  test.describe(`a region hugging the ${side} edge${reverse ? ", reversed" : ""}`, () => {
+    // The other marker is 0.48 of a frame from this edge of a 48,000-frame sample: no place for
+    // the edge marker leaves a whole frame, so it cannot move until the other one does.
+    const FRAMES = 48_000;
+    const p = project(["Kick"]);
+    p.channels[0].frames = FRAMES;
+    p.channels[0].sampler =
+      side === "left"
+        ? { start: Math.fround(0.000005), end: Math.fround(0.00001), reverse }
+        : { start: Math.fround(0.99999), end: Math.fround(0.999995), reverse };
+    test.use({ seed: { project: p, files: soundsFor(["Kick"]) } });
+
+    test("edits_that_leave_less_than_a_frame_are_refused", async ({ app, mock }) => {
+      await open(app);
+      const before = (await stored(mock)).sampler;
+      const edge = control(app, side === "left" ? "start" : "end");
+      const other = control(app, side === "left" ? "end" : "start");
+      // Every key, and a drag past the sample's edge and back over the other marker.
+      await edge.focus();
+      for (const key of ["Home", "End", "ArrowLeft", "ArrowRight", "PageUp", "PageDown"]) await app.keyboard.press(key);
+      const well = (await waveform(app).boundingBox())!;
+      await dragTo(app, edge, side === "left" ? well.x - 30 : well.x + well.width + 30);
+      await app.mouse.move(well.x + well.width / 2, well.y + 20, { steps: 4 });
+      await app.mouse.up();
+      await frames(app);
+      expect(await paramEdits(mock)).toEqual([]);
+      expect(await liveValue(mock, side === "left" ? "start" : "end")).toBeUndefined();
+      expect((await stored(mock)).sampler).toMatchObject({ start: before.start, end: before.end });
+
+      // Once the other marker moves away, the edge marker moves again, and every committed
+      // region holds at least a frame.
+      await other.focus();
+      await app.keyboard.press(side === "left" ? "End" : "Home");
+      await expect.poll(async () => (await paramEdits(mock)).length).toBe(1);
+      await edge.focus();
+      await app.keyboard.press(side === "left" ? "Home" : "End");
+      await expect.poll(async () => (await paramEdits(mock)).length).toBe(2);
+      const s = (await stored(mock)).sampler;
+      expect(side === "left" ? s.start : s.end).toBe(side === "left" ? 0 : 1);
+      expect(s.end * FRAMES - s.start * FRAMES).toBeGreaterThanOrEqual(1);
+    });
+  });
+}
+
+test.describe("a relink's length", () => {
+  // The seeded length belongs to the missing file; the new one is two seconds long.
+  const p = project(["Kick"]);
+  p.channels[0].frames = 48_000;
+  p.channels[0].embedded = false;
+  test.use({ seed: { project: p, files: { "/new/Kick.wav": { kind: "sample", seconds: 2 } } } });
+
+  test("relink_replaces_the_previous_frame_count", async ({ app, mock }) => {
+    await open(app);
+    expect((await mock.view()).channels[0]).toMatchObject({ missing: true });
+    expect(await mock.eval("(m) => m.view().channels[0].sampleFrames")).toBeNull();
+    await mock.eval("(m) => m.queueDialog('/new/Kick.wav')");
+    await editor(app).getByRole("button", { name: "Relink Kick", exact: true }).click();
+    await expect.poll(() => mock.eval("(m) => m.view().channels[0].sampleFrames")).toBe(96_000);
+    // The editor now limits the region by the new length: End on Start leaves one frame of it.
+    await control(app, "start").focus();
+    await app.keyboard.press("End");
+    await expect.poll(async () => (await paramEdits(mock)).length).toBe(1);
+    const s = (await stored(mock)).sampler;
+    expect(s.end * 96_000 - s.start * 96_000).toBeGreaterThanOrEqual(1);
+    expect(s.end * 96_000 - s.start * 96_000).toBeLessThan(1.01);
+  });
+});

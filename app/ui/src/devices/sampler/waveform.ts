@@ -33,22 +33,27 @@ export function f32Above(x: number): number {
  * (`start * len` and `end * len` in f64, `end - start >= 1`). */
 const frameApart = (start: number, end: number, frames: number) => end * frames - start * frames >= 1;
 
-/** The latest f32 start that leaves a frame before `end` (one f32 step without a length). */
-function lastStart(end: number, frames: number | null): number {
-  if (!frames) return f32Below(end);
-  let s = Math.fround(end - 1 / frames);
-  if (s <= 0) return 0;
+/** The latest f32 start that leaves a frame before `end` (one f32 step without a length), or
+ * `null` when none does: `end` itself is less than a frame from the sample's start. */
+function lastStart(end: number, frames: number | null): number | null {
+  if (!frames) {
+    const s = f32Below(end);
+    return s < end ? s : null;
+  }
+  let s = Math.max(0, Math.fround(end - 1 / frames));
   while (s > 0 && !frameApart(s, end, frames)) s = f32Below(s);
-  return s;
+  return frameApart(s, end, frames) ? s : null;
 }
 
-/** The earliest f32 end that leaves a frame after `start`. */
-function firstEnd(start: number, frames: number | null): number {
-  if (!frames) return f32Above(start);
-  let e = Math.fround(start + 1 / frames);
-  if (e >= 1) return 1;
+/** The earliest f32 end that leaves a frame after `start`, or `null` when none does. */
+function firstEnd(start: number, frames: number | null): number | null {
+  if (!frames) {
+    const e = f32Above(start);
+    return e > start ? e : null;
+  }
+  let e = Math.min(1, Math.fround(start + 1 / frames));
   while (e < 1 && !frameApart(start, e, frames)) e = f32Above(e);
-  return e;
+  return frameApart(start, e, frames) ? e : null;
 }
 
 export type Marker = "start" | "end" | "loop_start";
@@ -123,29 +128,45 @@ export function markerPosition(m: Marker, r: Region): number {
   return r.reverse ? hi - at : lo + at;
 }
 
-/** The values a marker may take now: f32s that keep start at least a frame before end. A
- * region stored narrower than that (or out of order) can be outside its own range: it stays as
- * it is until a marker is moved. */
-export function markerRange(m: Marker, r: Region): [number, number] {
-  if (m === "start") return [0, lastStart(r.end, r.frames)];
-  if (m === "end") return [firstEnd(r.start, r.frames), 1];
+/** The values a marker may take now: f32s that keep start at least a frame before end. `null`
+ * when there are none (the other marker is less than a frame from this one's edge of the
+ * sample): the marker cannot move until the other one does. A region stored narrower than a
+ * frame (or out of order) can be outside its own range: it stays as it is until a marker is
+ * moved. */
+export function markerRange(m: Marker, r: Region): [number, number] | null {
+  if (m === "start") {
+    const max = lastStart(r.end, r.frames);
+    return max === null ? null : [0, max];
+  }
+  if (m === "end") {
+    const min = firstEnd(r.start, r.frames);
+    return min === null ? null : [min, 1];
+  }
   return [0, 1];
 }
+
+const stored = (m: Marker, r: Region) => (m === "loop_start" ? r.loopStart : r[m]);
 
 /** A marker's value after a key moves it by `delta` (towards `delta`'s sign): kept in its range,
  * and never moved the other way (a region stored out of order or tighter than the range stays
  * where it is). */
 export function nudgeMarker(m: Marker, r: Region, value: number, delta: number): number {
-  const [min, max] = markerRange(m, r);
+  const range = markerRange(m, r);
+  // Nowhere to go that leaves a frame: the edit is refused.
+  if (!range) return value;
+  const [min, max] = range;
   // Stored as the engine holds it: an f32 inside the range is still inside it.
   const next = Math.fround(Math.min(max, Math.max(min, value + delta)));
   return (delta > 0 && next < value) || (delta < 0 && next > value) ? value : next;
 }
 
-/** The marker's value with the pointer at `at` (0..1 of the sample): start and end stop short
- * of each other; the loop point is that place as a fraction of the played region. */
+/** The marker's value with the pointer at `at` (0..1 of the sample): start and end stop a frame
+ * short of each other (or stay where they are stored when no place leaves a frame); the loop
+ * point is that place as a fraction of the played region. */
 export function dragMarker(m: Marker, at: number, r: Region): number {
-  const [min, max] = markerRange(m, r);
+  const range = markerRange(m, r);
+  if (!range) return stored(m, r);
+  const [min, max] = range;
   if (m !== "loop_start") return Math.fround(clamp(at, min, max));
   const [lo, hi] = played(r);
   if (hi - lo <= 0) return 0;

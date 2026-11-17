@@ -118,7 +118,7 @@ describe("waveform", () => {
       const marker = (["start", "end", "loop_start"] as Marker[])[i % 3];
       const at = rnd() * 1.4 - 0.2;
       const value = dragMarker(marker, at, region);
-      const [lo, hi] = markerRange(marker, region);
+      const [lo, hi] = markerRange(marker, region)!;
       expect(value).toBeGreaterThanOrEqual(lo);
       expect(value).toBeLessThanOrEqual(hi);
       const next = { ...region, [marker === "loop_start" ? "loopStart" : marker]: value };
@@ -148,7 +148,7 @@ describe("waveform", () => {
     const len = 48_000;
     const narrow: Region = { start: Math.fround(0.1), end: Math.fround(0.1002), loopStart: 0, reverse: false, frames: len };
     for (const m of ["start", "end"] as const) {
-      const [lo, hi] = markerRange(m, narrow);
+      const [lo, hi] = markerRange(m, narrow)!;
       expect(narrow[m]).toBeGreaterThanOrEqual(lo);
       expect(narrow[m]).toBeLessThanOrEqual(hi);
     }
@@ -188,9 +188,11 @@ describe("waveform", () => {
     // at all, an f32, inside its range, and a moved marker leaves at least a frame.
     let seed = 11;
     const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
-    for (let i = 0; i < 4000; i++) {
+    for (let i = 0; i < 6000; i++) {
       const n = LENGTHS[i % LENGTHS.length];
-      const a = Math.fround(rnd());
+      // Some regions hug an edge of the sample, closer than a frame to it.
+      const edge = i % 7;
+      const a = Math.fround(edge === 0 ? rnd() * 2 / n : edge === 1 ? 1 - (rnd() * 3) / n : rnd());
       const w = [0, 2 ** -20, 1e-4, 1e-3, 0.05][i % 5];
       const region: Region = { start: a, end: Math.min(1, f32Above(a + w)), loopStart: Math.fround(rnd()), reverse: rnd() < 0.5, frames: n };
       if (!(region.start < region.end)) continue;
@@ -200,14 +202,76 @@ describe("waveform", () => {
       const next = nudgeMarker(marker, region, value, delta);
       expect(Math.sign(next - value) === Math.sign(delta) || next === value).toBe(true);
       expect(Math.fround(next)).toBe(next);
-      const [lo, hi] = markerRange(marker, region);
-      if (next !== value) expect(next >= lo && next <= hi).toBe(true);
+      const range = markerRange(marker, region);
+      // Nowhere that leaves a frame: refused.
+      if (!range) expect(next).toBe(value);
+      if (next !== value) expect(next >= range![0] && next <= range![1]).toBe(true);
       const moved = { ...region, [marker === "loop_start" ? "loopStart" : marker]: next };
       expect(moved.start).toBeLessThan(moved.end);
-      // Moving a region end inwards never leaves less than a frame (unless the sample itself
-      // is too short to hold one there).
-      const inwards = (marker === "start" && next > value) || (marker === "end" && next < value);
-      if (inwards) expect(frames(moved.start, moved.end, n), `${marker} ${n}`).toBeGreaterThanOrEqual(1);
+      // A region end that moves, either way, always leaves at least a frame.
+      if (next !== value && marker !== "loop_start") expect(frames(moved.start, moved.end, n), `${marker} ${n}`).toBeGreaterThanOrEqual(1);
+      // ... and so does a drag to anywhere.
+      const dragged = dragMarker(marker, rnd() * 1.4 - 0.2, region);
+      if (dragged !== value && marker !== "loop_start") {
+        const d = { ...region, [marker]: dragged };
+        expect(frames(d.start, d.end, n), `drag ${marker} ${n}`).toBeGreaterThanOrEqual(1);
+      }
     }
+  });
+
+  it("edge_regions_refuse_edits_that_leave_less_than_a_frame", () => {
+    const len = 48_000;
+    // The review's cases: the end is 0.48 of a frame from the sample's start, the start 0.48 of
+    // a frame from its end. No place for the other marker leaves a whole frame: every key and
+    // drag that would move it is refused, and it stays as stored, played forwards or reversed.
+    for (const reverse of [false, true]) {
+      const left: Region = { start: Math.fround(0.000005), end: Math.fround(0.00001), loopStart: 0, reverse, frames: len };
+      expect(markerRange("start", left)).toBeNull();
+      for (const d of [-Infinity, -0.001, -1 / len, 0.001, Infinity]) expect(nudgeMarker("start", left, left.start, d)).toBe(left.start);
+      for (const at of [-0.5, 0, 0.000001, 0.00002, 0.5, 1.5]) expect(dragMarker("start", at, left)).toBe(left.start);
+      // The end can still move away (it then leaves a frame).
+      const away = nudgeMarker("end", left, left.end, 0.001);
+      expect(frames(left.start, away, len)).toBeGreaterThanOrEqual(1);
+      // ... after which the start can move again.
+      const freed = { ...left, end: away };
+      expect(markerRange("start", freed)).not.toBeNull();
+      expect(nudgeMarker("start", freed, freed.start, -Infinity)).toBe(0);
+
+      const right: Region = { start: Math.fround(0.99999), end: Math.fround(0.999995), loopStart: 0, reverse, frames: len };
+      expect(markerRange("end", right)).toBeNull();
+      for (const d of [-Infinity, -0.001, 0.001, Infinity]) expect(nudgeMarker("end", right, right.end, d)).toBe(right.end);
+      for (const at of [-0.5, 0.5, 0.999999, 1, 1.5]) expect(dragMarker("end", at, right)).toBe(right.end);
+      const back = nudgeMarker("start", right, right.start, -0.001);
+      expect(frames(back, right.end, len)).toBeGreaterThanOrEqual(1);
+      expect(nudgeMarker("end", { ...right, start: back }, right.end, Infinity)).toBe(1);
+    }
+
+    // At the very edges: a start at 0 with the end a frame in, an end at 1 with the start a frame
+    // before it. Those are the limits; nothing goes past them.
+    const whole: Region = { start: 0, end: 1, loopStart: 0, reverse: false, frames: len };
+    const atZero: Region = { ...whole, end: nudgeMarker("end", whole, 1, -Infinity) };
+    // One frame, not a step more (f32(1 / 48000) alone is just under a frame).
+    expect(frames(atZero.start, atZero.end, len)).toBeGreaterThanOrEqual(1);
+    expect(frames(atZero.start, f32Below(atZero.end), len)).toBeLessThan(1);
+    expect(nudgeMarker("end", atZero, atZero.end, -Infinity)).toBe(atZero.end);
+    expect(frames(nudgeMarker("start", atZero, atZero.start, Infinity), atZero.end, len)).toBeGreaterThanOrEqual(1);
+
+    // A one-frame sample: only start 0 with end 1 holds a frame. Every other move is refused.
+    const one: Region = { start: 0, end: 1, loopStart: 0, reverse: false, frames: 1 };
+    expect(markerRange("start", one)).toEqual([0, 0]);
+    expect(markerRange("end", one)).toEqual([1, 1]);
+    for (const d of [-Infinity, -0.5, 0.5, Infinity]) {
+      expect(nudgeMarker("start", one, 0, d)).toBe(0);
+      expect(nudgeMarker("end", one, 1, d)).toBe(1);
+    }
+    for (const at of [0, 0.3, 0.7, 1]) {
+      expect(dragMarker("start", at, one)).toBe(0);
+      expect(dragMarker("end", at, one)).toBe(1);
+    }
+    const stuck: Region = { ...one, start: 0.2, end: 0.7 };
+    expect(markerRange("start", stuck)).toBeNull();
+    expect(markerRange("end", stuck)).toBeNull();
+    expect(nudgeMarker("start", stuck, 0.2, -Infinity)).toBe(0.2);
+    expect(dragMarker("end", 1, stuck)).toBe(0.7);
   });
 });

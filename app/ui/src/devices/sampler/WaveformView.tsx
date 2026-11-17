@@ -182,7 +182,9 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
   const handle = (id: Marker) => {
     const m = markers[id];
     const value = regionValue(region, id);
-    const [min, max] = markerRange(id, region);
+    // No place leaves a frame: the marker stays put until the other one moves.
+    const range = markerRange(id, region);
+    const [min, max] = range ?? [value, value];
     const off = id === "loop_start" && !loop;
     return (
       <div
@@ -206,6 +208,7 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
         onLostPointerCapture={onCancel}
         onKeyDown={onKeyDown(id)}
         onDoubleClick={() => {
+          if (!range) return;
           const v = Math.min(max, Math.max(min, m.default));
           if (v !== value) set(id, v);
         }}
