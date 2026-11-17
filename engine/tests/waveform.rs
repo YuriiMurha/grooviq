@@ -59,11 +59,11 @@ fn silence_impulse_tiny_and_invalid_buffers() {
 fn rust_binary_fixture() {
     let tree = PeakPyramid::new(Arc::new(SampleBuf {
         rate: 8000.0,
-        l: vec![-1.0, 0.5, 0.25],
-        r: vec![1.0, -0.5, -0.25],
+        l: vec![-1.0, 0.5, 0.25, -0.75, 0.0],
+        r: vec![1.0, -0.5, -0.25, 0.75, 0.0],
     }))
     .unwrap();
-    let bytes = tree.encode(9, 10, 11, 0, 3, 2).unwrap();
+    let bytes = tree.encode(9, 10, 11, 1, 3, 2).unwrap();
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/waveform-v1.bin");
     if std::env::var_os("GROOVIQ_WRITE_WAVEFORM_FIXTURE").is_some() {
@@ -110,4 +110,68 @@ fn nonmonotonic_interior_levels_match_direct_scan() {
             assert_eq!(*peak, Peak::from_frames(&sample.l[a..b], &sample.r[a..b]));
         }
     }
+}
+
+#[test]
+fn independent_query_and_buffer_geometry_guards() {
+    let tree = PeakPyramid::new(Arc::new(SampleBuf {
+        rate: 8000.0,
+        l: vec![0.0; 3],
+        r: vec![0.0; 3],
+    }))
+    .unwrap();
+    assert!(tree.query(0, 3, 0).is_err());
+    assert!(tree.query(0, 1, 2).is_err());
+    assert!(tree.encode(1, 2, 3, 0, 3, 0).is_err());
+    assert!(tree.encode(1, 2, 3, 0, 1, 2).is_err());
+    assert!(
+        PeakPyramid::new(Arc::new(SampleBuf {
+            rate: 8000.0,
+            l: vec![0.0; 3],
+            r: vec![0.0; 2]
+        }))
+        .is_err()
+    );
+    for rate in [7999.0, 384001.0, 8000.5, f32::INFINITY, f32::NAN] {
+        assert!(
+            PeakPyramid::new(Arc::new(SampleBuf {
+                rate,
+                l: vec![0.0],
+                r: vec![0.0]
+            }))
+            .is_err(),
+            "rate={rate}"
+        );
+    }
+    for rate in [8000.0, 384000.0] {
+        assert!(
+            PeakPyramid::new(Arc::new(SampleBuf {
+                rate,
+                l: vec![0.0],
+                r: vec![0.0]
+            }))
+            .is_ok()
+        );
+    }
+}
+#[test]
+fn duration_boundary_uses_lowest_legal_rate_without_giant_fixture() {
+    // 38.4 MB of generated samples, versus 1.84 GB at the maximum source rate.
+    let frames = 600 * 8000;
+    assert!(
+        PeakPyramid::new(Arc::new(SampleBuf {
+            rate: 8000.0,
+            l: vec![0.0; frames],
+            r: vec![0.0; frames]
+        }))
+        .is_ok()
+    );
+    assert!(
+        PeakPyramid::new(Arc::new(SampleBuf {
+            rate: 8000.0,
+            l: vec![0.0; frames + 1],
+            r: vec![0.0; frames + 1]
+        }))
+        .is_err()
+    );
 }
