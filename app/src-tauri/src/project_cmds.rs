@@ -172,18 +172,20 @@ pub async fn project_view(audio: State<'_, Audio>) -> Result<ProjectView, String
     Ok(session(&audio).view())
 }
 
-/// Applies one edit (`notes-changed` if it changed notes: a step, or a removed channel's).
+/// Applies one edit made in the project of `generation` (`notes-changed` if it changed notes: a
+/// step, or a removed channel's). An edit for a project replaced since changes nothing.
 #[tauri::command]
 pub async fn project_edit(
     app: AppHandle,
     audio: State<'_, Audio>,
     edit: grooviq_project::session::Edit,
+    generation: u64,
 ) -> Result<ProjectView, String> {
     let (view, before) = {
         let mut session = session(&audio);
         let before = session.notes_revision();
         let view = session
-            .apply(edit, Instant::now())
+            .apply_in(generation, edit, Instant::now())
             .map_err(|e| e.to_string())?;
         (view, before)
     };
@@ -207,26 +209,13 @@ fn replaced<T>(
     Ok(result)
 }
 
-/// Adds a channel playing the sample file at `path`.
+/// Adds a channel playing the sample file at `path`, for the project of `generation`: one
+/// replaced while the file was decoded is refused.
 #[tauri::command]
-pub async fn channel_add(audio: State<'_, Audio>, path: String) -> Result<ProjectView, String> {
-    let path = PathBuf::from(path);
-    let (file, buf) = blocking({
-        let path = path.clone();
-        move || read_and_decode(&path)
-    })
-    .await?;
-    session(&audio)
-        .add_channel(&path, file, buf, Instant::now())
-        .map_err(|e| e.to_string())
-}
-
-/// Gives `channel` the sample file at `path` (relinking a missing sample, or replacing it).
-#[tauri::command]
-pub async fn channel_set_sample(
+pub async fn channel_add(
     audio: State<'_, Audio>,
-    channel: u32,
     path: String,
+    generation: u64,
 ) -> Result<ProjectView, String> {
     let path = PathBuf::from(path);
     let (file, buf) = blocking({
@@ -235,7 +224,27 @@ pub async fn channel_set_sample(
     })
     .await?;
     session(&audio)
-        .set_channel_sample(channel, &path, file, buf, Instant::now())
+        .add_channel_in(generation, &path, file, buf, Instant::now())
+        .map_err(|e| e.to_string())
+}
+
+/// Gives `channel` the sample file at `path` (relinking a missing sample, or replacing it), in
+/// the project of `generation` (see [`channel_add`]).
+#[tauri::command]
+pub async fn channel_set_sample(
+    audio: State<'_, Audio>,
+    channel: u32,
+    path: String,
+    generation: u64,
+) -> Result<ProjectView, String> {
+    let path = PathBuf::from(path);
+    let (file, buf) = blocking({
+        let path = path.clone();
+        move || read_and_decode(&path)
+    })
+    .await?;
+    session(&audio)
+        .set_channel_sample_in(generation, channel, &path, file, buf, Instant::now())
         .map_err(|e| e.to_string())
 }
 

@@ -72,6 +72,7 @@ describe("commit queue", () => {
     expect(store.get(-2)).toEqual(note(-2, 1440));
     expect(engine.sent).toHaveLength(1);
     expect(engine.sent[0]).toEqual({
+      generation: 0,
       baseRevision: 4,
       add: [{ channel: 1, tick: 480, length: 240, key: 60, velocity: 0.8, slide: false }],
       update: [],
@@ -81,11 +82,12 @@ describe("commit queue", () => {
     await engine.ack({ revision: 5, addedIds: [40] });
     // The second edit names the engine's id, against the new revision.
     expect(engine.sent).toHaveLength(2);
-    expect(engine.sent[1]).toEqual({ baseRevision: 5, add: [], update: [note(40, 960, 62)], delete: [] });
+    expect(engine.sent[1]).toEqual({ generation: 0, baseRevision: 5, add: [], update: [note(40, 960, 62)], delete: [] });
     expect(views).toEqual([VIEW]);
 
     await engine.ack({ revision: 6 });
     expect(engine.sent[2]).toEqual({
+      generation: 0,
       baseRevision: 6,
       add: [{ channel: 1, tick: 1440, length: 240, key: 60, velocity: 0.8, slide: false }],
       update: [],
@@ -313,5 +315,96 @@ describe("commit queue", () => {
     server.revision = 6;
     await flush();
     expect(store.get(-1)).toBeUndefined();
+  });
+
+  it("a_replacement_drops_queued_edits_and_ignores_the_reply_still_out", async () => {
+    // Project A (generation 3): two notes drawn quickly, the first one's reply delayed.
+    const { store, server, engine, queue, views } = setup([note(1, 0)]);
+    queue.setGeneration(3);
+    queue.commit({ add: [note(-1, 480)], update: [], delete: [] });
+    queue.commit({ add: [note(-2, 960)], update: [], delete: [] });
+    expect(engine.sent.map((e) => e.generation)).toEqual([3]);
+    expect(queue.unsettled()).toBe(true);
+    // Open B: the queue lets go of A's work, and takes nothing while B is on its way.
+    queue.replacing();
+    expect(queue.unsettled()).toBe(false);
+    queue.commit({ add: [note(-3, 1440)], update: [], delete: [] });
+    queue.run(() => Promise.resolve(null));
+    expect(store.get(-3)).toBeUndefined();
+    expect(queue.unsettled()).toBe(false);
+    queue.setGeneration(4);
+    server.revision = 9;
+    server.notes = [note(7, 240, 72)];
+    // A's late reply: its ids and its view are A's, and are not taken.
+    await engine.ack({ revision: 5, addedIds: [2], view: { ...VIEW, generation: 3 } });
+    expect(views).toEqual([]);
+    expect(engine.sent).toHaveLength(1);
+    expect(engine.fetches()).toBe(0);
+    // B is in: its notes are fetched, and A's second note never went out.
+    queue.reopened();
+    await queue.idle();
+    expect(engine.sent).toHaveLength(1);
+    expect(store.revision).toBe(9);
+    expect(store.get(7)).toEqual(note(7, 240, 72));
+    expect(store.count).toBe(1);
+    // B's own edits go out, as B's.
+    queue.commit({ add: [], update: [note(7, 480, 72)], delete: [] });
+    expect(engine.sent[1]).toMatchObject({ generation: 4, baseRevision: 9 });
+  });
+
+  it("an_edit_queued_in_another_project_is_never_sent", async () => {
+    const { engine, queue } = setup([note(1, 0)]);
+    queue.setGeneration(3);
+    queue.commit({ add: [], update: [note(1, 240)], delete: [] });
+    queue.commit({ add: [], update: [note(1, 480)], delete: [] });
+    // The project changed without a replacement reaching the queue (it must still not cross).
+    queue.setGeneration(4);
+    await engine.ack({ revision: 5 });
+    await flush();
+    expect(engine.sent).toHaveLength(1);
+  });
+
+  it("a_failed_replacement_reopens_the_queue_for_the_same_project", async () => {
+    const { engine, queue } = setup([note(1, 0)]);
+    queue.replacing();
+    queue.reopened();
+    await queue.idle();
+    expect(engine.fetches()).toBe(1);
+    queue.commit({ add: [], update: [note(1, 240)], delete: [] });
+    expect(engine.sent).toHaveLength(1);
+    expect(queue.unsettled()).toBe(true);
+    await engine.ack({ revision: 5 });
+    await queue.idle();
+    expect(queue.unsettled()).toBe(false);
+  });
+
+  it("a_flush_says_whether_every_queued_edit_was_applied", async () => {
+    const { engine, queue } = setup([note(1, 0)]);
+    queue.commit({ add: [], update: [note(1, 240)], delete: [] });
+    const ok = queue.flush();
+    await engine.ack({ revision: 5 });
+    expect(await ok).toBe(true);
+    // A refused edit (and the one queued behind it, dropped with it): the flush says so.
+    queue.commit({ add: [note(-1, 480)], update: [], delete: [] });
+    queue.commit({ add: [], update: [note(-1, 960)], delete: [] });
+    const refused = queue.flush();
+    await engine.fail("This pattern has used up its note ids.");
+    expect(await refused).toBe(false);
+    // The next flush starts clean.
+    queue.commit({ add: [], update: [note(1, 480)], delete: [] });
+    const again = queue.flush();
+    await flush();
+    await engine.ack({ revision: 7 });
+    expect(await again).toBe(true);
+  });
+
+  it("an_edit_for_another_project_is_dropped_unshown", async () => {
+    const { store, engine, queue } = setup([note(1, 0)]);
+    queue.setGeneration(4);
+    // A velocity drag that began in project 3 ends after project 4 is shown.
+    queue.commit({ add: [], update: [note(1, 960)], delete: [] }, 3);
+    expect(store.get(1)).toEqual(note(1, 0));
+    expect(engine.sent).toEqual([]);
+    expect(queue.unsettled()).toBe(false);
   });
 });

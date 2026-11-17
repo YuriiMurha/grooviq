@@ -6,6 +6,7 @@ use grooviq_dsp::sampler::SampleBuf;
 use grooviq_engine::{
     AudioProcessor, ChannelId, Command, Controller, EngineConfig, STEP_TICKS, SeqNote, engine,
 };
+use grooviq_project::file::Disk;
 use grooviq_project::session::{AUTOSAVE_PERIOD, Edit, STRUCTURAL_DELAY, Session, SessionError};
 use grooviq_project::{
     Channel, Loaded, Note, Project, SampleFile, SampleRef, decode_samples, load, read_sample_file,
@@ -637,11 +638,8 @@ fn a_failed_save_makes_no_backup() {
     for _ in 0..3 {
         // The disk fails while the new file is being staged (after the zip is in the temp file).
         let job = session.begin_save(None).unwrap();
-        let err = job
-            .write_faulty(&backups, |_| {
-                Err(std::io::Error::other("injected: disk full"))
-            })
-            .unwrap_err();
+        let mut disk = Ops::failing("written", &path);
+        let err = job.write_on(&backups, &mut disk).unwrap_err();
         session.save_failed();
         assert!(matches!(err, SessionError::Save(_)), "{err}");
         assert!(err.to_string().contains("disk full"), "{err}");
@@ -655,6 +653,145 @@ fn a_failed_save_makes_no_backup() {
     assert!(session.view().dirty, "the change is still unsaved");
     // And nothing of the failed saves is left beside the project.
     assert_eq!(names(dir.path()), before);
+}
+
+#[test]
+fn a_project_too_big_to_reopen_is_not_saved_and_keeps_the_file_and_its_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, backups) = saved_twice(dir.path());
+    // The same file, reopened and grown past the 64 MB `project.json` may hold.
+    let mut project = load(&path).unwrap().project;
+    project.patterns[0].name = "x".repeat(64 << 20);
+    let loaded = Loaded {
+        project,
+        samples: Default::default(),
+        warnings: vec![],
+    };
+    let decoded = decode_samples(&loaded);
+    session.open(&path, loaded, decoded).unwrap();
+    let before = names(dir.path());
+    let folder = grooviq_project::backup_folder(&path, &backups).unwrap();
+    let backed_up = names(&folder);
+    let err = session.save(None, &backups).unwrap_err();
+    assert!(matches!(err, SessionError::Save(_)), "{err}");
+    assert!(
+        err.to_string()
+            .starts_with("The project is too big to save"),
+        "{err}"
+    );
+    assert_eq!(
+        load(&path).unwrap().project.bpm,
+        110.0,
+        "the file is intact"
+    );
+    assert_eq!(backup_tempos(&path, &backups), [100.0], "no backup rotated");
+    assert_eq!(names(&folder), backed_up);
+    assert_eq!(names(dir.path()), before, "nothing written");
+}
+
+/// A disk that records a save's file operations, checks the target is untouched until the
+/// rename, and fails the operation named `fail` ("disk full").
+struct Ops {
+    ops: Vec<&'static str>,
+    fail: Option<&'static str>,
+    target: PathBuf,
+    old: Vec<u8>,
+}
+
+impl Ops {
+    fn failing(fail: &'static str, target: &Path) -> Self {
+        Self {
+            ops: Vec::new(),
+            fail: Some(fail).filter(|f| !f.is_empty()),
+            target: target.to_path_buf(),
+            old: std::fs::read(target).unwrap(),
+        }
+    }
+
+    fn step(&mut self, op: &'static str) -> std::io::Result<()> {
+        self.ops.push(op);
+        assert_eq!(
+            std::fs::read(&self.target).unwrap(),
+            self.old,
+            "the target changed before the rename"
+        );
+        if self.fail == Some(op) {
+            return Err(std::io::Error::other(format!(
+                "injected: disk full at {op}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Disk for Ops {
+    fn written(&mut self, _file: &mut std::fs::File) -> std::io::Result<()> {
+        self.step("written")
+    }
+
+    fn sync(&mut self, file: &std::fs::File) -> std::io::Result<()> {
+        // What is synced is the whole zip: written before, not after.
+        use std::io::{Read, Seek};
+        let mut bytes = Vec::new();
+        let mut reader = file;
+        reader.rewind()?;
+        reader.read_to_end(&mut bytes)?;
+        assert!(
+            zip::ZipArchive::new(std::io::Cursor::new(bytes)).is_ok(),
+            "synced before the zip was complete"
+        );
+        self.step("sync")?;
+        // The production sync, as a save makes it.
+        grooviq_project::file::RealDisk.sync(file)
+    }
+
+    fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.step("rename")?;
+        std::fs::rename(from, to)
+    }
+}
+
+#[test]
+fn a_save_writes_then_syncs_then_renames() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, backups) = saved_twice(dir.path());
+    session
+        .apply(Edit::SetTempo { bpm: 120.0 }, Instant::now())
+        .unwrap();
+    let job = session.begin_save(None).unwrap();
+    let mut disk = Ops::failing("", &path);
+    job.write_on(&backups, &mut disk).unwrap();
+    session.finish_save(&job);
+    assert_eq!(disk.ops, ["written", "sync", "rename"]);
+    assert_eq!(load(&path).unwrap().project.bpm, 120.0);
+    assert_eq!(backup_tempos(&path, &backups), [100.0, 110.0]);
+}
+
+#[test]
+fn a_failed_sync_keeps_the_file_and_its_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, backups) = saved_twice(dir.path());
+    session
+        .apply(Edit::SetTempo { bpm: 120.0 }, Instant::now())
+        .unwrap();
+    let before = names(dir.path());
+    let folder = grooviq_project::backup_folder(&path, &backups).unwrap();
+    let backed_up = names(&folder);
+    let job = session.begin_save(None).unwrap();
+    let mut disk = Ops::failing("sync", &path);
+    let err = job.write_on(&backups, &mut disk).unwrap_err();
+    session.save_failed();
+    assert_eq!(disk.ops, ["written", "sync"], "never renamed");
+    assert!(err.to_string().contains("disk full at sync"), "{err}");
+    assert_eq!(
+        load(&path).unwrap().project.bpm,
+        110.0,
+        "the file is intact"
+    );
+    assert_eq!(backup_tempos(&path, &backups), [100.0], "no backup rotated");
+    assert_eq!(names(&folder), backed_up, "the backups are as they were");
+    assert_eq!(names(dir.path()), before, "no temp file left");
+    assert!(session.view().dirty);
 }
 
 #[test]
@@ -1771,6 +1908,7 @@ fn add_synth(session: &mut Session, preset: &str) -> u32 {
 
 fn add_notes(session: &mut Session, add: Vec<NewNote>) -> Vec<u32> {
     let edit = NotesEdit {
+        generation: session.generation(),
         base_revision: session.view().notes_revision,
         add,
         update: Vec::new(),
@@ -2383,6 +2521,119 @@ fn waveform_peaks_cover_the_sample() {
     assert_eq!(session.waveform(99, 4), None);
 }
 
+#[test]
+fn channel_requests_from_a_replaced_project_change_nothing() {
+    let (mut session, _, _) = rig();
+    let now = Instant::now();
+    let kick = add(&mut session, "kick", now);
+    let a = session.generation();
+    // B is opened over A (the same channel ids), clean.
+    let loaded = Loaded {
+        project: session.project().clone(),
+        samples: Default::default(),
+        warnings: vec![],
+    };
+    let decoded = decode_samples(&loaded);
+    session
+        .open(Path::new("/music/b.grooviq"), loaded, decoded)
+        .unwrap();
+    let before = session.view();
+    let refused = |r: Result<_, SessionError>| {
+        assert!(matches!(r, Err(SessionError::ProjectReplaced)), "{r:?}");
+    };
+    // Requests made in A, arriving after their files were decoded: refused, B as it was.
+    refused(session.add_channel_in(
+        a,
+        Path::new("/s/late.wav"),
+        sample_file("late.wav"),
+        buffer(),
+        now,
+    ));
+    refused(session.add_synth_channel_in(a, "Init", now));
+    refused(session.set_channel_sample_in(
+        a,
+        kick,
+        Path::new("/s/new.wav"),
+        sample_file("new.wav"),
+        buffer(),
+        now,
+    ));
+    assert_eq!(session.view(), before);
+    assert!(!session.view().dirty);
+    assert_eq!(
+        SessionError::ProjectReplaced.to_string(),
+        "The project changed before this finished, so it was not applied."
+    );
+    // B's own go through.
+    let b = session.generation();
+    session
+        .add_channel_in(
+            b,
+            Path::new("/s/late.wav"),
+            sample_file("late.wav"),
+            buffer(),
+            now,
+        )
+        .unwrap();
+    session.add_synth_channel_in(b, "Init", now).unwrap();
+    let view = session
+        .set_channel_sample_in(
+            b,
+            kick,
+            Path::new("/s/new.wav"),
+            sample_file("new.wav"),
+            buffer(),
+            now,
+        )
+        .unwrap();
+    assert_eq!(view.channels.len(), 3);
+    assert!(view.dirty);
+}
+
+#[test]
+fn waveform_requests_are_held_to_the_point_budget() {
+    use grooviq_project::session::{MAX_WAVEFORM_POINTS, waveform_peaks};
+    // Three frames whose mono mix is -0.5, 0.25 and 1.0.
+    let sample = SampleBuf {
+        rate: RATE,
+        l: vec![-1.0, 0.5, 1.0],
+        r: vec![0.0, 0.0, 1.0],
+    };
+    let pairs = |bytes: &[u8]| -> Vec<(f32, f32)> {
+        bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| {
+                let (min, max) = c.split_at(4);
+                (
+                    f32::from_le_bytes(min.try_into().unwrap()),
+                    f32::from_le_bytes(max.try_into().unwrap()),
+                )
+            })
+            .collect()
+    };
+    // None asked for: one point, the whole sample.
+    assert_eq!(pairs(&waveform_peaks(&sample, 0)), [(-0.5, 1.0)]);
+    let limit = MAX_WAVEFORM_POINTS as usize;
+    for asked in [MAX_WAVEFORM_POINTS, MAX_WAVEFORM_POINTS + 1, u32::MAX] {
+        let got = pairs(&waveform_peaks(&sample, asked));
+        assert_eq!(got.len(), limit, "{asked} points asked for");
+        // Each point holds one of the three frames, in order, and together they hold all three.
+        assert_eq!(got[0], (-0.5, -0.5), "{asked}");
+        assert_eq!(got[limit - 1], (1.0, 1.0), "{asked}");
+        assert!(got.contains(&(0.25, 0.25)), "{asked}");
+        assert!(
+            got.iter()
+                .all(|&(min, max)| min == max && [-0.5, 0.25, 1.0].contains(&min))
+        );
+        assert!(
+            got.windows(2).all(|w| w[0].0 <= w[1].0),
+            "{asked}: out of order"
+        );
+    }
+}
+
 // --- Fix round 1: recording across project replacement, engine back-pressure, the note cap. ---
 
 use grooviq_project::session::Recorded;
@@ -2652,6 +2903,7 @@ fn overflow_disarm_is_retried_until_the_engine_takes_it() {
     poll(&mut session, &controller, &mut processor);
     // Room again, and the person plays while Record shows off: nothing is recorded.
     let edit = NotesEdit {
+        generation: session.generation(),
         base_revision: session.view().notes_revision,
         add: Vec::new(),
         update: Vec::new(),
@@ -2694,6 +2946,7 @@ fn turning_record_on_again_cancels_an_owed_disarm() {
     render(&mut processor, 4);
     // The person makes room and turns Record on again before the next poll.
     let edit = NotesEdit {
+        generation: session.generation(),
         base_revision: session.view().notes_revision,
         add: Vec::new(),
         update: Vec::new(),
@@ -2748,6 +3001,7 @@ fn overflowed_with_an_owed_disarm() -> (Session, Arc<Mutex<Controller>>, AudioPr
     assert_eq!(got.stopped.map(|s| s.dropped), Some(1));
     render(&mut processor, 4);
     let edit = NotesEdit {
+        generation: session.generation(),
         base_revision: session.view().notes_revision,
         add: Vec::new(),
         update: Vec::new(),

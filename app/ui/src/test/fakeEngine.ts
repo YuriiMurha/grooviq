@@ -61,6 +61,10 @@ export function createFakeEngine(initial: ProjectView) {
 
   /** Deletes, then updates, then adds, by id (Task 7's contract, without clamping). */
   function editNotes(edit: NotesEdit): NotesAck {
+    // Made for another project (as the engine does): nothing applied, fetch again.
+    if (edit.generation !== view.generation) {
+      return { revision: view.notesRevision, addedIds: [], ignoredIds: [], reload: true, view: structuredClone(view) };
+    }
     const reload = edit.baseRevision !== view.notesRevision;
     const byId = new Map(notes.map((n) => [n.id, n]));
     const ignoredIds: number[] = [];
@@ -86,9 +90,11 @@ export function createFakeEngine(initial: ProjectView) {
       case "project_view":
         return structuredClone(view);
       case "project_edit":
+        if (args?.generation !== view.generation) return structuredClone(view);
         applyEdit(args?.edit as Edit);
         return touch();
       case "channel_add": {
+        if (args?.generation !== view.generation) throw "The project changed before this finished, so it was not applied.";
         const path = String(args?.path);
         const refusal = refuse.get(path);
         if (refusal) throw refusal;
@@ -118,6 +124,7 @@ export function createFakeEngine(initial: ProjectView) {
         return touch();
       }
       case "channel_set_sample": {
+        if (args?.generation !== view.generation) throw "The project changed before this finished, so it was not applied.";
         const path = String(args?.path);
         const name = (path.split("/").pop() ?? path).replace(/\.[^.]+$/, "");
         view.channels = view.channels.map((c) =>
@@ -212,6 +219,7 @@ export function project(
     autosavedAt: null,
     key: null,
     notesRevision: 1,
+    generation: 0,
     recording: false,
     canUndo: false,
     canRedo: false,

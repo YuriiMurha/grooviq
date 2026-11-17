@@ -28,7 +28,7 @@ interface Props {
 /** The channel rack and the piano roll, stacked, each toggled by its key (F6, F7), with a
  * splitter between them; the selected channel they and the typing keyboard share. */
 export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }: Props) {
-  const { view, run } = useProject();
+  const { view, runFor, stamp } = useProject();
   const [panels, setPanels] = useState<Panels>(DEFAULT_PANELS);
   const [chosen, setChosen] = useState<number | null>(null);
   const area = useRef<HTMLDivElement>(null);
@@ -46,7 +46,10 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }
 
   useTypingKeyboard(keyboard, channel, onError, { release: releaseKeys, recording: view?.recording ?? false });
 
-  const relink = useCallback((c: ChannelView) => relinkChannel(c, run, onError), [run, onError]);
+  const relink = useCallback(
+    (c: ChannelView) => relinkChannel(c, { runFor, stamp }, onError),
+    [runFor, stamp, onError],
+  );
 
   const openRoll = useCallback((id: number) => {
     setChosen(id);

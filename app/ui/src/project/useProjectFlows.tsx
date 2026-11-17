@@ -47,21 +47,29 @@ interface Deps {
   toast: (message: string, warn: boolean) => void;
   /** Stops the transport if it plays (a project that is replaced must not keep playing). */
   stopIfPlaying: () => Promise<void>;
+  /** A change was sent (or queued) and its view is not in yet: the project counts as unsaved. */
+  unsettled: () => boolean;
+  /** Resolves once the piano roll's queued edits are answered: `false` if any was refused. */
+  settle: () => Promise<boolean>;
 }
 
 /** Every project action (new, open, save, save as, export), the "Save changes?" guard, the
  * close request, crash recovery and the autosave clock. It returns the dialogs to render. */
-export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: Deps) {
+export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, unsettled, settle }: Deps) {
   const [pending, setPending] = useState<Pending | null>(null);
   const [recovery, setRecovery] = useState<RecoveryStatus | null>(null);
   const [exporting, setExporting] = useState(false);
   const [autosavedAt, setAutosavedAt] = useState<number | null>(null);
   const viewRef = useRef(view);
   const busy = useRef(false);
+  const unsettledRef = useRef(unsettled);
+  const settleRef = useRef(settle);
 
   useEffect(() => {
     viewRef.current = view;
-  }, [view]);
+    unsettledRef.current = unsettled;
+    settleRef.current = settle;
+  }, [view, unsettled, settle]);
 
   const fail = useCallback((e: unknown) => toast(errorText(e), true), [toast]);
 
@@ -75,6 +83,14 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: 
     [adopt, toast],
   );
 
+  /** Waits for the piano roll's queued edits; `false`, with a warning, if any was refused: what
+   * the person drew is not all in the project, so nothing is saved (and nothing replaces it). */
+  const settled = useCallback(async (): Promise<boolean> => {
+    if (await settleRef.current()) return true;
+    toast("Your latest note edits could not be applied, so the project was not saved. Check the notes, then save again.", true);
+    return false;
+  }, [toast]);
+
   /** Saves as a path the person picks; `false` if they cancel or it fails. */
   const saveAs = useCallback(async (): Promise<boolean> => {
     const current = viewRef.current;
@@ -86,13 +102,15 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: 
         filters: PROJECT_FILTER,
       });
       if (!path) return false;
+      // The notes the person drew are saved too, even those still on their way.
+      if (!(await settled())) return false;
       adopt(await enqueue(() => projectSaveAs(path)));
       return true;
     } catch (e) {
       fail(e);
       return false;
     }
-  }, [adopt, enqueue, fail]);
+  }, [adopt, enqueue, fail, settled]);
 
   /** Saves in place (an untitled project asks for a path); `true` only if it is saved. */
   const save = useCallback(async (): Promise<boolean> => {
@@ -100,6 +118,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: 
     if (!current) return false;
     if (current.path === null) return saveAs();
     try {
+      if (!(await settled())) return false;
       adopt(await enqueue(projectSave));
       return true;
     } catch (e) {
@@ -107,7 +126,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: 
       fail(e);
       return false;
     }
-  }, [adopt, enqueue, fail, saveAs]);
+  }, [adopt, enqueue, fail, saveAs, settled]);
 
   /** Sends a command that replaces the project (New, Open, Restore), telling what is keyed by
    * the old project's channels before it goes and once it succeeded or failed. */
@@ -142,7 +161,8 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: 
   /** Runs `proceed` now if nothing is unsaved, else after the "Save changes?" prompt. */
   const guarded = useCallback((why: Why, proceed: () => Promise<void>) => {
     const current = viewRef.current;
-    if (current?.dirty === false) {
+    // An edit still on its way may make it dirty: ask, rather than drop it unasked.
+    if (current?.dirty === false && !unsettledRef.current()) {
       proceed().catch(fail);
     } else {
       setPending({ why, name: current?.name ?? "this project", proceed });

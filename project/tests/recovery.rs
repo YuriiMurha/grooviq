@@ -541,3 +541,30 @@ fn clearing_after_many_writes_leaves_no_autosave_and_no_metadata() {
     session.clear_autosave().unwrap();
     assert_eq!(names(dir.path()), ["session.lock"]);
 }
+
+#[test]
+fn a_refused_autosave_keeps_the_previous_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = PathBuf::from("/music/a.grooviq");
+    let (session, _) = RecoveryDir::start(dir.path()).unwrap();
+    write(&session, 100.0, Some(&a));
+    let before = names(dir.path());
+    // A project whose project.json would pass the 64 MB a file can hold.
+    let mut big = project(140.0);
+    big.patterns[0].name = "x".repeat(64 << 20);
+    let err = session
+        .write_autosave(&big, &SampleFiles::new(), Some(&a))
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .starts_with("The project is too big to save"),
+        "{err}"
+    );
+    assert_eq!(
+        names(dir.path()),
+        before,
+        "the refused autosave touched the folder"
+    );
+    drop(session);
+    assert_eq!(offered(dir.path()), [(100.0, Some(a))]);
+}

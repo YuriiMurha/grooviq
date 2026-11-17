@@ -16,6 +16,20 @@ export interface ProjectContextValue {
   run: (command: () => Promise<ProjectView>) => Promise<boolean>;
   /** Stores a view that a command returned. */
   setView: (view: ProjectView) => void;
+  /** The project shown now, to stamp a request with (see [`runFor`]). */
+  stamp: () => ProjectStamp;
+  /** [`run`] for the project of `stamp` (taken when the person acted, before any dialog or
+   * decoding): dropped quietly (resolving `false`) if, when its turn comes, a New, Open or
+   * Restore is on its way or done since; `command` gets the engine's generation to send, so the
+   * engine refuses it too. */
+  runFor: (stamp: ProjectStamp, command: (generation: number) => Promise<ProjectView>) => Promise<boolean>;
+}
+
+/** A project as a request names it: the engine's generation (`ProjectView.generation`) and the
+ * UI's replacement count (`projectGeneration`), which moves the moment a replacement lands. */
+export interface ProjectStamp {
+  generation: number;
+  replacements: number;
 }
 
 export const ProjectContext = createContext<ProjectContextValue | null>(null);

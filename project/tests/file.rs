@@ -1597,3 +1597,78 @@ fn the_typed_read_refuses_structs_written_as_arrays_on_its_own() {
         1
     );
 }
+
+/// A pattern holding the most notes a pattern can, every field of every note in its widest
+/// range, so its JSON is as long as a real pattern's can be.
+fn full_pattern(id: u32, channel: u32) -> Pattern {
+    let mut p = Pattern::new(id, format!("Full {id}"));
+    p.steps = MAX_STEPS;
+    let ticks = MAX_STEPS * 240;
+    p.notes = (0..MAX_NOTES_PER_PATTERN as u32)
+        .map(|i| Note {
+            id: i + 1,
+            channel,
+            tick: ticks - 1 - (i * 7919) % 10_000,
+            length: ticks - (i % 997),
+            key: (i % 128) as u8,
+            velocity: (i % 997) as f32 / 997.0,
+            slide: i % 2 == 0,
+        })
+        .collect();
+    p.next_note_id = MAX_NOTES_PER_PATTERN as u32 + 1;
+    p
+}
+
+/// A project of `patterns` full patterns on one channel.
+fn full_project(patterns: u32) -> Project {
+    let mut p = Project::new();
+    p.channels = vec![channel(1, "Lead", None)];
+    p.patterns = (2..patterns + 2).map(|id| full_pattern(id, 1)).collect();
+    p.current_pattern = 2;
+    p.next_id = patterns + 2;
+    p
+}
+
+/// Bytes of `project.json` in a saved file.
+fn json_bytes(path: &Path) -> u64 {
+    let mut zip = ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+    zip.by_name("project.json").unwrap().size()
+}
+
+#[test]
+fn several_full_patterns_survive_load_save_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.grooviq");
+    let b = dir.path().join("b.grooviq");
+    let p = full_project(4);
+    save(&p, &SampleFiles::new(), &a).unwrap();
+    let first = load(&a).unwrap_or_else(|e| panic!("the saved file does not open: {e}"));
+    assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    assert_eq!(first.project.patterns, p.patterns);
+
+    save(&first.project, &first.samples, &b).unwrap();
+    let second = load(&b).unwrap_or_else(|e| panic!("the file saved again does not open: {e}"));
+    assert_eq!(second.project.patterns, p.patterns);
+    assert_eq!(fs::read(&a).unwrap(), fs::read(&b).unwrap());
+    // Compact: well inside the reader's 64 MB for project.json.
+    assert!(json_bytes(&a) < 48 << 20, "{} bytes", json_bytes(&a));
+}
+
+#[test]
+fn a_save_the_loader_would_refuse_is_refused_and_keeps_the_old_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.grooviq");
+    let (old_project, samples) = project();
+    save(&old_project, &samples, &path).unwrap();
+    let old = fs::read(&path).unwrap();
+
+    // Eight full patterns: about 80 MB of JSON, more than `load` reads.
+    let err = save(&full_project(8), &SampleFiles::new(), &path).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        err.to_string(),
+        "The project is too big to save: its notes and settings would take more than the 64 MB a project file can hold. Remove some notes, then save again."
+    );
+    assert_eq!(fs::read(&path).unwrap(), old, "the old file is intact");
+    assert_eq!(names_in(dir.path()), vec!["a.grooviq"], "nothing written");
+}

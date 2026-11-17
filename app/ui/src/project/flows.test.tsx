@@ -56,6 +56,7 @@ const VIEW: ProjectView = {
   autosavedAt: null,
   key: null,
   notesRevision: 1,
+  generation: 0,
   recording: false,
   canUndo: false,
   canRedo: false,

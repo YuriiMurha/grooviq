@@ -29,7 +29,9 @@ export function VelocityLane({ store, queue, channel, view, ink }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const wrap = useRef<HTMLDivElement>(null);
   const live = useRef({ channel, ink });
-  const drag = useRef<{ values: Map<number, number>; rev: number } | null>(null);
+  /** A drag under way: the velocities it shows, and the project it started in (its edit is that
+   * project's, and is dropped if another replaced it). */
+  const drag = useRef<{ values: Map<number, number>; rev: number; generation: number } | null>(null);
   const redraw = useRef(true);
   useEffect(() => {
     live.current = { channel, ink };
@@ -127,7 +129,7 @@ export function VelocityLane({ store, queue, channel, view, ink }: Props) {
             } catch {
               /* no pointer capture here */
             }
-            drag.current = { values: new Map(), rev: 0 };
+            drag.current = { values: new Map(), rev: 0, generation: queue.generationNow() };
             apply(e);
           }}
           onPointerMove={(e) => drag.current && apply(e)}
@@ -137,7 +139,7 @@ export function VelocityLane({ store, queue, channel, view, ink }: Props) {
             apply(e);
             drag.current = null;
             const edit = laneEdit(store, d.values);
-            if (edit) queue.commit(edit);
+            if (edit) queue.commit(edit, d.generation);
             redraw.current = true;
           }}
           onPointerCancel={() => {

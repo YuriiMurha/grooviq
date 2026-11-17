@@ -63,7 +63,8 @@ fn encode_unlocked(session: &Mutex<Session>, encode: impl FnOnce(&Pattern) -> Ve
     encode(&pattern)
 }
 
-/// Applies one note edit (deletes, updates, adds).
+/// Applies one note edit (deletes, updates, adds) made in the project of `edit.generation`;
+/// one for a project replaced since changes nothing and asks for a reload.
 #[tauri::command]
 pub async fn notes_edit(
     app: AppHandle,
@@ -82,34 +83,38 @@ pub async fn notes_edit(
     Ok(ack)
 }
 
-/// Takes back the last note change (`null`: nothing to undo). The ack asks for a reload.
+/// Takes back the last note change of the project of `generation` (`null`: nothing to undo).
+/// The ack asks for a reload.
 #[tauri::command]
 pub async fn notes_undo(
     app: AppHandle,
     audio: State<'_, Audio>,
+    generation: u64,
 ) -> Result<Option<NotesAck>, String> {
-    history(&app, &audio, true)
+    history(&app, &audio, generation, true)
 }
 
-/// Makes the last undone note change again (`null`: nothing to redo).
+/// Makes the last undone note change of the project of `generation` again (`null`: nothing to
+/// redo).
 #[tauri::command]
 pub async fn notes_redo(
     app: AppHandle,
     audio: State<'_, Audio>,
+    generation: u64,
 ) -> Result<Option<NotesAck>, String> {
-    history(&app, &audio, false)
+    history(&app, &audio, generation, false)
 }
 
-fn history(app: &AppHandle, audio: &Audio, undo: bool) -> Result<Option<NotesAck>, String> {
+fn history(
+    app: &AppHandle,
+    audio: &Audio,
+    generation: u64,
+    undo: bool,
+) -> Result<Option<NotesAck>, String> {
     let (ack, before) = {
         let mut session = lock(&audio.session);
         let before = session.notes_revision();
-        let now = Instant::now();
-        let ack = if undo {
-            session.undo_notes(now)
-        } else {
-            session.redo_notes(now)
-        };
+        let ack = session.step_history_in(generation, undo, Instant::now());
         (ack.map_err(text)?, before)
     };
     if let Some(ack) = &ack {
@@ -118,14 +123,15 @@ fn history(app: &AppHandle, audio: &Audio, undo: bool) -> Result<Option<NotesAck
     Ok(ack)
 }
 
-/// Adds a synth channel from a factory preset, named after it.
+/// Adds a synth channel from a factory preset, named after it, to the project of `generation`.
 #[tauri::command]
 pub async fn channel_add_synth(
     audio: State<'_, Audio>,
     preset: String,
+    generation: u64,
 ) -> Result<ProjectView, String> {
     lock(&audio.session)
-        .add_synth_channel(&preset, Instant::now())
+        .add_synth_channel_in(generation, &preset, Instant::now())
         .map_err(text)
 }
 

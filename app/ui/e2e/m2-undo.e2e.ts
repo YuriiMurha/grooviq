@@ -176,26 +176,27 @@ test.describe("the live fixture's history", () => {
       m.state.project.pattern.notes = Array.from({ length: count }, (_, i) => ({
         id: i + 1, channel: 1, tick: i, length: 10, key: 40, velocity: 0.5, slide: false,
       }));
+      const { generation } = (await ipc.invoke("project_view")) as { generation: number };
       for (let edit = 0; edit < 11; edit++) {
         const view = (await ipc.invoke("project_view")) as { notesRevision: number };
         const update = Array.from({ length: count }, (_, i) => ({
           id: i + 1, channel: 1, tick: i, length: 10, key: 41 + edit, velocity: 0.5, slide: false,
         }));
-        await ipc.invoke("notes_edit", { edit: { baseRevision: view.notesRevision, add: [], update, delete: [] } });
+        await ipc.invoke("notes_edit", { edit: { generation, baseRevision: view.notesRevision, add: [], update, delete: [] } });
       }
       let undone = 0;
-      while ((await ipc.invoke("notes_undo")) !== null) undone++;
+      while ((await ipc.invoke("notes_undo", { generation })) !== null) undone++;
       const first = [...new Set(m.state.project.pattern.notes.map((n) => (n as { key: number }).key))];
       // Five redone, then a new edit: the five undone ones are forgotten, and with them their
       // notes, so six steps fit.
-      for (let i = 0; i < 5; i++) await ipc.invoke("notes_redo");
+      for (let i = 0; i < 5; i++) await ipc.invoke("notes_redo", { generation });
       const view = (await ipc.invoke("project_view")) as { notesRevision: number };
       const update = Array.from({ length: count }, (_, i) => ({
         id: i + 1, channel: 1, tick: i, length: 10, key: 90, velocity: 0.5, slide: false,
       }));
-      await ipc.invoke("notes_edit", { edit: { baseRevision: view.notesRevision, add: [], update, delete: [] } });
+      await ipc.invoke("notes_edit", { edit: { generation, baseRevision: view.notesRevision, add: [], update, delete: [] } });
       let again = 0;
-      while ((await ipc.invoke("notes_undo")) !== null) again++;
+      while ((await ipc.invoke("notes_undo", { generation })) !== null) again++;
       return { undone, first, again };
     });
     // Ten steps back is the first edit's notes.
@@ -213,24 +214,26 @@ test.describe("the live fixture's pattern length", () => {
     const lengths = await app.evaluate(async () => {
       const ipc = (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args?: object) => Promise<unknown> } })
         .__TAURI_INTERNALS__;
-      const view = async () => (await ipc.invoke("project_view")) as { notesRevision: number; pattern: { steps: number } };
+      const view = async () =>
+        (await ipc.invoke("project_view")) as { notesRevision: number; generation: number; pattern: { steps: number } };
+      const { generation } = await view();
       const add = async (tick: number) => {
         const v = await view();
         const note = { channel: 1, tick, length: 240, key: 60, velocity: 0.8, slide: false };
-        await ipc.invoke("notes_edit", { edit: { baseRevision: v.notesRevision, add: [note], update: [], delete: [] } });
+        await ipc.invoke("notes_edit", { edit: { generation, baseRevision: v.notesRevision, add: [note], update: [], delete: [] } });
         return (await view()).pattern.steps;
       };
       const out: number[] = [];
       out.push(await add(5_000)); // grows 16 -> 32
       out.push(await add(10_000)); // grows 32 -> 48
-      await ipc.invoke("project_edit", { edit: { kind: "setPatternLength", steps: 40 } });
+      await ipc.invoke("project_edit", { edit: { kind: "setPatternLength", steps: 40 }, generation });
       out.push(await add(12_000)); // past 40 steps: grows to 64
       for (let i = 0; i < 3; i++) {
-        await ipc.invoke("notes_undo");
+        await ipc.invoke("notes_undo", { generation });
         out.push((await view()).pattern.steps);
       }
       for (let i = 0; i < 3; i++) {
-        await ipc.invoke("notes_redo");
+        await ipc.invoke("notes_redo", { generation });
         out.push((await view()).pattern.steps);
       }
       return out;
@@ -249,11 +252,12 @@ test.describe("the live fixture's length log", () => {
       const ipc = window.__TAURI_INTERNALS__;
       const m = window.__grooviqMock;
       const steps = () => m.view().pattern.steps;
-      const edit = (edit) => ipc.invoke("project_edit", { edit });
+      const generation = m.view().generation;
+      const edit = (edit) => ipc.invoke("project_edit", { edit, generation });
       const add = async (tick) => {
         const v = await ipc.invoke("project_view");
         const note = { channel: 1, tick, length: 240, key: 60, velocity: 0.8, slide: false };
-        return ipc.invoke("notes_edit", { edit: { baseRevision: v.notesRevision, add: [note], update: [], delete: [] } });
+        return ipc.invoke("notes_edit", { edit: { generation, baseRevision: v.notesRevision, add: [note], update: [], delete: [] } });
       };
       ${body}
     })()`) as Promise<T>;
@@ -263,7 +267,7 @@ test.describe("the live fixture's length log", () => {
       await add(5000);
       for (let i = 0; i < 100000; i++) await edit({ kind: "setPatternLength", steps: 1 + (i % 200) });
       const last = steps();
-      await ipc.invoke("notes_undo");
+      await ipc.invoke("notes_undo", { generation });
       return { log: m.state.history.log.length, steps: last, undone: steps() };
     `);
     expect(out.log).toBeLessThanOrEqual(2);
@@ -275,7 +279,7 @@ test.describe("the live fixture's length log", () => {
       for (let i = 0; i < 1000; i++) {
         await add(5000 + (i % 100));
         await edit({ kind: "setPatternLength", steps: 16 });
-        await ipc.invoke("notes_undo");
+        await ipc.invoke("notes_undo", { generation });
       }
       return { log: m.state.history.log.length, steps: steps() };
     `);
@@ -289,10 +293,10 @@ test.describe("the live fixture's length log", () => {
       await edit({ kind: "setPatternLength", steps: 16 });
       const v = await ipc.invoke("project_view");
       const note = m.notes()[0];
-      await ipc.invoke("notes_edit", { edit: { baseRevision: v.notesRevision, add: [], update: [note], delete: [] } });
+      await ipc.invoke("notes_edit", { edit: { generation, baseRevision: v.notesRevision, add: [], update: [note], delete: [] } });
       const out = [steps()];
-      await ipc.invoke("notes_undo"); out.push(steps(), m.notes().length);
-      await ipc.invoke("notes_redo"); out.push(steps());
+      await ipc.invoke("notes_undo", { generation }); out.push(steps(), m.notes().length);
+      await ipc.invoke("notes_redo", { generation }); out.push(steps());
       return out;
     `);
     // Grown to 32; the undo takes only the growth back (the note stays); redo grows again.
@@ -318,9 +322,9 @@ test.describe("the live fixture's length log", () => {
       const out = [steps()];
       await edit({ kind: "setTimeSignature", beats: 5, unit: 8 });
       await note(201, 72, 25); out.push(steps());
-      await ipc.invoke("notes_undo"); out.push(steps());
-      await ipc.invoke("notes_redo"); out.push(steps());
-      await ipc.invoke("notes_undo"); await ipc.invoke("notes_undo"); out.push(steps());
+      await ipc.invoke("notes_undo", { generation }); out.push(steps());
+      await ipc.invoke("notes_redo", { generation }); out.push(steps());
+      await ipc.invoke("notes_undo", { generation }); await ipc.invoke("notes_undo", { generation }); out.push(steps());
       return out;
     `);
     expect(out).toEqual([36, 36, 30, 36, 16]);
@@ -343,8 +347,8 @@ test.describe("the live fixture's length log", () => {
       await edit({ kind: "setTimeSignature", beats: 3, unit: 4 });
       await note(301, 71, 26);
       const out = [steps()];
-      await ipc.invoke("notes_undo"); out.push(steps());
-      await ipc.invoke("notes_redo"); out.push(steps());
+      await ipc.invoke("notes_undo", { generation }); out.push(steps());
+      await ipc.invoke("notes_redo", { generation }); out.push(steps());
       return out;
     `);
     expect(out).toEqual([32, 16, 32]);

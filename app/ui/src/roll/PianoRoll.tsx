@@ -4,6 +4,7 @@ import type { ProjectKey } from "../api/project";
 import type { LiveFrame } from "../live/decode";
 import { useProject } from "../project/context";
 import { setRollHistory } from "../project/noteHistory";
+import { isProjectReplacing, onProjectReplaceFailed, onProjectReplaced, onProjectReplacing } from "../project/replacement";
 import { isMac, isTypingTarget, modalIsOpen } from "../project/shortcuts";
 import { displayTicks } from "../transport/position";
 import { createCanvasRoll } from "./canvasRoll";
@@ -59,6 +60,10 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   const { view: project, setView, apply } = useProject();
   const store = useMemo(() => new NoteStore(), []);
   const queue = useMemo(() => new CommitQueue(store, api), [store, api]);
+  // The project the roll edits now: every edit carries it, and the engine refuses one made for a
+  // project that was replaced since.
+  const generation = project?.generation ?? 0;
+  useEffect(() => queue.setGeneration(generation), [queue, generation]);
   const report = useRef(onError);
   useEffect(() => {
     report.current = onError;
@@ -157,6 +162,25 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     const listening = onNotesChanged((r) => queue.notesChanged(r)).catch(() => null);
     return () => void listening.then((stop) => stop?.());
   }, [queue]);
+  // New, Open or Restore: a held gesture is let go unsent, and what the queue holds for this
+  // project is dropped (its ids would land on the next project's notes). No gesture starts
+  // while it is on its way (see `onPointerDown`).
+  useEffect(() => {
+    const before = onProjectReplacing(() => {
+      abandon(store, gesture.current);
+      gesture.current = null;
+      dirty.current = true;
+      queue.replacing();
+    });
+    const after = onProjectReplaced(() => queue.reopened());
+    const failed = onProjectReplaceFailed(() => queue.reopened());
+    return () => {
+      before();
+      after();
+      failed();
+    };
+  }, [store, queue]);
+
   // Another channel: nothing stays selected, and the view centres on its notes once loaded.
   useEffect(() => {
     abandon(store, gesture.current);
@@ -408,7 +432,9 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
 
   const onPointerDown = (e: PointerEvent<HTMLCanvasElement>) => {
     const ctx = context();
-    if (!ctx || gesture.current) return;
+    // While a New, Open or Restore is on its way the old project shows, but takes no edits: a
+    // gesture begun now would end in the project that replaces it.
+    if (!ctx || gesture.current || isProjectReplacing()) return;
     e.preventDefault();
     try {
       e.currentTarget.setPointerCapture(e.pointerId);

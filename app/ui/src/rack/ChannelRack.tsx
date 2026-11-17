@@ -4,7 +4,7 @@ import { channelAdd, errorText, projectView, type ChannelView } from "../api/pro
 import { useSelection } from "../layout/selection";
 import type { LiveFrame } from "../live/decode";
 import { ConfirmDialog } from "../project/ConfirmDialog";
-import { useProject } from "../project/context";
+import { useProject, type ProjectStamp } from "../project/context";
 import { AddChannelMenu } from "./AddChannelMenu";
 import { pickSounds, relinkChannel } from "./audioFiles";
 import { ChannelRow } from "./ChannelRow";
@@ -73,21 +73,25 @@ function usePatternNotes(revision: number | undefined, onError: (message: string
 /** The channel rack: a row per channel beside one step grid, then adding channels (button or
  * files dropped on the window), the pattern length and swing. */
 export function ChannelRack({ latest, sampleRate, onError = () => {}, onOpenRoll = () => {}, createRenderer }: Props) {
-  const { view, apply, run } = useProject();
+  const project = useProject();
+  const { view, apply, runFor, stamp } = project;
   const { channel: selected, select } = useSelection();
   const [dropping, setDropping] = useState(false);
   const [removing, setRemoving] = useState<ChannelView | null>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
   const notes = usePatternNotes(view?.notesRevision, onError);
 
-  // Each file becomes a channel, in order; one that cannot load shows the loader's sentence.
+  // Each file becomes a channel, in order, in the project shown when the files were dropped or
+  // picked; one that cannot load shows the loader's sentence. Each file is checked at its turn:
+  // after a New, Open or Restore (or while one is on its way) the rest are dropped.
   const addFiles = useCallback(
-    async (paths: string[]) => {
-      for (const path of paths) await run(() => channelAdd(path));
+    async (paths: string[], at: ProjectStamp) => {
+      for (const path of paths) await runFor(at, (g) => channelAdd(path, g));
     },
-    [run],
+    [runFor],
   );
-  useFileDrop(addFiles, setDropping);
+  const dropFiles = useCallback((paths: string[]) => void addFiles(paths, stamp()), [addFiles, stamp]);
+  useFileDrop(dropFiles, setDropping);
 
   if (!view) return null;
   const { channels, pattern } = view;
@@ -102,17 +106,18 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, onOpenRoll
       solo: change.solo ?? ch.solo,
     });
 
-  const relink = (ch: ChannelView) => relinkChannel(ch, run, onError);
+  const relink = (ch: ChannelView) => relinkChannel(ch, project, onError);
 
   const addSamples = () => {
-    pickSounds().then(addFiles, (e: unknown) => onError(errorText(e)));
+    const at = stamp();
+    pickSounds().then((paths) => addFiles(paths, at), (e: unknown) => onError(errorText(e)));
   };
   // The new synth becomes the selected channel: the one the typing keyboard plays.
   const addSynth = (preset: string) => {
     const before = new Set(channels.map((c) => c.id));
     let made: number | null = null;
-    void run(async () => {
-      const next = await channelAddSynth(preset);
+    void runFor(stamp(), async (g) => {
+      const next = await channelAddSynth(preset, g);
       made = next.channels.find((c) => !before.has(c.id))?.id ?? null;
       return next;
     }).then((added) => {

@@ -45,9 +45,17 @@ const note = (tick: number, length: number, key = 60) => ({ channel: 1, tick, le
 type Ack = { revision: number; addedIds: number[]; reload: boolean };
 /** A note edit on the revision the mock holds now (a stale one asks for a reload anyway). */
 const edit = async (page: Page, add: object[], del: number[] = []) => {
-  const baseRevision = await page.evaluate(() => (window as unknown as { __grooviqMock: { state: { notesRevision: number } } }).__grooviqMock.state.notesRevision);
-  return call<Ack>(page, "notes_edit", { edit: { baseRevision, add, update: [], delete: del } });
+  const { baseRevision, generation } = await mockState(page);
+  return call<Ack>(page, "notes_edit", { edit: { generation, baseRevision, add, update: [], delete: del } });
 };
+/** The mock's notes revision and project generation now. */
+const mockState = (page: Page) =>
+  page.evaluate(() => {
+    const s = (window as unknown as { __grooviqMock: { state: { notesRevision: number; generation: number } } }).__grooviqMock.state;
+    return { baseRevision: s.notesRevision, generation: s.generation };
+  });
+/** Undo in the project the mock holds now. */
+const undo = async (page: Page) => call(page, "notes_undo", { generation: (await mockState(page)).generation });
 
 test.describe("recording pairs each release with its own press", () => {
   test.use({ seed: { project: twoChannels([]) } });
@@ -134,12 +142,12 @@ test.describe("note ids and bounds", () => {
     const [b] = (await edit(app, [note(0, 240)], [a])).addedIds;
     expect(b).toBeGreaterThan(a);
     // Undone: the next note still gets a new id; redo is gone, so b never comes back.
-    await call(app, "notes_undo");
+    await undo(app);
     const [c] = (await edit(app, [note(480, 240)])).addedIds;
     expect(c).toBeGreaterThan(b);
     // Undone back to the start: still never an id handed out before.
-    await call(app, "notes_undo");
-    await call(app, "notes_undo");
+    await undo(app);
+    await undo(app);
     const [d] = (await edit(app, [note(960, 240)])).addedIds;
     expect(d).toBeGreaterThan(c);
   });
