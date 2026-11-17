@@ -64,8 +64,14 @@ test("secondary pointers cannot replace or release the captured hold", async ({ 
   await expect.poll(() => commands(mock)).toEqual([true]);
   await name.evaluate((el) => {
     const pointerId = Number(el.getAttribute("data-pointer")) + 10;
-    for (const type of ["pointerdown", "pointerup", "pointercancel", "lostpointercapture"]) {
-      el.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId, button: 0, isPrimary: false }));
+    const realCapture = el.setPointerCapture.bind(el);
+    // Simulate the first touch while a mouse already owns capture. Both devices
+    // have a primary pointer; this synthetic touch has no browser capture.
+    el.setPointerCapture = (id) => {
+      if (id !== pointerId) realCapture(id);
+    };
+    for (const type of ["pointerup", "pointercancel", "lostpointercapture", "pointerdown"]) {
+      el.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId, pointerType: "touch", button: 0, isPrimary: true }));
     }
   });
   expect(await commands(mock)).toEqual([true]);
