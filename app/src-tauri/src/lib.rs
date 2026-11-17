@@ -4,8 +4,9 @@
 //! until the UI asks), starts the live-state stream for the meters and two threads: one
 //! forwards output events, one checks the engine's health every 250 ms. Both log what happened
 //! and emit it to the UI as `audio-event`; a third moves recorded live notes into the pattern
-//! (see [`notes_cmds`]). The UI talks back through the async commands in [`commands`],
-//! `project_cmds` and [`notes_cmds`]. Started with `GROOVIQ_AUDIO=null` it opens no audio device at all (see
+//! (see [`notes_cmds`]) and a fourth opens MIDI keyboards as they are plugged in (see [`midi`]).
+//! The UI talks back through the async commands in [`commands`], `project_cmds`, [`notes_cmds`]
+//! and `midi_cmds`. Started with `GROOVIQ_AUDIO=null` it opens no audio device at all (see
 //! [`output_mode`]): the silent mode for QA runs.
 
 mod audio_log;
@@ -15,6 +16,8 @@ mod display;
 mod events;
 mod exit;
 mod menu;
+pub mod midi;
+mod midi_cmds;
 mod notes_cmds;
 mod output_mode;
 pub mod panic_hook;
@@ -31,6 +34,7 @@ use grooviq_engine::{
 use grooviq_project::autosave::{AutosaveTick, autosave_tick};
 use grooviq_project::recovery::{Recovery, RecoveryDir};
 use grooviq_project::session::Session;
+use midi::{MidiHub, MidirPorts, NO_CHANNEL};
 use settings::Settings;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32};
@@ -84,8 +88,10 @@ pub(crate) struct Audio {
     /// so the UI can ask once it listens (`autosave_status`); the failure event only carries
     /// later changes.
     autosave: Arc<Mutex<AutosaveStatus>>,
-    /// The channel a MIDI keyboard plays ([`notes_cmds::NO_CHANNEL`]: none).
+    /// The channel a MIDI keyboard plays ([`NO_CHANNEL`]: none).
     selected_channel: notes_cmds::SelectedChannel,
+    /// The MIDI inputs; the `grooviq-midi` thread polls it.
+    midi: Arc<Mutex<MidiHub>>,
 }
 
 /// Locks `mutex` even if a thread panicked while holding it.
@@ -190,6 +196,17 @@ fn start_audio(app: &AppHandle) -> Audio {
         );
         move || notes_cmds::record_loop(&session, &controller, &log, &app)
     });
+    let selected_channel: notes_cmds::SelectedChannel = Arc::new(AtomicU32::new(NO_CHANNEL));
+    let midi = Arc::new(Mutex::new(MidiHub::new(
+        Box::new(MidirPorts::new()),
+        Arc::new(midi_cmds::ControllerSink(Arc::clone(&controller))),
+        Arc::clone(&selected_channel),
+        settings.midi_disabled.clone(),
+    )));
+    spawn_named("grooviq-midi", {
+        let (midi, log, app) = (Arc::clone(&midi), Arc::clone(&log), app.clone());
+        move || midi_cmds::poll_loop(&midi, &log, &app)
+    });
     if autosave_on {
         spawn_named("grooviq-autosave", {
             let (session, recovery, log, status, app) = (
@@ -218,7 +235,8 @@ fn start_audio(app: &AppHandle) -> Audio {
         export_running: AtomicBool::new(false),
         exit: exit::ExitState::default(),
         autosave: autosave_status,
-        selected_channel: Arc::new(AtomicU32::new(notes_cmds::NO_CHANNEL)),
+        selected_channel,
+        midi,
     }
 }
 
@@ -420,6 +438,8 @@ pub fn run() {
             notes_cmds::channel_waveform,
             notes_cmds::record_set,
             notes_cmds::metronome_set,
+            midi_cmds::midi_inputs,
+            midi_cmds::midi_set_enabled,
         ])
         .build(tauri::generate_context!())
         .expect("the Tauri app builds");

@@ -26,8 +26,7 @@ pub(crate) const NOTES_CHANGED: &str = "notes-changed";
 pub(crate) const RECORDING_STOPPED: &str = "recording-stopped";
 /// How often the recorder thread drains the engine's recording queue.
 const RECORD_PERIOD: Duration = Duration::from_millis(20);
-/// The MIDI channel when none is selected.
-pub(crate) const NO_CHANNEL: u32 = u32::MAX;
+pub(crate) use crate::midi::NO_CHANNEL;
 
 /// The channel a MIDI keyboard plays, shared with the MIDI input: [`NO_CHANNEL`] for none.
 pub(crate) type SelectedChannel = Arc<AtomicU32>;
@@ -136,6 +135,8 @@ pub async fn channel_select(audio: State<'_, Audio>, channel: Option<u32>) -> Re
     audio
         .selected_channel
         .store(channel.unwrap_or(NO_CHANNEL), Ordering::Release);
+    // A MIDI key held on the old channel is let go now, not at the next poll.
+    lock(&audio.midi).release_stale();
     Ok(())
 }
 

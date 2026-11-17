@@ -68,6 +68,8 @@ export interface MockSeed {
   samplerParams?: { id: string; min: number; max: number; default: number }[];
   /** The synth's parameters (the same fixture). */
   synthParams?: { id: string; min: number; max: number; default: number }[];
+  /** The MIDI keyboards plugged in at start, and the ones the person switched off (settings.json). */
+  midi?: { inputs: string[]; disabled?: string[] };
   /** Every synth preset's 40 values in SPEC order (tests/fixtures/synth-presets.json). */
   synthPresets?: Record<string, number[]>;
 }
@@ -169,6 +171,9 @@ export function installMockTauri(seed: MockSeed): void {
     metronome: false,
     /** The channel MIDI plays (`channel_select`). */
     selected: null as number | null,
+    /** The MIDI inputs plugged in (sorted, no duplicates: midi/hub.rs `poll`) and the names
+     * switched off (`midiDisabled` in settings.json, kept while a device is unplugged). */
+    midi: { present: [...new Set(seed.midi?.inputs ?? [])].sort(), disabled: [...(seed.midi?.disabled ?? [])] },
     /** Live notes sounding now, "channel:key" -> velocity (`channel_note`). */
     live: new Map<string, number>(),
     /** Notes being recorded: "channel:key" -> where and how hard they started. */
@@ -813,6 +818,17 @@ export function installMockTauri(seed: MockSeed): void {
       s.metronome = Boolean(a.on);
       return null;
     },
+    // midi_cmds.rs: the list is what the last poll found, `midi_set_enabled` tells the UI only
+    // when the switch moved (midi/hub.rs `set_enabled`).
+    midi_inputs: () => s.midi.present.map((name) => ({ name, enabled: !s.midi.disabled.includes(name) })),
+    midi_set_enabled: (a) => {
+      const name = a.name as string;
+      const was = !s.midi.disabled.includes(name);
+      s.midi.disabled = s.midi.disabled.filter((n) => n !== name);
+      if (!a.enabled) s.midi.disabled.push(name);
+      if (was !== Boolean(a.enabled)) emit("midi-inputs-changed", null);
+      return null;
+    },
     channel_preview: (a) => {
       channelIndex(a.channel);
       s.previews.set(a.channel as number, Boolean(a.on));
@@ -993,6 +1009,7 @@ export function installMockTauri(seed: MockSeed): void {
     channel_note: { channel: u32, key: u8, velocity: f32, on: bool },
     channel_param_live: { channel: u32, param: str, value: f32 },
     channel_select: { channel: optional(u32) },
+    midi_set_enabled: { name: str, enabled: bool },
     channel_waveform: { channel: u32, points: u32 },
     record_set: { on: bool },
     metronome_set: { on: bool },
@@ -1096,6 +1113,17 @@ export function installMockTauri(seed: MockSeed): void {
         growToNotes(pat, [note]);
       });
     },
+    /** A MIDI keyboard is plugged in or out; the shell's poll notices within 2 s and tells the UI. */
+    midiPlug: (name: string) => {
+      s.midi.present = [...new Set([...s.midi.present, name])].sort();
+      emit("midi-inputs-changed", null);
+    },
+    midiUnplug: (name: string) => {
+      s.midi.present = s.midi.present.filter((n) => n !== name);
+      emit("midi-inputs-changed", null);
+    },
+    /** The names of the MIDI inputs switched off. */
+    midiDisabled: () => [...s.midi.disabled],
     /** The notes as the engine holds them. */
     notes: () => clone(s.project.pattern.notes),
     /** Live notes sounding now, as "channel:key". */

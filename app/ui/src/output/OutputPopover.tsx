@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { SYSTEM_DEFAULT, type LogEntry, type Output } from "../audio";
 import { AudioLog } from "../log/AudioLog";
+import { MidiSettings } from "../midi/MidiSettings";
 import { focusInto, returnFocus } from "./focus";
 import { kindIcon, kindWarns } from "./kind";
 
@@ -15,7 +16,7 @@ interface Props {
   onClose: () => void;
 }
 
-/** The output menu: every device, the speaker guard and the audio log. Escape or a click
+/** The output menu: every device, the MIDI keyboards, the speaker guard and the audio log. Escape or a click
  * outside closes it. Focus moves into it on open and back to what opened it on close. */
 export function OutputPopover({ outputs, chosen, guard, log, onSelect, onGuard, onClose }: Props) {
   const box = useRef<HTMLDivElement>(null);
@@ -87,6 +88,7 @@ export function OutputPopover({ outputs, chosen, guard, log, onSelect, onGuard, 
           </label>
         ))}
       </fieldset>
+      <MidiSettings />
       <label className="guard">
         <input type="checkbox" checked={guard} onChange={(e) => onGuard(e.target.checked)} />
         Stop playback if sound would move to speakers
