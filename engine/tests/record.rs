@@ -5,7 +5,7 @@ use grooviq_dsp::sampler::SPEC;
 use grooviq_engine::{
     AudioProcessor, ChannelId, ChannelMix, ChannelSetup, Command, ControlError, Controller,
     EngineConfig, EngineState, ExportOptions, NoteId, PatternData, RECORD_CAPACITY, RecordEvent,
-    SampleBuf, engine_with, export_wav, render_offline_with,
+    SampleBuf, SeqNote, engine_with, export_wav, render_offline_with,
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -75,6 +75,7 @@ fn recorded(key_on: bool, tick: u64) -> RecordEvent {
         tick,
         position: (tick % LOOP) as u32,
         take: 1,
+        id: NoteId(60),
     }
 }
 
@@ -176,6 +177,82 @@ fn nothing_is_recorded_while_stopped_or_not_recording() {
     assert!(r.out.iter().any(|x| *x != 0.0), "the notes still played");
 }
 
+/// A note-on or note-off of press `id` on key 60.
+fn press(id: u64, velocity: f32, on: bool) -> Command {
+    Command::ChannelNote {
+        channel: ChannelId(1),
+        key: 60,
+        velocity,
+        on,
+        id: NoteId(id),
+    }
+}
+
+#[test]
+fn each_recorded_note_names_its_press() {
+    let mut r = Rig::new();
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    // Two presses of one key, the inner one let go first.
+    r.at(1_000, press(7, 0.8, true));
+    r.at(2_000, press(9, 0.4, true));
+    r.at(3_000, press(9, 0.0, false));
+    r.at(4_000, press(7, 0.0, false));
+    r.run_to(6_000);
+    let got: Vec<(u64, bool, f32)> = r
+        .take()
+        .into_iter()
+        .filter_map(|e| match e {
+            RecordEvent::Note {
+                id, on, velocity, ..
+            } => Some((id.0, on, velocity)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (7, true, 0.8),
+            (9, true, 0.4),
+            (9, false, 0.0),
+            (7, false, 0.0)
+        ]
+    );
+}
+
+#[test]
+fn the_sequencer_s_notes_are_not_recorded() {
+    let pattern = PatternData {
+        length: LOOP as u32,
+        notes: vec![SeqNote {
+            tick: 0,
+            channel: ChannelId(1),
+            key: 60,
+            velocity: 1.0,
+            length: 480,
+            slide: false,
+        }],
+    };
+    let (c, p) = engine_with(
+        cfg(),
+        EngineState {
+            pattern,
+            ..state(vec![channel(1, &dc(0.5))])
+        },
+    );
+    let mut r = Rig {
+        c,
+        p,
+        at: 0,
+        out: Vec::new(),
+    };
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    r.run_to(20_000);
+    assert!(r.out.iter().any(|x| *x != 0.0), "the pattern played");
+    assert!(r.take().is_empty(), "and nothing was recorded");
+}
+
 #[test]
 fn stop_and_record_off_push_an_end_marker() {
     let mut r = Rig::new();
@@ -253,6 +330,7 @@ fn in_take(event: RecordEvent, take: u32) -> RecordEvent {
             on,
             tick,
             position,
+            id,
             ..
         } => RecordEvent::Note {
             channel,
@@ -262,6 +340,7 @@ fn in_take(event: RecordEvent, take: u32) -> RecordEvent {
             tick,
             position,
             take,
+            id,
         },
         other => other,
     }

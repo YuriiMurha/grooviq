@@ -2528,6 +2528,7 @@ fn whole_notes(channel: u32, n: u32) -> Vec<RecordEvent> {
                 tick,
                 position: tick as u32,
                 take: 0,
+                id: grooviq_engine::NoteId(u64::from(40 + i)),
             };
             [
                 note(true, u64::from(i) * 10),
@@ -2841,6 +2842,7 @@ fn a_note_held_when_recording_stops_itself_is_refused_and_counted() {
         tick: 50,
         position: 50,
         take: 0,
+        id: grooviq_engine::NoteId(90),
     };
     events.push(held(true));
     let got = session.collect_recorded(&events, Instant::now());

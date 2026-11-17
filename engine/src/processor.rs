@@ -375,7 +375,7 @@ impl AudioProcessor {
                             // naming a note the instrument never started, ends nothing.
                             if self.graph.channel_note(channel, event) {
                                 let at = start + u64::from(event.offset);
-                                let note = (channel, key, velocity, on);
+                                let note = (channel, key, velocity, on, id);
                                 self.recorder.note(&self.transport, at, &self.live, note);
                             }
                         }

@@ -1,6 +1,7 @@
 //! The recording tap: the audio thread queues every live channel note that lands while
 //! recording and playing, with the pattern tick it was heard at, for the controller to drain.
 
+use crate::command::NoteId;
 use crate::live::LiveShared;
 use crate::state::ChannelId;
 use crate::transport::TransportClock;
@@ -30,6 +31,9 @@ pub enum RecordEvent {
         /// next take's is one more (wrapping). It moves on when the take ends, even if the
         /// queue had no room for the [`RecordEvent::End`], so it tells takes apart for sure.
         take: u32,
+        /// The press (see [`NoteId`]): a note-off carries its note-on's, so presses of one key
+        /// held at once pair up by it, whichever is let go first.
+        id: NoteId,
     },
     /// The take ended (recording switched off, or the transport stopped or restarted): a note
     /// still held ends here.
@@ -105,18 +109,19 @@ impl Recorder {
         }
     }
 
-    /// Queues a note that landed at frame `at`, if a take is running.
+    /// Queues a note (channel, key, velocity, on, press) that landed at frame `at`, if a take
+    /// is running.
     pub(crate) fn note(
         &mut self,
         transport: &TransportClock,
         at: u64,
         live: &LiveShared,
-        note: (ChannelId, u8, f32, bool),
+        note: (ChannelId, u8, f32, bool, NoteId),
     ) {
         if !self.taking(transport) {
             return;
         }
-        let (channel, key, velocity, on) = note;
+        let (channel, key, velocity, on, id) = note;
         let (tick, position) = transport.record_at(at, live.output_latency_frames());
         let event = RecordEvent::Note {
             channel,
@@ -126,6 +131,7 @@ impl Recorder {
             tick,
             position,
             take: self.take,
+            id,
         };
         self.push(event, live);
     }
@@ -155,6 +161,7 @@ mod tests {
             tick: 0,
             position: 0,
             take: 0,
+            id: NoteId(u64::from(key)),
         }
     }
 

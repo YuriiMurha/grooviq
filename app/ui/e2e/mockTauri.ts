@@ -17,7 +17,9 @@ export interface MockProject {
   bpm: number;
   timeSignature: { beats: number; unit: number };
   channels: MockChannel[];
-  pattern: { id: number; name: string; steps: number; swing: number; notes: MockNote[] };
+  /** `nextNoteId`: the id the next note gets (model.rs `Pattern::next_note_id`); never lower than
+   * one past the largest id. */
+  pattern: { id: number; name: string; steps: number; swing: number; notes: MockNote[]; nextNoteId?: number };
   nextId: number;
   key?: { root: number; scale: string } | null;
 }
@@ -95,6 +97,9 @@ export interface MockSeed {
   midi?: { inputs: string[]; disabled?: string[] };
   /** Every synth preset's 40 values in SPEC order (tests/fixtures/synth-presets.json). */
   synthPresets?: Record<string, number[]>;
+  /** What `autosave_status` reports at start (autosave_notice.rs): autosave off for good in this
+   * window, and a failing autosave. Both `null` if absent. */
+  autosave?: { disabled?: string | null; failure?: string | null };
 }
 
 export function installMockTauri(seed: MockSeed): void {
@@ -120,6 +125,10 @@ export function installMockTauri(seed: MockSeed): void {
   ];
   const MAX_CHOKE = 16;
   const MAX_NOTES = 100_000;
+  /** model.rs `MAX_TICKS`: a note starts before it and lasts at most it. */
+  const MAX_TICKS = MAX_STEPS * STEP_TICKS;
+  /** model.rs `DEFAULT_KEY`: the key a channel's preview plays. */
+  const DEFAULT_KEY = 60;
   /** undo.rs `MAX_UNDO` and `MAX_UNDO_NOTES`. */
   const MAX_UNDO = 200;
   const MAX_UNDO_NOTES = 2_000_000;
@@ -161,6 +170,7 @@ export function installMockTauri(seed: MockSeed): void {
       velocity: n.velocity,
       slide: n.slide ?? false,
     }));
+    p.pattern.nextNoteId = Math.max(p.pattern.nextNoteId ?? 1, next);
     return p;
   };
   const emptyProject = (): Project => ({
@@ -206,9 +216,12 @@ export function installMockTauri(seed: MockSeed): void {
      * `channel_note`, project_cmds.rs `channel_preview`: a note-on returns its press, a release
      * names it). */
     presses: new Map<number, string>(),
+    /** The presses `channel_preview` made, of those. */
+    previewPresses: new Set<number>(),
     nextPress: 1,
-    /** Notes being recorded: "channel:key" -> where and how hard they started. */
-    recordOpen: new Map<string, { tick: number; velocity: number; take: number }>(),
+    /** Notes being recorded, by press: where and how hard they started (recorder.rs pairs a
+     * note-off with its own press's note-on). */
+    recordOpen: new Map<number, { channel: number; key: number; tick: number; velocity: number; take: number }>(),
     /** The running take's number (engine/src/record.rs): one more after every take ends. */
     take: 0,
     /** Live frames are held back (a stalled stream), as `pauseLive` sets. */
@@ -218,6 +231,10 @@ export function installMockTauri(seed: MockSeed): void {
     dialogCalls: [] as { kind: string; options: unknown }[],
     /** Note changes for undo and redo (undo.rs): the notes and length before and after each. */
     history: { undo: [] as NoteChange[], redo: [] as NoteChange[], notes: 0, base: 0, log: [] as LengthEntry[], nextId: 0 },
+    /** The saved output (`"default"`: follow the system) and speaker guard (settings.json). */
+    audio: { output: "default", guard: true },
+    /** What autosave owes the person (autosave_notice.rs `AutosaveStatus`). */
+    autosave: { disabled: seed.autosave?.disabled ?? null, failure: seed.autosave?.failure ?? null },
   };
 
   // --- Events (the event plugin, as @tauri-apps/api/mocks implements it). ---
@@ -522,9 +539,16 @@ export function installMockTauri(seed: MockSeed): void {
     s.history.base = 0;
     s.history.log = [];
   };
-  const nextNoteId = () => Math.max(0, ...s.project.pattern.notes.map((n) => n.id ?? 0)) + 1;
-  const noteBase = (channel: number, tick: number, velocity: number): MockNote => ({
-    id: nextNoteId(),
+  /** model.rs `Pattern::take_note_id`: the pattern's next id, never handed out before (an
+   * undone or deleted note's id is not reused). */
+  const takeNoteId = (pat: Project["pattern"]) => {
+    const id = Math.max(1, pat.nextNoteId ?? 1);
+    if (id >= 0xffffffff) throw "This pattern has used up its note ids. Save the project and open it again to renumber its notes.";
+    pat.nextNoteId = id + 1;
+    return id;
+  };
+  const noteBase = (pat: Project["pattern"], channel: number, tick: number, velocity: number): MockNote => ({
+    id: takeNoteId(pat),
     channel,
     tick,
     length: STEP_TICKS,
@@ -546,11 +570,11 @@ export function installMockTauri(seed: MockSeed): void {
     if (end <= pat.steps * STEP_TICKS) return;
     pat.steps = Math.max(pat.steps, to);
   };
-  /** Clamps a note's values as `validate` does; `true` if any changed. */
+  /** Clamps a note's values as notes.rs `clamp_note` does; `true` if any changed. */
   const clampNote = (n: MockNote) => {
     const before = JSON.stringify(n);
-    n.tick = Math.max(0, Math.trunc(n.tick));
-    n.length = Math.max(1, Math.trunc(n.length ?? 1));
+    n.tick = clamp(Math.trunc(n.tick), 0, MAX_TICKS - 1);
+    n.length = clamp(Math.trunc(n.length ?? 1), 1, MAX_TICKS);
     n.key = clamp(Math.trunc(n.key ?? 60), 0, 127);
     n.velocity = clamp(n.velocity, 0, 1);
     n.slide = Boolean(n.slide);
@@ -633,7 +657,7 @@ export function installMockTauri(seed: MockSeed): void {
         return editPattern((pat) => {
           const before = pat.notes.length;
           pat.notes = pat.notes.filter((n) => !(n.channel === e.channel && n.tick === tick));
-          if (pat.notes.length === before) pat.notes.push(noteBase(e.channel as number, tick, DEFAULT_VELOCITY));
+          if (pat.notes.length === before) pat.notes.push(noteBase(pat, e.channel as number, tick, DEFAULT_VELOCITY));
         });
       }
       case "setStepVelocity": {
@@ -647,7 +671,7 @@ export function installMockTauri(seed: MockSeed): void {
               found = true;
             }
           }
-          if (!found) pat.notes.push(noteBase(e.channel as number, tick, velocity));
+          if (!found) pat.notes.push(noteBase(pat, e.channel as number, tick, velocity));
         });
       }
       case "clearStep": {
@@ -758,7 +782,7 @@ export function installMockTauri(seed: MockSeed): void {
    * (the recorder's `End`), so a key let go later records nothing more. */
   const stopTransport = () => {
     const end = ticksNow();
-    for (const key of [...s.recordOpen.keys()]) closeRecorded(key, end);
+    for (const press of [...s.recordOpen.keys()]) closeRecorded(press, end);
     s.recordOpen.clear();
     // The take ends with the transport: the next one has the next number.
     if (s.recording && s.transport.playing) s.take += 1;
@@ -867,11 +891,10 @@ export function installMockTauri(seed: MockSeed): void {
         pat.notes[i] = n;
         touched.push(n);
       }
-      let id = Math.max(0, ...pat.notes.map((n) => n.id ?? 0)) + 1;
       for (const a of e.add) {
         if (pat.notes.length >= MAX_NOTES) throw `A pattern holds at most ${MAX_NOTES} notes.`;
         channelIndex(a.channel);
-        const n: MockNote = { ...a, id: id++ };
+        const n: MockNote = { ...a, id: takeNoteId(pat) };
         clamped = clampNote(n) || clamped;
         pat.notes.push(n);
         touched.push(n);
@@ -882,29 +905,37 @@ export function installMockTauri(seed: MockSeed): void {
     if (done) changed();
     return { revision: s.notesRevision, addedIds: added, ignoredIds: ignored, reload: stale || clamped, view: view() };
   };
-  /** The recorder (recorder.rs): a note-on and its note-off become a note at the tick it was
-   * heard, in the loop; an open note ends when recording stops. Notes are overdubbed. */
-  const closeRecorded = (key: string, now: number) => {
-    const open = s.recordOpen.get(key);
+  /** session.rs `disarm`: recording switches itself off because `dropped` recorded notes did not
+   * fit; the notes held now are refused too, and counted with them. */
+  const stopsItself = (dropped: number) => {
+    const lost = dropped + s.recordOpen.size;
+    s.recordOpen.clear();
+    if (s.recording && s.transport.playing) s.take += 1;
+    s.recording = false;
+    const notes = lost === 1 ? "1 recorded note was" : `${lost} recorded notes were`;
+    emit("recording-stopped", {
+      reason: "noteCap",
+      dropped: lost,
+      message: `Recording stopped: this pattern holds ${MAX_NOTES} notes, the most a pattern can hold. ${notes} not added.`,
+    });
+  };
+  /** The recorder (recorder.rs): a press's note-on and note-off become a note at the tick it
+   * was heard, in the loop; an open note ends when recording stops. Notes are overdubbed. */
+  const closeRecorded = (press: number, now: number) => {
+    const open = s.recordOpen.get(press);
     if (!open) return;
-    s.recordOpen.delete(key);
-    const [channel, note] = key.split(":").map(Number);
+    s.recordOpen.delete(press);
+    const { channel, key: note } = open;
     if (!s.project.channels.some((c) => c.id === channel)) return;
     // At the note cap the note is not added: recording switches off and says so (session.rs).
     if (s.project.pattern.notes.length >= MAX_NOTES) {
-      if (s.recording && s.transport.playing) s.take += 1;
-      s.recording = false;
-      emit("recording-stopped", {
-        reason: "noteCap",
-        dropped: 1,
-        message: `Recording stopped: this pattern holds ${MAX_NOTES} notes, the most a pattern can hold. 1 recorded note was not added.`,
-      });
+      stopsItself(1);
       return;
     }
     const loop = s.project.pattern.steps * STEP_TICKS;
     editPattern((pat) => {
       const n: MockNote = {
-        id: nextNoteId(),
+        id: takeNoteId(pat),
         channel,
         tick: open.tick % loop,
         length: Math.max(1, now - open.tick),
@@ -925,10 +956,14 @@ export function installMockTauri(seed: MockSeed): void {
     audio_outputs: () => [SILENT_OUTPUT],
     audio_select: (a) => {
       if (a.id !== "default" && a.id !== SILENT_OUTPUT.id) throw `No output with the id "${String(a.id)}"`;
+      s.audio.output = String(a.id);
       return null;
     },
-    audio_settings: () => ({ output: "default", guard: true }),
-    audio_set_guard: () => null,
+    audio_settings: () => ({ ...s.audio }),
+    audio_set_guard: (a) => {
+      s.audio.guard = Boolean(a.on);
+      return null;
+    },
     test_tone: (a) => {
       s.tone = Boolean(a.on);
       return null;
@@ -1010,20 +1045,7 @@ export function installMockTauri(seed: MockSeed): void {
       changed();
       return view();
     },
-    channel_note: (a) => {
-      const c = s.project.channels[channelIndex(a.channel)];
-      const key = `${c.id}:${String(a.key)}`;
-      if (a.on) {
-        s.live.set(key, a.velocity as number);
-        if (s.recording && s.transport.playing) s.recordOpen.set(key, { tick: ticksNow(), velocity: a.velocity as number, take: s.take });
-        return press(key);
-      }
-      // The engine ends only the note the release names: a press it never made ends nothing.
-      if (!release(a.press, key)) return null;
-      if (![...s.presses.values()].includes(key)) s.live.delete(key);
-      closeRecorded(key, ticksNow());
-      return null;
-    },
+    channel_note: (a) => (a.on ? liveOn(a.channel, a.key, a.velocity) : liveOff(a.channel, a.key, a.press)),
     channel_param_live: (a) => {
       const c = s.project.channels[channelIndex(a.channel)];
       const { spec, value } = instrumentParam(c, a.param, a.value);
@@ -1051,7 +1073,7 @@ export function installMockTauri(seed: MockSeed): void {
     },
     record_set: (a) => {
       const on = Boolean(a.on);
-      if (!on) for (const key of [...s.recordOpen.keys()]) closeRecorded(key, ticksNow());
+      if (!on) for (const press of [...s.recordOpen.keys()]) closeRecorded(press, ticksNow());
       // Switching recording off ends a running take; every switch on starts a new one.
       if (on || (s.recording && s.transport.playing)) s.take += 1;
       s.recording = on;
@@ -1072,14 +1094,18 @@ export function installMockTauri(seed: MockSeed): void {
       if (was !== Boolean(a.enabled)) emit("midi-inputs-changed", null);
       return null;
     },
+    // session.rs `preview_on`: the channel's live note on its preview key, recorded like any.
     channel_preview: (a) => {
-      channelIndex(a.channel);
-      const key = `${String(a.channel)}:preview`;
       if (a.on) {
+        const id = liveOn(a.channel, DEFAULT_KEY, DEFAULT_VELOCITY);
+        s.previewPresses.add(id);
         s.previews.set(a.channel as number, true);
-        return press(key);
+        return id;
       }
-      if (release(a.press, key) && ![...s.presses.values()].includes(key)) s.previews.set(a.channel as number, false);
+      liveOff(a.channel, DEFAULT_KEY, a.press);
+      s.previewPresses.delete(a.press as number);
+      const where = `${String(a.channel)}:${DEFAULT_KEY}`;
+      if (![...s.previewPresses].some((p) => s.presses.get(p) === where)) s.previews.set(a.channel as number, false);
       return null;
     },
     transport_play: () => {
@@ -1139,6 +1165,7 @@ export function installMockTauri(seed: MockSeed): void {
       if (s.export) s.export.cancel = true;
       return null;
     },
+    autosave_status: () => ({ ...s.autosave }),
     recovery_status: () =>
       s.recovery ? { savedAt: s.recovery.savedAt, original: s.recovery.original } : null,
     recovery_restore: () => {
@@ -1180,18 +1207,35 @@ export function installMockTauri(seed: MockSeed): void {
     "plugin:window|set_title": () => null,
   };
 
-  /** A new press for a note-on of `key`. */
-  const press = (key: string) => {
+  /** session.rs `checked_key`. */
+  const checkedKey = (key: unknown) => {
+    if ((key as number) > 127) throw `Key ${String(key)} is outside 0 to 127.`;
+    return key as number;
+  };
+  /** session.rs `live_note_on`, the one path of every live note (a key, a click, a preview): a
+   * new press, sounding now and recorded while a take runs. */
+  const liveOn = (channel: unknown, key: unknown, velocity: unknown) => {
+    const c = s.project.channels[channelIndex(channel)];
+    const k = checkedKey(key);
+    const v = clamp(finite(velocity, "velocity"), 0, 1);
     const id = s.nextPress++;
-    s.presses.set(id, key);
+    const where = `${c.id}:${k}`;
+    s.presses.set(id, where);
+    s.live.set(where, v);
+    if (s.recording && s.transport.playing) s.recordOpen.set(id, { channel: c.id, key: k, tick: ticksNow(), velocity: v, take: s.take });
     return id;
   };
-  /** Ends `id` if it is a press of `key`; a release must name one. */
-  const release = (id: unknown, key: string) => {
+  /** session.rs `live_note_off`: the engine ends only the press the release names (of this
+   * channel and key); a press it never made, or already ended, ends nothing. */
+  const liveOff = (channel: unknown, key: unknown, id: unknown) => {
+    const c = s.project.channels[channelIndex(channel)];
+    const where = `${c.id}:${checkedKey(key)}`;
     if (id === null || id === undefined) throw "A release names the press it ends.";
-    if (s.presses.get(id as number) !== key) return false;
+    if (s.presses.get(id as number) !== where) return null;
     s.presses.delete(id as number);
-    return true;
+    if (![...s.presses.values()].includes(where)) s.live.delete(where);
+    closeRecorded(id as number, ticksNow());
+    return null;
   };
 
   // Argument types as serde reads them from the payload (the command signatures, `Edit`,
@@ -1383,7 +1427,7 @@ export function installMockTauri(seed: MockSeed): void {
      * adds it): the engine bumps the notes revision and announces it. */
     addNote: (n: { channel: number; tick: number; length: number; key: number; velocity: number }) => {
       editPattern((pat) => {
-        const note = { ...n, id: nextNoteId(), slide: false };
+        const note = { ...n, id: takeNoteId(pat), slide: false };
         pat.notes.push(note);
         growToNotes(pat, [note]);
       });
@@ -1399,11 +1443,16 @@ export function installMockTauri(seed: MockSeed): void {
     },
     /** The names of the MIDI inputs switched off. */
     midiDisabled: () => [...s.midi.disabled],
+    /** Recorded notes did not fit (the note cap): recording switches itself off, as the
+     * shell's recorder thread does between two polls. */
+    recordingStopsItself: (dropped: number) => stopsItself(dropped),
     /** The notes as the engine holds them. */
     notes: () => clone(s.project.pattern.notes),
     /** Live notes sounding now, as "channel:key". */
     live: () => [...s.live.keys()],
     autosave: () => {
+      // autosave_notice.rs `succeeded`: the trouble is over.
+      s.autosave.failure = null;
       s.autosavedAt = Math.floor(Date.now() / 1000);
       emit("project-autosaved", s.autosavedAt);
     },

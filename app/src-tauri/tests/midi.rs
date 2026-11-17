@@ -701,6 +701,43 @@ mod engine_queue {
     }
 
     #[test]
+    fn a_midi_press_and_a_typed_press_of_one_key_record_their_own_lengths() {
+        let (controller, mut processor) = recording_engine();
+        let sink = ControllerSink::new(Arc::clone(&controller));
+        let typed = |on| Command::ChannelNote {
+            channel: ChannelId(1),
+            key: 60,
+            velocity: 0.3,
+            on,
+            id: NoteId(1_060),
+        };
+        // The MIDI key is held; the typing keyboard plays the same key inside it.
+        sink.press(1, 60, 0.9, press_id(60));
+        run(&mut processor, 8);
+        controller.lock().unwrap().send(typed(true)).unwrap();
+        run(&mut processor, 8);
+        controller.lock().unwrap().send(typed(false)).unwrap();
+        run(&mut processor, 8);
+        release_now(&sink, &controller, 1, 60);
+        run(&mut processor, 2);
+        let mut events = Vec::new();
+        controller.lock().unwrap().take_recorded(&mut events);
+        let mut notes = grooviq_project::recorder::Recorder::new().feed(&events);
+        notes.sort_by_key(|n| n.tick);
+        let got: Vec<(f32, u32)> = notes.iter().map(|n| (n.velocity, n.length)).collect();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!((got[0].0, got[1].0), (0.9, 0.3));
+        // 24 blocks against 8: the MIDI note lasts three times the typed one.
+        assert!(got[0].1 > 2 * got[1].1, "{got:?}");
+        let end = |n: &grooviq_project::notes::NewNote| i64::from(n.tick + n.length);
+        let gap = end(&notes[0]) - end(&notes[1]);
+        assert!(
+            (gap - i64::from(notes[1].length)).abs() <= 2,
+            "the MIDI note ends 8 blocks after the typed one: {got:?}"
+        );
+    }
+
+    #[test]
     fn a_release_the_full_queue_refused_is_delivered_when_it_has_room() {
         let (controller, mut processor) = recording_engine();
         let sink = ControllerSink::new(Arc::clone(&controller));

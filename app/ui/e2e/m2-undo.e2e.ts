@@ -304,10 +304,10 @@ test.describe("the live fixture's length log", () => {
     const out = await inPage<number[]>(app, `
       m.state.transport.playing = true;
       const note = async (take, key, steps) => {
-        m.state.recordOpen.set("1:" + key, { tick: 0, velocity: 0.8, take });
         // The note's press, as its note-on would have made it: the release names it.
         const press = m.state.nextPress++;
         m.state.presses.set(press, "1:" + key);
+        m.state.recordOpen.set(press, { channel: 1, key, tick: 0, velocity: 0.8, take });
         m.hold(steps * 240);
         await ipc.invoke("channel_note", { channel: 1, key, on: false, velocity: 0, press });
       };
@@ -332,10 +332,10 @@ test.describe("the live fixture's length log", () => {
     const out = await inPage<number[]>(app, `
       m.state.transport.playing = true;
       const note = async (take, key, steps) => {
-        m.state.recordOpen.set("1:" + key, { tick: 0, velocity: 0.8, take });
         // The note's press, as its note-on would have made it: the release names it.
         const press = m.state.nextPress++;
         m.state.presses.set(press, "1:" + key);
+        m.state.recordOpen.set(press, { channel: 1, key, tick: 0, velocity: 0.8, take });
         m.hold(steps * 240);
         await ipc.invoke("channel_note", { channel: 1, key, on: false, velocity: 0, press });
       };
