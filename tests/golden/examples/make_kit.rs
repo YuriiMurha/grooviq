@@ -7,6 +7,12 @@
 //! * `hat.wav`: 0.08 s differenced noise, 32-bit float stereo 48 kHz.
 //! * `clap.wav`: 0.3 s, three noise bursts and a decay, 16-bit stereo 48 kHz.
 //!
+//! M2 adds two more for `notes_m2`:
+//!
+//! * `sub.wav`: 1 s of a 55 Hz sine (exactly 55 cycles, so the loop at its middle is seamless),
+//!   16-bit mono 48 kHz.
+//! * `open_hat.wav`: 0.4 s of differenced noise with a slow decay, 16-bit mono 48 kHz.
+//!
 //! Run with `cargo run -p grooviq-golden --example make_kit`. Every `exp`/`sin` goes through
 //! `libm` and the noise is a seeded xorshift, so the files come out the same on every platform.
 //! Regenerating them changes the M1 golden render: refresh `refs/drums_4ch.wav` too.
@@ -78,6 +84,29 @@ fn hat(rate: u32, seed: u64) -> Vec<f64> {
             let d = 0.5 * (x - last);
             last = x;
             0.4 * libm::exp(-t / 0.015) * d
+        })
+        .collect();
+    fade_out(&mut out, rate);
+    out
+}
+
+fn sub(rate: u32) -> Vec<f64> {
+    (0..rate)
+        .map(|i| 0.5 * libm::sin(TAU * 55.0 * f64::from(i) / f64::from(rate)))
+        .collect()
+}
+
+fn open_hat(rate: u32, seed: u64) -> Vec<f64> {
+    let n = (0.4 * f64::from(rate)) as usize;
+    let mut noise = Noise(seed);
+    let mut last = 0.0;
+    let mut out: Vec<f64> = (0..n)
+        .map(|i| {
+            let t = i as f64 / f64::from(rate);
+            let x = noise.next();
+            let d = 0.5 * (x - last);
+            last = x;
+            0.4 * libm::exp(-t / 0.12) * d
         })
         .collect();
     fade_out(&mut out, rate);
@@ -162,5 +191,15 @@ fn main() {
         &dir.join("clap.wav"),
         spec(2, 48_000, 16, false),
         &[clap(48_000, 0x5EED_0004), clap(48_000, 0x5EED_0014)],
+    );
+    write(
+        &dir.join("sub.wav"),
+        spec(1, 48_000, 16, false),
+        &[sub(48_000)],
+    );
+    write(
+        &dir.join("open_hat.wav"),
+        spec(1, 48_000, 16, false),
+        &[open_hat(48_000, 0x5EED_0005)],
     );
 }
