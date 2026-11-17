@@ -113,3 +113,36 @@ fn synth_trap_lead_uni7_block(bencher: Bencher, voices: usize) {
     let (mut l, mut r) = settle(&mut synth, &chord(48, voices));
     bencher.bench_local(|| synth.process(black_box(&mut l), black_box(&mut r), None, &[]));
 }
+
+// Keep the device continuous, but replace the in-place output with fresh stereo input on
+// every timed call. Setup, preset allocation and warmup are outside the measured closure.
+#[divan::bench(args = grooviq_dsp::ott::PRESETS, consts = [64, 128])]
+fn multiband_block<const N: usize>(bencher: Bencher, name: &str) {
+    let mut device = grooviq_dsp::ott::Ott::new(SR);
+    for (index, value) in grooviq_dsp::ott::preset(name).unwrap() {
+        device.set_param(index, value);
+    }
+    let mut frame = 0usize;
+    let mut l = [0.0; N];
+    let mut r = [0.0; N];
+    let mut render = || {
+        for i in 0..N {
+            let t = frame as f32 / SR;
+            let envelope = if i < N / 4 { 0.65 } else { 0.025 };
+            l[i] = envelope
+                * (libm::sinf(t * 439.823)
+                    + 0.5 * libm::sinf(t * 6283.185)
+                    + 0.3 * libm::sinf(t * 43982.3));
+            r[i] = envelope
+                * (libm::sinf(t * 552.92)
+                    + 0.4 * libm::sinf(t * 9424.778)
+                    + 0.25 * libm::sinf(t * 50265.484));
+            frame = frame.wrapping_add(1);
+        }
+        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
+    };
+    for _ in 0..SETTLE_BLOCKS {
+        render();
+    }
+    bencher.bench_local(render);
+}
