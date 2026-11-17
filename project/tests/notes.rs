@@ -454,18 +454,16 @@ fn median(runs: usize, mut f: impl FnMut() -> Duration) -> Duration {
     times[runs / 2]
 }
 
-#[test]
-fn ten_thousand_notes_edit_in_under_50_ms() {
+fn ten_thousand_notes_edit() -> Duration {
     let (mut session, _, ch) = with_synth();
     let mut e = edit(&session);
     e.add = (0..10_000u32)
         .map(|i| new_note(ch, (i % 64) * 240, (i % 128) as u8))
         .collect();
     session.edit_notes(e, Instant::now()).unwrap();
-    let mut shift = 0;
-    let took = median(5, || {
+    median(5, || {
         // Move every note one tick later: one edit, as a drag of a select-all commits.
-        shift += 1;
+        let before = notes(&session);
         let mut e = edit(&session);
         e.update = notes(&session)
             .into_iter()
@@ -478,9 +476,40 @@ fn ten_thousand_notes_edit_in_under_50_ms() {
         let ack = session.edit_notes(e, Instant::now()).unwrap();
         let took = start.elapsed();
         assert!(ack.ignored_ids.is_empty());
+        let expected: Vec<_> = before
+            .iter()
+            .map(|n| Note {
+                tick: n.tick + 1,
+                ..*n
+            })
+            .collect();
+        assert_eq!(notes(&session), expected);
+        assert!(session.undo_notes(Instant::now()).unwrap().is_some());
+        assert_eq!(notes(&session), before);
+        assert!(session.redo_notes(Instant::now()).unwrap().is_some());
+        assert_eq!(notes(&session), expected);
         took
-    });
-    assert_eq!(notes(&session)[0].tick, shift);
+    })
+}
+
+#[test]
+fn ten_thousand_notes_edit_and_undo_exactly() {
+    ten_thousand_notes_edit();
+}
+
+// Explicit optimized gate: never interpret a shared runner's debug timing as a budget.
+#[test]
+#[ignore = "run explicitly with --release --ignored --exact"]
+#[allow(clippy::assertions_on_constants)]
+fn ten_thousand_notes_edit_in_under_50_ms() {
+    // This must refuse a debug invocation at runtime; a const assertion would prevent
+    // ordinary debug tests from compiling even though this budget test is ignored.
+    assert!(
+        !cfg!(debug_assertions),
+        "the performance budget requires --release"
+    );
+    let took = ten_thousand_notes_edit();
+    println!("10,000-note edit median: {took:?}");
     assert!(took < Duration::from_millis(50), "{took:?}");
 }
 
