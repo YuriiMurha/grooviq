@@ -3200,3 +3200,154 @@ fn an_owed_record_off_keeps_refusing_past_a_replacement_s_barrier() {
     assert_eq!((stopped.reason, stopped.dropped), ("engineBusy", 1));
     assert_eq!(session.project().patterns[0].notes, notes);
 }
+
+fn saturate_ui_queue(controller: &Arc<Mutex<Controller>>) {
+    let mut c = controller.lock().unwrap();
+    while c.send(Command::SetMetronome { on: false }).is_ok() {}
+}
+
+#[test]
+fn ui_release_retries_without_input_after_queue_drains() {
+    let (mut s, c, mut p) = rig();
+    let ch = add_synth(&mut s, "Init");
+    let press = s.live_note_on(ch, 60, 0.8).unwrap();
+    assert!(render(&mut p, 30) > 0.001);
+    saturate_ui_queue(&c);
+    let _ = s.live_note_off(ch, 60, press);
+    render(&mut p, 30);
+    s.collect_recorded(&[], Instant::now());
+    render(&mut p, 2000);
+    assert_eq!(render(&mut p, 10), 0.0);
+}
+
+#[test]
+fn ui_release_retry_preserves_a_new_same_key_press_in_every_voice_mode() {
+    for sampler in [false, true] {
+        for mode in 0..3 {
+            let (mut s, c, mut p) = rig();
+            let ch = if sampler {
+                let ch = add(&mut s, "loop", Instant::now());
+                s.param_live(ch, "loop", 1.0).unwrap();
+                ch
+            } else {
+                add_synth(&mut s, "Init")
+            };
+            s.param_live(ch, "voice_mode", mode as f32).unwrap();
+            let old = s.live_note_on(ch, 60, 0.8).unwrap();
+            render(&mut p, 30);
+            saturate_ui_queue(&c);
+            let _ = s.live_note_off(ch, 60, old);
+            render(&mut p, 30);
+            let new = s.live_note_on(ch, 60, 0.8).unwrap();
+            s.collect_recorded(&[], Instant::now());
+            assert!(
+                render(&mut p, 100) > 0.001,
+                "sampler={sampler}, mode={mode}"
+            );
+            s.live_note_off(ch, 60, new).unwrap();
+            render(&mut p, 2000);
+            assert_eq!(render(&mut p, 10), 0.0, "sampler={sampler}, mode={mode}");
+        }
+    }
+}
+
+#[test]
+fn ui_release_debt_survives_engine_rebuild_and_duplicate_release() {
+    let (mut s, c, mut p) = rig();
+    let ch = add_synth(&mut s, "Init");
+    let press = s.live_note_on(ch, 60, 0.8).unwrap();
+    saturate_ui_queue(&c);
+    let _ = s.live_note_off(ch, 60, press);
+    let _ = s.live_note_off(ch, 60, press);
+    c.lock()
+        .unwrap()
+        .reconfigure(&mut p, EngineConfig { sample_rate: RATE });
+    render(&mut p, 30);
+    s.collect_recorded(&[], Instant::now());
+    render(&mut p, 2000);
+    assert_eq!(render(&mut p, 10), 0.0);
+}
+
+#[test]
+fn ui_release_retry_records_delivery_and_keeps_take_barriers() {
+    let (mut s, c, mut p) = rig();
+    let ch = add_synth(&mut s, "Init");
+    s.set_recording(true).unwrap();
+    let mut events = start_take(&c, &mut p);
+    let old = s.live_note_on(ch, 60, 0.8).unwrap();
+    render(&mut p, 40);
+    saturate_ui_queue(&c);
+    let _ = s.live_note_off(ch, 60, old);
+    render(&mut p, 40);
+    c.lock().unwrap().take_recorded(&mut events);
+    s.collect_recorded(&events, Instant::now());
+    render(&mut p, 2);
+    events.clear();
+    c.lock().unwrap().take_recorded(&mut events);
+    s.collect_recorded(&events, Instant::now());
+    let notes = &s.project().patterns[0].notes;
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].length > 200,
+        "release records delivery, not physical key-up"
+    );
+    // A release owed by the previous take must not close this take's same-key press.
+    let old = s.live_note_on(ch, 60, 0.8).unwrap();
+    render(&mut p, 2);
+    saturate_ui_queue(&c);
+    let _ = s.live_note_off(ch, 60, old);
+    render(&mut p, 2);
+    s.set_recording(false).unwrap();
+    s.set_recording(true).unwrap();
+    let new = s.live_note_on(ch, 60, 0.8).unwrap();
+    s.collect_recorded(&[], Instant::now());
+    render(&mut p, 40);
+    s.live_note_off(ch, 60, new).unwrap();
+    render(&mut p, 2);
+    events.clear();
+    c.lock().unwrap().take_recorded(&mut events);
+    s.collect_recorded(&events, Instant::now());
+    assert!(
+        s.project().patterns[0]
+            .notes
+            .iter()
+            .any(|n| n.length >= 115 && n.length <= 125)
+    );
+}
+
+#[test]
+fn ui_release_debt_does_not_cross_project_or_channel_replacement() {
+    for open in [false, true] {
+        let (mut s, c, mut p) = rig();
+        let ch = add_synth(&mut s, "Init");
+        let old = s.live_note_on(ch, 60, 0.8).unwrap();
+        saturate_ui_queue(&c);
+        s.live_note_off(ch, 60, old).unwrap();
+        render(&mut p, 10);
+        let ch = if open {
+            let loaded = Loaded {
+                project: s.project().clone(),
+                samples: Default::default(),
+                warnings: vec![],
+            };
+            s.open(
+                Path::new("/generated/replacement.grooviq"),
+                loaded,
+                Default::default(),
+            )
+            .unwrap();
+            ch
+        } else {
+            s.apply(Edit::RemoveChannel { channel: ch }, Instant::now())
+                .unwrap();
+            add_synth(&mut s, "Init")
+        };
+        let new = s.live_note_on(ch, 60, 0.8).unwrap();
+        s.live_note_off(ch, 60, old).unwrap();
+        s.collect_recorded(&[], Instant::now());
+        assert!(render(&mut p, 100) > 0.001);
+        s.live_note_off(ch, 60, new).unwrap();
+        render(&mut p, 2000);
+        assert_eq!(render(&mut p, 10), 0.0);
+    }
+}
