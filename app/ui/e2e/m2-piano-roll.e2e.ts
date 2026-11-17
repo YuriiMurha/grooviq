@@ -388,7 +388,8 @@ test.describe("renderers", () => {
 
 test.describe("the production build", () => {
   // What ships: no counters on `window`, so the renderer is read off the canvas itself.
-  test.use({ baseURL: PROD_URL, seed: { project: bass([{ id: 1, channel: 1, tick: 0, length: 960, key: 60, velocity: 1 }]) } });
+  // No retention shim: the buffer lifetime must be the one that ships.
+  test.use({ baseURL: PROD_URL, keepFrames: false, seed: { project: bass([{ id: 1, channel: 1, tick: 0, length: 960, key: 60, velocity: 1 }]) } });
 
   test("the_production_build_draws_with_webgl2", async ({ app }) => {
     const webgl2 = await app.evaluate(() => {
@@ -404,7 +405,11 @@ test.describe("the production build", () => {
     await nextFrame(app);
     await nextFrame(app);
     // A canvas holding a 2D context answers null for WebGL2, and the reverse.
-    const kind = await canvas(app).evaluate((c: HTMLCanvasElement) => ({ webgl2: c.getContext("webgl2") !== null, canvas2d: c.getContext("2d") !== null }));
-    expect(kind).toEqual({ webgl2: true, canvas2d: false });
+    const kind = await canvas(app).evaluate((c: HTMLCanvasElement) => ({
+      webgl2: c.getContext("webgl2") !== null,
+      canvas2d: c.getContext("2d") !== null,
+      preserveDrawingBuffer: c.getContext("webgl2")?.getContextAttributes()?.preserveDrawingBuffer,
+    }));
+    expect(kind).toEqual({ webgl2: true, canvas2d: false, preserveDrawingBuffer: false });
   });
 });

@@ -7,7 +7,11 @@
  * the same way. macOS WebKit and Chromium present the last frame either way. The attribute only
  * changes how long the buffer lives, never what is drawn, so the pixel checks still read the
  * renderer's output. Tests that read canvas pixels get this through the `app` fixture and
- * `pixelsAt`; nothing in the app changes. */
+ * `pixelsAt`; nothing in the app changes.
+ *
+ * Scope: contexts of HTMLCanvasElements created after navigation (`webgl2`, `webgl`,
+ * `experimental-webgl`). Not OffscreenCanvas, and not a context that already exists. Checks of the
+ * shipping buffer lifetime turn it off with `test.use({ keepFrames: false })`. */
 export function keepWebglFrames() {
   const original = HTMLCanvasElement.prototype.getContext;
   HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string, options?: unknown) {

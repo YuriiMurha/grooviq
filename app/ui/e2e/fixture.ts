@@ -76,9 +76,11 @@ export interface Mock {
 }
 
 /** The page with the mock shell loaded and every console error and page error collected. */
-export const test = base.extend<{ seed: MockSeed; app: Page; mock: Mock }>({
+export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; app: Page; mock: Mock }>({
   seed: [{}, { option: true }],
-  app: async ({ page, seed }, use) => {
+  // Retain WebGL frames (see webglProbe.ts). Off only where the shipping buffer lifetime is the subject.
+  keepFrames: [true, { option: true }],
+  app: async ({ page, seed, keepFrames }, use) => {
     const consoleErrors: string[] = [];
     page.on("console", (m) => {
       // Headless Chromium's own GPU notes ("GPU stall due to ReadPixels" while it composites):
@@ -87,7 +89,7 @@ export const test = base.extend<{ seed: MockSeed; app: Page; mock: Mock }>({
       if (m.type() === "error" || m.type() === "warning") consoleErrors.push(`${m.type()}: ${m.text()}`);
     });
     page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
-    await page.addInitScript(keepWebglFrames);
+    if (keepFrames) await page.addInitScript(keepWebglFrames);
     await page.addInitScript(installMockTauri, { samplerParams: SAMPLER_PARAMS, synthParams: SYNTH_PARAMS, synthPresets: SYNTH_PRESETS, ...seed });
     await page.goto("/");
     await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
