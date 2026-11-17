@@ -420,6 +420,7 @@ fn sequencing_never_allocates() {
         bpm: 400.0,
         channels: vec![setup(1, Vec::new()), setup(2, gate)],
         pattern: dense(3_840, 500),
+        ..EngineState::default()
     };
     let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
     let mut buf = vec![0f32; 441 * 2];
@@ -535,6 +536,7 @@ fn choke_never_allocates() {
         bpm: 400.0,
         channels: vec![hat(1, 1), hat(2, 1), hat(3, 1), synth],
         pattern,
+        ..EngineState::default()
     };
     let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
     let mut buf = vec![0f32; 441 * 2];
@@ -571,4 +573,76 @@ fn choke_never_allocates() {
         c.check_health();
     }
     assert!(c.live().peak[0] > 0.05, "it sounded");
+}
+
+#[test]
+fn recording_never_allocates() {
+    // Also the metronome, AllSoundOff's choke and the fade of a removed channel.
+    let setup = |id, sample: &Arc<SampleBuf>| {
+        ChannelSetup::sampler(
+            ChannelId(id),
+            Some(Arc::clone(sample)),
+            Vec::new(),
+            ChannelMix::default(),
+        )
+    };
+    let synth = ChannelSetup::synth(ChannelId(3), Vec::new(), ChannelMix::default());
+    let a = tone_sample(48_000);
+    let state = EngineState {
+        bpm: 400.0,
+        channels: vec![setup(1, &a), setup(2, &a), synth],
+        time_signature: (7, 16),
+        ..EngineState::default()
+    };
+    let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
+    c.live_shared().set_output_latency_frames(512);
+    let mut buf = vec![0f32; 441 * 2];
+    let note = |id, on| Command::ChannelNote {
+        channel: ChannelId(id),
+        key: 60,
+        velocity: 0.9,
+        on,
+    };
+    let mut run = |c: &mut grooviq_engine::Controller, callbacks: usize| {
+        for _ in 0..callbacks {
+            assert_no_alloc(|| p.process(&mut buf, 2));
+        }
+        c.check_health();
+    };
+    c.send(Command::SetMetronome { on: true }).unwrap();
+    c.send(Command::SetRecording { on: true }).unwrap();
+    c.send(Command::Play).unwrap();
+    // More notes than the recording queue holds, never drained: the rest are counted.
+    for i in 0..1_100 {
+        c.send(note(1 + i % 3, i % 2 == 0)).unwrap();
+        if i % 100 == 99 {
+            run(&mut c, 1);
+        }
+    }
+    run(&mut c, 20);
+    assert!(c.record_dropped() > 0, "the queue filled up");
+    c.send(Command::SetTimeSignature { beats: 3, unit: 4 })
+        .unwrap();
+    c.send(Command::SetRecording { on: false }).unwrap();
+    c.send(Command::SetRecording { on: true }).unwrap();
+    c.send(note(2, true)).unwrap();
+    c.send(Command::AllSoundOff).unwrap();
+    c.send(note(2, true)).unwrap();
+    c.send(Command::Play).unwrap();
+    run(&mut c, 5);
+    // A sounding channel fades out, then goes back through the trash queue.
+    c.send(note(1, true)).unwrap();
+    run(&mut c, 1);
+    c.remove_channel(ChannelId(1)).unwrap();
+    run(&mut c, 5);
+    c.send(Command::Stop).unwrap();
+    run(&mut c, 5);
+    assert!(c.live().peak[0] > 0.05, "it sounded");
+    let mut taken = Vec::new();
+    assert!(c.take_recorded(&mut taken) > 0);
+    assert_eq!(
+        Arc::strong_count(&a),
+        3,
+        "the test and channel 2's state and node: the removed node was freed"
+    );
 }

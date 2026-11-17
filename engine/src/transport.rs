@@ -38,6 +38,8 @@ pub(crate) struct TransportClock {
     sample_rate: f32,
     anchor_frame: u64,
     anchor_tick: f64,
+    /// The frame play started on: a recorded note is never placed before it.
+    play_frame: u64,
     /// `PlayLoops`: the number of loops to play (no note starts at or after `loops * length`).
     loops: Option<u32>,
     /// The first tick the blocks so far have not covered: every note before it has had its
@@ -57,6 +59,7 @@ impl TransportClock {
             sample_rate,
             anchor_frame: 0,
             anchor_tick: 0.0,
+            play_frame: 0,
             loops: None,
             covered: 0,
             shift: 0,
@@ -76,6 +79,7 @@ impl TransportClock {
         self.playing = true;
         self.anchor_frame = at;
         self.anchor_tick = 0.0;
+        self.play_frame = at;
         self.loops = loops;
         self.covered = 0;
         self.shift = 0;
@@ -86,6 +90,7 @@ impl TransportClock {
         self.playing = false;
         self.anchor_frame = 0;
         self.anchor_tick = 0.0;
+        self.play_frame = 0;
         self.loops = None;
         self.covered = 0;
         self.shift = 0;
@@ -184,6 +189,16 @@ impl TransportClock {
             tick += 1;
         }
         self.covered = tick;
+    }
+
+    /// Where a note heard at `frame` belongs: the whole pattern tick at `frame - latency`
+    /// frames (what was playing when the listener heard the note's sound), never before the
+    /// frame play started on. Before a tempo change since then, the tick counts at the new
+    /// tempo: off by at most `latency` frames' worth of the change.
+    pub(crate) fn record_tick(&self, frame: u64, latency: u64) -> u64 {
+        let heard = frame.saturating_sub(latency).max(self.play_frame);
+        // Saturating: never negative.
+        self.tick_at(heard).floor() as u64
     }
 
     /// The whole pattern tick at `frame` (ticks since play started, plus any shift), 0 while

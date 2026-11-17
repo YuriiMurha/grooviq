@@ -279,6 +279,7 @@ fn play(channel: ChannelSetup, notes: Vec<SeqNote>, frames: usize) -> Vec<f32> {
             length: 16 * 240,
             notes,
         },
+        ..EngineState::default()
     };
     left(&render_offline_with(
         cfg(),
@@ -370,6 +371,7 @@ fn synth_channels_are_identical_for_any_callback_size() {
                 },
             ],
         },
+        ..EngineState::default()
     };
     let mut events = vec![(0, Command::Play), (3_001, cnote(3, 64, true))];
     events.push((9_999, cnote(3, 64, false)));

@@ -10,6 +10,8 @@
 use crate::command::{Command, Msg, Trash};
 use crate::graph::Graph;
 use crate::live::LiveShared;
+use crate::metronome::Metronome;
+use crate::record::{RecordEvent, Recorder};
 use crate::transport::TransportClock;
 use crate::{BLOCK, QUEUE_CAPACITY};
 use grooviq_dsp::NoteEvent;
@@ -86,8 +88,11 @@ pub struct AudioProcessor {
     events: [NoteEvent; MAX_EVENTS],
     /// First frame of the next block: the engine's sample clock.
     clock: u64,
-    /// Play state and tempo. Owned here, not by the graph, so it survives graph swaps.
+    /// Play state and tempo. Owned here, not by the graph, so it survives graph swaps, as do
+    /// the recording tap and the metronome.
     transport: TransportClock,
+    recorder: Recorder,
+    metronome: Metronome,
     faults: u32,
     guard_hits: u32,
     meter: [f32; 2],
@@ -97,10 +102,9 @@ pub struct AudioProcessor {
 impl AudioProcessor {
     pub(crate) fn new(
         sample_rate: f32,
-        bpm: f32,
+        (bpm, time_signature): (f32, (u8, u8)),
         graph: Box<Graph>,
-        commands: Consumer<Msg>,
-        trash: Producer<Trash>,
+        (commands, trash, recorded): (Consumer<Msg>, Producer<Trash>, Producer<RecordEvent>),
         live: Arc<LiveShared>,
     ) -> Self {
         Self {
@@ -117,6 +121,8 @@ impl AudioProcessor {
             events: [NO_EVENT; MAX_EVENTS],
             clock: 0,
             transport: TransportClock::new(sample_rate, bpm),
+            recorder: Recorder::new(recorded),
+            metronome: Metronome::new(sample_rate, time_signature),
             faults: 0,
             guard_hits: 0,
             meter: [0.0; 2],
@@ -158,6 +164,7 @@ impl AudioProcessor {
     /// old graph is freed on its thread. The transport keeps playing from the tick it reached.
     pub(crate) fn restart(&mut self, sample_rate: f32, graph: Box<Graph>) {
         self.transport.set_sample_rate(self.clock, sample_rate);
+        self.metronome.set_sample_rate(sample_rate);
         // A pattern of a new length can arrive with the fresh graph (its swap was still queued,
         // or a faulted graph refused it): the place in the loop holds, as in `replace_graph`.
         self.transport
@@ -200,7 +207,16 @@ impl AudioProcessor {
                 graph.sequence(transport, start);
                 graph.render(block_l, block_r, &events[..count])
             })) {
-                Ok(silenced) => self.guard_hits = self.guard_hits.wrapping_add(silenced),
+                Ok(silenced) => {
+                    self.guard_hits = self.guard_hits.wrapping_add(silenced);
+                    self.metronome.render(
+                        &mut self.block_l,
+                        &mut self.block_r,
+                        &self.transport,
+                        start,
+                    );
+                    self.collect_departed();
+                }
                 // Dropping the payload frees what the panic allocated: the one path that
                 // touches the allocator, since unwinding itself allocates.
                 Err(_payload) => self.fault(),
@@ -280,6 +296,7 @@ impl AudioProcessor {
                         self.discard(Trash::Channel(node));
                     }
                 }
+                // A removed channel fades out first: `collect_departed` hands it back after.
                 Msg::RemoveChannel(id) => {
                     if !self.faulted
                         && let Some(node) = self.graph.remove_channel(id)
@@ -336,7 +353,11 @@ impl AudioProcessor {
                                 on,
                                 slide: false,
                             };
-                            self.graph.channel_note(channel, event);
+                            if self.graph.channel_note(channel, event) {
+                                let at = start + u64::from(event.offset);
+                                let note = (channel, key, velocity, on);
+                                self.recorder.note(&self.transport, at, &self.live, note);
+                            }
                         }
                     }
                     Command::SetChannelMix { channel, mix } => {
@@ -365,11 +386,18 @@ impl AudioProcessor {
                         }
                     }
                     Command::PlayLoops { loops } => self.play(start, Some(loops)),
-                    Command::Stop => self.stop(),
+                    Command::Stop => self.stop(start),
                     Command::SetTempo { bpm } => self.transport.set_bpm(start, bpm),
                     Command::AllSoundOff => {
-                        self.stop();
+                        self.stop(start);
                         self.with_graph(Graph::all_sound_off);
+                    }
+                    Command::SetRecording { on } => {
+                        self.recorder.set(on, &self.transport, start, &self.live);
+                    }
+                    Command::SetMetronome { on } => self.metronome.set_on(on),
+                    Command::SetTimeSignature { beats, unit } => {
+                        self.metronome.set_time_signature(beats, unit);
                     }
                     Command::TestTone { on, hz, gain_db } => {
                         self.with_graph(|g| g.set_tone(on, hz, gain_db));
@@ -388,19 +416,33 @@ impl AudioProcessor {
     }
 
     /// Plays from tick 0 at frame `at` (a block start). While playing, the notes sounding are
-    /// released first.
+    /// released first, and a take recording ends.
     fn play(&mut self, at: u64, loops: Option<u32>) {
         if self.transport.playing() {
+            self.recorder.end(&self.transport, at, &self.live);
             self.with_graph(Graph::transport_stopped);
         }
         self.transport.start(at, loops);
         self.with_graph(Graph::transport_started);
     }
 
-    /// Stops and rewinds; the sequenced notes sounding are released at this block's start.
-    fn stop(&mut self) {
+    /// Stops and rewinds at frame `at` (a block start); the sequenced notes sounding are
+    /// released there, and a take recording ends there.
+    fn stop(&mut self, at: u64) {
+        self.recorder.end(&self.transport, at, &self.live);
         self.transport.stop();
         self.with_graph(Graph::transport_stopped);
+    }
+
+    /// Hands the removed channels whose fade ended to the trash queue, while it has room (one
+    /// more is parked when it is full; the rest wait in the graph, silent).
+    fn collect_departed(&mut self) {
+        while self.unsent.is_none() {
+            let Some(node) = self.graph.take_departed() else {
+                break;
+            };
+            self.discard(Trash::Channel(node));
+        }
     }
 
     /// Runs `f` on the graph unless it is faulted, catching a panic like a render does.
@@ -491,7 +533,9 @@ mod tests {
         let (trash_tx, trash) = rtrb::RingBuffer::new(1);
         let graph = Box::new(Graph::new(SR, 0));
         let live = Arc::new(LiveShared::default());
-        let p = AudioProcessor::new(SR, 140.0, graph, commands_rx, trash_tx, live);
+        let (recorded, _) = rtrb::RingBuffer::new(1);
+        let queues = (commands_rx, trash_tx, recorded);
+        let p = AudioProcessor::new(SR, (140.0, (4, 4)), graph, queues, live);
         (p, commands, trash)
     }
 
@@ -584,19 +628,24 @@ mod tests {
         p.process(&mut buf, 2);
         assert_eq!(commands.slots(), QUEUE_CAPACITY - 2, "the removal waits");
         assert!(matches!(trash.pop(), Ok(Trash::Pattern(_))));
-        // ...the removal, whose node is parked...
+        // ...the removal, which only starts the channel's 5 ms fade, and the last pattern,
+        // whose old one is parked.
         p.process(&mut buf, 2);
         assert!(p.graph.channel_ids().is_empty());
+        assert_eq!(p.graph.pattern().length, 30);
+        assert_eq!(commands.slots(), QUEUE_CAPACITY);
         assert!(matches!(trash.pop(), Ok(Trash::Sample(_))));
-        // ...and the last pattern.
+        // The parked pattern moves into the queue and stays there while the channel fades.
+        p.process(&mut buf, 2);
+        p.process(&mut buf, 2);
+        assert!(p.unsent.is_none());
+        // The fade (240 frames) ends in the fourth block: the full queue parks the node.
+        p.process(&mut buf, 2);
+        assert!(matches!(p.unsent, Some(Trash::Channel(_))));
+        assert!(matches!(trash.pop(), Ok(Trash::Pattern(_))));
         p.process(&mut buf, 2);
         assert!(matches!(trash.pop(), Ok(Trash::Channel(_))));
         assert_eq!(Arc::strong_count(&new_sample), 1, "it left with the node");
-        assert_eq!(p.graph.pattern().length, 30);
-        assert_eq!(commands.slots(), QUEUE_CAPACITY);
-        // The last old pattern was parked, and goes once there is room.
-        p.process(&mut buf, 2);
-        assert!(matches!(trash.pop(), Ok(Trash::Pattern(_))));
         assert!(p.unsent.is_none());
     }
 
@@ -607,7 +656,9 @@ mod tests {
         let (trash_tx, mut trash) = rtrb::RingBuffer::new(8);
         let live = Arc::new(LiveShared::default());
         let graph = Box::new(Graph::new(SR, 0));
-        let mut p = AudioProcessor::new(SR, 140.0, graph, commands_rx, trash_tx, live);
+        let (recorded, _) = rtrb::RingBuffer::new(1);
+        let queues = (commands_rx, trash_tx, recorded);
+        let mut p = AudioProcessor::new(SR, (140.0, (4, 4)), graph, queues, live);
         let held = sample();
         let mut buf = [0.0; BLOCK * 2];
         let mut back = |p: &mut AudioProcessor, msg: Msg| {

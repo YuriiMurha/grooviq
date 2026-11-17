@@ -288,7 +288,7 @@ fn mix_changes_ramp_without_clicks() {
 }
 
 #[test]
-fn all_sound_off_fades_channels_out_and_later_notes_play() {
+fn all_sound_off_chokes_channels_and_later_notes_play() {
     let s = dc(1.0);
     let st = state(vec![channel(1, &s, ChannelMix::default())]);
     let ev = [
@@ -297,15 +297,44 @@ fn all_sound_off_fades_channels_out_and_later_notes_play() {
         (9_600, note(1, true)),
     ];
     let l = left(&render(st.clone(), &ev, 12_000));
-    let limit = 1.0 / (0.005 * SR) + 1e-6;
+    // Each voice's 3 ms choke fade.
+    let limit = 1.0 / (0.003 * SR) + 1e-6;
     assert!(max_step(&l[..9_600]) <= limit, "step {}", max_step(&l));
-    assert!(l[4_800 + RAMP..9_600].iter().all(|x| *x == 0.0));
+    assert!(l[4_800 + 144..9_600].iter().all(|x| *x == 0.0));
     assert!(l[9_600..].iter().all(|x| *x == 1.0), "a later note plays");
 
     // AllSoundOff while nothing sounds leaves no fade behind for the next note.
     let ev = [(0, Command::AllSoundOff), (4_800, note(1, true))];
-    let l = left(&render(st, &ev, 6_000));
+    let l = left(&render(st.clone(), &ev, 6_000));
     assert!(l[4_800..].iter().all(|x| *x == 1.0));
+
+    // A note just before AllSoundOff, in its block (which it applies at the start of), never
+    // starts.
+    let ev = [(4_801, note(1, true)), (4_802, Command::AllSoundOff)];
+    let l = left(&render(st, &ev, 6_000));
+    assert!(l.iter().all(|x| *x == 0.0));
+}
+
+#[test]
+fn a_note_right_after_all_sound_off_plays_at_full_level() {
+    let s = dc(1.0);
+    let st = state(vec![channel(1, &s, ChannelMix::default())]);
+    // AllSoundOff applies at its block's start (4 800); the note lands 1 ms later, while the
+    // choked voice still fades.
+    let ev = [
+        (0, note(1, true)),
+        (4_800, Command::AllSoundOff),
+        (4_848, note(1, true)),
+    ];
+    let l = left(&render(st, &ev, 6_000));
+    assert!(
+        l[4_848..].iter().all(|x| *x >= 1.0),
+        "full level, plus the fading voice"
+    );
+    assert!(
+        l[4_800 + 144..].iter().all(|x| *x == 1.0),
+        "the new note alone"
+    );
 }
 
 #[test]
@@ -373,7 +402,10 @@ fn removing_a_sounding_channel_frees_it_off_the_audio_thread() {
     c.remove_channel(ChannelId(1)).unwrap();
     assert_eq!(Arc::strong_count(&s), 2, "the state let go");
     p.process(&mut buf, 2);
-    assert!(buf.iter().all(|x| *x == 0.0), "removed at once");
+    assert!(
+        buf[RAMP * 2..].iter().all(|x| *x == 0.0),
+        "faded out in 5 ms"
+    );
     assert_eq!(
         Arc::strong_count(&s),
         2,
@@ -618,6 +650,7 @@ fn load_state_replaces_everything() {
             ),
         ],
         pattern: sorted(pattern()),
+        ..EngineState::default()
     };
     c.load_state(new.clone()).unwrap();
     assert_eq!(*c.state(), new);

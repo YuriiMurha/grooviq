@@ -2,7 +2,9 @@
 
 use crate::channel::ChannelNode;
 use crate::graph::Graph;
-use crate::state::{BPM_RANGE, ChannelId, ChannelMix, MAX_CHOKE_GROUP, PatternData};
+use crate::state::{
+    BPM_RANGE, ChannelId, ChannelMix, MAX_CHOKE_GROUP, PatternData, time_signature_ok,
+};
 use grooviq_dsp::sampler::SampleBuf;
 use std::sync::Arc;
 
@@ -30,9 +32,19 @@ pub enum Command {
     /// Sets the tempo, clamped to [`BPM_RANGE`]. Applies at the start of its block: the tick
     /// reached there stays put and later steps follow the new tempo.
     SetTempo { bpm: f32 },
-    /// Fades the tone, every synth voice and every channel out over 5 ms (each device resets
-    /// after the fade) and stops the transport.
+    /// Fades the tone and every synth voice out over 5 ms (each resets after the fade), chokes
+    /// every channel (its sounding notes fade over 3 ms; a note after the command plays in
+    /// full) and stops the transport.
     AllSoundOff,
+    /// Switches recording: while it is on and the transport plays, every channel note that
+    /// lands is queued for [`crate::Controller::take_recorded`]. Off by default.
+    SetRecording { on: bool },
+    /// Switches the metronome, which clicks on every beat while the transport plays. Off by
+    /// default; an export never has it.
+    SetMetronome { on: bool },
+    /// Sets the time signature: `beats` 1..=16 in a bar, of note value `unit` 2, 4, 8 or 16
+    /// (anything else is rejected). Applies at the start of its block.
+    SetTimeSignature { beats: u8, unit: u8 },
     /// Switches the sine test tone; `hz` is clamped to 20..=20000 and `gain_db` to -60..=0.
     /// Every change ramps over 5 ms.
     TestTone { on: bool, hz: f32, gain_db: f32 },
@@ -127,6 +139,9 @@ impl Command {
             // The range depends on the channel's instrument: the controller clamps it.
             Self::SetChannelParam { value, .. } => value.is_finite().then_some(self),
             Self::SetChoke { group, .. } => (group <= MAX_CHOKE_GROUP).then_some(self),
+            Self::SetTimeSignature { beats, unit } => {
+                time_signature_ok(beats, unit).then_some(self)
+            }
             Self::ChannelNote {
                 channel,
                 key,
@@ -191,9 +206,10 @@ impl Msg {
 ///   channel added or removed, a sample, a pattern, the tone, a synth, mix, sampler or channel
 ///   parameter, a choke group), and a note-on that a later message would have cut (a new graph
 ///   or `AllSoundOff` for any note; a removal or a new sample for a note on that channel).
-/// * Kept: the transport commands (the transport outlives the graph; `AllSoundOff` keeps only
-///   its `Stop`, its fade and tone-off being in the rebuilt graph), the other notes (note-offs
-///   always: one that finds no note does nothing), and the test hooks.
+/// * Kept: the transport commands and the recording, metronome and time-signature switches (the
+///   processor owns them, so they outlive the graph; `AllSoundOff` keeps only its `Stop`, its
+///   fade, choke and tone-off being in the rebuilt graph), the other notes (note-offs always:
+///   one that finds no note does nothing), and the test hooks.
 pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
     // From the back: whether a later message cuts every note, and the channels whose notes a
     // later message cuts.
@@ -233,7 +249,10 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
             | Command::Play
             | Command::PlayLoops { .. }
             | Command::Stop
-            | Command::SetTempo { .. } => cmd,
+            | Command::SetTempo { .. }
+            | Command::SetRecording { .. }
+            | Command::SetMetronome { .. }
+            | Command::SetTimeSignature { .. } => cmd,
             #[cfg(feature = "test-hooks")]
             Command::InjectNaN | Command::InjectPanic => cmd,
         };
@@ -435,5 +454,16 @@ mod tests {
             })
         );
         assert_eq!(cparam(f32::NAN), None);
+
+        let sig = |beats, unit| Command::SetTimeSignature { beats, unit }.clamped();
+        for (beats, unit) in [(1, 2), (3, 4), (7, 8), (16, 16)] {
+            assert_eq!(
+                sig(beats, unit),
+                Some(Command::SetTimeSignature { beats, unit })
+            );
+        }
+        for (beats, unit) in [(0, 4), (17, 4), (4, 1), (4, 3), (4, 32)] {
+            assert_eq!(sig(beats, unit), None, "{beats}/{unit}");
+        }
     }
 }

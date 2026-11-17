@@ -125,6 +125,7 @@ fn the_choke_is_sequenced_on_the_closed_hat_s_frame() {
             length: 3_840,
             notes: vec![note(0, 1), note(41, 2)],
         },
+        ..EngineState::default()
     };
     let out = left(&render_offline_with(
         cfg(),
