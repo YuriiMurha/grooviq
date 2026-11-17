@@ -500,7 +500,10 @@ fn ten_thousand_notes_edit_and_undo_exactly() {
 // Explicit optimized gate: never interpret a shared runner's debug timing as a budget.
 #[test]
 #[ignore = "run explicitly with --release --ignored --exact"]
+#[allow(clippy::assertions_on_constants)]
 fn ten_thousand_notes_edit_in_under_50_ms() {
+    // This must refuse a debug invocation at runtime; a const assertion would prevent
+    // ordinary debug tests from compiling even though this budget test is ignored.
     assert!(
         !cfg!(debug_assertions),
         "the performance budget requires --release"
