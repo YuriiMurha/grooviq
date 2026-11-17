@@ -67,26 +67,35 @@ function counted(store: NoteStore): NoteStore {
 // their full input length; install only around fn, so assertions do not count test-runner work.
 function countNativeWork(): () => void {
   const restore: (() => void)[] = [];
-  const wrap = (prototype: object, name: string, byLength: boolean) => {
+  const wrap = (prototype: object, name: PropertyKey, weight: (receiver: object) => number) => {
     const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
     if (!descriptor || typeof descriptor.value !== "function") return;
     const original = descriptor.value;
     Object.defineProperty(prototype, name, {
       ...descriptor,
-      value: function (this: { length: number }, ...args: unknown[]) {
-        work += byLength ? this.length : 1;
+      value: function (this: object, ...args: unknown[]) {
+        work += weight(this);
         return Reflect.apply(original, this, args);
       },
     });
     restore.push(() => { Object.defineProperty(prototype, name, descriptor); });
   };
-  for (const name of ["getUint32", "getFloat32", "getUint8"]) wrap(DataView.prototype, name, false);
+  for (const name of ["getUint32", "getFloat32", "getUint8"]) wrap(DataView.prototype, name, () => 1);
+  // Constructors are not traversals. subarray creates a constant-time view; reads of
+  // store views are already counted by arrayWork. Iterator creation is charged up front.
+  const constant = new Set<PropertyKey>(["constructor", "at", "push", "pop", "subarray"]);
   for (const prototype of [Array.prototype, Object.getPrototypeOf(Int32Array.prototype)]) {
-    for (const name of ["includes", "indexOf", "lastIndexOf", "find", "findIndex", "some", "filter", "splice", "unshift", "shift"]) {
-      wrap(prototype, name, true);
+    for (const name of Reflect.ownKeys(prototype)) {
+      if (!constant.has(name)) wrap(prototype, name, (receiver) => Number(Reflect.get(receiver, "length")));
     }
   }
-  return () => { for (const undo of restore) undo(); };
+  for (const prototype of [Map.prototype, Set.prototype]) {
+    for (const name of [Symbol.iterator, "entries", "keys", "values", "forEach"]) {
+      wrap(prototype, name, (receiver) => Number(Reflect.get(receiver, "size")));
+    }
+  }
+  // Avoid charging cleanup's own array iteration after the measured operation ends.
+  return () => { for (let i = restore.length - 1; i >= 0; i--) restore[i](); };
 }
 
 /** Wall-clock acceptance is opt-in; normal tests enforce bounded observed work. */
