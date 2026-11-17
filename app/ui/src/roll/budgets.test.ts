@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { decodeNotes, encodeNotes, type WireNote } from "../api/notes";
 import { NoteStore, buildInstances } from "./noteStore";
 
@@ -52,24 +52,44 @@ function counted(store: NoteStore): NoteStore {
   return store;
 }
 
-/** Wall-clock acceptance is opt-in; normal tests enforce actual bounded data access. */
+// Native searches on plain arrays and subarray views bypass the store proxies. Charge
+// their full input length; install only around fn, so assertions do not count test-runner work.
+function countNativeWork(): () => void {
+  const restore: (() => void)[] = [];
+  const wrap = (prototype: object, name: string, byLength: boolean) => {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+    if (!descriptor || typeof descriptor.value !== "function") return;
+    const original = descriptor.value;
+    Object.defineProperty(prototype, name, {
+      ...descriptor,
+      value: function (this: { length: number }, ...args: unknown[]) {
+        work += byLength ? this.length : 1;
+        return Reflect.apply(original, this, args);
+      },
+    });
+    restore.push(() => { Object.defineProperty(prototype, name, descriptor); });
+  };
+  for (const name of ["getUint32", "getFloat32", "getUint8"]) wrap(DataView.prototype, name, false);
+  for (const prototype of [Array.prototype, Object.getPrototypeOf(Int32Array.prototype)]) {
+    for (const name of ["includes", "indexOf", "lastIndexOf", "find", "findIndex", "some", "filter", "splice", "unshift", "shift"]) {
+      wrap(prototype, name, true);
+    }
+  }
+  return () => { for (const undo of restore) undo(); };
+}
+
+/** Wall-clock acceptance is opt-in; normal tests enforce bounded observed work. */
 function measure(fn: () => void, milliseconds: number, maxWork: number) {
   if (!performanceGate) {
-    const spies = (["getUint32", "getFloat32", "getUint8"] as const).map((name) => {
-      const original: (offset: number, littleEndian?: boolean) => number = DataView.prototype[name];
-      return vi.spyOn(DataView.prototype, name).mockImplementation(function (this: DataView, offset: number, littleEndian?: boolean) {
-        work++;
-        return original.call(this, offset, littleEndian);
-      });
-    });
+    const restore = countNativeWork();
     work = 0;
     try {
       fn();
-      expect(work).toBeGreaterThan(0);
-      expect(work).toBeLessThanOrEqual(maxWork);
     } finally {
-      spies.forEach((spy) => spy.mockRestore());
+      restore();
     }
+    expect(work).toBeGreaterThan(0);
+    expect(work).toBeLessThanOrEqual(maxWork);
     return;
   }
   fn();
