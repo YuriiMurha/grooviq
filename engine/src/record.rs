@@ -10,8 +10,9 @@ use rtrb::Producer;
 /// ([`crate::Controller::record_dropped`]).
 pub const RECORD_CAPACITY: usize = 1024;
 
-/// What the audio thread recorded. Ticks are whole pattern ticks since play started (a looped
-/// pattern keeps counting up), already corrected for the output latency.
+/// What the audio thread recorded. Ticks are whole ticks played since Play, at the tempo of
+/// each moment: a looped pattern keeps counting up and a pattern of a new length does not move
+/// them, so `off - on` is a held note's length. Already corrected for the output latency.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RecordEvent {
     /// A channel note that landed on its channel.

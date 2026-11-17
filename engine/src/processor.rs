@@ -430,6 +430,7 @@ impl AudioProcessor {
     /// released there, and a take recording ends there.
     fn stop(&mut self, at: u64) {
         self.recorder.end(&self.transport, at, &self.live);
+        self.metronome.release();
         self.transport.stop();
         self.with_graph(Graph::transport_stopped);
     }

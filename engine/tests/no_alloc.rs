@@ -621,6 +621,18 @@ fn recording_never_allocates() {
     }
     run(&mut c, 20);
     assert!(c.record_dropped() > 0, "the queue filled up");
+    let mut taken = Vec::new();
+    c.take_recorded(&mut taken);
+    // More tempo changes than the recording's tempo history keeps, with notes heard across
+    // them.
+    for i in 0..80 {
+        c.send(Command::SetTempo {
+            bpm: 90.0 + i as f32,
+        })
+        .unwrap();
+        c.send(note(2, i % 2 == 0)).unwrap();
+        run(&mut c, 1);
+    }
     c.send(Command::SetTimeSignature { beats: 3, unit: 4 })
         .unwrap();
     c.send(Command::SetRecording { on: false }).unwrap();
@@ -635,10 +647,14 @@ fn recording_never_allocates() {
     run(&mut c, 1);
     c.remove_channel(ChannelId(1)).unwrap();
     run(&mut c, 5);
+    // Stopping, and switching off, fade a click that is sounding.
     c.send(Command::Stop).unwrap();
     run(&mut c, 5);
+    c.send(Command::Play).unwrap();
+    run(&mut c, 1);
+    c.send(Command::SetMetronome { on: false }).unwrap();
+    run(&mut c, 5);
     assert!(c.live().peak[0] > 0.05, "it sounded");
-    let mut taken = Vec::new();
     assert!(c.take_recorded(&mut taken) > 0);
     assert_eq!(
         Arc::strong_count(&a),

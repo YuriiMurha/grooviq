@@ -406,3 +406,141 @@ fn the_time_signature_is_mirrored_and_outlives_a_new_state_and_a_rate_change() {
     c.take_recorded(&mut taken);
     assert_eq!(taken, [RecordEvent::End { tick: 6_722 }], "recording too");
 }
+
+/// The tick each note-on at the given frames was recorded at.
+fn ticks(events: &[RecordEvent]) -> Vec<u64> {
+    events
+        .iter()
+        .map(|e| match e {
+            RecordEvent::Note { tick, .. } | RecordEvent::End { tick } => *tick,
+        })
+        .collect()
+}
+
+#[test]
+fn recorded_ticks_follow_the_tempo_at_the_heard_frame() {
+    // 120 BPM (25 frames a tick) from 0, 60 BPM (50) from 3 200, 240 BPM (12.5) from 4 800:
+    // ticks 128 and 160 at the changes. Each note is heard 2 400 frames before it lands.
+    let mut r = Rig::new();
+    r.c.live_shared().set_output_latency_frames(2_400);
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    r.at(2_500, note(true));
+    r.at(3_200, Command::SetTempo { bpm: 60.0 });
+    r.at(4_800, Command::SetTempo { bpm: 240.0 });
+    for frame in [5_600, 5_601, 7_199, 7_200, 8_000] {
+        r.at(frame, note(true));
+    }
+    r.run_to(9_000);
+    // Heard at 100, 3 200, 3 201, 4 799, 4 800 and 5 600.
+    assert_eq!(ticks(&r.take()), [4, 128, 128, 159, 160, 224]);
+
+    // The reviewer's case: 60 BPM from 6 400, a note at 6 500 was heard at 4 100 (tick 164).
+    let mut r = Rig::new();
+    r.c.live_shared().set_output_latency_frames(2_400);
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    r.at(6_400, Command::SetTempo { bpm: 60.0 });
+    r.at(6_500, note(true));
+    r.run_to(7_000);
+    assert_eq!(ticks(&r.take()), [164]);
+}
+
+#[test]
+fn recorded_ticks_follow_a_sample_rate_change() {
+    // 48 kHz (25 frames a tick) until 6 400 (tick 256), then 96 kHz (50 frames a tick).
+    let mut r = Rig::new();
+    r.c.live_shared().set_output_latency_frames(2_400);
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    r.run_to(6_400);
+    r.c.reconfigure(
+        &mut r.p,
+        EngineConfig {
+            sample_rate: 96_000.0,
+        },
+    );
+    r.at(6_500, note(true));
+    r.at(11_400, note(true));
+    r.run_to(12_000);
+    // Heard at 4 100 (48 kHz: 164) and 9 000 (96 kHz: 256 + 2 600 / 50).
+    assert_eq!(ticks(&r.take()), [164, 308]);
+}
+
+#[test]
+fn a_note_heard_before_play_started_records_at_tick_0() {
+    // Play at 6 400 at 120 BPM, 60 BPM from 6 464 (tick 2.56 there).
+    let mut r = Rig::new();
+    r.c.live_shared().set_output_latency_frames(2_400);
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.run_to(6_400);
+    r.c.send(Command::Play).unwrap();
+    r.at(6_464, Command::SetTempo { bpm: 60.0 });
+    // Heard at 4 100, 6 400 (play start), 6 464 and 6 514.
+    for frame in [6_500, 8_800, 8_864, 8_914] {
+        r.at(frame, note(true));
+    }
+    r.run_to(9_000);
+    assert_eq!(ticks(&r.take()), [0, 0, 2, 3]);
+}
+
+#[test]
+fn held_notes_keep_their_length_across_pattern_resizes() {
+    let resize = |length| PatternData {
+        length,
+        notes: Vec::new(),
+    };
+    let mut r = Rig::new();
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    // Across the loop end of the default 3 840-tick pattern (frame 96 000).
+    r.at(95_000, note(true));
+    r.at(97_000, note(false));
+    // Held while the pattern grows to 7 680 ticks at 120 000.
+    r.at(119_000, note(true));
+    r.run_to(120_000);
+    r.c.set_pattern(resize(7_680)).unwrap();
+    r.at(120_000, note(false));
+    // Held while it shrinks to 1 920 ticks at 140 032.
+    r.at(139_000, note(true));
+    r.run_to(140_032);
+    r.c.set_pattern(resize(1_920)).unwrap();
+    r.at(141_000, note(false));
+    r.run_to(142_000);
+    let t = ticks(&r.take());
+    assert_eq!(t, [3_800, 3_880, 4_760, 4_800, 5_560, 5_640]);
+}
+
+#[test]
+fn stop_and_all_sound_off_end_a_click_within_1_ms() {
+    // A click at frame 0 is in its decay at 128; in 4/16 at 120 BPM the second click starts
+    // at 6 000 and is in its attack at block 6 016.
+    for (stop, signature) in [(128, (4, 4)), (6_016, (4, 16))] {
+        for cut in [
+            Command::Stop,
+            Command::AllSoundOff,
+            Command::SetMetronome { on: false },
+        ] {
+            let (beats, unit) = signature;
+            let events = [
+                (0, Command::SetTimeSignature { beats, unit }),
+                (0, Command::SetMetronome { on: true }),
+                (0, Command::Play),
+                (stop, cut),
+            ];
+            let l = render_clicks(&events, 12_000, 64);
+            let stop = stop as usize;
+            let peak = |x: &[f32]| x.iter().fold(0f32, |m, v| m.max(v.abs()));
+            // A fade, not a cut: it still sounds after the stop, falling off over 1 ms.
+            let (early, late) = (peak(&l[stop..stop + 16]), peak(&l[stop + 32..stop + 48]));
+            assert!(
+                early > 0.0 && late < 0.5 * early,
+                "{cut:?} at {stop}: {early} {late}"
+            );
+            assert!(
+                l[stop + 48..].iter().all(|x| *x == 0.0),
+                "{cut:?} at {stop}: silent 1 ms later"
+            );
+        }
+    }
+}

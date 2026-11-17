@@ -8,6 +8,7 @@
 //! split.
 
 use crate::BLOCK;
+use crate::graph::Ramp;
 use crate::transport::TransportClock;
 use grooviq_dsp::db_to_gain;
 use std::f64::consts::TAU;
@@ -40,6 +41,8 @@ pub(crate) struct Metronome {
     env: f32,
     phase: f64,
     step: f64,
+    /// Fading the burst out over 1 ms (the transport stopped or the metronome went off).
+    release: Option<Ramp>,
 }
 
 impl Metronome {
@@ -57,6 +60,7 @@ impl Metronome {
             env: 0.0,
             phase: 0.0,
             step: 0.0,
+            release: None,
         };
         m.set_sample_rate(sample_rate);
         m
@@ -68,11 +72,25 @@ impl Metronome {
         self.decay = libm::expf(-1.0 / (DECAY_SECONDS * sample_rate));
         // A burst in flight ends rather than change pitch.
         self.sounding = false;
+        self.release = None;
     }
 
-    /// Switches the clicks; a burst already sounding rings out.
+    /// Switches the clicks; switching off fades a burst that is sounding over 1 ms.
     pub(crate) fn set_on(&mut self, on: bool) {
         self.on = on;
+        if !on {
+            self.release();
+        }
+    }
+
+    /// The transport stopped, or the metronome went off: a burst sounding fades out over 1 ms
+    /// (a cut would click).
+    pub(crate) fn release(&mut self) {
+        if self.sounding && self.release.is_none() {
+            let mut ramp = Ramp::at(1.0);
+            ramp.start(0.0, self.attack_len);
+            self.release = Some(ramp);
+        }
     }
 
     /// Takes a checked time signature (see [`crate::state::time_signature_ok`]).
@@ -114,7 +132,14 @@ impl Metronome {
             if !self.sounding {
                 continue;
             }
-            let s = libm::sin(self.phase * TAU) as f32 * self.env * self.gain;
+            let mut s = libm::sin(self.phase * TAU) as f32 * self.env * self.gain;
+            if let Some(release) = &mut self.release {
+                s *= release.tick();
+                if release.done() {
+                    self.sounding = false;
+                    self.release = None;
+                }
+            }
             *a += s;
             *b += s;
             self.advance();
@@ -153,6 +178,7 @@ impl Metronome {
         self.env = 0.0;
         self.phase = 0.0;
         self.step = hz / self.sample_rate;
+        self.release = None;
     }
 
     /// Moves the burst on by one frame.
