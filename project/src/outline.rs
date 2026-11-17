@@ -1,12 +1,15 @@
 //! A first pass over an untrusted `project.json` that keeps almost nothing: the header (`format`,
-//! `version`) and how many notes each pattern holds. It reads the whole document without building
-//! it, so `load` can refuse a newer version before typing anything and can say how many notes past
-//! the cap it skipped (the typed pass never holds them).
+//! `version`), the channel ids validation keeps and which patterns have a `notes` list. It reads
+//! the whole document without building it, so `load` can refuse a newer version before typing
+//! anything, and the typed pass ([`crate::reading`]) knows the version and the channels whatever
+//! order the fields come in.
 //!
 //! Every value of an unexpected type counts as absent here: the typed pass reports it.
 
+use grooviq_engine::MAX_CHANNELS;
 use serde::Deserializer;
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use std::collections::HashSet;
 use std::fmt;
 use std::io::Read;
 
@@ -17,8 +20,11 @@ pub(crate) struct Outline {
     pub(crate) format: Option<String>,
     /// `version`, if it is a non-negative integer.
     pub(crate) version: Option<u64>,
-    /// The length of each `patterns[i].notes` list, in pattern order (0 if absent).
-    pub(crate) notes: Vec<usize>,
+    /// The ids of the channels validation keeps: the first [`MAX_CHANNELS`] distinct ones.
+    pub(crate) channels: HashSet<u32>,
+    /// Whether each of `patterns`, in order, has a `notes` key: the patterns whose notes the
+    /// typed pass reads, in the order it reads them.
+    pub(crate) has_notes: Vec<bool>,
 }
 
 /// Reads `json` once. A document that is not an object is a `Data` error; broken JSON is a
@@ -58,12 +64,9 @@ macro_rules! anything_else {
 }
 
 /// Drains a list or an object without keeping anything.
-fn drain_seq<'de, A: SeqAccess<'de>>(mut seq: A) -> Result<usize, A::Error> {
-    let mut n = 0;
-    while seq.next_element::<IgnoredAny>()?.is_some() {
-        n += 1;
-    }
-    Ok(n)
+fn drain_seq<'de, A: SeqAccess<'de>>(mut seq: A) -> Result<(), A::Error> {
+    while seq.next_element::<IgnoredAny>()?.is_some() {}
+    Ok(())
 }
 
 fn drain_map<'de, A: MapAccess<'de>>(mut map: A) -> Result<(), A::Error> {
@@ -86,7 +89,8 @@ impl<'de> Visitor<'de> for OutlineVisitor {
             match key.as_str() {
                 "format" => outline.format = map.next_value_seed(Lenient(Header::Format))?.text,
                 "version" => outline.version = map.next_value_seed(Lenient(Header::Version))?.int,
-                "patterns" => outline.notes = map.next_value_seed(Lenient(Patterns))?,
+                "channels" => outline.channels = map.next_value_seed(Lenient(Channels))?,
+                "patterns" => outline.has_notes = map.next_value_seed(Lenient(Patterns))?,
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -156,80 +160,115 @@ impl<'de> Visitor<'de> for Header {
     }
 }
 
-/// `patterns`: one note count per element.
-struct Patterns;
+/// `channels`: the first [`MAX_CHANNELS`] distinct ids (later ones validation drops).
+struct Channels;
 
-impl<'de> Visitor<'de> for Patterns {
-    type Value = Vec<usize>;
+impl<'de> Visitor<'de> for Channels {
+    type Value = HashSet<u32>;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("any value")
     }
 
-    anything_else!(Vec<usize>, Vec::new(), with numbers and text);
+    anything_else!(HashSet<u32>, HashSet::new(), with numbers and text);
 
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<usize>, A::Error> {
-        let mut counts = Vec::new();
-        while let Some(n) = seq.next_element_seed(Lenient(PatternNotes))? {
-            counts.push(n);
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<HashSet<u32>, A::Error> {
+        let mut ids = HashSet::new();
+        while let Some(id) = seq.next_element_seed(Lenient(Field("id")))? {
+            if let Some(id) = id.and_then(|id| u32::try_from(id).ok())
+                && ids.len() < MAX_CHANNELS
+            {
+                ids.insert(id);
+            }
         }
-        Ok(counts)
+        Ok(ids)
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Vec<usize>, A::Error> {
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<HashSet<u32>, A::Error> {
+        drain_map(map)?;
+        Ok(HashSet::new())
+    }
+}
+
+/// One object's integer field `.0` (the last one, if repeated), or `None`.
+struct Field(&'static str);
+
+impl<'de> Visitor<'de> for Field {
+    type Value = Option<u64>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("any value")
+    }
+
+    anything_else!(Option<u64>, None, with numbers and text);
+
+    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Option<u64>, A::Error> {
+        drain_seq(seq)?;
+        Ok(None)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Option<u64>, A::Error> {
+        let mut value = None;
+        while let Some(key) = map.next_key::<String>()? {
+            if key == self.0 {
+                value = map.next_value_seed(Lenient(Header::Version))?.int;
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(value)
+    }
+}
+
+/// `patterns`: per element, whether it has a `notes` key.
+struct Patterns;
+
+impl<'de> Visitor<'de> for Patterns {
+    type Value = Vec<bool>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("any value")
+    }
+
+    anything_else!(Vec<bool>, Vec::new(), with numbers and text);
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<bool>, A::Error> {
+        let mut has_notes = Vec::new();
+        while let Some(has) = seq.next_element_seed(Lenient(HasNotes))? {
+            has_notes.push(has);
+        }
+        Ok(has_notes)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Vec<bool>, A::Error> {
         drain_map(map)?;
         Ok(Vec::new())
     }
 }
 
-/// One pattern: the length of its `notes` list.
-struct PatternNotes;
+/// One pattern: whether it has a `notes` key (whatever its value).
+struct HasNotes;
 
-impl<'de> Visitor<'de> for PatternNotes {
-    type Value = usize;
+impl<'de> Visitor<'de> for HasNotes {
+    type Value = bool;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("any value")
     }
 
-    anything_else!(usize, 0, with numbers and text);
+    anything_else!(bool, false, with numbers and text);
 
-    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<usize, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<bool, A::Error> {
         drain_seq(seq)?;
-        Ok(0)
+        Ok(false)
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<usize, A::Error> {
-        let mut notes = 0;
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+        let mut has = false;
         while let Some(key) = map.next_key::<String>()? {
-            if key == "notes" {
-                notes = map.next_value_seed(Lenient(Count))?;
-            } else {
-                map.next_value::<IgnoredAny>()?;
-            }
+            has |= key == "notes";
+            map.next_value::<IgnoredAny>()?;
         }
-        Ok(notes)
-    }
-}
-
-/// The length of a list; anything else is 0.
-struct Count;
-
-impl<'de> Visitor<'de> for Count {
-    type Value = usize;
-
-    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("any value")
-    }
-
-    anything_else!(usize, 0, with numbers and text);
-
-    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<usize, A::Error> {
-        drain_seq(seq)
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<usize, A::Error> {
-        drain_map(map)?;
-        Ok(0)
+        Ok(has)
     }
 }

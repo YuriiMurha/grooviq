@@ -20,6 +20,7 @@ pub mod compile;
 pub mod file;
 pub mod model;
 mod outline;
+mod reading;
 pub mod recovery;
 pub mod session;
 

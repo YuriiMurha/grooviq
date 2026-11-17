@@ -10,7 +10,8 @@
 //!   a failed project. `load` never opens a path the file names; relinking is the user's choice.
 
 use crate::model::{FORMAT, MAX_NOTES_PER_PATTERN, Project, VERSION};
-use crate::outline;
+use crate::reading::NoteDrops;
+use crate::{outline, reading};
 use grooviq_engine::InstrumentKind;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -510,29 +511,39 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
         return Err(LoadError::NotAProject);
     }
     let version = checked_version(outline.version)?;
-    let mut project: Project =
-        serde_json::from_reader(project_json(&mut zip)?).map_err(|e| match e.classify() {
-            serde_json::error::Category::Data => {
-                LoadError::Corrupt(format!("{PROJECT_JSON} does not fit: {e}"))
+    let (project, drops) = reading::with_context(version, outline.channels, || {
+        serde_json::from_reader::<_, Project>(project_json(&mut zip)?).map_err(|e| {
+            match e.classify() {
+                serde_json::error::Category::Data => {
+                    LoadError::Corrupt(format!("{PROJECT_JSON} does not fit: {e}"))
+                }
+                _ => json_error(e),
             }
-            _ => json_error(e),
-        })?;
+        })
+    });
+    let mut project = project?;
     migrate(&mut project, version)?;
 
-    let mut warnings: Vec<String> = outline
-        .notes
+    // What each pattern lost while it was read, by pattern. The typed pass read the `notes` of
+    // exactly the patterns the outline saw a `notes` key in, in order (a repeated key or another
+    // shape fails the typed pass), so the two line up.
+    let mut drops = drops.into_iter();
+    let read: Vec<NoteDrops> = outline
+        .has_notes
         .iter()
-        .zip(&project.patterns)
-        .filter(|(n, _)| **n > MAX_NOTES_PER_PATTERN)
-        .map(|(n, p)| {
-            format!(
-                "Pattern \"{}\": dropped {} notes past the limit of {MAX_NOTES_PER_PATTERN} notes per pattern.",
-                p.name,
-                n - MAX_NOTES_PER_PATTERN
-            )
+        .map(|&has| {
+            if has {
+                drops.next()
+            } else {
+                Some(NoteDrops::default())
+            }
         })
-        .collect();
-    warnings.extend(project.validate());
+        .collect::<Option<_>>()
+        .filter(|read: &Vec<NoteDrops>| {
+            read.len() == project.patterns.len() && drops.next().is_none()
+        })
+        .ok_or_else(|| LoadError::Corrupt(format!("{PROJECT_JSON} reads differently twice")))?;
+    let mut warnings = project.validate_read(&read);
     let mut samples = SampleFiles::new();
     let mut entries: HashMap<String, EntryRead> = HashMap::new();
     // Channels whose embedded sample is too big: their entry name stays.
