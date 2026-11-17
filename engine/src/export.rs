@@ -141,15 +141,19 @@ pub fn export_wav(
     export_wav_with(state, options, path, progress, cancel, &RealFiles)
 }
 
-/// The two file operations that make an export durable, as a seam for tests: the real ones
-/// ([`RealFiles`]) sync to disk and rename; a test's record the order they are called in, or
-/// fail. Not part of the API.
+/// The two file operations that make an export durable, plus a tail checkpoint, as a seam for
+/// tests: the real ones ([`RealFiles`]) sync to disk and rename; a test's record the order they
+/// are called in, or fail, or hold the export at the checkpoint. Not part of the API.
 #[doc(hidden)]
 pub trait PartFiles {
     /// Puts the part file's bytes on disk (`path` is its name).
     fn sync(&self, file: &File, path: &Path) -> io::Result<()>;
     /// Gives the part file its final name.
     fn rename(&self, part: &Path, to: &Path) -> io::Result<()>;
+    /// Called in the tail right before each cancel check, with the tail frames rendered so far
+    /// (a multiple of 4 096). A test blocks here until it has set `cancel`, so the check that
+    /// follows sees it: no race with the renderer. Does nothing by default.
+    fn tail_checkpoint(&self, _tail_frames: u64) {}
 }
 
 /// What the app uses.
@@ -185,7 +189,7 @@ pub fn export_wav_with(
     // take it, and an old file of the same name in the folder is none of our business.
     let part = create_owned_temp(path, ".part")?;
     // From here the part file is ours, and goes on any error.
-    let result = write_part(state, options, &part.file, progress, cancel)
+    let result = write_part(state, options, &part.file, progress, cancel, files)
         .and_then(|report| {
             // On disk before it takes the final name: a power cut must not leave a complete
             // name on a file whose bytes never landed.
@@ -211,6 +215,7 @@ fn write_part(
     part: &File,
     progress: &mut dyn FnMut(f32),
     cancel: &AtomicBool,
+    files: &dyn PartFiles,
 ) -> Result<ExportReport, ExportError> {
     let config = EngineConfig {
         sample_rate: options.sample_rate as f32,
@@ -278,8 +283,11 @@ fn write_part(
     let mut tail = 0u64;
     let mut quiet = 0usize;
     while tail < max_tail && quiet < silent_blocks {
-        if tail.is_multiple_of(CHUNK) && cancel.load(Ordering::Relaxed) {
-            return Err(ExportError::Cancelled);
+        if tail.is_multiple_of(CHUNK) {
+            files.tail_checkpoint(tail);
+            if cancel.load(Ordering::Relaxed) {
+                return Err(ExportError::Cancelled);
+            }
         }
         render(&mut processor, &mut block);
         tail += BLOCK as u64;

@@ -219,6 +219,7 @@ describe("ChannelRack", () => {
     await rack();
     mocks.open.mockResolvedValueOnce(["/kit/Kick.wav", "/kit/Hat.flac"]);
     await user.click(screen.getByRole("button", { name: "+ Add channel" }));
+    await user.click(screen.getByRole("menuitem", { name: "Sample…" }));
     await waitFor(() => expect(engine.argsOf("channel_add")).toHaveLength(2));
     expect(mocks.open.mock.calls[0][0]).toMatchObject({
       multiple: true,

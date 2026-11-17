@@ -75,7 +75,8 @@ describe("shortcutFor", () => {
   it("mod_r_exports", () => {
     expect(shortcutFor(key("r", { metaKey: true }), "MacIntel")).toBe("export");
     expect(shortcutFor(key("r", { ctrlKey: true }), "Win32")).toBe("export");
-    expect(shortcutFor(key("r"), "Win32")).toBeNull();
+    // R alone is record while the typing keyboard is off, and a note while it is on.
+    expect(shortcutFor(key("r"), "Win32", true)).toBeNull();
   });
 
   it("mod shortcuts also work while typing (they are not text)", () => {
@@ -85,5 +86,18 @@ describe("shortcutFor", () => {
   it("ignores everything else", () => {
     expect(shortcutFor(key("a"), "Win32")).toBeNull();
     expect(shortcutFor(key("Enter"), "Win32")).toBeNull();
+  });
+});
+
+describe("record", () => {
+  it("r_is_record_only_while_the_typing_keyboard_is_off", () => {
+    expect(shortcutFor(key("r"), "MacIntel")).toBe("record");
+    expect(shortcutFor(key("R"), "Win32", false)).toBe("record");
+    expect(shortcutFor(key("r"), "MacIntel", true)).toBeNull();
+    expect(shortcutFor(key("r", { repeat: true }), "MacIntel")).toBeNull();
+    expect(shortcutFor(key("r", { target: INPUT }), "MacIntel")).toBeNull();
+    expect(shortcutFor(key("r", { shiftKey: true }), "MacIntel")).toBeNull();
+    // Mod+R stays Export.
+    expect(shortcutFor(key("r", { metaKey: true }), "MacIntel")).toBe("export");
   });
 });

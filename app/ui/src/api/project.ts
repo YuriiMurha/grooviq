@@ -23,8 +23,18 @@ export interface ChannelView {
   pan: number;
   mute: boolean;
   solo: boolean;
-  /** Sampler parameter values by id. */
+  /** Sampler parameter values by id (empty for a synth). */
   sampler: Record<string, number>;
+  kind: "sampler" | "synth";
+  /** Synth parameter values by id (empty for a sampler). */
+  synth: Record<string, number>;
+  /** The synth preset last loaded, if any. */
+  preset: string | null;
+  /** Choke group, 0..16 (0 = none). */
+  choke: number;
+  /** The channel has notes that are not plain steps: the rack shows a preview and the piano
+   * roll edits them. */
+  roll: boolean;
 }
 
 export interface PatternView {
@@ -48,6 +58,17 @@ export interface ProjectView {
   pattern: PatternView;
   /** Unix seconds of the last autosave. */
   autosavedAt: number | null;
+  key: ProjectKey | null;
+  /** Bumped by every note change; `patternNotes` reports the same number. */
+  notesRevision: number;
+  /** Live notes are being recorded into the pattern. */
+  recording: boolean;
+}
+
+/** The project's key: a root (0..11, 0 = C) and a scale id ("minor", "dorian", ...). */
+export interface ProjectKey {
+  root: number;
+  scale: string;
 }
 
 /** An edit to the project, as `project_edit` takes it. */
@@ -68,7 +89,11 @@ export type Edit =
   | { kind: "setPatternLength"; steps: number }
   | { kind: "setSwing"; swing: number }
   | { kind: "setTempo"; bpm: number }
-  | { kind: "setTimeSignature"; beats: number; unit: number };
+  | { kind: "setTimeSignature"; beats: number; unit: number }
+  | { kind: "setInstrumentParam"; channel: number; param: string; value: number }
+  | { kind: "loadSynthPreset"; channel: number; preset: string }
+  | { kind: "setChoke"; channel: number; group: number }
+  | { kind: "setProjectKey"; key: ProjectKey | null };
 
 export interface OpenResult {
   view: ProjectView;

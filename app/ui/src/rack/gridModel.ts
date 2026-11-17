@@ -32,6 +32,9 @@ export const GRID_HINT =
 export const stepHint = (channel: string, step: number) =>
   `${channel}, step ${step + 1}. Click to add a hit, right-click to clear it, drag up or down to change its velocity.`;
 
+/** The hint for a roll channel's row (the copy is fixed by the spec). */
+export const rollHint = (channel: string) => `${channel} has piano-roll notes. Click to open the piano roll.`;
+
 /** Floats per cell record: x, y, w, h, ink index, velocity (-1 when empty), flags. */
 export const STRIDE = 7;
 /** The cell has keyboard focus. */
@@ -40,6 +43,8 @@ export const FLAG_FOCUS = 1;
 export const FLAG_PLAYHEAD = 2;
 /** The cell is in beats 2 or 4 of a bar (the other off-step colour). */
 export const FLAG_BEAT_B = 4;
+/** The record is a note bar of a roll row's preview: solid ink, no second-ink shadow. */
+export const FLAG_BAR = 8;
 
 /** Steps in a beat: a step is a sixteenth. */
 const BEAT_STEPS = 4;
@@ -89,19 +94,29 @@ export function fillHeight(height: number, velocity: number): number {
 }
 
 /** One record per cell, row by row (`STRIDE` floats each). `cells[row]` may be shorter than the
- * pattern: the rest is empty. `inks[row]` is the row's ink index (0..5). */
+ * pattern: the rest is empty. `inks[row]` is the row's ink index (0..5). A row with records in
+ * `roll` (a roll channel's preview, from `rollInstances`) shows those instead of its steps. */
 export function buildInstances(
   layout: GridLayout,
   cells: (number | null)[][],
   inks: number[],
   focus: Cell | null,
   playheadStep: number | null,
+  roll: (Float32Array | null | undefined)[] = [],
 ): Float32Array {
   const { rows, steps, cell } = layout;
   const p = pitch(layout);
-  const out = new Float32Array(rows * steps * STRIDE);
+  let size = 0;
+  for (let r = 0; r < rows; r++) size += roll[r] ? roll[r]!.length : steps * STRIDE;
+  const out = new Float32Array(size);
   let o = 0;
   for (let r = 0; r < rows; r++) {
+    const preview = roll[r];
+    if (preview) {
+      out.set(preview, o);
+      o += preview.length;
+      continue;
+    }
     const row = cells[r];
     const ink = inks[r] ?? 0;
     const y = r * p;

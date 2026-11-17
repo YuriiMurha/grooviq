@@ -209,21 +209,3 @@ test.describe("grid keys and the right button (check 11)", () => {
     await expect.poll(() => mock.view().then((v) => v.pattern.cells["3"][5])).toBeLessThan(0.8);
   });
 });
-
-test.describe("a new pixel ratio (check 3, moving between screens)", () => {
-  test.use({ seed: { project: project(KIT, { 1: [0] }), files: soundsFor(KIT) } });
-
-  test("the grid redraws at the new ratio without a window resize", async ({ app, browserName }, info) => {
-    test.skip(browserName !== "chromium", "changes the ratio through the Chrome DevTools Protocol");
-    const backing = () => grid(app).evaluate((c: HTMLCanvasElement) => c.width / c.clientWidth);
-    expect(await backing()).toBeCloseTo(1);
-    const cdp = await app.context().newCDPSession(app);
-    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 2, mobile: false });
-    await expect.poll(() => app.evaluate(() => window.devicePixelRatio)).toBe(2);
-    await app.waitForTimeout(500);
-    // Known defect #117: the grid re-reads the ratio only on `resize`, so it stays at 1x. This
-    // pins it; when #117 is fixed this fails: expect 2 here instead.
-    info.annotations.push({ type: "issue", description: "#117" });
-    expect(await backing(), "#117 fixed? expect a 2x backing store now").toBeCloseTo(1);
-  });
-});

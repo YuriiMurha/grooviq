@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { shortcutLabel, type Action } from "./shortcuts";
+import { shortcutLabel, type MenuAction } from "./shortcuts";
 
-type MenuAction = Exclude<Action, "playStop">;
 
 const ITEMS: { action: MenuAction; label: string; hint: string }[] = [
   { action: "new", label: "New", hint: "Starts an empty project. It asks first if this one has unsaved changes." },
