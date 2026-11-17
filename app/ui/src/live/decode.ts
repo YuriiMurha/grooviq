@@ -11,6 +11,9 @@ export interface LiveFrame {
   outputLatencyFrames: number;
   /** Whole ticks (960 a quarter note) since play started; 0 while stopped. A u64. */
   positionTicks: bigint;
+  /** When the frame arrived, on the clock of `performance.now` and animation frames (set by
+   * `connectLive`): the piano roll's playhead runs on from it. */
+  receivedAt?: number;
 }
 
 const LIVE_VERSION = 2;

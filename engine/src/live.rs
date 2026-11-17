@@ -38,6 +38,9 @@ pub struct LiveShared {
     guard_hits: AtomicU32,
     output_latency_frames: AtomicU32,
     position_ticks: AtomicU64,
+    /// Recorded events the full recording queue dropped. Not in the snapshot or the wire
+    /// format: [`crate::Controller::record_dropped`] reads it.
+    record_dropped: AtomicU32,
 }
 
 impl LiveShared {
@@ -61,6 +64,20 @@ impl LiveShared {
     /// Records the output latency (written by the output layer, not the processor).
     pub fn set_output_latency_frames(&self, frames: u32) {
         self.output_latency_frames.store(frames, Relaxed);
+    }
+
+    /// The output latency the output layer last reported.
+    pub(crate) fn output_latency_frames(&self) -> u64 {
+        u64::from(self.output_latency_frames.load(Relaxed))
+    }
+
+    /// Counts a recorded event dropped by a full queue. Real-time safe (wraps).
+    pub(crate) fn count_record_drop(&self) {
+        self.record_dropped.fetch_add(1, Relaxed);
+    }
+
+    pub(crate) fn record_dropped(&self) -> u32 {
+        self.record_dropped.load(Relaxed)
     }
 
     /// The transport's state, once per block. Real-time safe: plain atomic stores.

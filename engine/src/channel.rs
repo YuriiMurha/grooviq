@@ -52,8 +52,10 @@ pub(crate) struct ChannelNode {
     /// Left and right gain: volume, pan law and mute/solo together.
     gain: [Ramp; 2],
     ramp_len: u32,
-    /// Output gain while fading out after `AllSoundOff`; the device resets when it reaches 0.
+    /// Output gain while fading out; the device resets when it reaches 0.
     fade: Option<Ramp>,
+    /// Removed: fading out, then silent until the graph hands it to the trash queue.
+    leaving: bool,
     /// A sampler with no voice sounding: blocks without events are skipped (the ramps and the
     /// fade still advance, so skipping never changes the output). Never set for the synth,
     /// whose LFO runs on while it is silent.
@@ -96,6 +98,7 @@ impl ChannelNode {
             gain: [Ramp::at(l), Ramp::at(r)],
             ramp_len,
             fade: None,
+            leaving: false,
             idle,
             events: [NO_EVENT; CHANNEL_EVENTS],
             count: 0,
@@ -200,6 +203,37 @@ impl ChannelNode {
             fade.start(0.0, self.ramp_len);
             self.fade = Some(fade);
         }
+    }
+
+    /// The channel is removed: it fades out (the notes queued so far play into the fade).
+    pub(crate) fn leave(&mut self) {
+        self.leaving = true;
+        self.fade_out();
+    }
+
+    pub(crate) fn leaving(&self) -> bool {
+        self.leaving
+    }
+
+    /// Removed and silent for good: ready for the trash queue.
+    pub(crate) fn departed(&self) -> bool {
+        self.leaving && self.fade.is_none()
+    }
+
+    /// Cuts every note (`AllSoundOff`): the note-ons queued so far are dropped (their note-offs
+    /// stay, finding nothing) and the instrument chokes, its voices fading over 3 ms. Notes
+    /// queued after the call play in full.
+    pub(crate) fn choke_all(&mut self) {
+        let mut kept = 0;
+        for i in 0..self.count {
+            let e = self.events[i];
+            if !(e.on && e.velocity > 0.0) {
+                self.events[kept] = e;
+                kept += 1;
+            }
+        }
+        self.count = kept;
+        self.source.device().choke();
     }
 
     /// Renders one block into `l`/`r` (overwritten) and clears the events. `chokes` are the

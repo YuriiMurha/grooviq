@@ -13,7 +13,8 @@
 //! processor on the output the user expects: it follows the system default, stops playback
 //! rather than move sound from headphones to speakers, and survives devices coming and going.
 //! [`decode_sample`] and [`load_sample`] turn sample files into [`SampleBuf`]s (on a control
-//! thread) for the sampler.
+//! thread) for the sampler. While recording, the processor taps the live channel notes into a
+//! queue ([`Controller::take_recorded`]); a metronome clicks the beats while playing.
 //!
 //! The transport plays the pattern at [`PPQ`] ticks per quarter note: a step sequencer in the
 //! graph sends each note to its channel on the frame [`ticks_to_frames`] gives it, and
@@ -31,9 +32,11 @@ mod export;
 mod graph;
 mod leftover;
 mod live;
+mod metronome;
 mod offline;
 mod output;
 mod processor;
+mod record;
 mod sample_file;
 mod sequencer;
 mod state;
@@ -57,12 +60,14 @@ pub use output::{
     null_backend, run_silent,
 };
 pub use processor::{AudioProcessor, in_audio_callback};
+pub use record::{RECORD_CAPACITY, RecordEvent};
 pub use sample_file::{
     MAX_SAMPLE_SECONDS, SampleError, decode_sample, load_sample, load_sample_with_limit,
 };
 pub use state::{
     BPM_RANGE, ChannelId, ChannelMix, ChannelSetup, EngineState, Instrument, InstrumentKind,
-    MAX_CHANNELS, MAX_CHOKE_GROUP, PPQ, PatternData, STEP_TICKS, SeqNote,
+    MAX_CHANNELS, MAX_CHOKE_GROUP, PPQ, PatternData, STEP_TICKS, SeqNote, TIME_SIGNATURE_BEATS,
+    TIME_SIGNATURE_UNITS,
 };
 pub use stream::{StreamServer, start_stream};
 pub use transport::ticks_to_frames;
@@ -124,11 +129,18 @@ pub fn engine_with(config: EngineConfig, state: EngineState) -> (Controller, Aud
     let sample_rate = config.rate();
     let (commands, commands_rx) = rtrb::RingBuffer::new(QUEUE_CAPACITY);
     let (trash_tx, trash) = rtrb::RingBuffer::new(TRASH_CAPACITY);
+    let (recorded_tx, recorded) = rtrb::RingBuffer::new(RECORD_CAPACITY);
     let live = Arc::new(LiveShared::default());
-    let mut controller = Controller::new(sample_rate, commands, trash, Arc::clone(&live), state);
+    let mut controller = Controller::new(
+        sample_rate,
+        (commands, trash, recorded),
+        Arc::clone(&live),
+        state,
+    );
     let graph = controller.build_graph();
-    let bpm = controller.state().bpm;
-    let processor = AudioProcessor::new(sample_rate, bpm, graph, commands_rx, trash_tx, live);
+    let timing = (controller.state().bpm, controller.state().time_signature);
+    let queues = (commands_rx, trash_tx, recorded_tx);
+    let processor = AudioProcessor::new(sample_rate, timing, graph, queues, live);
     (controller, processor)
 }
 

@@ -88,6 +88,7 @@ fn clicks(bpm: f32, pattern: PatternData) -> EngineState {
         bpm,
         channels: vec![channel(1, &click(), exact())],
         pattern,
+        ..EngineState::default()
     }
 }
 
@@ -385,6 +386,7 @@ fn a_note_off_booked_before_a_tempo_jump_does_not_cut_a_newer_note() {
             length: 16 * STEP_TICKS,
             notes: vec![note(0, 1, STEP_TICKS), note(STEP_TICKS, 1, 8 * STEP_TICKS)],
         },
+        ..EngineState::default()
     };
     let jump = 3_008;
     assert_eq!(block_start(jump), jump);
@@ -454,6 +456,7 @@ fn gated(len: usize, notes: Vec<SeqNote>) -> EngineState {
             length: 16 * STEP_TICKS,
             notes,
         },
+        ..EngineState::default()
     }
 }
 
@@ -539,6 +542,7 @@ fn stop_releases_held_notes_and_rewinds() {
             length: 16 * STEP_TICKS,
             notes: vec![note(0, 1, 16 * STEP_TICKS)],
         },
+        ..EngineState::default()
     };
     let (stop, again) = (24_000u64, 48_000u64);
     assert_eq!(block_start(stop), stop);
@@ -589,6 +593,7 @@ fn playback_is_identical_for_any_callback_size() {
                 note(2_000, 2, 10),
             ],
         },
+        ..EngineState::default()
     };
     let swapped = PatternData {
         length: 7 * STEP_TICKS,
@@ -653,6 +658,7 @@ fn a_key_retriggered_inside_one_block_keeps_sounding() {
             length: 16 * STEP_TICKS,
             notes: vec![note(0, 1, 1), note(1, 1, STEP_TICKS)],
         },
+        ..EngineState::default()
     };
     let l = left(&play(state, SR, &[], 12_000));
     assert_eq!(l[5_000], 0.5, "the second note is held");
@@ -696,6 +702,7 @@ fn play_loops_while_playing_releases_and_restarts_from_tick_0() {
             length: 16 * STEP_TICKS,
             notes: vec![note(0, 1, 16 * STEP_TICKS)],
         },
+        ..EngineState::default()
     };
     let restart = 24_000u64;
     let ev = [(restart, Command::PlayLoops { loops: 1 })];
@@ -727,6 +734,7 @@ fn a_new_sample_rate_mid_play_keeps_the_position() {
         bpm: 120.0,
         channels: vec![channel(1, &click96, exact())],
         pattern: pattern(16, &steps(&every)),
+        ..EngineState::default()
     };
     let (mut c, mut p) = engine_with(cfg(48_000.0), state);
     c.send(Command::Play).unwrap();
@@ -772,6 +780,7 @@ fn clicks96(bpm: f32) -> EngineState {
         bpm,
         channels: vec![channel(1, &click96, exact())],
         pattern: pattern(16, &steps(&every)),
+        ..EngineState::default()
     }
 }
 
@@ -922,6 +931,7 @@ fn a_new_rate_mid_play_neither_replays_nor_skips_a_note() {
             length: 3_840,
             notes: every.iter().map(|&t| note(t, 1, 1)).collect(),
         },
+        ..EngineState::default()
     };
     let at44 = |t: u32| ticks_to_frames(f64::from(t), 120.0, 44_100.0);
     let switch = (1..3_000)
