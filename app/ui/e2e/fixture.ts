@@ -70,6 +70,8 @@ export interface Mock {
     bpm: number;
     recording: boolean;
     notesRevision: number;
+    canUndo: boolean;
+    canRedo: boolean;
     pattern: { steps: number; swing: number; cells: Record<string, (number | null)[]> };
     channels: { id: number; name: string; volume: number; mute: boolean; kind: string; preset: string | null; roll: boolean }[];
   }>;

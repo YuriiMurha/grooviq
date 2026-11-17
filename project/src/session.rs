@@ -23,6 +23,7 @@ use crate::model::{
 };
 use crate::notes::{self, NewNote, NotesAck, NotesEdit, encode_notes};
 use crate::recorder::Recorder;
+use crate::undo::{NoteChange, NoteHistory};
 use grooviq_dsp::sampler::{self, PARAM_IDS, SPEC, SampleBuf};
 use grooviq_dsp::synth;
 use grooviq_engine::{
@@ -165,6 +166,10 @@ pub struct ProjectView {
     pub notes_revision: u32,
     /// Live notes are recorded into the pattern while the transport plays.
     pub recording: bool,
+    /// A note change can be undone ([`Session::undo_notes`]).
+    pub can_undo: bool,
+    /// An undone note change can be made again ([`Session::redo_notes`]).
+    pub can_redo: bool,
 }
 
 /// A channel's instrument, as the UI names it: `"sampler"` or `"synth"`.
@@ -483,6 +488,8 @@ pub struct Session {
     /// recording on (or off) by hand sends its own barrier instead; a new project keeps it
     /// (the engine records until it takes the switch).
     owed_disarm: bool,
+    /// The current pattern's note changes, for undo and redo.
+    history: NoteHistory,
 }
 
 fn lock(controller: &Mutex<Controller>) -> MutexGuard<'_, Controller> {
@@ -520,6 +527,7 @@ impl Session {
             recording: false,
             pending: Vec::new(),
             owed_disarm: false,
+            history: NoteHistory::default(),
         };
         // A fresh queue always has room for a whole state.
         let synced = session.sync_engine();
@@ -611,6 +619,8 @@ impl Session {
             key: self.project.key.clone(),
             notes_revision: pattern.revision,
             recording: self.recording,
+            can_undo: self.history.can_undo(),
+            can_redo: self.history.can_redo(),
         }
     }
 
@@ -932,6 +942,7 @@ impl Session {
 
     /// Changes a copy of the current pattern, sends it to the engine, then keeps it, with its
     /// revision bumped if its notes changed. A change that fails leaves the pattern as it was.
+    /// A note change goes into the undo history, as one step.
     fn edit_pattern(
         &mut self,
         change: impl FnOnce(&mut Pattern) -> Result<(), SessionError>,
@@ -941,13 +952,68 @@ impl Session {
         if pattern == *self.current() {
             return Ok(false);
         }
+        let notes = NoteChange::between(self.current(), &pattern);
         if pattern.notes != self.current().notes {
             pattern.revision = pattern.revision.wrapping_add(1);
         }
+        self.keep_pattern(pattern)?;
+        if let Some(notes) = notes {
+            self.history.push(notes);
+        }
+        Ok(true)
+    }
+
+    /// Sends `pattern` to the engine (which goes on playing), then makes it the current one.
+    fn keep_pattern(&mut self, pattern: Pattern) -> Result<(), SessionError> {
         let compiled = compile_pattern(&self.project, &pattern);
         lock(&self.controller).set_pattern(compiled)?;
         *self.current_mut() = pattern;
-        Ok(true)
+        Ok(())
+    }
+
+    /// Takes back the last note change (a note edit, a step edit or a recorded take), or
+    /// `None` if there is none. The notes (under their own ids) and the length go back to what
+    /// they were; the engine takes the pattern without stopping. Its revision moves on and the
+    /// project counts as changed; the ack asks the UI to fetch the notes again. A refused undo
+    /// (the engine's queue full) changes nothing and stays next in line. Recording is left as
+    /// it is.
+    pub fn undo_notes(&mut self, now: Instant) -> Result<Option<NotesAck>, SessionError> {
+        self.step_history(true, now)
+    }
+
+    /// Makes the last undone note change again, or `None` if there is none (see
+    /// [`Self::undo_notes`]). Any new note change clears what redo could make.
+    pub fn redo_notes(&mut self, now: Instant) -> Result<Option<NotesAck>, SessionError> {
+        self.step_history(false, now)
+    }
+
+    fn step_history(&mut self, undo: bool, now: Instant) -> Result<Option<NotesAck>, SessionError> {
+        let next = if undo {
+            self.history.next_undo()
+        } else {
+            self.history.next_redo()
+        };
+        let Some(change) = next else {
+            return Ok(None);
+        };
+        let mut pattern = self.current().clone();
+        change.apply(&mut pattern, undo)?;
+        let steps = self.current().steps;
+        pattern.revision = pattern.revision.wrapping_add(1);
+        self.keep_pattern(pattern)?;
+        if undo {
+            self.history.undone();
+        } else {
+            self.history.redone();
+        }
+        self.changed(self.current().steps != steps, now);
+        Ok(Some(NotesAck {
+            revision: self.current().revision,
+            added_ids: Vec::new(),
+            ignored_ids: Vec::new(),
+            reload: true,
+            view: self.view(),
+        }))
     }
 
     fn send(&self, cmd: Command) -> Result<(), SessionError> {
@@ -983,6 +1049,8 @@ impl Session {
         self.project.patterns = patterns;
         self.files.remove(&channel);
         self.decoded.remove(&channel);
+        // Undo cannot bring a channel back (structural undo is M6), nor its notes.
+        self.history.clear();
         Ok(())
     }
 
@@ -1397,6 +1465,7 @@ impl Session {
             self.recorder.await_mark(mark);
         }
         self.pending.clear();
+        self.history.clear();
         self.project = project;
         self.files = files;
         self.decoded = decoded;

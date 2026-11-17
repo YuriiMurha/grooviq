@@ -97,6 +97,31 @@ describe("shortcutFor", () => {
   });
 });
 
+describe("undo", () => {
+  it("mod_z_and_mod_shift_z_map_to_undo_and_redo_and_ctrl_y_off_mac", () => {
+    expect(shortcutFor(key("z", { metaKey: true }), "MacIntel")).toBe("undo");
+    expect(shortcutFor(key("Z", { metaKey: true, shiftKey: true }), "MacIntel")).toBe("redo");
+    expect(shortcutFor(key("z", { ctrlKey: true }), "Win32")).toBe("undo");
+    expect(shortcutFor(key("Z", { ctrlKey: true, shiftKey: true }), "Linux x86_64")).toBe("redo");
+    expect(shortcutFor(key("y", { ctrlKey: true }), "Win32")).toBe("redo");
+    expect(shortcutFor(key("y", { ctrlKey: true }), "Linux x86_64")).toBe("redo");
+    // Ctrl+Y is not Mod on macOS, and Cmd+Y is nothing there.
+    expect(shortcutFor(key("y", { ctrlKey: true }), "MacIntel")).toBeNull();
+    expect(shortcutFor(key("y", { metaKey: true }), "MacIntel")).toBeNull();
+    expect(shortcutFor(key("y", { ctrlKey: true, shiftKey: true }), "Win32")).toBeNull();
+    // The other modifier, or Alt, makes it some other combination.
+    expect(shortcutFor(key("z", { ctrlKey: true }), "MacIntel")).toBeNull();
+    expect(shortcutFor(key("z", { metaKey: true }), "Win32")).toBeNull();
+    expect(shortcutFor(key("z", { metaKey: true, altKey: true }), "MacIntel")).toBeNull();
+    // A text field undoes its own typing.
+    expect(shortcutFor(key("z", { metaKey: true, target: INPUT }), "MacIntel")).toBeNull();
+    expect(shortcutFor(key("Z", { metaKey: true, shiftKey: true, target: INPUT }), "MacIntel")).toBeNull();
+    expect(shortcutFor(key("y", { ctrlKey: true, target: INPUT }), "Win32")).toBeNull();
+    // Z alone is a note of the typing keyboard, never undo.
+    expect(shortcutFor(key("z"), "MacIntel")).toBeNull();
+  });
+});
+
 describe("record", () => {
   it("r_is_record_only_while_the_typing_keyboard_is_off", () => {
     expect(shortcutFor(key("r"), "MacIntel")).toBe("record");

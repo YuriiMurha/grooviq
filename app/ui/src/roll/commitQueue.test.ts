@@ -101,6 +101,63 @@ describe("commit queue", () => {
     expect(engine.fetches()).toBe(0);
   });
 
+  it("an_undo_waits_for_the_edit_in_flight_then_the_notes_are_refetched", async () => {
+    const { store, server, engine, queue, views } = setup([note(1, 0)]);
+    queue.commit({ add: [], update: [note(1, 480)], delete: [] });
+    const order: string[] = [];
+    let answer: (ack: NotesAck | null) => void = () => {};
+    queue.run(() => {
+      order.push(`undo after ${engine.sent.length} edit(s), ${engine.pending()} unanswered`);
+      return new Promise((resolve) => (answer = resolve));
+    });
+    // The undo stays queued while the move is in flight.
+    await flush();
+    expect(order).toEqual([]);
+    server.revision = 5;
+    server.notes = [note(1, 480)];
+    await engine.ack({ revision: 5 });
+    expect(order).toEqual(["undo after 1 edit(s), 0 unanswered"]);
+    // An edit made meanwhile waits behind the undo.
+    queue.commit({ add: [], update: [note(1, 960)], delete: [] });
+    expect(engine.sent).toHaveLength(1);
+    server.revision = 6;
+    server.notes = [note(1, 0)];
+    answer({ revision: 6, addedIds: [], ignoredIds: [], reload: true, view: { name: "undone" } as ProjectView });
+    await flush();
+    expect(views.at(-1)?.name).toBe("undone");
+    // The edit goes out against the revision the roll last held: stale, so the engine says reload.
+    expect(engine.sent).toHaveLength(2);
+    expect(engine.sent[1].baseRevision).toBe(5);
+    server.revision = 7;
+    server.notes = [note(1, 960)];
+    await engine.ack({ revision: 7, reload: true });
+    await queue.idle();
+    expect(engine.fetches()).toBe(1);
+    expect(store.revision).toBe(7);
+    expect(store.get(1)).toEqual(note(1, 960));
+  });
+
+  it("an_undo_alone_refetches_the_notes", async () => {
+    const { store, server, engine, queue } = setup([note(1, 0), note(2, 480)]);
+    server.revision = 5;
+    server.notes = [note(1, 0)];
+    queue.run(() => Promise.resolve({ revision: 5, addedIds: [], ignoredIds: [], reload: true, view: VIEW }));
+    await queue.idle();
+    expect(engine.fetches()).toBe(1);
+    expect(store.revision).toBe(5);
+    expect(store.get(2)).toBeUndefined();
+  });
+
+  it("an_undo_with_nothing_to_undo_or_refused_fetches_nothing", async () => {
+    const { engine, queue, errors } = setup([note(1, 0)]);
+    queue.run(() => Promise.resolve(null));
+    await queue.idle();
+    queue.run(() => Promise.reject("The audio engine did not take the change (full)."));
+    await queue.idle();
+    expect(engine.fetches()).toBe(0);
+    expect(errors).toEqual(["The audio engine did not take the change (full)."]);
+  });
+
   it("a_reply_with_reload_refetches_the_notes", async () => {
     const { store, server, engine, queue } = setup([note(1, 0), note(2, 240)]);
     queue.commit({ add: [], update: [note(1, 3840)], delete: [] });

@@ -210,5 +210,7 @@ export function project(
     key: null,
     notesRevision: 1,
     recording: false,
+    canUndo: false,
+    canRedo: false,
   };
 }

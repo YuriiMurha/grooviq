@@ -57,6 +57,14 @@ export interface MockNote {
   slide?: boolean;
 }
 
+/** One step of the undo history: the pattern's notes and length before and after it. */
+interface NoteChange {
+  before: MockNote[];
+  after: MockNote[];
+  stepsBefore: number;
+  stepsAfter: number;
+}
+
 export interface MockSeed {
   /** Paths the mock's file system holds. */
   files?: Record<string, MockFile>;
@@ -99,6 +107,8 @@ export function installMockTauri(seed: MockSeed): void {
   ];
   const MAX_CHOKE = 16;
   const MAX_NOTES = 100_000;
+  /** undo.rs `MAX_UNDO`. */
+  const MAX_UNDO = 200;
   const NOTES_MAGIC = 0x314e5147;
   const SILENT_OUTPUT = {
     id: "null",
@@ -185,6 +195,8 @@ export function installMockTauri(seed: MockSeed): void {
     /** `channel_param_live` calls, last value per "channel:param". */
     liveParams: new Map<string, number>(),
     dialogCalls: [] as { kind: string; options: unknown }[],
+    /** Note changes for undo and redo (undo.rs): the notes and length before and after each. */
+    history: { undo: [] as NoteChange[], redo: [] as NoteChange[] },
   };
 
   // --- Events (the event plugin, as @tauri-apps/api/mocks implements it). ---
@@ -271,6 +283,8 @@ export function installMockTauri(seed: MockSeed): void {
       key: p.key ?? null,
       notesRevision: s.notesRevision,
       recording: s.recording,
+      canUndo: s.history.undo.length > 0,
+      canRedo: s.history.redo.length > 0,
     };
   };
   const finite = (x: unknown, what: string): number => {
@@ -296,16 +310,42 @@ export function installMockTauri(seed: MockSeed): void {
     s.notesRevision += 1;
     emit("notes-changed", s.notesRevision);
   };
-  /** Changes the pattern; `true` if anything changed. A note change bumps the notes revision. */
+  /** Changes the pattern; `true` if anything changed. A note change bumps the notes revision
+   * and is one step of the undo history (undo.rs), which forgets what redo could make. */
   const editPattern = (change: (p: Project["pattern"]) => void) => {
     const before = JSON.stringify(s.project.pattern);
     const notesBefore = JSON.stringify(s.project.pattern.notes);
-    const next = clone(s.project.pattern);
+    const prev = s.project.pattern;
+    const next = clone(prev);
     change(next);
     if (JSON.stringify(next) === before) return false;
     s.project.pattern = next;
-    if (JSON.stringify(next.notes) !== notesBefore) notesChanged();
+    if (JSON.stringify(next.notes) !== notesBefore) {
+      s.history.undo.push({ before: clone(prev.notes), after: clone(next.notes), stepsBefore: prev.steps, stepsAfter: next.steps });
+      if (s.history.undo.length > MAX_UNDO) s.history.undo.shift();
+      s.history.redo = [];
+      notesChanged();
+    }
     return true;
+  };
+  /** Undo or redo (session.rs `undo_notes`): the notes go back, the length too unless it was set
+   * by hand since; the project is changed and the UI fetches the notes again. */
+  const stepHistory = (undo: boolean) => {
+    const from = undo ? s.history.undo : s.history.redo;
+    const change = from.pop();
+    if (!change) return null;
+    const pat = s.project.pattern;
+    pat.notes = clone(undo ? change.before : change.after);
+    const [was, to] = undo ? [change.stepsAfter, change.stepsBefore] : [change.stepsBefore, change.stepsAfter];
+    if (pat.steps === was) pat.steps = to;
+    (undo ? s.history.redo : s.history.undo).push(change);
+    notesChanged();
+    changed();
+    return { revision: s.notesRevision, addedIds: [], ignoredIds: [], reload: true, view: view() };
+  };
+  const clearHistory = () => {
+    s.history.undo = [];
+    s.history.redo = [];
   };
   const nextNoteId = () => Math.max(0, ...s.project.pattern.notes.map((n) => n.id ?? 0)) + 1;
   const noteBase = (channel: number, tick: number, velocity: number): MockNote => ({
@@ -354,6 +394,7 @@ export function installMockTauri(seed: MockSeed): void {
           pat.notes = pat.notes.filter((n) => n.channel !== e.channel);
         });
         p.channels.splice(i, 1);
+        clearHistory();
         // The engine drops the channel's live notes with it (Task 5).
         for (const k of [...s.live.keys()]) if (k.startsWith(`${String(e.channel)}:`)) s.live.delete(k);
         return true;
@@ -497,6 +538,7 @@ export function installMockTauri(seed: MockSeed): void {
   const openProject = (p: Project, path: string | null, unsaved: boolean) => {
     stopTransport();
     s.project = normalise(clone(p));
+    clearHistory();
     notesChanged();
     s.path = path;
     markClean();
@@ -756,6 +798,8 @@ export function installMockTauri(seed: MockSeed): void {
     },
     pattern_notes: () => encodeNotes(),
     notes_edit: (a) => editNotes(a.edit as Parameters<typeof editNotes>[0]),
+    notes_undo: () => stepHistory(true),
+    notes_redo: () => stepHistory(false),
     channel_add_synth: (a) => {
       const preset = String(a.preset);
       if (!PRESETS.includes(preset)) throw `There is no synth preset called "${preset}".`;

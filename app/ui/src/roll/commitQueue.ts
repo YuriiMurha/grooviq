@@ -15,12 +15,19 @@ export interface QueueHooks {
   onView(view: ProjectView): void;
 }
 
+/** A command that changes the notes without an edit of the roll's own (undo, redo). */
+export type NotesCommand = () => Promise<NotesAck | null>;
+
+/** What waits in the queue: an edit of the roll's, or a command. */
+type Queued = { edit: LocalEdit } | { command: NotesCommand };
+
 /** Sends the piano roll's edits to the engine one at a time, in order. Each edit shows in the
  * store at once; added notes keep temporary negative ids until the engine's reply names them,
  * and later edits are translated before they go out. A reply asking for a reload, a failure, or
- * a newer notes revision announced by the engine refetches the notes once nothing is in flight. */
+ * a newer notes revision announced by the engine refetches the notes once nothing is in flight.
+ * Undo and redo take their turn in the same line ([`run`]), so they never overtake an edit. */
 export class CommitQueue {
-  private pending: LocalEdit[] = [];
+  private pending: Queued[] = [];
   private busy = false;
   /** Temporary id → the engine's id. */
   private real = new Map<number, number>();
@@ -54,7 +61,15 @@ export class CommitQueue {
 
   commit(edit: LocalEdit) {
     this.store.apply(edit);
-    this.pending.push(edit);
+    this.pending.push({ edit });
+    this.pump();
+  }
+
+  /** Runs `command` (undo, redo) once every edit before it has been answered; edits made after
+   * wait for it. Its ack's view is kept and the notes are fetched again afterwards; `null`
+   * (nothing to do) changes nothing. */
+  run(command: NotesCommand) {
+    this.pending.push({ command });
     this.pump();
   }
 
@@ -77,8 +92,10 @@ export class CommitQueue {
   private pump() {
     if (this.busy) return;
     const next = this.pending.shift();
-    if (next) {
-      this.send(next);
+    if (next && "command" in next) {
+      this.runNow(next.command);
+    } else if (next) {
+      this.send(next.edit);
     } else if (this.needsFetch()) {
       this.fetch();
     } else {
@@ -151,6 +168,25 @@ export class CommitQueue {
     );
   }
 
+  private runNow(command: NotesCommand) {
+    this.busy = true;
+    command().then(
+      (ack) => {
+        if (ack) {
+          // The store's notes are the ones before the command: edits that go out before the
+          // fetch keep the store's older revision, so the engine sees them as stale too.
+          this.reload = true;
+          this.hooks.onView(ack.view);
+        }
+        this.done();
+      },
+      (e: unknown) => {
+        this.hooks.onError(errorText(e));
+        this.done();
+      },
+    );
+  }
+
   private fetch() {
     this.busy = true;
     this.reload = false;
@@ -160,7 +196,7 @@ export class CommitQueue {
         this.store.load(revision, notes);
         // Edits made while the fetch ran are not in it yet: show them again on top, with the
         // temporary ids the store and the selection know them by.
-        for (const e of this.pending) this.store.apply(this.localize(e));
+        for (const e of this.pending) if ("edit" in e) this.store.apply(this.localize(e.edit));
         const held = this.held();
         if (held) this.store.apply(held);
         this.store.setSelection(selected);

@@ -1,6 +1,6 @@
-export type Action = "playStop" | "record" | "new" | "open" | "save" | "saveAs" | "export";
+export type Action = "playStop" | "record" | "undo" | "redo" | "new" | "open" | "save" | "saveAs" | "export";
 /** The project actions: the menu's items and what `perform` takes. */
-export type MenuAction = Exclude<Action, "playStop" | "record">;
+export type MenuAction = Exclude<Action, "playStop" | "record" | "undo" | "redo">;
 
 /** The part of a `KeyboardEvent` the shortcuts read (so tests need no DOM). */
 export interface ShortcutEvent {
@@ -53,7 +53,8 @@ const MOD_KEYS: Record<string, Action> = { n: "new", o: "open", s: "save", r: "e
 /** The action a key press asks for, or `null`. Mod is Cmd on macOS and Ctrl elsewhere; the
  * other of the two never counts as Mod. Space (alone, not held down) is play/stop unless the
  * person is typing. R alone is record, but only while the typing keyboard is off (it plays a
- * note then). */
+ * note then). Mod+Z undoes a note change and Mod+Shift+Z (Ctrl+Y off macOS) redoes it, except
+ * in a text field, which undoes its own typing. */
 export function shortcutFor(event: ShortcutEvent, platform: string, typingKeyboard = false): Action | null {
   if (event.altKey) return null;
   const mac = isMac(platform);
@@ -63,6 +64,11 @@ export function shortcutFor(event: ShortcutEvent, platform: string, typingKeyboa
   const key = event.key.toLowerCase();
 
   if (mod) {
+    const redoY = !mac && key === "y" && !event.shiftKey;
+    if (key === "z" || redoY) {
+      if (isTypingTarget(event.target)) return null;
+      return event.shiftKey || redoY ? "redo" : "undo";
+    }
     if (key === "s" && event.shiftKey) return "saveAs";
     if (event.shiftKey) return null;
     return MOD_KEYS[key] ?? null;

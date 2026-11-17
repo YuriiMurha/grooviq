@@ -82,6 +82,42 @@ pub async fn notes_edit(
     Ok(ack)
 }
 
+/// Takes back the last note change (`null`: nothing to undo). The ack asks for a reload.
+#[tauri::command]
+pub async fn notes_undo(
+    app: AppHandle,
+    audio: State<'_, Audio>,
+) -> Result<Option<NotesAck>, String> {
+    history(&app, &audio, true)
+}
+
+/// Makes the last undone note change again (`null`: nothing to redo).
+#[tauri::command]
+pub async fn notes_redo(
+    app: AppHandle,
+    audio: State<'_, Audio>,
+) -> Result<Option<NotesAck>, String> {
+    history(&app, &audio, false)
+}
+
+fn history(app: &AppHandle, audio: &Audio, undo: bool) -> Result<Option<NotesAck>, String> {
+    let (ack, before) = {
+        let mut session = lock(&audio.session);
+        let before = session.notes_revision();
+        let now = Instant::now();
+        let ack = if undo {
+            session.undo_notes(now)
+        } else {
+            session.redo_notes(now)
+        };
+        (ack.map_err(text)?, before)
+    };
+    if let Some(ack) = &ack {
+        notes_changed(app, before, ack.revision);
+    }
+    Ok(ack)
+}
+
 /// Adds a synth channel from a factory preset, named after it.
 #[tauri::command]
 pub async fn channel_add_synth(

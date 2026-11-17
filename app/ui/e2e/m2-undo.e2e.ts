@@ -1,0 +1,116 @@
+// M2 Task 15: undo and redo of note changes (Mod+Z, Mod+Shift+Z). Assertions read the mock
+// session's command log and notes, and what the piano roll draws.
+import type { Page } from "@playwright/test";
+import { clickCell, colourDistance, expect, pixelsAt, test, type Mock } from "./fixture";
+import { at, canvas, local, nextFrame, openRoll, sessionNotes, shot, twoChannels } from "./rollHelpers";
+
+const UNDO = "ControlOrMeta+z";
+const REDO = "ControlOrMeta+Shift+z";
+
+const cmds = async (mock: Mock) => (await mock.calls()).map((c) => c.cmd);
+const count = async (mock: Mock, cmd: string) => (await mock.calls(cmd)).length;
+const hold = (mock: Mock, cmd: string) => mock.eval(`(m) => m.holdCommand("${cmd}")`);
+const release = (mock: Mock, cmd: string) => mock.eval(`(m) => m.releaseCommand("${cmd}")`);
+
+/** What the roll shows at (tick, key). */
+const pixel = async (page: Page, tick: number, key: number) => {
+  await nextFrame(page);
+  return (await pixelsAt(page, canvas(page), [await local(page, tick, key)]))[0];
+};
+
+test.describe("undo and redo", () => {
+  // Bass (row 0) and Lead (row 1), two synth channels with no notes yet.
+  test.use({ seed: { project: twoChannels([]) } });
+
+  test("undo_and_redo_in_the_roll_and_the_grid", async ({ app, mock }, info) => {
+    // The step grid: two steps, each one change.
+    await clickCell(app, 0, 0);
+    await clickCell(app, 0, 4);
+    await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 240, 60], [1, 960, 240, 60]]);
+    await expect.poll(() => mock.view().then((v) => [v.canUndo, v.canRedo])).toEqual([true, false]);
+    await app.keyboard.press(UNDO);
+    await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 240, 60]]);
+    await expect.poll(() => mock.view().then((v) => [v.canUndo, v.canRedo, v.dirty])).toEqual([true, true, true]);
+    await expect.poll(() => mock.view().then((v) => v.pattern.cells["1"][4])).toBeNull();
+    await app.keyboard.press(REDO);
+    await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 240, 60], [1, 960, 240, 60]]);
+
+    // An undo pressed while a step edit is still on its way waits for it.
+    const gridUndos = await count(mock, "notes_undo");
+    await hold(mock, "project_edit");
+    await clickCell(app, 0, 8);
+    await app.keyboard.press(UNDO);
+    await nextFrame(app);
+    expect(await count(mock, "notes_undo")).toBe(gridUndos);
+    await release(mock, "project_edit");
+    await expect.poll(() => count(mock, "notes_undo")).toBe(gridUndos + 1);
+    const order = (await cmds(mock)).filter((c) => c === "project_edit" || c === "notes_undo");
+    expect(order.slice(-2)).toEqual(["project_edit", "notes_undo"]);
+    await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 240, 60], [1, 960, 240, 60]]);
+
+    // The piano roll: a drawn note goes and comes back, and the roll shows it each time.
+    await openRoll(app);
+    const empty = await pixel(app, 2_000, 64);
+    await app.mouse.click(...xy(await at(app, 1_920, 64)));
+    await expect.poll(() => sessionNotes(mock).then((n) => n.length)).toBe(3);
+    const drawn = await pixel(app, 2_000, 64);
+    expect(colourDistance(drawn, empty)).toBeGreaterThan(40);
+    const fetches = await count(mock, "pattern_notes");
+    await app.keyboard.press(UNDO);
+    await expect.poll(() => sessionNotes(mock).then((n) => n.length)).toBe(2);
+    // The roll fetched the notes again and no longer draws the note.
+    await expect.poll(() => count(mock, "pattern_notes")).toBeGreaterThan(fetches);
+    await expect.poll(async () => colourDistance(await pixel(app, 2_000, 64), empty)).toBeLessThan(8);
+    await shot(app, info, "undone");
+    await app.keyboard.press(REDO);
+    await expect.poll(() => sessionNotes(mock).then((n) => n.length)).toBe(3);
+    await expect.poll(async () => colourDistance(await pixel(app, 2_000, 64), drawn)).toBeLessThan(8);
+
+    // An undo pressed while the roll's edit is in flight waits for it too.
+    await hold(mock, "notes_edit");
+    await app.mouse.click(...xy(await at(app, 2_880, 67)));
+    await app.keyboard.press(UNDO);
+    await nextFrame(app);
+    const undos = await count(mock, "notes_undo");
+    expect(undos).toBe(gridUndos + 2);
+    await release(mock, "notes_edit");
+    await expect.poll(() => count(mock, "notes_undo")).toBe(undos + 1);
+    // The new note was made, then undone: the three notes from before stay.
+    await expect.poll(() => sessionNotes(mock).then((n) => n.length)).toBe(3);
+    const order2 = (await cmds(mock)).filter((c) => c === "notes_edit" || c === "notes_undo");
+    expect(order2.slice(-2)).toEqual(["notes_edit", "notes_undo"]);
+
+    // During a drag, undo is ignored.
+    const before = await count(mock, "notes_undo");
+    const from = await at(app, 1_960, 64);
+    await app.mouse.move(from.x, from.y);
+    await app.mouse.down();
+    await app.mouse.move(from.x + 20, from.y - 10, { steps: 3 });
+    await app.keyboard.press(UNDO);
+    await app.mouse.up();
+    await nextFrame(app);
+    expect(await count(mock, "notes_undo")).toBe(before);
+  });
+
+  test("undo_is_ignored_while_typing_in_the_bpm_field", async ({ app, mock }) => {
+    await clickCell(app, 0, 0);
+    await expect.poll(() => sessionNotes(mock).then((n) => n.length)).toBe(1);
+    const bpm = app.getByRole("textbox", { name: "BPM" });
+    await bpm.click();
+    await bpm.fill("128");
+    await app.keyboard.press(UNDO);
+    await app.keyboard.press(REDO);
+    await nextFrame(app);
+    // The field kept the key for its own text; no note change was undone.
+    expect(await count(mock, "notes_undo")).toBe(0);
+    expect(await count(mock, "notes_redo")).toBe(0);
+    expect(await sessionNotes(mock)).toEqual([[1, 0, 240, 60]]);
+    await bpm.press("Escape");
+    // Outside the field the same keys undo.
+    await app.locator("body").click({ position: { x: 5, y: 5 } });
+    await app.keyboard.press(UNDO);
+    await expect.poll(() => sessionNotes(mock)).toEqual([]);
+  });
+});
+
+const xy = (p: { x: number; y: number }): [number, number] => [p.x, p.y];

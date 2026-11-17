@@ -116,6 +116,11 @@ export const TYPING_VELOCITY = 0.8;
 
 export const patternNotes = async () => decodeNotes(await invoke<ArrayBuffer>("pattern_notes"));
 export const notesEdit = (edit: NotesEdit) => invoke<NotesAck>("notes_edit", { edit });
+/** Takes back the last note change (a note edit, a step edit or a recorded take); `null` when
+ * there is none. The ack always asks for a reload. */
+export const notesUndo = () => invoke<NotesAck | null>("notes_undo");
+/** Makes the last undone note change again; `null` when there is none. */
+export const notesRedo = () => invoke<NotesAck | null>("notes_redo");
 /** Adds a synth channel named after the preset. */
 export const channelAddSynth = (preset: string) => invoke<ProjectView>("channel_add_synth", { preset });
 /** Starts or stops a note on a channel now (typing keyboard, previews). Only from a key or a click. */

@@ -8,6 +8,7 @@
 //! * [`backup`]: rolling copies of a file before it is overwritten.
 //! * [`notes`]: the notes wire format for the UI and note edits by id.
 //! * [`recorder`]: recorded live events paired into notes.
+//! * [`undo`]: undo and redo of note changes.
 //! * [`session`]: the open project, its edits kept in step with the engine, dirty state and
 //!   when to autosave.
 //! * [`recovery`]: the autosave file and crash recovery on the next launch.
@@ -27,6 +28,7 @@ mod reading;
 pub mod recorder;
 pub mod recovery;
 pub mod session;
+pub mod undo;
 
 pub use backup::{backup_before_save, backup_folder};
 pub use compile::{compile_pattern, engine_state, sampler_values, synth_values};
