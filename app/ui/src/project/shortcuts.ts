@@ -26,7 +26,8 @@ const TEXT_INPUTS = new Set(["", "text", "number", "search", "email", "url", "te
 
 /** Text goes here, so Space is a space, not play. Only text entry counts: a slider, a select or
  * a button keeps Space as play/stop. A button inside a menu or dialog needs Space to press
- * itself. */
+ * itself, except in a device window (`data-device-window`), where Space plays and stops and the
+ * typing keyboard plays that window's channel. */
 export function isTypingTarget(target: ShortcutEvent["target"]): boolean {
   const el = target as {
     tagName?: string;
@@ -39,9 +40,12 @@ export function isTypingTarget(target: ShortcutEvent["target"]): boolean {
   if (tag === "INPUT" && TEXT_INPUTS.has((el.type ?? "").toLowerCase())) return true;
   if (tag === "TEXTAREA") return true;
   if (el.isContentEditable) return true;
-  return Boolean(
-    el.closest?.("[role='menu'], [role='dialog'], [role='alertdialog'], [role='listbox']"),
-  );
+  const box = el.closest?.("[role='menu'], [role='dialog'], [role='alertdialog'], [role='listbox']") as
+    | { hasAttribute?: (name: string) => boolean }
+    | null
+    | undefined;
+  // A device window is a floating editor, not a dialog to answer: the keys go on playing there.
+  return Boolean(box) && !box?.hasAttribute?.("data-device-window");
 }
 
 const MOD_KEYS: Record<string, Action> = { n: "new", o: "open", s: "save", r: "export" };

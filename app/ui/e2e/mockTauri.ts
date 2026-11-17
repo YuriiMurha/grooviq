@@ -985,8 +985,13 @@ export function installMockTauri(seed: MockSeed): void {
     project_export: { path: str, options: exportOptions },
   };
 
+  /** Commands the test holds back (`holdCommand`), each until `releaseCommand`. */
+  const holds = new Map<string, { promise: Promise<void>; release: () => void }>();
   const invoke = async (cmd: string, args: Record<string, unknown> = {}) => {
     calls.push({ cmd, args: clone(args ?? {}), at: performance.now() });
+    // A held command waits here, before the engine sees it, until the test releases it.
+    const held = holds.get(cmd);
+    if (held) await held.promise;
     const handler = commands[cmd];
     if (!handler) throw `The mock engine has no command ${cmd}`;
     for (const [name, check] of Object.entries(ARGS[cmd] ?? {})) {
@@ -1051,6 +1056,16 @@ export function installMockTauri(seed: MockSeed): void {
       const v = new DataView(data);
       v.setUint8(1, (v.getUint8(1) & ~1) | (playing ? 1 : 0));
       for (const socket of sockets) socket.onmessage?.(new MessageEvent("message", { data }));
+    },
+    /** Holds every later call of `cmd` before the engine handles it, until `releaseCommand`. */
+    holdCommand: (cmd: string) => {
+      let release = () => {};
+      const promise = new Promise<void>((r) => (release = r));
+      holds.set(cmd, { promise, release });
+    },
+    releaseCommand: (cmd: string) => {
+      holds.get(cmd)?.release();
+      holds.delete(cmd);
     },
     /** Holds back live frames (`true`) or lets them flow again. */
     pauseLive: (on: boolean) => {

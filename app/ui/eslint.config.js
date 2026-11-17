@@ -17,6 +17,30 @@ export default tseslint.config(
     },
   },
   {
+    // Device editors reach the project only through useDeviceParams, whose sink guards every edit
+    // against a project replacement (devices/paramSink.ts).
+    files: ["src/devices/**/*.{ts,tsx}"],
+    ignores: ["src/devices/useDeviceParams.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              regex: "(^|/)project/(context|useSession)$",
+              message: "Device editors send edits through useDeviceParams (send, set, gestures), never apply.",
+            },
+            {
+              regex: "(^|/)api/project$",
+              importNames: ["projectEdit"],
+              message: "Device editors send edits through useDeviceParams, never projectEdit.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // Run in Node, not the webview: build config and tests.
     files: ["vite.config.ts", "**/*.test.ts"],
     languageOptions: { globals: globals.node },
