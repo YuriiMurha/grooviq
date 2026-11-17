@@ -1,8 +1,10 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useEffect, useRef } from "react";
+import { modalIsOpen } from "../project/shortcuts";
 
 /** Follows files dragged from the OS onto the window: `onHover` while they are over it,
- * `onDrop` with their paths, in the order the OS gives them. Outside the Tauri shell it does
+ * `onDrop` with their paths, in the order the OS gives them. While a dialog is open files are
+ * ignored (the dialog may replace the project they would join). Outside the Tauri shell it does
  * nothing. */
 export function useFileDrop(onDrop: (paths: string[]) => void, onHover: (over: boolean) => void) {
   const handlers = useRef({ onDrop, onHover });
@@ -17,6 +19,10 @@ export function useFileDrop(onDrop: (paths: string[]) => void, onHover: (over: b
       getCurrentWebview()
         .onDragDropEvent((event) => {
           const p = event.payload;
+          if (modalIsOpen()) {
+            handlers.current.onHover(false);
+            return;
+          }
           if (p.type === "enter") handlers.current.onHover(true);
           else if (p.type === "leave") handlers.current.onHover(false);
           else if (p.type === "drop") {

@@ -11,6 +11,7 @@ const rows = (app: import("@playwright/test").Page) =>
 const sounding = (cmd: string, args: Record<string, unknown>) =>
   cmd === "transport_play" ||
   cmd === "synth_note" ||
+  (cmd === "channel_note" && args.on === true) ||
   (cmd === "test_tone" && args.on === true) ||
   (cmd === "channel_preview" && args.on === true);
 
@@ -54,6 +55,7 @@ test.describe("dropping files on the window (check 4)", () => {
   test("+ Add channel takes several files in the order picked", async ({ app, mock }) => {
     await mock.eval("(m) => m.queueDialog(['/qa/drop/Shaker.ogg', '/qa/drop/Boom.wav'])");
     await app.getByRole("button", { name: "+ Add channel" }).click();
+    await app.getByRole("menuitem", { name: "Sample…" }).click();
     await expect.poll(() => rows(app)).toEqual(["Shaker", "Boom"]);
   });
 });

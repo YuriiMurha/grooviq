@@ -1,6 +1,7 @@
 import { RADIUS, RING_GAP, RING_WIDTH, PLAYHEAD_MIX } from "./glRenderer";
 import {
   EDGE,
+  FLAG_BAR,
   FLAG_BEAT_B,
   FLAG_FOCUS,
   FLAG_PLAYHEAD,
@@ -45,7 +46,7 @@ export function createCanvasRenderer(canvas: HTMLCanvasElement): GridRenderer {
 
       for (let o = 0; o < instances.length; o += STRIDE) {
         const velocity = instances[o + 5];
-        if (velocity < 0) continue;
+        if (velocity < 0 || instances[o + 6] & FLAG_BAR) continue;
         ctx.fillStyle = css(palette.inksB[instances[o + 4]] ?? palette.inksB[0]);
         roundRect(ctx, instances[o] + ox, instances[o + 1] + oy, instances[o + 2], instances[o + 3], RADIUS);
         ctx.fill();
@@ -61,6 +62,13 @@ export function createCanvasRenderer(canvas: HTMLCanvasElement): GridRenderer {
         const flags = instances[o + 6];
         const lit = velocity >= 0;
         const playhead = (flags & FLAG_PLAYHEAD) !== 0;
+        if (flags & FLAG_BAR) {
+          // A roll preview's note bar: solid ink.
+          ctx.fillStyle = css(ink);
+          roundRect(ctx, x, y, w, h, Math.min(RADIUS, w / 2, h / 2));
+          ctx.fill();
+          continue;
+        }
 
         let base = lit ? palette.stepLit : flags & FLAG_BEAT_B ? palette.stepB : palette.stepA;
         if (!lit && playhead) base = mix(base, palette.playhead, PLAYHEAD_MIX);

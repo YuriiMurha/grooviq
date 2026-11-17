@@ -1,7 +1,11 @@
-import { useCallback, useRef, useState, type CSSProperties, type KeyboardEvent, type RefObject } from "react";
-import { channelAdd, channelSetSample, errorText, type ChannelView } from "../api/project";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type RefObject } from "react";
+import { channelAddSynth, onNotesChanged, patternNotes, type WireNote } from "../api/notes";
+import { channelAdd, channelSetSample, errorText, projectView, type ChannelView } from "../api/project";
+import { useSelection } from "../layout/selection";
 import type { LiveFrame } from "../live/decode";
+import { ConfirmDialog } from "../project/ConfirmDialog";
 import { useProject } from "../project/context";
+import { AddChannelMenu } from "./AddChannelMenu";
 import { pickSound, pickSounds } from "./audioFiles";
 import { ChannelRow } from "./ChannelRow";
 import { useFileDrop } from "./fileDrop";
@@ -21,14 +25,60 @@ interface Props {
   sampleRate: number;
   /** Shows a failure that is not a project edit (a preview, a file dialog). */
   onError?: (message: string) => void;
+  /** Opens the piano roll on a channel (a click on a roll channel's preview). */
+  onOpenRoll?: (channel: number) => void;
   createRenderer?: (canvas: HTMLCanvasElement) => GridRenderer;
+}
+
+/** The pattern's notes, fetched again whenever the view's notes revision moves. The engine
+ * announces notes changed elsewhere (recording) with `notes-changed`: the view is fetched then,
+ * since roll channels may have changed too. */
+function usePatternNotes(revision: number | undefined, onError: (message: string) => void): WireNote[] {
+  const { run } = useProject();
+  const [notes, setNotes] = useState<WireNote[]>([]);
+  const report = useRef(onError);
+  const shown = useRef(revision);
+  useEffect(() => {
+    report.current = onError;
+    shown.current = revision;
+  }, [onError, revision]);
+
+  useEffect(() => {
+    if (revision === undefined) return;
+    let gone = false;
+    patternNotes().then(
+      (n) => {
+        if (!gone) setNotes(n.notes);
+      },
+      (e: unknown) => report.current(errorText(e)),
+    );
+    return () => {
+      gone = true;
+    };
+  }, [revision]);
+
+  useEffect(() => {
+    // Outside the Tauri shell there is nothing to listen to. A revision the view already has
+    // (an edit this UI made) needs no fetch.
+    const listening = onNotesChanged((r) => {
+      if (r !== shown.current) void run(projectView);
+    }).catch(() => null);
+    return () => {
+      void listening.then((stop) => stop?.());
+    };
+  }, [run]);
+  return notes;
 }
 
 /** The channel rack: a row per channel beside one step grid, then adding channels (button or
  * files dropped on the window), the pattern length and swing. */
-export function ChannelRack({ latest, sampleRate, onError = () => {}, createRenderer }: Props) {
+export function ChannelRack({ latest, sampleRate, onError = () => {}, onOpenRoll = () => {}, createRenderer }: Props) {
   const { view, apply, run } = useProject();
+  const { channel: selected, select } = useSelection();
   const [dropping, setDropping] = useState(false);
+  const [removing, setRemoving] = useState<ChannelView | null>(null);
+  const rowsRef = useRef<HTMLDivElement>(null);
+  const notes = usePatternNotes(view?.notesRevision, onError);
 
   // Each file becomes a channel, in order; one that cannot load shows the loader's sentence.
   const addFiles = useCallback(
@@ -61,8 +111,29 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, createRend
     );
   };
 
-  const addChannel = () => {
+  const addSamples = () => {
     pickSounds().then(addFiles, (e: unknown) => onError(errorText(e)));
+  };
+  // The new synth becomes the selected channel: the one the typing keyboard plays.
+  const addSynth = (preset: string) => {
+    const before = new Set(channels.map((c) => c.id));
+    let made: number | null = null;
+    void run(async () => {
+      const next = await channelAddSynth(preset);
+      made = next.channels.find((c) => !before.has(c.id))?.id ?? null;
+      return next;
+    }).then((added) => {
+      if (added && made !== null) select(made);
+    });
+  };
+
+  const remove = async (ch: ChannelView) => {
+    setRemoving(null);
+    const index = channels.findIndex((c) => c.id === ch.id);
+    if (!(await apply({ kind: "removeChannel", channel: ch.id }))) return;
+    // Keep the keyboard in the rack: the row that took its place, else the one above.
+    const names = rowsRef.current?.querySelectorAll<HTMLElement>(".channel-name");
+    if (names && names.length > 0) names[Math.min(index, names.length - 1)].focus();
   };
 
   return (
@@ -80,7 +151,7 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, createRend
       </header>
       {channels.length > 0 && (
         <div className="rack-body">
-          <div className="rack-rows">
+          <div className="rack-rows" ref={rowsRef}>
             {channels.map((ch) => (
               <ChannelRow
                 key={ch.id}
@@ -88,6 +159,9 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, createRend
                 onMix={(change) => mix(ch, change)}
                 onRelink={() => relink(ch)}
                 onError={onError}
+                selected={ch.id === selected}
+                onSelect={() => select(ch.id)}
+                onRemove={() => setRemoving(ch)}
               />
             ))}
           </div>
@@ -98,23 +172,34 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, createRend
               bpm={view.bpm}
               latest={latest}
               sampleRate={sampleRate}
+              notes={notes}
+              onOpenRoll={onOpenRoll}
               createRenderer={createRenderer}
             />
           </div>
         </div>
       )}
       <footer className="rack-foot">
-        <button
-          type="button"
-          className="add-channel"
-          data-hint="Adds a channel for each sound file you choose: WAV, AIFF, FLAC, MP3 or Ogg."
-          onClick={addChannel}
-        >
-          + Add channel
-        </button>
+        <AddChannelMenu onSample={addSamples} onSynth={addSynth} />
         <span className="rack-drop">{EMPTY_RACK}</span>
         <Swing swing={pattern.swing} onCommit={(swing) => apply({ kind: "setSwing", swing })} />
       </footer>
+      {removing && (
+        <ConfirmDialog
+          title={`Remove ${removing.name}?`}
+          message={`${removing.name} goes, with its steps and notes.`}
+          onDismiss={() => setRemoving(null)}
+          actions={[
+            { label: "Cancel", hint: "Keeps the channel.", onSelect: () => setRemoving(null) },
+            {
+              label: "Remove",
+              hint: `Removes ${removing.name} from the project.`,
+              primary: true,
+              onSelect: () => void remove(removing),
+            },
+          ]}
+        />
+      )}
     </section>
   );
 }

@@ -28,13 +28,18 @@ import { Meter } from "./meter/Meter";
 import { OutputChip } from "./output/OutputChip";
 import { OutputPopover } from "./output/OutputPopover";
 import { ProjectContext } from "./project/context";
-import { ChannelRack } from "./rack/ChannelRack";
+import { metronomeSet, recordSet } from "./api/notes";
+import { Workspace } from "./layout/Workspace";
 import { ProjectMenu } from "./project/ProjectMenu";
 import { SaveState } from "./project/SaveState";
-import { isTypingTarget, shortcutFor } from "./project/shortcuts";
+import { isTypingTarget, modalIsOpen, shortcutFor } from "./project/shortcuts";
 import { useProjectFlows } from "./project/useProjectFlows";
 import { useSession } from "./project/useSession";
 import { Toasts, type Toast } from "./toast/Toasts";
+import { KeyboardToggle } from "./transport/KeyboardToggle";
+import { MetronomeButton } from "./transport/MetronomeButton";
+import { RecordButton } from "./transport/RecordButton";
+import { PlayGuard } from "./transport/playGuard";
 import { TransportBar } from "./transport/TransportBar";
 
 /** How long a toast stays. */
@@ -53,9 +58,19 @@ export function App() {
   const [tone, setTone] = useState(false);
   const [playing, setPlaying] = useState(false);
   const playingRef = useRef(false);
+  // Bumped whenever the transport stops (or the project is replaced): the typing keyboard lets go
+  // of every held key then.
+  const [releaseKeys, setReleaseKeys] = useState(0);
+  const releaseHeld = useCallback(() => setReleaseKeys((n) => n + 1), []);
+  // Doubts "stopped" frames right after a Play (they may predate it).
+  const playGuard = useRef(new PlayGuard());
   const [latencyFrames, setLatencyFrames] = useState<number | null>(null);
   const latest = useRef<LiveFrame | null>(null);
   const nextToast = useRef(0);
+  // The typing keyboard is on by default; R records only while it is off.
+  const [keyboard, setKeyboard] = useState(true);
+  const keyboardRef = useRef(true);
+  const [metronome, setMetronome] = useState(false);
 
   const refresh = useCallback(() => {
     audioOutputs().then(setOutputs, () => {});
@@ -71,14 +86,15 @@ export function App() {
   const session = useSession(useCallback((message: string) => toast(message, true), [toast]));
   const { view } = session;
 
-  // A project that is replaced must not go on playing.
+  // A project that is replaced must not go on playing, nor keep notes held on its channels.
   const stopIfPlaying = useCallback(async () => {
+    releaseHeld();
     if (playingRef.current) {
       await transportStop().catch(() => {});
       playingRef.current = false;
       setPlaying(false);
     }
-  }, []);
+  }, [releaseHeld]);
   const flows = useProjectFlows({
     view,
     adopt: session.adopt,
@@ -93,11 +109,24 @@ export function App() {
     setPlaying(on);
   }, []);
   const play = useCallback(() => {
-    transportPlay().then(() => setPlayingNow(true), (e: unknown) => toast(errorText(e), true));
+    transportPlay().then(
+      () => {
+        playGuard.current.played();
+        setPlayingNow(true);
+      },
+      (e: unknown) => toast(errorText(e), true),
+    );
   }, [setPlayingNow, toast]);
   const stop = useCallback(() => {
-    transportStop().then(() => setPlayingNow(false), (e: unknown) => toast(errorText(e), true));
-  }, [setPlayingNow, toast]);
+    // Every Stop that succeeds lets go of held keys, whether or not the UI thought it played.
+    transportStop().then(
+      () => {
+        setPlayingNow(false);
+        releaseHeld();
+      },
+      (e: unknown) => toast(errorText(e), true),
+    );
+  }, [setPlayingNow, releaseHeld, toast]);
 
   // The window title: "name — Grooviq", with a bullet while there are unsaved changes.
   const projectName = view?.name;
@@ -113,6 +142,22 @@ export function App() {
     }
   }, [projectName, dirty]);
 
+  const recording = view?.recording ?? false;
+  const recordingRef = useRef(recording);
+  useEffect(() => {
+    recordingRef.current = recording;
+    keyboardRef.current = keyboard;
+  }, [recording, keyboard]);
+  const runCommand = session.context.run;
+  const toggleRecord = useCallback(() => {
+    const on = !recordingRef.current;
+    void runCommand(() => recordSet(on));
+  }, [runCommand]);
+  const toggleMetronome = () => {
+    const on = !metronome;
+    metronomeSet(on).then(() => setMetronome(on), (e: unknown) => toast(errorText(e), true));
+  };
+
   // Shortcuts. They stand aside while a dialog is open.
   const modalRef = useRef(false);
   useEffect(() => {
@@ -120,18 +165,19 @@ export function App() {
   }, [modalOpen]);
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (modalRef.current) return;
-      const action = shortcutFor(e, navigator.platform);
+      if (modalRef.current || modalIsOpen()) return;
+      const action = shortcutFor(e, navigator.platform, keyboardRef.current);
       if (!action) return;
       e.preventDefault();
       // A held key repeats: one save (or open, export...) per press, not one per repeat.
       if (e.repeat) return;
       if (action === "playStop") (playingRef.current ? stop : play)();
+      else if (action === "record") toggleRecord();
       else perform(action);
     };
     // A focused button presses itself when Space is released: play/stop took that key.
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key === " " && !modalRef.current && !isTypingTarget(e.target) && !e.ctrlKey && !e.metaKey) {
+      if (e.key === " " && !modalRef.current && !modalIsOpen() && !isTypingTarget(e.target) && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
       }
     };
@@ -141,7 +187,7 @@ export function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [perform, play, stop]);
+  }, [perform, play, stop, toggleRecord]);
 
   const loadSettings = useCallback(() => {
     audioSettings().then(
@@ -204,9 +250,19 @@ export function App() {
           const before = latest.current;
           latest.current = frame;
           if (before?.tone !== frame.tone) setTone(frame.tone);
-          if (before?.playing !== frame.playing) {
-            playingRef.current = frame.playing;
-            setPlaying(frame.playing);
+          const believed = playGuard.current.believe(frame.playing);
+          if (frame.playing) {
+            // A Play the UI did not send (another window): followed on the edge.
+            if (before?.playing !== true) {
+              playingRef.current = true;
+              setPlaying(true);
+            }
+          } else if (believed && (before?.playing === true || playingRef.current)) {
+            // The engine stopped: seen as an edge, or only against the UI's own state (a stall,
+            // a stop the UI did not ask for). The UI follows and lets go of held keys.
+            playingRef.current = false;
+            setPlaying(false);
+            releaseHeld();
           }
           if (before?.outputLatencyFrames !== frame.outputLatencyFrames) {
             setLatencyFrames(frame.outputLatencyFrames);
@@ -219,7 +275,7 @@ export function App() {
       cancelled = true;
       disconnect?.();
     };
-  }, [toast]);
+  }, [toast, releaseHeld]);
 
   const current = outputs.find((o) => o.current) ?? null;
   const latencyMs =
@@ -279,6 +335,13 @@ export function App() {
               onStop={stop}
               onTempo={(bpm) => void session.apply({ kind: "setTempo", bpm })}
               onSignature={(beats, unit) => void session.apply({ kind: "setTimeSignature", beats, unit })}
+              extra={
+                <>
+                  <RecordButton recording={recording} onToggle={toggleRecord} />
+                  <MetronomeButton on={metronome} onToggle={toggleMetronome} />
+                  <KeyboardToggle on={keyboard} onToggle={() => setKeyboard((on) => !on)} />
+                </>
+              }
             />
           )}
           <div className="toolbar-audio">
@@ -309,7 +372,7 @@ export function App() {
           </div>
         </header>
         <main className="stage">
-          {view && <ChannelRack latest={latest} sampleRate={sampleRate} onError={rackError} />}
+          {view && <Workspace latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
         </main>
         <HintBar />
         <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />

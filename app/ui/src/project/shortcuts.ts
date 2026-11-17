@@ -1,4 +1,6 @@
-export type Action = "playStop" | "new" | "open" | "save" | "saveAs" | "export";
+export type Action = "playStop" | "record" | "new" | "open" | "save" | "saveAs" | "export";
+/** The project actions: the menu's items and what `perform` takes. */
+export type MenuAction = Exclude<Action, "playStop" | "record">;
 
 /** The part of a `KeyboardEvent` the shortcuts read (so tests need no DOM). */
 export interface ShortcutEvent {
@@ -46,8 +48,9 @@ const MOD_KEYS: Record<string, Action> = { n: "new", o: "open", s: "save", r: "e
 
 /** The action a key press asks for, or `null`. Mod is Cmd on macOS and Ctrl elsewhere; the
  * other of the two never counts as Mod. Space (alone, not held down) is play/stop unless the
- * person is typing. */
-export function shortcutFor(event: ShortcutEvent, platform: string): Action | null {
+ * person is typing. R alone is record, but only while the typing keyboard is off (it plays a
+ * note then). */
+export function shortcutFor(event: ShortcutEvent, platform: string, typingKeyboard = false): Action | null {
   if (event.altKey) return null;
   const mac = isMac(platform);
   const mod = mac ? event.metaKey : event.ctrlKey;
@@ -60,15 +63,20 @@ export function shortcutFor(event: ShortcutEvent, platform: string): Action | nu
     if (event.shiftKey) return null;
     return MOD_KEYS[key] ?? null;
   }
-  if (key === " " && !event.shiftKey && !event.repeat && !isTypingTarget(event.target)) {
-    return "playStop";
-  }
+  if (event.shiftKey || event.repeat || isTypingTarget(event.target)) return null;
+  if (key === " ") return "playStop";
+  if (key === "r" && !typingKeyboard) return "record";
   return null;
 }
 
 /** How a shortcut is written in the menu: "⌘N" on macOS, "Ctrl+N" elsewhere. */
-export function shortcutLabel(action: Exclude<Action, "playStop">, platform: string): string {
+export function shortcutLabel(action: MenuAction, platform: string): string {
   const letter = { new: "N", open: "O", save: "S", saveAs: "S", export: "R" }[action];
   const shift = action === "saveAs";
   return isMac(platform) ? `${shift ? "⇧" : ""}⌘${letter}` : `Ctrl+${shift ? "Shift+" : ""}${letter}`;
+}
+
+/** A modal dialog is open: shortcuts, the typing keyboard and dropped files stand aside. */
+export function modalIsOpen(): boolean {
+  return typeof document !== "undefined" && document.querySelector("[aria-modal='true']") !== null;
 }
