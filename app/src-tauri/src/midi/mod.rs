@@ -17,21 +17,27 @@ pub const NO_CHANNEL: u32 = u32::MAX;
 /// What an open input calls with each message's bytes.
 pub type MidiSink = Box<dyn FnMut(&[u8]) + Send>;
 
-/// The system's MIDI inputs, by name. A fake stands in for it in tests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MidiPort {
+    pub id: String,
+    pub name: String,
+}
+
+/// The system's MIDI inputs, by opaque ID. A fake stands in for it in tests.
 pub trait MidiPorts: Send {
-    /// The names of the inputs plugged in now; empty if there are none or the system has no
+    /// The IDs and display names of the inputs plugged in now; empty if there are none or the system has no
     /// MIDI at all.
-    fn list(&self) -> Vec<String>;
-    /// Starts reading `name`: `sink` gets each message's bytes, on a thread of the system's.
+    fn list(&self) -> Vec<MidiPort>;
+    /// Starts reading the opaque ID `name`: `sink` gets each message's bytes, on a thread of the system's.
     fn open(&mut self, name: &str, sink: MidiSink) -> Result<(), String>;
-    /// Stops reading `name`.
+    /// Stops reading the opaque ID `name`.
     fn close(&mut self, name: &str);
 }
 
 /// The operating system's MIDI inputs, through `midir` (CoreMIDI on macOS, WinMM on Windows).
 ///
 /// A machine with no MIDI devices, or none at all, lists nothing and says nothing: CI runners
-/// are like that. Two devices with the same name are one input here.
+/// are like that. Display names never select a connection.
 #[derive(Default)]
 pub struct MidirPorts {
     open: HashMap<String, midir::MidiInputConnection<()>>,
@@ -46,16 +52,13 @@ impl MidirPorts {
     }
 }
 
-/// `input`'s port called `name`, if it is plugged in.
+/// Resolves an opaque ID against the current enumeration, never its index or label.
 fn find_port(input: &midir::MidiInput, name: &str) -> Option<midir::MidiInputPort> {
-    input
-        .ports()
-        .into_iter()
-        .find(|port| input.port_name(port).is_ok_and(|n| n == name))
+    input.ports().into_iter().find(|port| port.id() == name)
 }
 
 impl MidiPorts for MidirPorts {
-    fn list(&self) -> Vec<String> {
+    fn list(&self) -> Vec<MidiPort> {
         // `list` takes `&self`: a client made now is dropped after the listing. Cheap, and every
         // poll sees the devices as they are.
         let Ok(input) = midir::MidiInput::new(CLIENT_NAME) else {
@@ -64,7 +67,12 @@ impl MidiPorts for MidirPorts {
         input
             .ports()
             .iter()
-            .filter_map(|port| input.port_name(port).ok())
+            .filter_map(|port| {
+                input.port_name(port).ok().map(|name| MidiPort {
+                    id: port.id(),
+                    name,
+                })
+            })
             .collect()
     }
 

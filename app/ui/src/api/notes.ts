@@ -148,14 +148,15 @@ export const metronomeSet = (on: boolean) => invoke<null>("metronome_set", { on 
 
 /** One MIDI input as the settings show it. */
 export interface MidiInput {
+  id: string;
   name: string;
   enabled: boolean;
 }
 
 /** The MIDI keyboards plugged in now, with whether each plays. */
 export const midiInputs = () => invoke<MidiInput[]>("midi_inputs");
-/** Switches a MIDI keyboard on or off; the shell remembers it by name. */
-export const midiSetEnabled = (name: string, enabled: boolean) => invoke<null>("midi_set_enabled", { name, enabled });
+/** Switches a MIDI keyboard on or off; the shell remembers it by opaque ID. */
+export const midiSetEnabled = (id: string, enabled: boolean) => invoke<null>("midi_set_enabled", { id, enabled });
 
 /** A keyboard was plugged in or out, or switched on or off: ask `midiInputs` again. */
 export function onMidiInputsChanged(handler: () => void): Promise<UnlistenFn> {

@@ -1,6 +1,6 @@
 //! The players (what each keyboard holds down) and the hub that opens and closes the inputs.
 
-use super::{MidiMessage, MidiPorts, MidiSink, NO_CHANNEL, parse};
+use super::{MidiMessage, MidiPort, MidiPorts, MidiSink, NO_CHANNEL, parse};
 use grooviq_engine::{ChannelId, Command, NoteId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -335,6 +335,9 @@ pub struct MidiHub {
     disabled: BTreeSet<String>,
     /// Inputs plugged in at the last poll, sorted.
     listed: Vec<String>,
+    descriptors: Vec<MidiPort>,
+    overrides: BTreeMap<String, bool>,
+    labels: BTreeMap<String, String>,
     /// The open inputs' players and the keys they hold.
     bus: Arc<Mutex<Bus>>,
     /// Inputs whose last open failed and was reported.
@@ -354,6 +357,9 @@ impl MidiHub {
             selected,
             disabled: disabled.into_iter().collect(),
             listed: Vec::new(),
+            descriptors: Vec::new(),
+            overrides: BTreeMap::new(),
+            labels: BTreeMap::new(),
             bus: Arc::default(),
             failed: BTreeSet::new(),
         }
@@ -373,14 +379,29 @@ impl MidiHub {
     /// Opens the enabled inputs that appeared and closes the ones that vanished (their held
     /// notes are released).
     pub fn poll(&mut self) -> Poll {
-        let mut listed = self.ports.list();
+        let mut descriptors = self.ports.list();
+        descriptors.sort_by(|a, b| a.id.cmp(&b.id).then(a.name.cmp(&b.name)));
+        descriptors.dedup_by(|a, b| a.id == b.id);
+        let descriptor_changed = descriptors != self.descriptors;
+        for port in &descriptors {
+            if self.disabled.contains(&port.name) {
+                self.overrides.entry(port.id.clone()).or_insert(false);
+            }
+        }
+        self.descriptors = descriptors;
+        let mut listed: Vec<String> = self.descriptors.iter().map(|p| p.id.clone()).collect();
         listed.sort();
         listed.dedup();
         let mut poll = Poll {
-            changed: listed != self.listed,
+            changed: descriptor_changed || listed != self.listed,
             ..Poll::default()
         };
         self.listed = listed;
+        self.labels.extend(
+            self.input_views()
+                .into_iter()
+                .map(|(id, name, _)| (id, name)),
+        );
         self.failed.retain(|name| self.listed.contains(name));
         self.apply(&mut poll);
         self.release_stale();
@@ -397,12 +418,8 @@ impl MidiHub {
 
     /// Switches one input on or off, taking effect at once.
     pub fn set_enabled(&mut self, name: &str, enabled: bool) -> Poll {
-        let was_enabled = !self.disabled.contains(name);
-        if enabled {
-            self.disabled.remove(name);
-        } else {
-            self.disabled.insert(name.to_owned());
-        }
+        let was_enabled = self.enabled(name);
+        self.overrides.insert(name.to_owned(), enabled);
         let mut poll = Poll {
             changed: was_enabled != enabled,
             ..Poll::default()
@@ -415,7 +432,57 @@ impl MidiHub {
     pub fn inputs(&self) -> Vec<(String, bool)> {
         self.listed
             .iter()
-            .map(|name| (name.clone(), !self.disabled.contains(name)))
+            .map(|name| (name.clone(), self.enabled(name)))
+            .collect()
+    }
+
+    pub fn with_overrides(mut self, overrides: BTreeMap<String, bool>) -> Self {
+        self.overrides = overrides;
+        self
+    }
+
+    pub fn input_overrides(&self) -> BTreeMap<String, bool> {
+        self.overrides.clone()
+    }
+
+    fn label(&self, id: &str) -> String {
+        self.input_views()
+            .into_iter()
+            .find(|p| p.0 == id)
+            .map(|p| p.1)
+            .or_else(|| self.labels.get(id).cloned())
+            .unwrap_or_else(|| "Keyboard".into())
+    }
+
+    fn enabled(&self, id: &str) -> bool {
+        self.overrides.get(id).copied().unwrap_or_else(|| {
+            !self
+                .descriptors
+                .iter()
+                .any(|p| p.id == id && self.disabled.contains(&p.name))
+        })
+    }
+
+    /// Human labels reserve genuine names before generating suffixes.
+    pub fn input_views(&self) -> Vec<(String, String, bool)> {
+        let mut used: BTreeSet<String> = self.descriptors.iter().map(|p| p.name.clone()).collect();
+        let mut seen = BTreeSet::new();
+        self.descriptors
+            .iter()
+            .map(|p| {
+                let mut label = p.name.clone();
+                if !seen.insert(p.name.clone()) {
+                    let mut n = 2;
+                    loop {
+                        label = format!("{} ({n})", p.name);
+                        if used.insert(label.clone()) {
+                            break;
+                        }
+                        n += 1;
+                    }
+                }
+                (p.id.clone(), label, self.enabled(&p.id))
+            })
             .collect()
     }
 
@@ -436,7 +503,7 @@ impl MidiHub {
         let gone: Vec<String> = lock(&self.bus)
             .players
             .keys()
-            .filter(|name| !self.listed.contains(name) || self.disabled.contains(*name))
+            .filter(|name| !self.listed.contains(name) || !self.enabled(name))
             .cloned()
             .collect();
         for name in gone {
@@ -450,13 +517,13 @@ impl MidiHub {
                     player.retire_in(ledger, &mut ToSink(&*self.sink));
                 }
             }
-            poll.closed.push(name);
+            poll.closed.push(self.label(&name));
         }
         let wanted: Vec<String> = {
             let bus = lock(&self.bus);
             self.listed
                 .iter()
-                .filter(|name| !self.disabled.contains(*name) && !bus.players.contains_key(*name))
+                .filter(|name| self.enabled(name) && !bus.players.contains_key(*name))
                 .cloned()
                 .collect()
         };
@@ -467,13 +534,13 @@ impl MidiHub {
             match self.ports.open(&name, self.callback(&name)) {
                 Ok(()) => {
                     self.failed.remove(&name);
-                    poll.opened.push(name);
+                    poll.opened.push(self.label(&name));
                 }
                 // Tried again at every poll; said once.
                 Err(why) => {
                     lock(&self.bus).players.remove(&name);
                     if self.failed.insert(name.clone()) {
-                        poll.failed.push((name, why));
+                        poll.failed.push((self.label(&name), why));
                     }
                 }
             }
@@ -543,8 +610,14 @@ mod tests {
     struct TwoPorts;
 
     impl MidiPorts for TwoPorts {
-        fn list(&self) -> Vec<String> {
-            vec!["Keys".into(), "Pads".into()]
+        fn list(&self) -> Vec<MidiPort> {
+            vec!["Keys", "Pads"]
+                .into_iter()
+                .map(|name| MidiPort {
+                    id: name.into(),
+                    name: name.into(),
+                })
+                .collect()
         }
         fn open(&mut self, _: &str, _: MidiSink) -> Result<(), String> {
             Ok(())

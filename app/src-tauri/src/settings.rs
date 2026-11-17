@@ -19,6 +19,8 @@ pub struct Settings {
     /// MIDI inputs the person switched off, by name. Every input is on until it is listed here;
     /// a name stays while its device is unplugged.
     pub midi_disabled: Vec<String>,
+    /// Explicit opaque-ID switches override legacy disabled names, including explicit enables.
+    pub midi_input_overrides: std::collections::BTreeMap<String, bool>,
 }
 
 impl Default for Settings {
@@ -28,6 +30,7 @@ impl Default for Settings {
             guard: true,
             high_refresh: false,
             midi_disabled: Vec::new(),
+            midi_input_overrides: Default::default(),
         }
     }
 }
@@ -100,6 +103,7 @@ mod tests {
                 guard: true,
                 high_refresh: false,
                 midi_disabled: Vec::new(),
+                midi_input_overrides: Default::default(),
             }
         );
         let (level, message) = note.unwrap();
@@ -128,6 +132,7 @@ mod tests {
             guard: false,
             high_refresh: true,
             midi_disabled: vec!["USB Keyboard".into(), "Pads".into()],
+            midi_input_overrides: [("opaque-a".into(), true), ("opaque-b".into(), false)].into(),
         };
         save(&path, &saved).unwrap();
         assert_eq!(load(&path), (saved.clone(), None));
@@ -155,9 +160,84 @@ mod tests {
                     guard: false,
                     high_refresh: false,
                     midi_disabled: Vec::new(),
+                    midi_input_overrides: Default::default(),
                 },
                 None
             )
+        );
+    }
+    #[test]
+    fn legacy_disabled_names_allow_independent_id_overrides_after_save_reload() {
+        use crate::midi::{CommandSink, MidiHub, MidiPort, MidiPorts, MidiSink};
+        use grooviq_engine::NoteId;
+        use std::sync::{Arc, atomic::AtomicU32};
+        struct Ports;
+        impl MidiPorts for Ports {
+            fn list(&self) -> Vec<MidiPort> {
+                [("a", "Keyboard"), ("b", "Keyboard"), ("other", "Pads")]
+                    .into_iter()
+                    .map(|(id, name)| MidiPort {
+                        id: id.into(),
+                        name: name.into(),
+                    })
+                    .collect()
+            }
+            fn open(&mut self, _: &str, _: MidiSink) -> Result<(), String> {
+                Ok(())
+            }
+            fn close(&mut self, _: &str) {}
+        }
+        struct Sink;
+        impl CommandSink for Sink {
+            fn press(&self, _: u32, _: u8, _: f32, _: NoteId) -> Option<u64> {
+                Some(0)
+            }
+            fn release(&self, _: u32, _: u8, _: u64, _: &[NoteId]) {}
+        }
+        let path = dir("midi-migration").join("settings.json");
+        std::fs::write(&path, r#"{"midiDisabled":["Keyboard"]}"#).unwrap();
+        let (mut saved, note) = load(&path);
+        assert!(note.is_none());
+        let make = |saved: &Settings| {
+            MidiHub::new(
+                Box::new(Ports),
+                Arc::new(Sink),
+                Arc::new(AtomicU32::new(1)),
+                saved.midi_disabled.clone(),
+            )
+            .with_overrides(saved.midi_input_overrides.clone())
+        };
+        let mut hub = make(&saved);
+        hub.poll();
+        assert_eq!(
+            hub.inputs(),
+            [
+                ("a".into(), false),
+                ("b".into(), false),
+                ("other".into(), true)
+            ]
+        );
+        hub.set_enabled("a", true);
+        assert_eq!(
+            hub.inputs(),
+            [
+                ("a".into(), true),
+                ("b".into(), false),
+                ("other".into(), true)
+            ]
+        );
+        saved.midi_input_overrides = hub.input_overrides();
+        saved.midi_input_overrides.insert("unknown".into(), false);
+        save(&path, &saved).unwrap();
+        let mut hub = make(&load(&path).0);
+        hub.poll();
+        assert_eq!(
+            hub.inputs(),
+            [
+                ("a".into(), true),
+                ("b".into(), false),
+                ("other".into(), true)
+            ]
         );
     }
 }
