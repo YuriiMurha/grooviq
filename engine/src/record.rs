@@ -30,17 +30,45 @@ pub enum RecordEvent {
     /// The take ended (recording switched off, or the transport stopped or restarted): a note
     /// still held ends here.
     End { tick: u64, position: u32 },
+    /// A barrier: [`crate::Controller::load_state`] queued it behind the state, so every event
+    /// before it belongs to the state before, every event after it to the new one. `id` is
+    /// [`crate::Controller::record_mark`]. Never lost: a mark that finds the queue full waits,
+    /// and later events are dropped (counted) rather than overtake it.
+    Mark { id: u32 },
 }
 
 /// The audio thread's end of the recording queue.
 pub(crate) struct Recorder {
     tx: Producer<RecordEvent>,
     on: bool,
+    /// A mark that did not fit in the queue yet.
+    pending_mark: Option<u32>,
 }
 
 impl Recorder {
     pub(crate) fn new(tx: Producer<RecordEvent>) -> Self {
-        Self { tx, on: false }
+        Self {
+            tx,
+            on: false,
+            pending_mark: None,
+        }
+    }
+
+    /// Queues the barrier `id` (see [`RecordEvent::Mark`]), whatever recording does. A newer
+    /// mark replaces one still waiting.
+    pub(crate) fn mark(&mut self, id: u32) {
+        self.pending_mark = Some(id);
+        self.flush_mark();
+    }
+
+    /// Sends a waiting mark if the queue has room. Called at the start of every block, so a
+    /// mark goes out as soon as the queue drains.
+    pub(crate) fn flush_mark(&mut self) {
+        if let Some(id) = self.pending_mark
+            && self.tx.push(RecordEvent::Mark { id }).is_ok()
+        {
+            self.pending_mark = None;
+        }
     }
 
     /// Whether a take is running: recording is on and the transport plays.
@@ -88,7 +116,9 @@ impl Recorder {
         self.push(event, live);
     }
 
-    /// Real-time safe: a full queue drops the event and counts it, never waits.
+    /// Real-time safe: a full queue drops the event and counts it, never waits. A waiting mark
+    /// cannot be overtaken: every push happens while the processor drains its commands, after
+    /// that block's [`Self::flush_mark`], and only the controller frees room, between blocks.
     fn push(&mut self, event: RecordEvent, live: &LiveShared) {
         if self.tx.push(event).is_err() {
             live.count_record_drop();

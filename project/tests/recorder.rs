@@ -127,3 +127,26 @@ fn an_off_without_an_on_is_ignored() {
     assert!(r.feed(&[off(1, 60, 100, 100)]).is_empty());
     assert_eq!(r.open(), 0);
 }
+
+#[test]
+fn events_before_the_awaited_mark_are_dropped() {
+    let mut r = Recorder::new();
+    r.reset_until_mark(7);
+    let notes = r.feed(&[
+        on(1, 60, 0.5, 0, 0),
+        RecordEvent::Mark { id: 6 },
+        off(1, 60, 100, 100),
+        on(1, 62, 0.5, 120, 120),
+        RecordEvent::Mark { id: 7 },
+        off(1, 62, 200, 200),
+        on(1, 64, 0.9, 300, 300),
+        RecordEvent::Mark { id: 3 },
+        off(1, 64, 400, 400),
+    ]);
+    assert_eq!(
+        notes,
+        vec![note(1, 300, 100, 64, 0.9)],
+        "only the take after mark 7"
+    );
+    assert_eq!(r.open(), 0);
+}

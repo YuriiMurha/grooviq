@@ -103,6 +103,8 @@ pub struct Controller {
     /// Counts `reconfigure` calls. Every graph carries the generation it was built in, and the
     /// processor drops a replacement from an earlier one.
     generation: u64,
+    /// The id of the last recording barrier `load_state` queued (see [`Self::record_mark`]).
+    record_mark: u32,
     /// Faults already answered with a restart (queued by `check_health`, or done by
     /// `reconfigure`).
     seen_faults: u32,
@@ -131,6 +133,7 @@ impl Controller {
             synth: synth_defaults(),
             state,
             generation: 0,
+            record_mark: 0,
             seen_faults: 0,
             restart_owed: false,
             seen_guard_hits: 0,
@@ -270,7 +273,7 @@ impl Controller {
     }
 
     /// Replaces the whole state: stops the transport, sets the tempo and the time signature,
-    /// then swaps in one graph
+    /// queues a recording barrier ([`Self::record_mark`]), then swaps in one graph
     /// built from `state` (cutting every note; the test tone and the synth keep their
     /// settings). Checked
     /// like [`Self::add_channel`] and [`Self::set_pattern`], and refused as a whole
@@ -278,25 +281,34 @@ impl Controller {
     /// [`MAX_CHANNELS`], `Rejected` for a value that is not finite).
     pub fn load_state(&mut self, state: EngineState) -> Result<(), ControlError> {
         let state = state.checked()?;
-        if self.commands.slots() < 4 {
+        if self.commands.slots() < 5 {
             return Err(ControlError::Full);
         }
         // The old state (and the samples only it held) is freed here, on this thread.
         let _old = std::mem::replace(&mut self.state, state);
         let graph = self.build_graph();
-        // Only this thread pushes, and the queue had room for all three.
+        // Only this thread pushes, and the queue had room for all five.
         let command = |cmd| Msg::Command { due: 0, cmd };
         let tempo = Command::SetTempo {
             bpm: self.state.bpm,
         };
         let (beats, unit) = self.state.time_signature;
         let signature = Command::SetTimeSignature { beats, unit };
+        self.record_mark = self.record_mark.wrapping_add(1);
         let queued = self.commands.push(command(Command::Stop)).is_ok()
             && self.commands.push(command(tempo)).is_ok()
             && self.commands.push(command(signature)).is_ok()
-            && self.push(Msg::ReplaceGraph(graph)).is_ok();
+            && self.push(Msg::ReplaceGraph(graph)).is_ok()
+            && self.push(Msg::RecordMark(self.record_mark)).is_ok();
         debug_assert!(queued);
         Ok(())
+    }
+
+    /// The id of the recording barrier the last [`Self::load_state`] queued: in the recording
+    /// queue, every event before [`crate::RecordEvent::Mark`] with this id belongs to the
+    /// state before (its take ended at the stop), every event after it to this one.
+    pub fn record_mark(&self) -> u32 {
+        self.record_mark
     }
 
     fn channel_index(&self, id: ChannelId) -> Result<usize, ControlError> {

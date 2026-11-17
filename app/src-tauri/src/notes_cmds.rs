@@ -9,7 +9,7 @@
 use crate::audio_log::{AudioLog, Level};
 use crate::{Audio, lock};
 use grooviq_engine::{Controller, RecordEvent};
-use grooviq_project::notes::{NotesAck, NotesEdit};
+use grooviq_project::notes::{NotesAck, NotesEdit, encode_notes};
 use grooviq_project::session::{ProjectView, Session, SessionError, waveform_peaks};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,6 +20,9 @@ use tauri::{AppHandle, Emitter, State};
 
 /// Sent with the current pattern's new revision whenever its notes changed.
 pub(crate) const NOTES_CHANGED: &str = "notes-changed";
+/// Sent with `{ reason, dropped, message }` when recording switched itself off because recorded
+/// notes did not fit (`grooviq_project::session::RecordingStopped`).
+pub(crate) const RECORDING_STOPPED: &str = "recording-stopped";
 /// How often the recorder thread drains the engine's recording queue.
 const RECORD_PERIOD: Duration = Duration::from_millis(20);
 /// The MIDI channel when none is selected.
@@ -40,10 +43,14 @@ fn text(e: SessionError) -> String {
     e.to_string()
 }
 
-/// The current pattern's notes, wire format v1, as raw bytes.
+/// The current pattern's notes, wire format v1, as raw bytes. Only the copy is made under the
+/// session's lock; sorting and encoding run on a blocking worker.
 #[tauri::command]
 pub async fn pattern_notes(audio: State<'_, Audio>) -> Result<Response, String> {
-    let bytes = lock(&audio.session).notes();
+    let pattern = lock(&audio.session).current_pattern();
+    let bytes = tauri::async_runtime::spawn_blocking(move || encode_notes(&pattern))
+        .await
+        .map_err(|e| format!("The work stopped unexpectedly: {e}"))?;
     Ok(Response::new(bytes))
 }
 
@@ -160,7 +167,8 @@ pub async fn metronome_set(audio: State<'_, Audio>, on: bool) -> Result<(), Stri
 }
 
 /// Every [`RECORD_PERIOD`]: moves the engine's recorded events into the pattern and tells the
-/// UI the new revision when notes were added. Logs when the engine's queue dropped events.
+/// UI the new revision when notes were added, or [`RECORDING_STOPPED`] when recorded notes did
+/// not fit and recording was switched off. Logs when the engine's queue dropped events.
 /// Runs for the life of the app.
 pub(crate) fn record_loop(
     session: &Mutex<Session>,
@@ -174,19 +182,16 @@ pub(crate) fn record_loop(
         thread::sleep(RECORD_PERIOD);
         events.clear();
         // The session first, so a project opened meanwhile cannot take another's events.
-        let (added, now_dropped) = {
+        let (recorded, now_dropped) = {
             let mut session = lock(session);
             let now_dropped = {
                 let mut controller = lock(controller);
                 controller.take_recorded(&mut events);
                 controller.record_dropped()
             };
-            let added = if events.is_empty() {
-                None
-            } else {
-                session.collect_recorded(&events, Instant::now())
-            };
-            (added, now_dropped)
+            // Every poll, events or not: notes the engine could not take yet are retried.
+            let recorded = session.collect_recorded(&events, Instant::now());
+            (recorded, now_dropped)
         };
         if now_dropped != dropped {
             lock(log).push(
@@ -198,9 +203,13 @@ pub(crate) fn record_loop(
             );
             dropped = now_dropped;
         }
-        if let Some(revision) = added {
-            // Fails only while the app shuts down.
+        // Emits fail only while the app shuts down.
+        if let Some(revision) = recorded.revision {
             let _ = app.emit(NOTES_CHANGED, revision);
+        }
+        if let Some(stopped) = recorded.stopped {
+            lock(log).push(Level::Warn, stopped.message.clone());
+            let _ = app.emit(RECORDING_STOPPED, stopped);
         }
     }
 }

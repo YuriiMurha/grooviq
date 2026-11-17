@@ -2053,7 +2053,7 @@ fn recording_stop_sends_end_and_adds_the_notes() {
         "{events:?}"
     );
     let before = session.view().notes_revision;
-    let revision = session.collect_recorded(&events, Instant::now());
+    let revision = session.collect_recorded(&events, Instant::now()).revision;
     assert_eq!(revision, Some(before + 1));
     let notes = &session.project().patterns[0].notes;
     assert_eq!(notes.len(), 1);
@@ -2069,7 +2069,7 @@ fn recording_stop_sends_end_and_adds_the_notes() {
     assert!(session.view().dirty);
     assert!(!session.view().recording);
     // Nothing more to collect.
-    assert_eq!(session.collect_recorded(&[], Instant::now()), None);
+    assert_eq!(session.collect_recorded(&[], Instant::now()).revision, None);
 }
 
 #[test]
@@ -2086,7 +2086,10 @@ fn editing_while_recording_keeps_both() {
     session.live_note(synth, 60, 0.0, false).unwrap();
     render(&mut processor, 2);
     controller.lock().unwrap().take_recorded(&mut events);
-    session.collect_recorded(&events, Instant::now()).unwrap();
+    session
+        .collect_recorded(&events, Instant::now())
+        .revision
+        .unwrap();
     let notes = &session.project().patterns[0].notes;
     assert_eq!(notes.len(), 2, "{notes:?}");
     assert!(notes.iter().any(|n| n.id == drawn[0] && n.key == 72));
@@ -2108,7 +2111,10 @@ fn recorded_notes_of_a_removed_channel_are_dropped() {
     session
         .apply(Edit::RemoveChannel { channel: synth }, Instant::now())
         .unwrap();
-    assert_eq!(session.collect_recorded(&events, Instant::now()), None);
+    assert_eq!(
+        session.collect_recorded(&events, Instant::now()).revision,
+        None
+    );
     assert!(session.project().patterns[0].notes.is_empty());
 }
 
@@ -2132,7 +2138,10 @@ fn opening_a_project_mid_take_records_nothing_into_it() {
     let notes = session.project().patterns[0].notes.clone();
     render(&mut processor, 2);
     controller.lock().unwrap().take_recorded(&mut events);
-    assert_eq!(session.collect_recorded(&events, Instant::now()), None);
+    assert_eq!(
+        session.collect_recorded(&events, Instant::now()).revision,
+        None
+    );
     assert_eq!(session.project().patterns[0].notes, notes);
 }
 
@@ -2284,4 +2293,224 @@ fn waveform_peaks_cover_the_sample() {
     let synth = add_synth(&mut session, "Init");
     assert_eq!(session.waveform(synth, 4), None);
     assert_eq!(session.waveform(99, 4), None);
+}
+
+// --- Fix round 1: recording across project replacement, engine back-pressure, the note cap. ---
+
+use grooviq_project::session::Recorded;
+
+/// Opens the missing-sample fixture (channel ids 1 to 3) and returns its notes.
+fn open_fixture(session: &mut Session) -> Vec<Note> {
+    let loaded = loaded_with_a_missing_sample();
+    let decoded = decode_samples(&loaded);
+    session
+        .open(Path::new("/p/beat.grooviq"), loaded, decoded)
+        .unwrap();
+    session.project().patterns[0].notes.clone()
+}
+
+/// Renders a few blocks and hands everything recorded to the session.
+fn poll(
+    session: &mut Session,
+    controller: &Mutex<Controller>,
+    processor: &mut AudioProcessor,
+) -> Recorded {
+    render(processor, 4);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    session.collect_recorded(&events, Instant::now())
+}
+
+/// A whole note played and released during a take, not yet collected.
+fn play_a_note(session: &Session, processor: &mut AudioProcessor, channel: u32) {
+    session.live_note(channel, 60, 0.8, true).unwrap();
+    render(processor, 4);
+    session.live_note(channel, 60, 0.0, false).unwrap();
+    render(processor, 2);
+}
+
+#[test]
+fn record_off_then_open_records_nothing_into_the_new_project() {
+    let (mut session, controller, mut processor) = rig();
+    let synth = add_synth(&mut session, "Init");
+    assert_eq!(synth, 1, "the fixture's Kick has the same id");
+    session.set_recording(true).unwrap();
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    render(&mut processor, 2);
+    play_a_note(&session, &mut processor, synth);
+    // Recording is off before the recorder thread polls.
+    session.set_recording(false).unwrap();
+    render(&mut processor, 2);
+    let notes = open_fixture(&mut session);
+    assert_eq!(
+        poll(&mut session, &controller, &mut processor).revision,
+        None
+    );
+    assert_eq!(session.project().patterns[0].notes, notes);
+}
+
+#[test]
+fn stop_then_open_records_nothing_into_the_new_project() {
+    let (mut session, controller, mut processor) = rig();
+    let synth = add_synth(&mut session, "Init");
+    session.set_recording(true).unwrap();
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    render(&mut processor, 2);
+    play_a_note(&session, &mut processor, synth);
+    controller.lock().unwrap().send(Command::Stop).unwrap();
+    render(&mut processor, 2);
+    let notes = open_fixture(&mut session);
+    assert_eq!(
+        poll(&mut session, &controller, &mut processor).revision,
+        None
+    );
+    assert_eq!(session.project().patterns[0].notes, notes);
+}
+
+#[test]
+fn a_queued_play_then_open_records_nothing_into_the_new_project_but_the_next_take_does() {
+    let (mut session, controller, mut processor) = rig();
+    let synth = add_synth(&mut session, "Init");
+    session.set_recording(true).unwrap();
+    render(&mut processor, 2);
+    // Play and a whole note are still queued when the project opens.
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    session.live_note(synth, 60, 0.8, true).unwrap();
+    session.live_note(synth, 60, 0.0, false).unwrap();
+    let notes = open_fixture(&mut session);
+    assert_eq!(
+        poll(&mut session, &controller, &mut processor).revision,
+        None
+    );
+    assert_eq!(session.project().patterns[0].notes, notes);
+
+    // Recording is still on: the next take is the new project's.
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    render(&mut processor, 2);
+    play_a_note(&session, &mut processor, 1);
+    assert!(
+        poll(&mut session, &controller, &mut processor)
+            .revision
+            .is_some()
+    );
+    assert_eq!(session.project().patterns[0].notes.len(), notes.len() + 1);
+}
+
+#[test]
+fn a_recorded_note_survives_a_full_engine_queue_and_is_added_once() {
+    let (mut session, controller, mut processor) = rig();
+    let synth = add_synth(&mut session, "Init");
+    session.set_recording(true).unwrap();
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    render(&mut processor, 2);
+    play_a_note(&session, &mut processor, synth);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    // The engine's command queue is full when the note is committed.
+    while controller
+        .lock()
+        .unwrap()
+        .send(Command::SetTempo { bpm: 120.0 })
+        .is_ok()
+    {}
+    let got = session.collect_recorded(&events, Instant::now());
+    assert_eq!(got, Recorded::default(), "nothing yet, nothing lost");
+    assert!(session.project().patterns[0].notes.is_empty());
+    // The queue drains; the next poll commits the note, once.
+    render(&mut processor, 4);
+    let got = session.collect_recorded(&[], Instant::now());
+    assert!(got.revision.is_some(), "{got:?}");
+    assert_eq!(session.project().patterns[0].notes.len(), 1);
+    assert_eq!(
+        session.collect_recorded(&[], Instant::now()),
+        Recorded::default()
+    );
+    assert_eq!(session.project().patterns[0].notes.len(), 1);
+}
+
+/// `n` whole notes on `channel`, as the engine records them, after the session's barrier.
+fn whole_notes(channel: u32, n: u32) -> Vec<RecordEvent> {
+    (0..n)
+        .flat_map(|i| {
+            let note = |on, tick: u64| RecordEvent::Note {
+                channel: ChannelId(channel),
+                key: 40 + i as u8,
+                velocity: 0.8,
+                on,
+                tick,
+                position: tick as u32,
+            };
+            [
+                note(true, u64::from(i) * 10),
+                note(false, u64::from(i) * 10 + 5),
+            ]
+        })
+        .collect()
+}
+
+/// Lets the session see its barrier (the mark of its last new state).
+fn settle(session: &mut Session, controller: &Mutex<Controller>, processor: &mut AudioProcessor) {
+    poll(session, controller, processor);
+}
+
+#[test]
+fn recording_at_the_note_cap_keeps_what_fits_stops_and_says_so() {
+    let (mut session, controller, mut processor) = rig();
+    let synth = add_synth(&mut session, "Init");
+    add_notes(
+        &mut session,
+        (0..99_999u32)
+            .map(|i| NewNote {
+                length: 10,
+                ..melodic(synth, (i % 64) * 240, (i % 128) as u8)
+            })
+            .collect(),
+    );
+    session.set_recording(true).unwrap();
+    settle(&mut session, &controller, &mut processor);
+    let before = session.view().notes_revision;
+
+    // Two notes, room for one.
+    let got = session.collect_recorded(&whole_notes(synth, 2), Instant::now());
+    assert_eq!(got.revision, Some(before + 1));
+    let stopped = got.stopped.expect("the person is told");
+    assert_eq!(stopped.dropped, 1);
+    assert_eq!(
+        stopped.message,
+        "Recording stopped: this pattern holds 100000 notes, the most a pattern can hold. 1 recorded note was not added."
+    );
+    assert_eq!(session.project().patterns[0].notes.len(), 100_000);
+    assert!(!session.view().recording, "recording is switched off");
+    render(&mut processor, 2);
+
+    // Full: every note of a later batch is reported.
+    let got = session.collect_recorded(&whole_notes(synth, 3), Instant::now());
+    assert_eq!(got.revision, None);
+    assert_eq!(got.stopped.map(|s| s.dropped), Some(3));
+    assert_eq!(session.project().patterns[0].notes.len(), 100_000);
+}
+
+#[test]
+fn recording_when_note_ids_run_out_keeps_what_fits_stops_and_says_so() {
+    let (mut session, controller, mut processor) = rig();
+    let synth = add_synth(&mut session, "Init");
+    let mut project = session.project().clone();
+    // Two ids left.
+    project.patterns[0].next_note_id = u32::MAX - 2;
+    let loaded = Loaded {
+        project,
+        samples: Default::default(),
+        warnings: Vec::new(),
+    };
+    let decoded = decode_samples(&loaded);
+    session
+        .open(Path::new("/p/ids.grooviq"), loaded, decoded)
+        .unwrap();
+    session.set_recording(true).unwrap();
+    settle(&mut session, &controller, &mut processor);
+    let got = session.collect_recorded(&whole_notes(synth, 3), Instant::now());
+    assert!(got.revision.is_some());
+    assert_eq!(got.stopped.as_ref().map(|s| s.dropped), Some(1), "{got:?}");
+    assert_eq!(session.project().patterns[0].notes.len(), 2);
+    assert!(!session.view().recording);
 }

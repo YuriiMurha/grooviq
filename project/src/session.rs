@@ -21,7 +21,7 @@ use crate::model::{
     Pattern, Project, ProjectKey, SCALES, SampleRef, TimeSignature, VOLUME, is_plain_step,
     roll_channels,
 };
-use crate::notes::{self, NotesAck, NotesEdit, encode_notes};
+use crate::notes::{self, NewNote, NotesAck, NotesEdit, encode_notes};
 use crate::recorder::Recorder;
 use grooviq_dsp::sampler::{self, PARAM_IDS, SPEC, SampleBuf};
 use grooviq_dsp::synth;
@@ -217,6 +217,29 @@ pub struct PatternView {
     /// Per channel id: one entry per step, the velocity of the plain step hit there (see
     /// [`is_plain_step`]) or `null`.
     pub cells: BTreeMap<u32, Vec<Option<f32>>>,
+}
+
+/// What [`Session::collect_recorded`] did.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Recorded {
+    /// The pattern's new revision, if recorded notes were added.
+    pub revision: Option<u32>,
+    /// Recording was switched off because recorded notes did not fit: tell the person.
+    pub stopped: Option<RecordingStopped>,
+}
+
+/// Why recording stopped by itself, and what it could not keep. The `recording-stopped` event.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingStopped {
+    /// `"noteCap"` (the pattern holds [`MAX_NOTES_PER_PATTERN`]), `"noteIds"` (its note ids
+    /// are used up) or `"error"` (the pattern refused the notes).
+    pub reason: &'static str,
+    /// Recorded notes that were not added.
+    pub dropped: u32,
+    /// A sentence for the person.
+    pub message: String,
 }
 
 /// What [`Session::open`] gives back.
@@ -447,6 +470,9 @@ pub struct Session {
     recorder: Recorder,
     /// Recording is switched on (it takes notes while the transport plays).
     recording: bool,
+    /// Recorded notes completed but not in the pattern yet: the engine did not take the
+    /// pattern (its queue was full). Retried on the next collect.
+    pending: Vec<NewNote>,
 }
 
 fn lock(controller: &Mutex<Controller>) -> MutexGuard<'_, Controller> {
@@ -482,10 +508,14 @@ impl Session {
             autosaved_at: None,
             recorder: Recorder::new(),
             recording: false,
+            pending: Vec::new(),
         };
         // A fresh queue always has room for a whole state.
         let synced = session.sync_engine();
         debug_assert!(synced.is_ok(), "{synced:?}");
+        let mut session = session;
+        let mark = lock(&session.controller).record_mark();
+        session.recorder.reset_until_mark(mark);
         session
     }
 
@@ -625,6 +655,12 @@ impl Session {
     /// The current pattern's notes in the wire format (see [`encode_notes`]).
     pub fn notes(&self) -> Vec<u8> {
         encode_notes(self.current())
+    }
+
+    /// A copy of the current pattern (its revision and notes), cheap next to encoding it: the
+    /// app takes it under the session's lock and runs [`encode_notes`] without.
+    pub fn current_pattern(&self) -> Pattern {
+        self.current().clone()
     }
 
     fn channel_index(&self, id: u32) -> Result<usize, SessionError> {
@@ -1127,26 +1163,98 @@ impl Session {
         self.send(Command::SetMetronome { on })
     }
 
-    /// Takes the engine's recorded events (from `Controller::take_recorded`, in order) and adds
-    /// the notes they complete to the current pattern as one edit (overdub). Notes of channels
-    /// the project no longer has are dropped, as are notes past the note cap. Returns the new
-    /// revision if notes were added.
-    pub fn collect_recorded(&mut self, events: &[RecordEvent], now: Instant) -> Option<u32> {
-        let mut add = self.recorder.feed(events);
+    /// Takes the engine's recorded events (from `Controller::take_recorded`, in order; empty
+    /// is fine) and adds the notes they complete to the current pattern as one edit (overdub).
+    /// Call it on every poll: notes the engine could not take yet (its queue full) wait here
+    /// and go in on a later call, once. Notes of channels the project no longer has are
+    /// dropped. When notes do not fit (the note cap, or used-up ids), the ones that fit go in,
+    /// recording is switched off, and [`Recorded::stopped`] says what was lost.
+    pub fn collect_recorded(&mut self, events: &[RecordEvent], now: Instant) -> Recorded {
+        let fed = self.recorder.feed(events);
+        self.pending.extend(fed);
         let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
-        add.retain(|n| channels.contains(&n.channel));
-        add.truncate(MAX_NOTES_PER_PATTERN.saturating_sub(self.current().notes.len()));
-        if add.is_empty() {
-            return None;
+        self.pending.retain(|n| channels.contains(&n.channel));
+        if self.pending.is_empty() {
+            return Recorded::default();
         }
-        let edit = NotesEdit {
-            base_revision: self.current().revision,
-            add,
-            update: Vec::new(),
-            delete: Vec::new(),
+        // What fits: the note cap, and the ids left (the used-up mark is never handed out).
+        let pattern = self.current();
+        let room = MAX_NOTES_PER_PATTERN.saturating_sub(pattern.notes.len());
+        let ids = (u32::MAX - pattern.next_note_id.max(1)) as usize;
+        let (fits, reason) = if ids < room {
+            (ids, "noteIds")
+        } else {
+            (room, "noteCap")
         };
-        let applied = self.apply_notes(&edit, now).ok()?;
-        (!applied.added_ids.is_empty()).then(|| self.current().revision)
+        let dropped = self.pending.len().saturating_sub(fits);
+        self.pending.truncate(fits);
+        let mut out = Recorded::default();
+        if !self.pending.is_empty() {
+            let edit = NotesEdit {
+                base_revision: self.current().revision,
+                add: self.pending.clone(),
+                update: Vec::new(),
+                delete: Vec::new(),
+            };
+            match self.apply_notes(&edit, now) {
+                Ok(applied) => {
+                    self.pending.clear();
+                    out.revision = (!applied.added_ids.is_empty()).then(|| self.current().revision);
+                }
+                // The engine's queue is full: the notes wait for the next collect.
+                Err(SessionError::Engine(_)) => {}
+                // Cannot happen after the checks above; never lose the notes silently.
+                Err(e) => {
+                    let lost = self.pending.len();
+                    self.pending.clear();
+                    out.stopped = Some(self.stop_recording(
+                        "error",
+                        dropped + lost,
+                        format!("Recording stopped: {e}"),
+                    ));
+                    return out;
+                }
+            }
+        }
+        if dropped > 0 {
+            let notes = if dropped == 1 {
+                "1 recorded note was"
+            } else {
+                &format!("{dropped} recorded notes were")
+            };
+            let why = if reason == "noteIds" {
+                "this pattern has used up its note ids (save and reopen the project to renumber them)"
+                    .to_owned()
+            } else {
+                format!(
+                    "this pattern holds {MAX_NOTES_PER_PATTERN} notes, the most a pattern can hold"
+                )
+            };
+            out.stopped = Some(self.stop_recording(
+                reason,
+                dropped,
+                format!("Recording stopped: {why}. {notes} not added."),
+            ));
+        }
+        out
+    }
+
+    /// Switches recording off because recorded notes did not fit, and says so.
+    fn stop_recording(
+        &mut self,
+        reason: &'static str,
+        dropped: usize,
+        message: String,
+    ) -> RecordingStopped {
+        // If the engine's queue is full the switch fails; later notes are refused the same
+        // way and reported again, so the flag follows the person's view: off.
+        let _ = self.send(Command::SetRecording { on: false });
+        self.recording = false;
+        RecordingStopped {
+            reason,
+            dropped: u32::try_from(dropped).unwrap_or(u32::MAX),
+            message,
+        }
     }
 
     /// The decoded sample of a sampler channel, if it has one.
@@ -1209,12 +1317,11 @@ impl Session {
         decoded: HashMap<u32, Arc<SampleBuf>>,
     ) -> Result<(), SessionError> {
         let state = engine_state(&project, &decoded);
-        let taking = {
+        let mark = {
             let mut controller = lock(&self.controller);
-            let taking = self.recording && controller.live().playing;
             // `load_state` stops the transport, then swaps the graph: opening never plays.
             controller.load_state(state)?;
-            taking
+            controller.record_mark()
         };
         // The new notes get a revision above the old ones, so an edit made against the old
         // project reads as stale.
@@ -1223,9 +1330,10 @@ impl Session {
         for p in &mut project.patterns {
             p.revision = revision;
         }
-        // A take of the old project still running is not recorded into this one: its events
-        // up to the `End` the stop queues are dropped.
-        self.recorder.reset(taking);
+        // Nothing recorded for the old project reaches this one: every event before the new
+        // state's barrier is dropped, and so are the old project's notes still waiting.
+        self.recorder.reset_until_mark(mark);
+        self.pending.clear();
         self.project = project;
         self.files = files;
         self.decoded = decoded;

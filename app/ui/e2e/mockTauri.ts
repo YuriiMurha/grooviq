@@ -652,6 +652,16 @@ export function installMockTauri(seed: MockSeed): void {
     s.recordOpen.delete(key);
     const [channel, note] = key.split(":").map(Number);
     if (!s.project.channels.some((c) => c.id === channel)) return;
+    // At the note cap the note is not added: recording switches off and says so (session.rs).
+    if (s.project.pattern.notes.length >= MAX_NOTES) {
+      s.recording = false;
+      emit("recording-stopped", {
+        reason: "noteCap",
+        dropped: 1,
+        message: `Recording stopped: this pattern holds ${MAX_NOTES} notes, the most a pattern can hold. 1 recorded note was not added.`,
+      });
+      return;
+    }
     const loop = s.project.pattern.steps * STEP_TICKS;
     editPattern((pat) => {
       const n: MockNote = {

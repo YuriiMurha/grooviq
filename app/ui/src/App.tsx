@@ -4,6 +4,7 @@ import {
   autosaveStatus,
   errorText,
   onAutosaveFailed,
+  projectView,
   transportPlay,
   transportStop,
 } from "./api/project";
@@ -28,7 +29,7 @@ import { Meter } from "./meter/Meter";
 import { OutputChip } from "./output/OutputChip";
 import { OutputPopover } from "./output/OutputPopover";
 import { ProjectContext } from "./project/context";
-import { metronomeSet, recordSet } from "./api/notes";
+import { metronomeSet, onRecordingStopped, recordSet } from "./api/notes";
 import { Workspace } from "./layout/Workspace";
 import { ProjectMenu } from "./project/ProjectMenu";
 import { SaveState } from "./project/SaveState";
@@ -153,6 +154,16 @@ export function App() {
     const on = !recordingRef.current;
     void runCommand(() => recordSet(on));
   }, [runCommand]);
+  // Recording switched itself off (the pattern is full): say what was lost, show it off.
+  useEffect(() => {
+    const listening = onRecordingStopped((s) => {
+      toast(s.message, true);
+      void runCommand(projectView);
+    });
+    return () => {
+      listening.then((stop) => stop());
+    };
+  }, [runCommand, toast]);
   const toggleMetronome = () => {
     const on = !metronome;
     metronomeSet(on).then(() => setMetronome(on), (e: unknown) => toast(errorText(e), true));

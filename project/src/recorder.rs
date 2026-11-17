@@ -3,7 +3,9 @@
 //! The engine's recording tap ([`RecordEvent`]) gives each live note-on and note-off with the
 //! tick played since Play (`tick`, for lengths) and the loop position heard then (`position`,
 //! where the note goes). A [`Recorder`] pairs them per (channel, key), oldest note-on first,
-//! and closes every note still held at a take's `End`.
+//! and closes every note still held at a take's `End`. After a new engine state it ignores
+//! everything up to that state's barrier ([`RecordEvent::Mark`]): those events belong to the
+//! project before.
 
 use crate::notes::NewNote;
 use grooviq_engine::RecordEvent;
@@ -21,8 +23,9 @@ struct Held {
 #[derive(Debug, Default)]
 pub struct Recorder {
     held: HashMap<(u32, u8), VecDeque<Held>>,
-    /// Events of a take that belongs to a replaced project are dropped up to its `End`.
-    skip_to_end: bool,
+    /// Events are dropped until the mark with this id (the barrier of the state the engine
+    /// took last).
+    awaiting: Option<u32>,
 }
 
 impl Recorder {
@@ -35,11 +38,11 @@ impl Recorder {
         self.held.values().map(VecDeque::len).sum()
     }
 
-    /// Forgets every held note; with `skip_to_end`, also drops every event up to and including
-    /// the next `End` (the rest of a take that is no longer wanted).
-    pub fn reset(&mut self, skip_to_end: bool) {
+    /// Forgets every held note and drops every event up to and including the mark `id`
+    /// (`grooviq_engine::Controller::record_mark` after a new state).
+    pub fn reset_until_mark(&mut self, id: u32) {
         self.held.clear();
-        self.skip_to_end = skip_to_end;
+        self.awaiting = Some(id);
     }
 
     /// Takes `events` in order and returns the notes they completed, in the order they ended.
@@ -48,8 +51,10 @@ impl Recorder {
     pub fn feed(&mut self, events: &[RecordEvent]) -> Vec<NewNote> {
         let mut notes = Vec::new();
         for event in events {
-            if self.skip_to_end {
-                self.skip_to_end = !matches!(event, RecordEvent::End { .. });
+            if let Some(id) = self.awaiting {
+                if *event == (RecordEvent::Mark { id }) {
+                    self.awaiting = None;
+                }
                 continue;
             }
             match *event {
@@ -81,6 +86,8 @@ impl Recorder {
                         notes.push(note(channel.0, key, on, tick));
                     }
                 }
+                // Another state's barrier, already passed.
+                RecordEvent::Mark { .. } => {}
                 RecordEvent::End { tick, .. } => {
                     let mut ended: Vec<((u32, u8), Held)> = self
                         .held

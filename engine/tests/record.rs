@@ -388,6 +388,7 @@ fn the_time_signature_is_mirrored_and_outlives_a_new_state_and_a_rate_change() {
         ..state(Vec::new())
     };
     c.load_state(waltz).unwrap();
+    let mark = c.record_mark();
     assert_eq!(c.state().time_signature, (3, 4));
     c.send(Command::SetMetronome { on: true }).unwrap();
     c.send(Command::SetRecording { on: true }).unwrap();
@@ -417,7 +418,11 @@ fn the_time_signature_is_mirrored_and_outlives_a_new_state_and_a_rate_change() {
     p.process(&mut out[..128], 2);
     let mut taken = Vec::new();
     c.take_recorded(&mut taken);
-    assert_eq!(taken, [end(6_722)], "recording too");
+    assert_eq!(
+        taken,
+        [RecordEvent::Mark { id: mark }, end(6_722)],
+        "recording too"
+    );
 }
 
 /// The tick each note-on at the given frames was recorded at.
@@ -426,6 +431,7 @@ fn ticks(events: &[RecordEvent]) -> Vec<u64> {
         .iter()
         .map(|e| match e {
             RecordEvent::Note { tick, .. } | RecordEvent::End { tick, .. } => *tick,
+            RecordEvent::Mark { .. } => unreachable!("no new state in these tests"),
         })
         .collect()
 }
@@ -436,6 +442,7 @@ fn positions(events: &[RecordEvent]) -> Vec<u32> {
         .iter()
         .map(|e| match e {
             RecordEvent::Note { position, .. } | RecordEvent::End { position, .. } => *position,
+            RecordEvent::Mark { .. } => unreachable!("no new state in these tests"),
         })
         .collect()
 }
@@ -641,4 +648,77 @@ fn stop_and_all_sound_off_end_a_click_within_1_ms() {
             );
         }
     }
+}
+
+/// Every new state is a recording barrier: what was recorded before it comes out first, then a
+/// numbered `Mark`, whether a take was running or not.
+#[test]
+fn a_new_state_queues_a_mark_behind_what_was_recorded_before_it() {
+    let mut r = Rig::new();
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    r.at(30_000, note(true));
+    r.run_to(32_000);
+    r.c.load_state(state(vec![channel(1, &dc(0.5))])).unwrap();
+    let first = r.c.record_mark();
+    r.run_to(34_000);
+    let got = r.take();
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(got[0], recorded(true, 1_200));
+    assert!(matches!(got[1], RecordEvent::End { .. }), "{got:?}");
+    assert_eq!(got[2], RecordEvent::Mark { id: first });
+
+    // Stopped and not recording: still a mark, with the next number.
+    r.c.send(Command::SetRecording { on: false }).unwrap();
+    r.c.load_state(state(vec![channel(1, &dc(0.5))])).unwrap();
+    let second = r.c.record_mark();
+    assert_ne!(second, first);
+    r.run_to(36_000);
+    assert_eq!(r.take(), [RecordEvent::Mark { id: second }]);
+}
+
+/// A mark that finds the queue full waits and is retried every block, and nothing recorded
+/// after it can overtake it: the order of the barrier holds.
+#[test]
+fn a_mark_that_finds_the_queue_full_goes_out_first_later() {
+    let mut r = Rig::new();
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    let mut sent = 0;
+    while sent < RECORD_CAPACITY {
+        for _ in 0..100.min(RECORD_CAPACITY - sent) {
+            r.c.send(note(sent % 2 == 0)).unwrap();
+            sent += 1;
+        }
+        let to = r.at + 64;
+        r.run_to(to);
+    }
+    // Full: the stop's End is dropped (counted), the mark waits; a note in the same block
+    // after it is dropped rather than going ahead of it.
+    r.c.load_state(state(vec![channel(1, &dc(0.5))])).unwrap();
+    let mark = r.c.record_mark();
+    r.c.send(Command::Play).unwrap();
+    r.c.send(note(true)).unwrap();
+    let to = r.at + 64;
+    r.run_to(to);
+    let dropped = r.c.record_dropped();
+    let got = r.take();
+    assert_eq!(got.len(), RECORD_CAPACITY);
+    assert!(!got.contains(&RecordEvent::Mark { id: mark }));
+    // Room again: the mark goes out at the next block, before the next note.
+    r.c.send(note(false)).unwrap();
+    let to = r.at + 64;
+    r.run_to(to);
+    let got = r.take();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(got[0], RecordEvent::Mark { id: mark });
+    assert!(
+        matches!(got[1], RecordEvent::Note { on: false, .. }),
+        "{got:?}"
+    );
+    assert_eq!(
+        r.c.record_dropped(),
+        dropped,
+        "the mark itself is never counted lost"
+    );
 }

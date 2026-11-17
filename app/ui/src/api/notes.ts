@@ -132,6 +132,19 @@ export const channelWaveform = (channel: number, points: number) =>
 export const recordSet = (on: boolean) => invoke<ProjectView>("record_set", { on });
 export const metronomeSet = (on: boolean) => invoke<null>("metronome_set", { on });
 
+/** Recording switched itself off because recorded notes did not fit in the pattern. */
+export interface RecordingStopped {
+  reason: "noteCap" | "noteIds" | "error";
+  /** Recorded notes that were not added. */
+  dropped: number;
+  /** A sentence to show. */
+  message: string;
+}
+
+export function onRecordingStopped(handler: (stopped: RecordingStopped) => void): Promise<UnlistenFn> {
+  return listen<RecordingStopped>("recording-stopped", (e) => handler(e.payload));
+}
+
 /** The notes changed outside an edit the UI made (recording, ...): the new revision. */
 export function onNotesChanged(handler: (revision: number) => void): Promise<UnlistenFn> {
   return listen<number>("notes-changed", (e) => handler(e.payload));
