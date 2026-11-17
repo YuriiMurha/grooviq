@@ -612,8 +612,10 @@ export function installMockTauri(seed: MockSeed): void {
         if (has(id)) pat.notes = pat.notes.filter((n) => n.id !== id);
         else ignored.push(id);
       }
+      // By id, so a 10,000-note move is not 10,000 scans.
+      const slots = new Map(pat.notes.map((n, i) => [n.id, i]));
       for (const u of e.update) {
-        const i = pat.notes.findIndex((n) => n.id === u.id);
+        const i = slots.get(u.id) ?? -1;
         if (i < 0) {
           ignored.push(u.id);
           continue;

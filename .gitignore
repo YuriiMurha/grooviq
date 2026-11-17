@@ -8,4 +8,5 @@ tests/golden/out/
 *.local
 .superpowers/
 app/ui/e2e-results/
+app/ui/dist-e2e/
 app/ui/playwright-report/

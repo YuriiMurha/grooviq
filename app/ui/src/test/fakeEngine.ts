@@ -1,4 +1,4 @@
-import { encodeNotes } from "../api/notes";
+import { encodeNotes, type NotesAck, type NotesEdit, type WireNote } from "../api/notes";
 import type { ChannelView, Edit, ProjectView } from "../api/project";
 
 type Args = Record<string, unknown> | undefined;
@@ -13,6 +13,8 @@ export interface Call {
 export function createFakeEngine(initial: ProjectView) {
   let view: ProjectView = structuredClone(initial);
   const calls: Call[] = [];
+  /** The pattern's notes (`pattern_notes`, `notes_edit`), empty unless a test sets them. */
+  let notes: WireNote[] = [];
   /** Paths `channel_add` refuses, with the loader's sentence. */
   const refuse = new Map<string, string>();
 
@@ -53,6 +55,27 @@ export function createFakeEngine(initial: ProjectView) {
       default:
         break;
     }
+  }
+
+  /** Deletes, then updates, then adds, by id (Task 7's contract, without clamping). */
+  function editNotes(edit: NotesEdit): NotesAck {
+    const reload = edit.baseRevision !== view.notesRevision;
+    const byId = new Map(notes.map((n) => [n.id, n]));
+    const ignoredIds: number[] = [];
+    for (const id of edit.delete) if (!byId.delete(id)) ignoredIds.push(id);
+    for (const u of edit.update) {
+      if (byId.has(u.id)) byId.set(u.id, { ...u });
+      else ignoredIds.push(u.id);
+    }
+    let next = Math.max(0, ...byId.keys()) + 1;
+    const addedIds = edit.add.map((a) => {
+      const id = next++;
+      byId.set(id, { ...a, id });
+      return id;
+    });
+    notes = [...byId.values()];
+    view = { ...view, dirty: true, notesRevision: view.notesRevision + 1 };
+    return { revision: view.notesRevision, addedIds, ignoredIds, reload, view: structuredClone(view) };
   }
 
   async function invoke(cmd: string, args?: Args): Promise<unknown> {
@@ -104,7 +127,9 @@ export function createFakeEngine(initial: ProjectView) {
       case "channel_note":
         return null;
       case "pattern_notes":
-        return encodeNotes(view.notesRevision, []);
+        return encodeNotes(view.notesRevision, notes);
+      case "notes_edit":
+        return editNotes(args?.edit as NotesEdit);
       default:
         throw new Error(`no fake for ${cmd}`);
     }
@@ -116,6 +141,12 @@ export function createFakeEngine(initial: ProjectView) {
     refuse,
     get view() {
       return view;
+    },
+    get notes() {
+      return notes;
+    },
+    set notes(next: WireNote[]) {
+      notes = next;
     },
     /** The edits sent, in order. */
     edits: () => calls.filter((c) => c.cmd === "project_edit").map((c) => c.args?.edit as Edit),

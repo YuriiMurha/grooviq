@@ -5,7 +5,7 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", "node_modules", "e2e-results", "playwright-report"] },
+  { ignores: ["dist", "dist-e2e", "node_modules", "e2e-results", "playwright-report"] },
   {
     files: ["**/*.{ts,tsx}"],
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
@@ -23,7 +23,7 @@ export default tseslint.config(
   },
   {
     // Playwright: the specs run in Node; the mock shell is injected into the page.
-    files: ["playwright.config.ts", "e2e/**/*.ts"],
+    files: ["playwright.config.ts", "e2e/**/*.ts", "bench/**/*.bench.ts"],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
     rules: { "react-hooks/rules-of-hooks": "off" },
   },

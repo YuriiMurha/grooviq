@@ -133,7 +133,13 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }
                 </span>
               )}
             </header>
-            <PianoRoll channel={rollChannel?.id ?? null} />
+            <PianoRoll
+              channel={rollChannel?.id ?? null}
+              latest={latest}
+              sampleRate={sampleRate}
+              keyboard={keyboard}
+              onError={onError}
+            />
           </section>
         )}
         {!panels.rack && !panels.roll && (
