@@ -79,6 +79,16 @@ export interface Mock {
   eval: <T>(fn: string) => Promise<T>;
 }
 
+/** Workspace selects its initial channel in a mount effect. A subsequent frame lets the
+ * same effect flush finish installing keyboard shortcuts, including for an empty project. */
+export async function workspaceReady(page: Page) {
+  await expect(page.getByRole("region", { name: "Channel rack" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __grooviqMock: { calls: { cmd: string }[] } }).__grooviqMock.calls.some((c) => c.cmd === "channel_select"),
+  )).toBe(true);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+}
+
 /** The page with the mock shell loaded and every console error and page error collected. */
 export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; app: Page; mock: Mock }>({
   seed: [{}, { option: true }],
@@ -97,6 +107,7 @@ export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; app: Page
     await page.addInitScript(installMockTauri, { samplerParams: SAMPLER_PARAMS, synthParams: SYNTH_PARAMS, synthPresets: SYNTH_PRESETS, ...seed });
     await page.goto("/");
     await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
+    await workspaceReady(page);
     await use(page);
     expect(consoleErrors, "console errors and warnings").toEqual([]);
   },
