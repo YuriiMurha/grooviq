@@ -2047,6 +2047,33 @@ mod release_tests {
     use grooviq_engine::{EngineConfig, engine};
 
     #[test]
+    fn delivered_ui_releases_leave_no_ledger_entries() {
+        let (c, mut processor) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        let c = Arc::new(Mutex::new(c));
+        let mut s = Session::new(c.clone());
+        let ch = s
+            .add_synth_channel("Init", Instant::now())
+            .unwrap()
+            .channels[0]
+            .id;
+
+        let press = s.live_note_on(ch, 60, 0.8).unwrap();
+        assert_eq!(s.live_presses.lock().unwrap().len(), 1);
+        s.live_note_off(ch, 60, press).unwrap();
+        assert!(s.live_presses.lock().unwrap().is_empty());
+
+        let press = s.live_note_on(ch, 60, 0.8).unwrap();
+        while lock(&c).send(Command::SetMetronome { on: false }).is_ok() {}
+        s.live_note_off(ch, 60, press).unwrap();
+        assert_eq!(s.live_presses.lock().unwrap().len(), 1);
+        processor.process(&mut [0.0; 128], 2);
+        s.collect_recorded(&[], Instant::now());
+        assert!(s.live_presses.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn ui_release_debt_is_bounded_by_accepted_presses_and_channel_lifetime() {
         let (c, mut processor) = engine(EngineConfig {
             sample_rate: 48_000.0,
