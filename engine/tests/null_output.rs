@@ -85,27 +85,38 @@ fn the_silent_output_lists_and_opens_only_its_own_device() {
     assert_eq!(cpal_backends_created(), 0);
 }
 
+/// The frame counter, read between two clock reads: it was sampled somewhere inside
+/// `(before, after)`, which is all a separate `Instant::now()` can say about when.
+fn frames_between_clock_reads(c: &Mutex<Controller>) -> (Instant, u64, Instant) {
+    let before = Instant::now();
+    let frames = frames(c);
+    (before, frames, Instant::now())
+}
+
+/// A smoke check on the real thread and clock: the silent output renders, and never faster than
+/// the clock. The cadence itself (no drift, one block's wait after a stall, no catching up) is
+/// proved on a synthetic clock in `null_backend.rs`; a starved CI runner may lose any share
+/// of a wall-clock second, so no minimum speed is asserted here.
 #[test]
-fn the_silent_output_renders_in_real_time() {
+fn the_silent_output_renders_and_never_runs_ahead_of_the_clock() {
     let (out, c, _events) = start_silent();
     // Past the first callbacks, then one measured second.
     thread::sleep(Duration::from_millis(50));
-    let (f0, t0) = (frames(&c), Instant::now());
+    let (t0, f0, _) = frames_between_clock_reads(&c);
     thread::sleep(Duration::from_millis(1_000));
-    let (f1, t1) = (frames(&c), Instant::now());
+    let (_, f1, t1) = frames_between_clock_reads(&c);
     drop(out);
     let rendered = (f1 - f0) as f64;
-    let expected = t1.duration_since(t0).as_secs_f64() * 48_000.0;
-    // Paced, not as fast as it can: within two 256-frame callbacks of the clock on the fast
-    // side; on the slow side a busy CI runner may lose some.
+    // The counters were sampled inside their brackets, so the widest elapsed time is from the
+    // start of the first bracket to the end of the last: a descheduled test thread can only
+    // widen it. The backend renders at most the clock's frames plus two 256-frame callbacks
+    // (the one in flight and the one a late wake-up may owe) over any stretch.
+    let at_most = t1.duration_since(t0).as_secs_f64() * 48_000.0;
     assert!(
-        rendered <= expected + 512.0,
-        "{rendered} frames in {expected} frames' time: too fast"
+        rendered <= at_most + 512.0,
+        "{rendered} frames in at most {at_most} frames' time: too fast"
     );
-    assert!(
-        rendered >= expected * 0.7,
-        "{rendered} frames in {expected} frames' time: too slow"
-    );
+    assert!(rendered > 0.0, "nothing rendered in the measured second");
 }
 
 #[test]

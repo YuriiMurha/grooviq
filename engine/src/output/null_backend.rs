@@ -20,10 +20,6 @@ const RATE: u32 = 48_000;
 /// Frames per callback: the buffer the real backend asks a device for.
 const CALLBACK_FRAMES: usize = 256;
 const CHANNELS: usize = 2;
-/// Late by more than this (the machine slept, the thread was starved), the pacing starts
-/// afresh from now, as a device drops what it missed, instead of rendering the backlog in a
-/// burst.
-const MAX_LAG: Duration = Duration::from_millis(50);
 
 /// A backend with one silent device. It never lists or opens a real one.
 pub fn null_backend() -> Box<dyn OutputBackend> {
@@ -91,26 +87,92 @@ impl Drop for NullBackend {
 #[doc(hidden)]
 pub fn run_silent(slot: &AudioSlot, quit: &AtomicBool, rate: u32) {
     let mut buffer = [0f32; CALLBACK_FRAMES * CHANNELS];
-    let rate = u64::from(rate.max(1));
-    let mut start = Instant::now();
-    let mut frames: u64 = 0;
-    while !quit.load(Ordering::Acquire) {
+    pace(&mut SystemClock, rate, || {
+        if quit.load(Ordering::Acquire) {
+            return false;
+        }
         slot.process(&mut buffer, CHANNELS);
-        frames += CALLBACK_FRAMES as u64;
+        true
+    });
+}
+
+/// Time as the pacing loop sees it: tests drive the very same loop on a synthetic one.
+trait Clock {
+    fn now(&mut self) -> Instant;
+    fn sleep(&mut self, wait: Duration);
+}
+
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&mut self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&mut self, wait: Duration) {
+        thread::sleep(wait);
+    }
+}
+
+/// Calls `render` once per callback, until it returns false, waiting out each block's time.
+fn pace(clock: &mut impl Clock, rate: u32, mut render: impl FnMut() -> bool) {
+    let mut pacer = Pacer::new(clock.now(), rate);
+    while render() {
+        let wait = pacer.block_rendered(clock.now());
+        if !wait.is_zero() {
+            clock.sleep(wait);
+        }
+    }
+}
+
+/// The pace of the callbacks: an absolute schedule, block n ends at `start + n x block
+/// duration`, so sleeps that overshoot never add up to drift.
+///
+/// A device does not catch up. A callback that is late by more than one block (the machine
+/// slept, the thread was starved) has missed its slot: the backlog is dropped and the schedule
+/// restarts from now, so the transport, the playhead and the meters never run ahead of the
+/// clock. Within one block a late wake-up is made up by a shorter wait, which keeps the pace
+/// exact. So over any stretch the callbacks render at most the clock's frames plus two blocks:
+/// the one in flight and the one a late wake-up may owe.
+struct Pacer {
+    start: Instant,
+    /// Frames rendered since `start`.
+    frames: u64,
+    rate: u64,
+}
+
+impl Pacer {
+    fn new(now: Instant, rate: u32) -> Self {
+        Pacer {
+            start: now,
+            frames: 0,
+            rate: u64::from(rate.max(1)),
+        }
+    }
+
+    /// One block was just rendered and the clock reads `now`: how long to wait before the next.
+    fn block_rendered(&mut self, now: Instant) -> Duration {
+        self.frames += CALLBACK_FRAMES as u64;
         // Whole seconds move into `start`, so `frames` stays small however long it runs.
-        if frames >= rate {
-            start += Duration::from_secs(1);
-            frames -= rate;
+        if self.frames >= self.rate {
+            self.start += Duration::from_secs(1);
+            self.frames -= self.rate;
         }
         // From the frame count, so the pace never drifts.
-        let due = start + Duration::from_nanos(frames * 1_000_000_000 / rate);
-        let now = Instant::now();
-        if now > due + MAX_LAG {
-            start = now;
-            frames = 0;
-        } else if due > now {
-            thread::sleep(due - now);
+        let due = self.start + Duration::from_nanos(self.frames * 1_000_000_000 / self.rate);
+        if now > due {
+            // The block just rendered ran past its whole slot, which is one block of lateness:
+            // it stands as the first of the new schedule.
+            self.start = now;
+            self.frames = CALLBACK_FRAMES as u64;
+            return self.block();
         }
+        due.saturating_duration_since(now)
+    }
+
+    /// How long one callback's frames last.
+    fn block(&self) -> Duration {
+        Duration::from_nanos(CALLBACK_FRAMES as u64 * 1_000_000_000 / self.rate)
     }
 }
 
@@ -118,6 +180,8 @@ pub fn run_silent(slot: &AudioSlot, quit: &AtomicBool, rate: u32) {
 mod tests {
     use super::*;
     use crate::{EngineConfig, LiveShared, engine};
+    use std::cell::Cell;
+    use std::rc::Rc;
     use std::time::Instant;
 
     /// A slot that keeps its processor whatever the backend does, so any callback after
@@ -145,6 +209,175 @@ mod tests {
         let before = live.snapshot().frames;
         thread::sleep(wait);
         live.snapshot().frames - before
+    }
+
+    /// Where block `n` falls on the ideal schedule, from the frame count as the pacer does.
+    fn ideal(n: u64) -> Duration {
+        Duration::from_nanos(n * CALLBACK_FRAMES as u64 * 1_000_000_000 / 48_000)
+    }
+
+    /// A clock that only moves when the loop sleeps or the test says the thread was late.
+    struct FakeClock(Rc<Cell<Instant>>);
+
+    impl Clock for FakeClock {
+        fn now(&mut self) -> Instant {
+            self.0.get()
+        }
+
+        fn sleep(&mut self, wait: Duration) {
+            self.0.set(self.0.get() + wait);
+        }
+    }
+
+    /// When each of `blocks` callbacks renders, as offsets from the start, when the production
+    /// pacing loop runs them on a synthetic clock and `late(n)` is how long past its wait the
+    /// thread wakes for block n (a stall, a slow wake-up). No real time passes.
+    fn render_times(blocks: usize, mut late: impl FnMut(usize) -> Duration) -> Vec<Duration> {
+        let base = Instant::now();
+        let now = Rc::new(Cell::new(base));
+        let mut times = Vec::with_capacity(blocks);
+        pace(&mut FakeClock(Rc::clone(&now)), 48_000, || {
+            let n = times.len();
+            if n == blocks {
+                return false;
+            }
+            now.set(now.get() + late(n));
+            times.push(now.get() - base);
+            true
+        });
+        times
+    }
+
+    /// The pacing guarantee: however the thread is delayed, no stretch of callbacks renders more
+    /// than the clock allows, plus the one callback in flight and the one a late wake-up may
+    /// owe. Catching a stall up in a burst would break it.
+    fn assert_never_ahead_of_the_clock(times: &[Duration]) {
+        let slack = 2.0 * CALLBACK_FRAMES as f64;
+        for (i, first) in times.iter().enumerate() {
+            for (j, last) in times.iter().enumerate().skip(i) {
+                let rendered = ((j - i + 1) * CALLBACK_FRAMES) as f64;
+                let allowed = (*last - *first).as_secs_f64() * 48_000.0 + slack;
+                assert!(
+                    rendered <= allowed + 1.0,
+                    "blocks {i}..={j}: {rendered} frames in {allowed} frames' time"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_stall_is_dropped_and_not_caught_up_in_a_burst() {
+        let times = render_times(400, |n| {
+            if n == 100 {
+                Duration::from_millis(40)
+            } else {
+                Duration::ZERO
+            }
+        });
+        assert_never_ahead_of_the_clock(&times);
+    }
+
+    #[test]
+    fn random_stalls_never_put_it_ahead_of_the_clock() {
+        // A fixed pseudo-random delay mix: mostly a sub-millisecond wake-up, now and then a
+        // few ms, rarely a stall of up to 120 ms.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let times = render_times(1_500, |_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let micros = match seed % 100 {
+                0..=79 => seed >> 8 & 0x3ff,
+                80..=94 => seed >> 8 & 0x1fff,
+                _ => seed >> 8 & 0x1_d4bf,
+            };
+            Duration::from_micros(micros)
+        });
+        assert_never_ahead_of_the_clock(&times);
+    }
+
+    #[test]
+    fn wake_ups_a_little_late_never_make_the_pace_drift() {
+        // Every wake-up up to 1 ms late, 1 900 blocks (10 s): the schedule is absolute, so block
+        // n still lands within that 1 ms of n x one block. A sleep of "one block" each time
+        // would be about a second behind by now.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let times = render_times(1_900, |_| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            Duration::from_micros((seed >> 54) % 1_000)
+        });
+        for (n, t) in times.iter().enumerate() {
+            let on_time = ideal(n as u64);
+            assert!(
+                *t <= on_time + Duration::from_millis(1),
+                "block {n} at {t:?}, schedule says {on_time:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn on_time_wake_ups_land_exactly_on_the_schedule_and_never_wait_longer() {
+        // 12 s, past the seconds rollover: block n renders at exactly n x one block, so a
+        // minimum sleep, or a wait of more than the schedule asks, shows at once.
+        let times = render_times(2_250, |_| Duration::ZERO);
+        for (n, t) in times.iter().enumerate() {
+            assert_eq!(*t, ideal(n as u64), "block {n}");
+        }
+    }
+
+    #[test]
+    fn a_run_of_days_stays_on_the_schedule() {
+        // 5 days of callbacks, 81 million: the frame count in nanoseconds would overflow a u64
+        // after about 4.4 days if whole seconds were not moved out of it.
+        const BLOCKS: u128 = 81_000_000;
+        let base = Instant::now();
+        let now = Rc::new(Cell::new(base));
+        let mut rendered = 0u128;
+        pace(&mut FakeClock(Rc::clone(&now)), 48_000, || {
+            rendered += 1;
+            rendered <= BLOCKS
+        });
+        let on_time = BLOCKS * CALLBACK_FRAMES as u128 * 1_000_000_000 / 48_000;
+        assert_eq!((now.get() - base).as_nanos(), on_time);
+    }
+
+    #[test]
+    fn a_dropped_stall_waits_one_block_and_the_new_schedule_runs_to_the_next() {
+        // Stalls well over a block, alone, back to back, and one 300 blocks on (so the
+        // schedule restarted by the stall rolls over a second before the next).
+        let stalls = [(100, 40), (130, 12), (131, 90), (132, 7), (440, 25)];
+        let times = render_times(700, |n| {
+            Duration::from_millis(stalls.iter().find(|s| s.0 == n).map_or(0, |s| s.1))
+        });
+        for pair in stalls.windows(2) {
+            let (from, to) = (pair[0].0, pair[1].0);
+            for n in from..to {
+                // Exactly the restarted schedule: one block's wait after the stall, then the
+                // absolute pace. Waiting 100 blocks after a stall would fail the first step.
+                assert_eq!(
+                    times[n] - times[from],
+                    ideal((n - from) as u64),
+                    "block {n} after the stall at {from}"
+                );
+            }
+        }
+        // And after the last stall, to the end: more than a second of it.
+        for n in 440..700 {
+            assert_eq!(times[n] - times[440], ideal((n - 440) as u64), "block {n}");
+        }
+    }
+
+    #[test]
+    fn a_short_lag_is_absorbed_by_the_schedule() {
+        let times = render_times(200, |n| {
+            if n == 50 {
+                Duration::from_millis(3)
+            } else {
+                Duration::ZERO
+            }
+        });
+        // The 3 ms is made up by the next wait: nothing is dropped, and block 60 is on time.
+        assert_eq!(times[60], ideal(60));
     }
 
     #[test]
