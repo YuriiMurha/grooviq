@@ -16,8 +16,8 @@ export class Press {
     );
   }
 
-  /** Sends `off` for the press once it is known. Best effort: a failed release is dropped (the
-   * channel may just have been removed, which ends its notes anyway). */
+  /** Sends `off` for the press once it is known. The backend retains queue-full releases
+   * until delivery. Other failures can mean the channel was removed, ending its notes. */
   release(off: (press: number) => Promise<unknown>): Promise<void> {
     return this.press.then(async (press) => {
       if (press === null) return;
