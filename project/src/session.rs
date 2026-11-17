@@ -480,8 +480,9 @@ pub struct Session {
     /// Recording is switched on (it takes notes while the transport plays).
     recording: bool,
     /// Recorded notes completed but not in the pattern yet: the engine did not take the
-    /// pattern (its queue was full). Retried on the next collect.
-    pending: Vec<NewNote>,
+    /// pattern (its queue was full). Retried on the next collect. Each with its take (see
+    /// `grooviq_engine::RecordEvent::Note`).
+    pending: Vec<(u32, NewNote)>,
     /// Recording switched itself off (the pattern was full) but the engine's queue refused the
     /// switch: it is sent again, with its barrier, on every collect until the queue takes it.
     /// The recorder refuses notes from the decision until that barrier is read. Turning
@@ -490,9 +491,6 @@ pub struct Session {
     owed_disarm: bool,
     /// The current pattern's note changes, for undo and redo.
     history: NoteHistory,
-    /// How many of `pending` belong to a take that ended (the engine's `End` came after them):
-    /// they join that take's undo step, which then closes; the rest start the next one.
-    take_end: Option<usize>,
 }
 
 /// What committing waiting recorded notes did.
@@ -539,7 +537,6 @@ impl Session {
             pending: Vec::new(),
             owed_disarm: false,
             history: NoteHistory::default(),
-            take_end: None,
         };
         // A fresh queue always has room for a whole state.
         let synced = session.sync_engine();
@@ -959,14 +956,14 @@ impl Session {
         &mut self,
         change: impl FnOnce(&mut Pattern) -> Result<(), SessionError>,
     ) -> Result<bool, SessionError> {
-        self.edit_pattern_as(false, change)
+        self.edit_pattern_as(None, change)
     }
 
-    /// [`Self::edit_pattern`]; with `take`, the note change is a recorded take's commit and joins
-    /// the take's undo step while the take runs.
+    /// [`Self::edit_pattern`]; with `take`, the note change is a commit of that recorded take
+    /// and joins the take's undo step while it is open (see [`NoteHistory::record`]).
     fn edit_pattern_as(
         &mut self,
-        take: bool,
+        take: Option<u32>,
         change: impl FnOnce(&mut Pattern) -> Result<(), SessionError>,
     ) -> Result<bool, SessionError> {
         let mut pattern = self.current().clone();
@@ -979,10 +976,11 @@ impl Session {
             pattern.revision = pattern.revision.wrapping_add(1);
         }
         self.keep_pattern(pattern)?;
-        match notes {
-            Some(notes) if take => self.history.record(notes),
-            Some(notes) => self.history.push(notes),
-            None => {}
+        if let Some(notes) = notes {
+            match take {
+                Some(take) => self.history.record(notes, take),
+                None => self.history.push(notes),
+            }
         }
         Ok(true)
     }
@@ -1177,7 +1175,7 @@ impl Session {
     /// nothing (only unknown ids) leaves the revision and the dirty state alone.
     pub fn edit_notes(&mut self, edit: NotesEdit, now: Instant) -> Result<NotesAck, SessionError> {
         let stale = edit.base_revision != self.current().revision;
-        let applied = self.apply_notes(&edit, false, now)?;
+        let applied = self.apply_notes(&edit, None, now)?;
         Ok(NotesAck {
             revision: self.current().revision,
             added_ids: applied.added_ids,
@@ -1191,7 +1189,7 @@ impl Session {
     fn apply_notes(
         &mut self,
         edit: &NotesEdit,
-        take: bool,
+        take: Option<u32>,
         now: Instant,
     ) -> Result<notes::Applied, SessionError> {
         let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
@@ -1290,35 +1288,10 @@ impl Session {
         if self.owed_disarm {
             self.send_disarm();
         }
-        // A take ends at the engine's `End` (recording off, the transport stopped): the notes
-        // completed up to the last one here, and those still waiting, belong to the take that
-        // ended; the ones after it to the next take. (Two takes ended within one poll share a
-        // step.)
-        match events
-            .iter()
-            .rposition(|e| matches!(e, RecordEvent::End { .. }))
-        {
-            Some(end) => {
-                let ended = self.recorder.feed(&events[..=end]);
-                self.pending.extend(ended);
-                self.take_end = Some(self.pending.len());
-                let next = self.recorder.feed(&events[end + 1..]);
-                self.pending.extend(next);
-            }
-            None => {
-                let fed = self.recorder.feed(events);
-                self.pending.extend(fed);
-            }
-        }
+        let fed = self.recorder.feed_takes(events);
+        self.pending.extend(fed);
         let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
-        if let Some(end) = self.take_end {
-            let kept = self.pending[..end]
-                .iter()
-                .filter(|n| channels.contains(&n.channel))
-                .count();
-            self.take_end = Some(kept);
-        }
-        self.pending.retain(|n| channels.contains(&n.channel));
+        self.pending.retain(|(_, n)| channels.contains(&n.channel));
         // What fits: the note cap, and the ids left (the used-up mark is never handed out).
         let pattern = self.current();
         let room = MAX_NOTES_PER_PATTERN.saturating_sub(pattern.notes.len());
@@ -1330,9 +1303,6 @@ impl Session {
         };
         let mut dropped = self.pending.len().saturating_sub(fits);
         self.pending.truncate(fits);
-        if let Some(end) = &mut self.take_end {
-            *end = (*end).min(fits);
-        }
 
         let mut out = Recorded::default();
         let mut error = None;
@@ -1390,8 +1360,6 @@ impl Session {
     /// engine's barrier behind the switch is read, every recorded note is refused and counted.
     fn disarm(&mut self) {
         self.recording = false;
-        // Every note it keeps is in: the take ends here.
-        self.history.end_take();
         self.recorder.refuse_until_mark(None);
         self.send_disarm();
     }
@@ -1408,45 +1376,40 @@ impl Session {
         }
     }
 
-    /// Adds the waiting recorded notes: those of a take that ended join its undo step, which
-    /// closes, and the rest go in as the running take's. A full engine queue keeps what is not
-    /// in yet for the next collect; any other refusal loses it and says how many (with the
-    /// revision of what did go in).
+    /// Adds the waiting recorded notes, take by take in the order they were played: each
+    /// run of one take is a commit of that take (one undo step per take, however many commits
+    /// it takes). A full engine queue keeps what is not in yet for the next collect; any other
+    /// refusal loses it and says how many (with the revision of what did go in).
     fn commit_pending(
         &mut self,
         now: Instant,
     ) -> Result<Option<u32>, (SessionError, usize, Option<u32>)> {
         let mut revision = None;
-        if let Some(end) = self.take_end {
-            match self
-                .commit_first(end, now)
-                .map_err(|(e, lost)| (e, lost, None))?
-            {
-                Commit::Busy => return Ok(None),
-                Commit::Done(r) => revision = r,
+        while let Some(&(take, _)) = self.pending.first() {
+            let run = self.pending.iter().take_while(|(t, _)| *t == take).count();
+            match self.commit_first(run, take, now) {
+                Ok(Commit::Done(r)) => revision = r.or(revision),
+                Ok(Commit::Busy) => break,
+                Err((e, lost)) => return Err((e, lost, revision)),
             }
-            self.take_end = None;
-            self.history.end_take();
         }
-        match self.commit_first(self.pending.len(), now) {
-            Ok(Commit::Done(r)) => Ok(r.or(revision)),
-            Ok(Commit::Busy) => Ok(revision),
-            Err((e, lost)) => Err((e, lost, revision)),
-        }
+        Ok(revision)
     }
 
-    /// Adds the first `n` waiting recorded notes as one edit, a recorded take's commit.
-    fn commit_first(&mut self, n: usize, now: Instant) -> Result<Commit, (SessionError, usize)> {
-        if n == 0 {
-            return Ok(Commit::Done(None));
-        }
+    /// Adds the first `n` waiting recorded notes, all of `take`, as one edit.
+    fn commit_first(
+        &mut self,
+        n: usize,
+        take: u32,
+        now: Instant,
+    ) -> Result<Commit, (SessionError, usize)> {
         let edit = NotesEdit {
             base_revision: self.current().revision,
-            add: self.pending[..n].to_vec(),
+            add: self.pending[..n].iter().map(|(_, note)| *note).collect(),
             update: Vec::new(),
             delete: Vec::new(),
         };
-        match self.apply_notes(&edit, true, now) {
+        match self.apply_notes(&edit, Some(take), now) {
             Ok(applied) => {
                 self.pending.drain(..n);
                 Ok(Commit::Done(
@@ -1457,7 +1420,6 @@ impl Session {
             Err(e) => {
                 let lost = self.pending.len();
                 self.pending.clear();
-                self.take_end = None;
                 Err((e, lost))
             }
         }
@@ -1551,7 +1513,6 @@ impl Session {
             self.recorder.await_mark(mark);
         }
         self.pending.clear();
-        self.take_end = None;
         self.history.clear();
         self.project = project;
         self.files = files;

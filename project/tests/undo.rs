@@ -4,7 +4,7 @@
 
 use grooviq_engine::{AudioProcessor, Command, Controller, EngineConfig, RecordEvent, engine};
 use grooviq_project::notes::{NewNote, NotesAck, NotesEdit};
-use grooviq_project::session::{Edit, Session, SessionError};
+use grooviq_project::session::{Edit, Recorded, Session, SessionError};
 use grooviq_project::undo::MAX_UNDO;
 use grooviq_project::{
     Loaded, MAX_NOTES_PER_PATTERN, Note, Project, compile_pattern, decode_samples,
@@ -797,4 +797,141 @@ fn a_take_that_grew_the_pattern_undoes_to_its_starting_length() {
     );
     let ack = redo(&mut session);
     assert_eq!(ack.view.pattern.steps, 32);
+}
+
+/// Plays `key` for a few blocks without collecting.
+fn play_key(session: &Session, processor: &mut AudioProcessor, channel: u32, key: u8) {
+    session.live_note(channel, key, 0.8, true).unwrap();
+    render(processor, 2);
+    session.live_note(channel, key, 0.0, false).unwrap();
+    render(processor, 2);
+}
+
+/// Collects everything the engine recorded so far, in one poll.
+fn collect(session: &mut Session, controller: &Mutex<Controller>) -> Recorded {
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    session.collect_recorded(&events, Instant::now())
+}
+
+#[test]
+fn two_ended_takes_in_one_poll_are_two_steps() {
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    // Two whole takes, and the start of a third, before the recorder polls once.
+    play_key(&session, &mut processor, ch, 70);
+    session.set_recording(false).unwrap();
+    session.set_recording(true).unwrap();
+    play_key(&session, &mut processor, ch, 71);
+    session.set_recording(false).unwrap();
+    session.set_recording(true).unwrap();
+    play_key(&session, &mut processor, ch, 72);
+    render(&mut processor, 2);
+    collect(&mut session, &controller).revision.unwrap();
+    assert_eq!(keys(&session), vec![60, 62, 64, 70, 71, 72]);
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64, 70, 71]);
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64, 70]);
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64]);
+}
+
+#[test]
+fn a_take_whose_end_was_dropped_is_still_its_own_step() {
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    // Fill the engine's recording queue without a poll, so the take's End finds it full.
+    let mut played = 0;
+    while controller.lock().unwrap().record_dropped() == 0 {
+        play_key(&session, &mut processor, ch, 30 + (played % 20) as u8);
+        played += 1;
+        assert!(played < 2_000, "the recording queue never filled");
+    }
+    session.set_recording(false).unwrap();
+    render(&mut processor, 2);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    assert!(
+        !events.iter().any(|e| matches!(e, RecordEvent::End { .. })),
+        "the End was dropped"
+    );
+    // The next take, collected in the same poll as the first.
+    session.set_recording(true).unwrap();
+    play_key(&session, &mut processor, ch, 90);
+    render(&mut processor, 2);
+    controller.lock().unwrap().take_recorded(&mut events);
+    session
+        .collect_recorded(&events, Instant::now())
+        .revision
+        .unwrap();
+    assert!(keys(&session).contains(&90));
+    undo(&mut session);
+    assert!(!keys(&session).contains(&90));
+    assert!(keys(&session).len() > 3, "the first take stays");
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64]);
+}
+
+#[test]
+fn a_take_cut_by_the_note_cap_under_a_busy_queue_is_one_step() {
+    let (mut session, controller, mut processor, ch, _) = three_notes();
+    // Two notes short of the cap.
+    let fill: Vec<NewNote> = (0..(MAX_NOTES_PER_PATTERN - 5) as u32)
+        .map(|i| NewNote {
+            channel: ch,
+            tick: (i % 3_840) + 10,
+            length: 1,
+            key: 20,
+            velocity: 0.5,
+            slide: false,
+        })
+        .collect();
+    add_notes(&mut session, fill);
+    let before = notes(&session).len();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    // B fits, C does not; the engine's queue is full when they are collected.
+    play_key(&session, &mut processor, ch, 71);
+    play_key(&session, &mut processor, ch, 72);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    while controller
+        .lock()
+        .unwrap()
+        .send(Command::SetTempo { bpm: 120.0 })
+        .is_ok()
+    {}
+    let got = session.collect_recorded(&events, Instant::now());
+    assert_eq!(got.stopped.map(|s| s.reason), Some("noteCap"));
+    assert_eq!(notes(&session).len(), before + 1, "B waits for the engine");
+    // The queue drains; B goes in, with A.
+    render(&mut processor, 4);
+    collect(&mut session, &controller).revision.unwrap();
+    assert_eq!(notes(&session).len(), MAX_NOTES_PER_PATTERN);
+    undo(&mut session);
+    assert_eq!(notes(&session).len(), before, "A and B are one take");
+}
+
+#[test]
+fn a_length_set_by_hand_mid_take_keeps_the_take_whole() {
+    let (mut session, controller, mut processor, ch, before) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
+    session
+        .apply(Edit::SetPatternLength { steps: 64 }, Instant::now())
+        .unwrap();
+    record_chord(&mut session, &controller, &mut processor, ch, &[71]).unwrap();
+    let recorded = notes(&session);
+
+    let ack = undo(&mut session);
+    assert_eq!(notes(&session), before, "the whole take");
+    assert_eq!(ack.view.pattern.steps, 64, "the length set by hand stays");
+    let ack = redo(&mut session);
+    assert_eq!(notes(&session), recorded);
+    assert_eq!(ack.view.pattern.steps, 64);
 }

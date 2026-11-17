@@ -12,6 +12,7 @@ fn on(channel: u32, key: u8, velocity: f32, tick: u64, position: u32) -> RecordE
         on: true,
         tick,
         position,
+        take: 0,
     }
 }
 
@@ -23,6 +24,7 @@ fn off(channel: u32, key: u8, tick: u64, position: u32) -> RecordEvent {
         on: false,
         tick,
         position,
+        take: 0,
     }
 }
 

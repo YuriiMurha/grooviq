@@ -57,12 +57,12 @@ export interface MockNote {
   slide?: boolean;
 }
 
-/** One step of the undo history: the pattern's notes and length before and after it. */
+/** One step of the undo history (undo.rs `NoteChange`): the changed notes before and after, by
+ * id, and the length change it made itself, if any. */
 interface NoteChange {
   before: MockNote[];
   after: MockNote[];
-  stepsBefore: number;
-  stepsAfter: number;
+  length: [number, number] | null;
 }
 
 export interface MockSeed {
@@ -107,8 +107,9 @@ export function installMockTauri(seed: MockSeed): void {
   ];
   const MAX_CHOKE = 16;
   const MAX_NOTES = 100_000;
-  /** undo.rs `MAX_UNDO`. */
+  /** undo.rs `MAX_UNDO` and `MAX_UNDO_NOTES`. */
   const MAX_UNDO = 200;
+  const MAX_UNDO_NOTES = 2_000_000;
   const NOTES_MAGIC = 0x314e5147;
   const SILENT_OUTPUT = {
     id: "null",
@@ -189,14 +190,16 @@ export function installMockTauri(seed: MockSeed): void {
     /** Live notes sounding now, "channel:key" -> velocity (`channel_note`). */
     live: new Map<string, number>(),
     /** Notes being recorded: "channel:key" -> where and how hard they started. */
-    recordOpen: new Map<string, { tick: number; velocity: number }>(),
+    recordOpen: new Map<string, { tick: number; velocity: number; take: number }>(),
+    /** The running take's number (engine/src/record.rs): one more after every take ends. */
+    take: 0,
     /** Live frames are held back (a stalled stream), as `pauseLive` sets. */
     livePaused: false,
     /** `channel_param_live` calls, last value per "channel:param". */
     liveParams: new Map<string, number>(),
     dialogCalls: [] as { kind: string; options: unknown }[],
     /** Note changes for undo and redo (undo.rs): the notes and length before and after each. */
-    history: { undo: [] as NoteChange[], redo: [] as NoteChange[], take: false },
+    history: { undo: [] as NoteChange[], redo: [] as NoteChange[], notes: 0, take: null as number | null },
   };
 
   // --- Events (the event plugin, as @tauri-apps/api/mocks implements it). ---
@@ -311,9 +314,9 @@ export function installMockTauri(seed: MockSeed): void {
     emit("notes-changed", s.notesRevision);
   };
   /** Changes the pattern; `true` if anything changed. A note change bumps the notes revision
-   * and is one step of the undo history (undo.rs), which forgets what redo could make. With
-   * `take`, it is a recorded note: it joins the running take's step (until the take ends). */
-  const editPattern = (change: (p: Project["pattern"]) => void, take = false) => {
+   * and is one step of the undo history (undo.rs). With `take`, it is a note recorded in that
+   * take: it joins the take's open step. */
+  const editPattern = (change: (p: Project["pattern"]) => void, take: number | null = null) => {
     const before = JSON.stringify(s.project.pattern);
     const notesBefore = JSON.stringify(s.project.pattern.notes);
     const prev = s.project.pattern;
@@ -322,32 +325,86 @@ export function installMockTauri(seed: MockSeed): void {
     if (JSON.stringify(next) === before) return false;
     s.project.pattern = next;
     if (JSON.stringify(next.notes) !== notesBefore) {
-      const top = s.history.undo[s.history.undo.length - 1];
-      if (take && s.history.take && top) {
-        top.after = clone(next.notes);
-        top.stepsAfter = next.steps;
-      } else {
-        s.history.undo.push({ before: clone(prev.notes), after: clone(next.notes), stepsBefore: prev.steps, stepsAfter: next.steps });
-        if (s.history.undo.length > MAX_UNDO) s.history.undo.shift();
-        s.history.redo = [];
-      }
-      s.history.take = take;
+      const step = noteChange(prev, next);
+      if (take === null) pushHistory(step);
+      else recordHistory(step, take);
       notesChanged();
     }
     return true;
   };
-  /** Undo or redo (session.rs `undo_notes`): the notes go back, the length too unless it was set
-   * by hand since; the project is changed and the UI fetches the notes again. */
+  const sameNote = (a: MockNote, b: MockNote) =>
+    a.channel === b.channel && a.tick === b.tick && a.length === b.length && a.key === b.key &&
+    a.velocity === b.velocity && Boolean(a.slide) === Boolean(b.slide);
+  /** undo.rs `NoteChange::between`. */
+  const noteChange = (old: Project["pattern"], next: Project["pattern"]): NoteChange => {
+    const was = new Map(old.notes.map((n) => [n.id, n]));
+    const before: MockNote[] = [];
+    const after: MockNote[] = [];
+    for (const n of next.notes) {
+      const o = was.get(n.id);
+      was.delete(n.id);
+      if (!o) after.push(clone(n));
+      else if (!sameNote(o, n)) {
+        before.push(clone(o));
+        after.push(clone(n));
+      }
+    }
+    for (const o of was.values()) before.push(clone(o));
+    return { before, after, length: old.steps !== next.steps ? [old.steps, next.steps] : null };
+  };
+  const sizeOf = (c: NoteChange) => c.before.length + c.after.length;
+  /** undo.rs `NoteHistory::trim`: the oldest steps go past the step count or the note budget. */
+  const trimHistory = () => {
+    const h = s.history;
+    while (h.undo.length > MAX_UNDO || (h.notes > MAX_UNDO_NOTES && h.undo.length > 1)) {
+      h.notes -= sizeOf(h.undo.shift()!);
+    }
+  };
+  /** undo.rs `NoteHistory::push`. */
+  const pushHistory = (c: NoteChange) => {
+    const h = s.history;
+    h.take = null;
+    for (const r of h.redo) h.notes -= sizeOf(r);
+    h.redo = [];
+    h.notes += sizeOf(c);
+    h.undo.push(c);
+    trimHistory();
+  };
+  /** undo.rs `NoteHistory::record`: a take's notes join its open step. */
+  const recordHistory = (c: NoteChange, take: number) => {
+    const h = s.history;
+    const top = h.undo[h.undo.length - 1];
+    if (top && h.take === take && c.before.length === 0) {
+      let newest = -1;
+      for (const n of top.before) newest = Math.max(newest, n.id ?? 0);
+      for (const n of top.after) newest = Math.max(newest, n.id ?? 0);
+      if (c.after.every((n) => (n.id ?? 0) > newest)) {
+        top.after.push(...c.after);
+        if (c.length) top.length = top.length && top.length[1] === c.length[0] ? [top.length[0], c.length[1]] : c.length;
+        h.notes += sizeOf(c);
+        trimHistory();
+        return;
+      }
+    }
+    pushHistory(c);
+    h.take = take;
+  };
+  /** Undo or redo (session.rs `undo_notes`): the notes go back by id, the length too if the step
+   * moved it and nobody did since; the project is changed and the UI fetches the notes again. */
   const stepHistory = (undo: boolean) => {
-    const from = undo ? s.history.undo : s.history.redo;
-    const change = from.pop();
+    const h = s.history;
+    const change = (undo ? h.undo : h.redo).pop();
     if (!change) return null;
     const pat = s.project.pattern;
-    pat.notes = clone(undo ? change.before : change.after);
-    const [was, to] = undo ? [change.stepsAfter, change.stepsBefore] : [change.stepsBefore, change.stepsAfter];
-    if (pat.steps === was) pat.steps = to;
-    (undo ? s.history.redo : s.history.undo).push(change);
-    s.history.take = false;
+    const [out, put] = undo ? [change.after, change.before] : [change.before, change.after];
+    const ids = new Set([...out, ...put].map((n) => n.id));
+    pat.notes = [...pat.notes.filter((n) => !ids.has(n.id)), ...clone(put)].sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+    if (change.length) {
+      const [from, to] = undo ? [change.length[1], change.length[0]] : change.length;
+      if (pat.steps === from) pat.steps = to;
+    }
+    (undo ? h.redo : h.undo).push(change);
+    h.take = null;
     notesChanged();
     changed();
     return { revision: s.notesRevision, addedIds: [], ignoredIds: [], reload: true, view: view() };
@@ -355,7 +412,8 @@ export function installMockTauri(seed: MockSeed): void {
   const clearHistory = () => {
     s.history.undo = [];
     s.history.redo = [];
-    s.history.take = false;
+    s.history.notes = 0;
+    s.history.take = null;
   };
   const nextNoteId = () => Math.max(0, ...s.project.pattern.notes.map((n) => n.id ?? 0)) + 1;
   const noteBase = (channel: number, tick: number, velocity: number): MockNote => ({
@@ -590,8 +648,8 @@ export function installMockTauri(seed: MockSeed): void {
     const end = ticksNow();
     for (const key of [...s.recordOpen.keys()]) closeRecorded(key, end);
     s.recordOpen.clear();
-    // The take ends with the transport.
-    s.history.take = false;
+    // The take ends with the transport: the next one has the next number.
+    if (s.recording && s.transport.playing) s.take += 1;
     s.transport = { playing: false, startMs: 0, startTicks: 0, held: null };
   };
 
@@ -722,8 +780,8 @@ export function installMockTauri(seed: MockSeed): void {
     if (!s.project.channels.some((c) => c.id === channel)) return;
     // At the note cap the note is not added: recording switches off and says so (session.rs).
     if (s.project.pattern.notes.length >= MAX_NOTES) {
+      if (s.recording && s.transport.playing) s.take += 1;
       s.recording = false;
-      s.history.take = false;
       emit("recording-stopped", {
         reason: "noteCap",
         dropped: 1,
@@ -744,7 +802,7 @@ export function installMockTauri(seed: MockSeed): void {
       };
       pat.notes.push(n);
       growToNotes(pat, [n]);
-    }, true);
+    }, open.take);
     changed();
   };
 
@@ -845,7 +903,7 @@ export function installMockTauri(seed: MockSeed): void {
       const key = `${c.id}:${String(a.key)}`;
       if (a.on) {
         s.live.set(key, a.velocity as number);
-        if (s.recording && s.transport.playing) s.recordOpen.set(key, { tick: ticksNow(), velocity: a.velocity as number });
+        if (s.recording && s.transport.playing) s.recordOpen.set(key, { tick: ticksNow(), velocity: a.velocity as number, take: s.take });
       } else {
         s.live.delete(key);
         closeRecorded(key, ticksNow());
@@ -880,8 +938,8 @@ export function installMockTauri(seed: MockSeed): void {
     record_set: (a) => {
       const on = Boolean(a.on);
       if (!on) for (const key of [...s.recordOpen.keys()]) closeRecorded(key, ticksNow());
-      // Switching recording ends the take.
-      s.history.take = false;
+      // Switching recording off ends a running take.
+      if (!on && s.recording && s.transport.playing) s.take += 1;
       s.recording = on;
       return view();
     },

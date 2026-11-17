@@ -3,8 +3,8 @@
 //! Every note change (a [`crate::notes::NotesEdit`], one step edit, one recorded take) is kept
 //! as a [`NoteChange`]. A recorded take is committed poll by poll; its commits join one open
 //! step until the take ends (see [`NoteHistory::record`]). Each step holds the changed notes
-//! as they were and as they became, by id, and the pattern's length before and after. Undo puts the old notes back under their own ids; redo
-//! puts the new ones back. Ids are never handed out twice (`Pattern::take_note_id` only moves
+//! as they were and as they became, by id, and the length change it made, if any. Undo puts
+//! the old notes back under their own ids; redo puts the new ones back. Ids are never handed out twice (`Pattern::take_note_id` only moves
 //! forward), so a note brought back can never meet another note with its id. The history is
 //! per project and never saved.
 
@@ -25,8 +25,9 @@ pub(crate) struct NoteChange {
     before: Vec<Note>,
     /// The changed notes as they became: added ones in full, and updated ones' new values.
     after: Vec<Note>,
-    steps_before: u32,
-    steps_after: u32,
+    /// The pattern's length before and after, if the change itself moved it. A length set by
+    /// hand is not a note change and is never part of one.
+    length: Option<(u32, u32)>,
 }
 
 impl NoteChange {
@@ -67,27 +68,34 @@ impl NoteChange {
         Some(Self {
             before,
             after,
-            steps_before: old.steps,
-            steps_after: new.steps,
+            length: (old.steps != new.steps).then_some((old.steps, new.steps)),
         })
     }
 
-    /// Folds `next`, the change made right after this one, into it, if `next` only adds notes
-    /// newer than every note this change touched (what a recording commit does): the added
-    /// notes join `after` and the length after is `next`'s. Otherwise changes nothing and
-    /// gives `next` back.
+    /// Folds `next`, a later note change, into this one if `next` only adds notes newer than
+    /// every note this change touched (what a recording commit does): the added notes join
+    /// `after`. Otherwise changes nothing and gives `next` back.
+    ///
+    /// A length change of `next` joins this one's when it carries on from it (the length
+    /// before `next` is the one this change left); when the length was set by hand in
+    /// between, only `next`'s own change is kept, so undo never takes back a length set by
+    /// hand.
     fn absorb(&mut self, next: Self) -> Result<(), Self> {
         let newest = self.before.iter().chain(&self.after).map(|n| n.id).max();
         let fresh = next
             .after
             .iter()
             .all(|n| newest.is_none_or(|newest| n.id > newest));
-        if !next.before.is_empty() || !fresh || next.steps_before != self.steps_after {
+        if !next.before.is_empty() || !fresh {
             return Err(next);
         }
         // Ids rise as notes are added: `after` stays sorted.
         self.after.extend(next.after);
-        self.steps_after = next.steps_after;
+        self.length = match (self.length, next.length) {
+            (Some((first, left)), Some((from, to))) if from == left => Some((first, to)),
+            (_, Some(moved)) => Some(moved),
+            (own, None) => own,
+        };
         Ok(())
     }
 
@@ -99,25 +107,15 @@ impl NoteChange {
     /// Takes `p` back to before the change (`undo`), or forward to after it.
     ///
     /// The notes it takes out are found by id, and the ones it puts back keep theirs. The
-    /// length moves only if it is still the one the change left: a length set by hand since
-    /// then stays. Refused, with `p` half changed (callers work on a copy), if the notes would
+    /// length moves only if the change moved it and it is still the one the change left: a
+    /// length set by hand since then stays. Refused, with `p` half changed (callers work on a copy), if the notes would
     /// pass [`MAX_NOTES_PER_PATTERN`] (they cannot: the history is cleared by every change it
     /// does not hold).
     pub(crate) fn apply(&self, p: &mut Pattern, undo: bool) -> Result<(), SessionError> {
-        let (take, put, from, to) = if undo {
-            (
-                &self.after,
-                &self.before,
-                self.steps_after,
-                self.steps_before,
-            )
+        let (take, put) = if undo {
+            (&self.after, &self.before)
         } else {
-            (
-                &self.before,
-                &self.after,
-                self.steps_before,
-                self.steps_after,
-            )
+            (&self.before, &self.after)
         };
         let ids: HashSet<u32> = take.iter().chain(put).map(|n| n.id).collect();
         p.notes.retain(|n| !ids.contains(&n.id));
@@ -131,8 +129,15 @@ impl NoteChange {
         p.notes.extend_from_slice(put);
         // Ids rise in the order notes are added: back in place, the pattern is as it was.
         p.notes.sort_unstable_by_key(|n| n.id);
-        if p.steps == from {
-            p.steps = to;
+        if let Some((before, after)) = self.length {
+            let (from, to) = if undo {
+                (after, before)
+            } else {
+                (before, after)
+            };
+            if p.steps == from {
+                p.steps = to;
+            }
         }
         Ok(())
     }
@@ -145,8 +150,9 @@ pub struct NoteHistory {
     redo: Vec<NoteChange>,
     /// Notes held by `undo` and `redo` together.
     notes: usize,
-    /// The newest undo step is a recorded take still running: the next recorded notes join it.
-    take: bool,
+    /// The take (see `grooviq_engine::RecordEvent::Note`) the newest undo step holds, while
+    /// it is open: that take's next commits join it.
+    take: Option<u32>,
 }
 
 impl NoteHistory {
@@ -163,10 +169,10 @@ impl NoteHistory {
         *self = Self::default();
     }
 
-    /// Records a new change (it ends a running take): redo is cleared, and the oldest changes
+    /// Records a new change (it closes an open take): redo is cleared, and the oldest changes
     /// drop past [`MAX_UNDO`] or [`MAX_UNDO_NOTES`].
     pub(crate) fn push(&mut self, change: NoteChange) {
-        self.take = false;
+        self.take = None;
         self.notes -= self.redo.iter().map(NoteChange::size).sum::<usize>();
         self.redo.clear();
         self.notes += change.size();
@@ -174,10 +180,11 @@ impl NoteHistory {
         self.trim();
     }
 
-    /// Records notes a recorded take added: they join the take's step while it runs (a take is
-    /// one step however many commits it takes), or start a new one.
-    pub(crate) fn record(&mut self, change: NoteChange) {
-        if self.take
+    /// Records a commit of recorded take `take`: it joins that take's step while the step is
+    /// open (a take is one step however many commits it takes), or opens a new one. Another
+    /// take, any other note change, undo, redo and clearing close the step.
+    pub(crate) fn record(&mut self, mut change: NoteChange, take: u32) {
+        if self.take == Some(take)
             && let Some(top) = self.undo.back_mut()
         {
             let size = change.size();
@@ -187,21 +194,11 @@ impl NoteHistory {
                     self.trim();
                     return;
                 }
-                Err(change) => {
-                    self.push(change);
-                    self.take = true;
-                    return;
-                }
+                Err(back) => change = back,
             }
         }
         self.push(change);
-        self.take = true;
-    }
-
-    /// The running take ended (recording off, the transport stopped): the next recorded notes
-    /// start a new step.
-    pub(crate) fn end_take(&mut self) {
-        self.take = false;
+        self.take = Some(take);
     }
 
     /// Drops the oldest changes past [`MAX_UNDO`] or [`MAX_UNDO_NOTES`]; the newest stays.
@@ -226,7 +223,7 @@ impl NoteHistory {
     /// The change from [`Self::next_undo`] was undone (a running take ends there): redo can
     /// make it again.
     pub(crate) fn undone(&mut self) {
-        self.take = false;
+        self.take = None;
         if let Some(change) = self.undo.pop_back() {
             self.redo.push(change);
         }
@@ -234,7 +231,7 @@ impl NoteHistory {
 
     /// The change from [`Self::next_redo`] was made again: undo can take it back.
     pub(crate) fn redone(&mut self) {
-        self.take = false;
+        self.take = None;
         if let Some(change) = self.redo.pop() {
             self.undo.push_back(change);
         }
@@ -261,8 +258,15 @@ mod tests {
         NoteChange {
             before: Vec::new(),
             after: (0..notes as u32).map(note).collect(),
-            steps_before: 16,
-            steps_after: 16,
+            length: None,
+        }
+    }
+
+    fn add(ids: std::ops::Range<u32>, length: Option<(u32, u32)>) -> NoteChange {
+        NoteChange {
+            before: Vec::new(),
+            after: ids.map(note).collect(),
+            length,
         }
     }
 
@@ -286,40 +290,58 @@ mod tests {
         assert_eq!(h.notes, 3);
         h.push(change(2));
         assert_eq!((h.notes, h.redo.len()), (2, 0));
+        // The live fixture's case (app/ui/e2e/m2-undo.e2e.ts): eleven edits of all 100,000
+        // notes hold 200,000 changed notes each, and ten stay.
+        h.clear();
+        for _ in 0..11 {
+            h.push(change(200_000));
+        }
+        assert_eq!(h.undo.len(), 10);
     }
 
     #[test]
-    fn a_take_folds_only_fresh_additions() {
+    fn a_take_folds_only_its_own_fresh_additions() {
         let mut h = NoteHistory::default();
-        let add = |ids: std::ops::Range<u32>| NoteChange {
-            before: Vec::new(),
-            after: ids.map(note).collect(),
-            steps_before: 16,
-            steps_after: 16,
-        };
-        h.record(add(1..3));
-        h.record(add(3..5));
+        h.record(add(1..3, None), 7);
+        h.record(add(3..5, None), 7);
         assert_eq!(h.undo.len(), 1);
         assert_eq!(h.undo[0].after.len(), 4);
         assert_eq!(h.notes, 4);
         // An addition under an id the take already holds is not a fresh one.
-        h.record(add(4..6));
+        h.record(add(4..6, None), 7);
         assert_eq!(h.undo.len(), 2);
         assert_eq!(h.undo[0].after.len(), 4);
-        h.end_take();
-        h.record(add(6..7));
+        // Another take opens its own step.
+        h.record(add(6..7, None), 8);
         assert_eq!(h.undo.len(), 3);
-        // A change that is not a pure addition of newer notes never folds in: it opens its own
-        // step (and the take goes on there).
-        let mut update = add(1..2);
+        // A change that is not a pure addition never folds in: it opens its own step (and the
+        // take goes on there).
+        let mut update = add(1..2, None);
         update.before = vec![note(1)];
-        h.record(update);
+        h.record(update, 8);
         assert_eq!(h.undo.len(), 4);
-        h.record(add(9..10));
+        h.record(add(9..10, None), 8);
         assert_eq!(h.undo.len(), 4);
-        h.end_take();
-        h.record(add(10..11));
-        assert_eq!(h.undo.len(), 5);
+        // Any other change closes the take: its next commit opens a step of its own.
+        h.push(add(10..11, None));
+        h.record(add(11..12, None), 8);
+        assert_eq!(h.undo.len(), 6);
+    }
+
+    #[test]
+    fn a_take_owns_only_the_length_changes_it_made() {
+        let fold = |first: Option<(u32, u32)>, next: Option<(u32, u32)>| {
+            let mut c = add(1..2, first);
+            c.absorb(add(2..3, next)).unwrap();
+            c.length
+        };
+        assert_eq!(fold(None, None), None);
+        assert_eq!(fold(Some((16, 32)), None), Some((16, 32)));
+        assert_eq!(fold(None, Some((16, 32))), Some((16, 32)));
+        // Growing on from its own growth: one change from the take's start.
+        assert_eq!(fold(Some((16, 32)), Some((32, 48))), Some((16, 48)));
+        // The length was set by hand in between: only the later growth is the take's.
+        assert_eq!(fold(Some((16, 32)), Some((64, 80))), Some((64, 80)));
     }
 
     #[test]

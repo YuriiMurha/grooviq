@@ -73,6 +73,7 @@ fn recorded(key_on: bool, tick: u64) -> RecordEvent {
         on: key_on,
         tick,
         position: (tick % LOOP) as u32,
+        take: 0,
     }
 }
 
@@ -195,10 +196,73 @@ fn stop_and_record_off_push_an_end_marker() {
         [
             recorded(true, 1_200),
             end(1_600),
-            recorded(false, 2_000),
+            // Each End moves the take number on: this note is the second take's.
+            in_take(recorded(false, 2_000), 1),
             end(2_560),
         ]
     );
+}
+
+#[test]
+fn the_take_number_moves_on_even_when_the_end_is_dropped() {
+    let mut r = Rig::new();
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    // 100 notes a block, never drained, until the queue is full.
+    let mut sent = 0;
+    while sent < RECORD_CAPACITY + 10 {
+        for _ in 0..100 {
+            r.c.send(note(sent % 2 == 0)).unwrap();
+            sent += 1;
+        }
+        let to = r.at + 64;
+        r.run_to(to);
+    }
+    assert!(r.c.record_dropped() > 0);
+    // The take ends while the queue is full: its End is dropped.
+    r.c.send(Command::SetRecording { on: false }).unwrap();
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    let to = r.at + 64;
+    r.run_to(to);
+    let first = r.take();
+    assert!(!first.iter().any(|e| matches!(e, RecordEvent::End { .. })));
+    assert!(
+        first
+            .iter()
+            .all(|e| matches!(e, RecordEvent::Note { take: 0, .. }))
+    );
+    r.c.send(note(true)).unwrap();
+    let to = r.at + 64;
+    r.run_to(to);
+    let next = r.take();
+    assert!(
+        matches!(next[..], [RecordEvent::Note { take: 1, .. }]),
+        "{next:?}"
+    );
+}
+
+/// `event` (a note) as recorded in take `take`.
+fn in_take(event: RecordEvent, take: u32) -> RecordEvent {
+    match event {
+        RecordEvent::Note {
+            channel,
+            key,
+            velocity,
+            on,
+            tick,
+            position,
+            ..
+        } => RecordEvent::Note {
+            channel,
+            key,
+            velocity,
+            on,
+            tick,
+            position,
+            take,
+        },
+        other => other,
+    }
 }
 
 #[test]
