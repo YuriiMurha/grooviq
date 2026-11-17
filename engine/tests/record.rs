@@ -722,3 +722,31 @@ fn a_mark_that_finds_the_queue_full_goes_out_first_later() {
         "the mark itself is never counted lost"
     );
 }
+
+/// A command sent with a barrier: what its take recorded, its End included, comes before the
+/// mark. Both or neither are queued.
+#[test]
+fn a_marked_record_off_ends_the_take_before_its_mark() {
+    let mut r = Rig::new();
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    r.at(30_000, note(true));
+    r.run_to(32_000);
+    let id =
+        r.c.send_marked(Command::SetRecording { on: false })
+            .unwrap();
+    assert_eq!(id, r.c.record_mark());
+    r.run_to(34_000);
+    let got = r.take();
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(got[0], recorded(true, 1_200));
+    assert!(matches!(got[1], RecordEvent::End { .. }), "{got:?}");
+    assert_eq!(got[2], RecordEvent::Mark { id });
+    // A full command queue takes neither.
+    while r.c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+    assert_eq!(
+        r.c.send_marked(Command::SetRecording { on: true }),
+        Err(ControlError::Full)
+    );
+    assert_eq!(r.c.record_mark(), id, "no mark was used up");
+}

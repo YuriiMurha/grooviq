@@ -475,9 +475,10 @@ pub struct Session {
     /// pattern (its queue was full). Retried on the next collect.
     pending: Vec<NewNote>,
     /// Recording switched itself off (the pattern was full) but the engine's queue refused the
-    /// switch: it is sent again on every collect until the engine takes it, and notes the
-    /// engine completes meanwhile are refused. Turning recording on again cancels it; a new
-    /// project keeps it (the engine records until it takes the switch).
+    /// switch: it is sent again, with its barrier, on every collect until the queue takes it.
+    /// The recorder refuses notes from the decision until that barrier is read. Turning
+    /// recording on (or off) by hand sends its own barrier instead; a new project keeps it
+    /// (the engine records until it takes the switch).
     owed_disarm: bool,
 }
 
@@ -1159,11 +1160,20 @@ impl Session {
 
     /// Switches recording: while it is on and the transport plays, live notes are recorded
     /// into the pattern (see [`Self::collect_recorded`]). Switching off ends the take.
+    ///
+    /// After recording switched itself off (see [`Self::collect_recorded`]) and before the
+    /// engine confirmed it, the switch goes with a fresh barrier: notes recorded before it are
+    /// still refused (and reported), the new take's after it are kept, and an owed record-off
+    /// is cancelled.
     pub fn set_recording(&mut self, on: bool) -> Result<(), SessionError> {
-        self.send(Command::SetRecording { on })?;
+        if self.owed_disarm || self.recorder.refusing() {
+            let id = lock(&self.controller).send_marked(Command::SetRecording { on })?;
+            self.recorder.refuse_until_mark(Some(id));
+            self.owed_disarm = false;
+        } else {
+            self.send(Command::SetRecording { on })?;
+        }
         self.recording = on;
-        // The engine took this switch after any owed one: it decides now.
-        self.owed_disarm = false;
         Ok(())
     }
 
@@ -1179,76 +1189,96 @@ impl Session {
     /// dropped. When notes do not fit (the note cap, or used-up ids), the ones that fit go in,
     /// recording is switched off, and [`Recorded::stopped`] says what was lost.
     pub fn collect_recorded(&mut self, events: &[RecordEvent], now: Instant) -> Recorded {
-        if self.owed_disarm && self.send(Command::SetRecording { on: false }).is_ok() {
-            self.owed_disarm = false;
+        if self.owed_disarm {
+            self.send_disarm();
         }
         let fed = self.recorder.feed(events);
-        // Recording shows off while the engine has not taken the switch: what it completes
-        // meanwhile was played after the person was told, and is refused.
-        let refused = if self.owed_disarm { fed.len() } else { 0 };
-        if refused == 0 {
-            self.pending.extend(fed);
-        }
+        self.pending.extend(fed);
         let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
         self.pending.retain(|n| channels.contains(&n.channel));
         // What fits: the note cap, and the ids left (the used-up mark is never handed out).
         let pattern = self.current();
         let room = MAX_NOTES_PER_PATTERN.saturating_sub(pattern.notes.len());
         let ids = (u32::MAX - pattern.next_note_id.max(1)) as usize;
-        let (fits, reason) = if ids < room {
+        let (fits, mut reason) = if ids < room {
             (ids, "noteIds")
         } else {
             (room, "noteCap")
         };
-        let dropped = self.pending.len().saturating_sub(fits);
+        let mut dropped = self.pending.len().saturating_sub(fits);
         self.pending.truncate(fits);
 
         let mut out = Recorded::default();
+        let mut error = None;
         match self.commit_pending(now) {
             Ok(revision) => out.revision = revision,
             Err((e, lost)) => {
-                out.stopped = Some(self.stop_recording(
-                    "error",
-                    dropped + refused + lost,
-                    format!("Recording stopped: {e}"),
-                ));
-                return out;
+                dropped += lost;
+                reason = "error";
+                error = Some(e);
             }
         }
         if dropped > 0 {
-            let notes = if dropped == 1 {
-                "1 recorded note was"
-            } else {
-                &format!("{dropped} recorded notes were")
-            };
-            let why = if reason == "noteIds" {
-                "this pattern has used up its note ids (save and reopen the project to renumber them)"
-                    .to_owned()
-            } else {
-                format!(
-                    "this pattern holds {MAX_NOTES_PER_PATTERN} notes, the most a pattern can hold"
-                )
-            };
-            out.stopped = Some(self.stop_recording(
+            self.disarm();
+        }
+        // Counted after the disarm: the notes held when it began are refused too.
+        let refused = self.recorder.take_refused();
+        if dropped + refused == 0 {
+            return out;
+        }
+        let lost = dropped + refused;
+        let notes = if lost == 1 {
+            "1 recorded note was".to_owned()
+        } else {
+            format!("{lost} recorded notes were")
+        };
+        let (reason, message) = match (dropped > 0, error) {
+            (true, Some(e)) => (reason, format!("Recording stopped: {e}")),
+            (true, None) if reason == "noteIds" => (
                 reason,
-                dropped + refused,
-                format!("Recording stopped: {why}. {notes} not added."),
-            ));
-        } else if refused > 0 {
-            let notes = if refused == 1 {
-                "1 note played since was".to_owned()
-            } else {
-                format!("{refused} notes played since were")
-            };
-            out.stopped = Some(self.stop_recording(
+                format!(
+                    "Recording stopped: this pattern has used up its note ids (save and reopen the project to renumber them). {notes} not added."
+                ),
+            ),
+            (true, None) => (
+                reason,
+                format!(
+                    "Recording stopped: this pattern holds {MAX_NOTES_PER_PATTERN} notes, the most a pattern can hold. {notes} not added."
+                ),
+            ),
+            (false, _) => (
                 "engineBusy",
-                refused,
                 format!(
                     "Recording is off, but the audio engine had not taken the switch yet: {notes} not added."
                 ),
-            ));
-        }
+            ),
+        };
+        out.stopped = Some(RecordingStopped {
+            reason,
+            dropped: u32::try_from(lost).unwrap_or(u32::MAX),
+            message,
+        });
         out
+    }
+
+    /// Switches recording off by itself (recorded notes did not fit): from now until the
+    /// engine's barrier behind the switch is read, every recorded note is refused and counted.
+    fn disarm(&mut self) {
+        self.recording = false;
+        self.recorder.refuse_until_mark(None);
+        self.send_disarm();
+    }
+
+    /// Sends the record-off with its barrier; owed (sent again on every collect) while the
+    /// engine's queue is full. The refusal ends at the barrier, not when the switch is queued.
+    fn send_disarm(&mut self) {
+        match lock(&self.controller).send_marked(Command::SetRecording { on: false }) {
+            Ok(id) => {
+                self.owed_disarm = false;
+                self.recorder.await_mark(id);
+            }
+            Err(_) => self.owed_disarm = true,
+        }
     }
 
     /// Adds the waiting recorded notes as one edit. A full engine queue keeps them for the next
@@ -1274,23 +1304,6 @@ impl Session {
                 self.pending.clear();
                 Err((e, lost))
             }
-        }
-    }
-
-    /// Switches recording off because recorded notes did not fit, and says so.
-    fn stop_recording(
-        &mut self,
-        reason: &'static str,
-        dropped: usize,
-        message: String,
-    ) -> RecordingStopped {
-        // If the engine's queue is full the switch is owed: sent again on every collect.
-        self.owed_disarm = self.send(Command::SetRecording { on: false }).is_err();
-        self.recording = false;
-        RecordingStopped {
-            reason,
-            dropped: u32::try_from(dropped).unwrap_or(u32::MAX),
-            message,
         }
     }
 
@@ -1368,8 +1381,13 @@ impl Session {
             p.revision = revision;
         }
         // Nothing recorded for the old project reaches this one: every event before the new
-        // state's barrier is dropped, and so are the old project's notes still waiting.
-        self.recorder.reset_until_mark(mark);
+        // state's barrier is dropped, and so are the old project's notes still waiting. A
+        // refusal running (recording switched itself off and the engine has not confirmed it)
+        // goes on to its own barrier, which comes after: the engine records until it takes
+        // the switch, and those notes are reported.
+        if !self.recorder.refusing() {
+            self.recorder.reset_until_mark(mark);
+        }
         self.pending.clear();
         self.project = project;
         self.files = files;

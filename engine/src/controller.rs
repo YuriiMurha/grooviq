@@ -304,9 +304,26 @@ impl Controller {
         Ok(())
     }
 
-    /// The id of the recording barrier the last [`Self::load_state`] queued: in the recording
-    /// queue, every event before [`crate::RecordEvent::Mark`] with this id belongs to the
-    /// state before (its take ended at the stop), every event after it to this one.
+    /// Queues `cmd` (checked as [`Self::send`] does), then a recording barrier, both or
+    /// neither. In the recording queue, everything recorded before the command applied comes
+    /// before [`crate::RecordEvent::Mark`] with the returned id (the End a `SetRecording { on:
+    /// false }` makes included), and everything after it after.
+    pub fn send_marked(&mut self, cmd: Command) -> Result<u32, ControlError> {
+        if self.commands.slots() < 2 {
+            return Err(ControlError::Full);
+        }
+        self.send_at(0, cmd)?;
+        let id = self.record_mark.wrapping_add(1);
+        self.record_mark = id;
+        // Only this thread pushes, and the queue had room for both.
+        let queued = self.push(Msg::RecordMark(id));
+        debug_assert!(queued.is_ok());
+        Ok(id)
+    }
+
+    /// The id of the last recording barrier queued (by [`Self::load_state`] or
+    /// [`Self::send_marked`]): in the recording queue, every event before
+    /// [`crate::RecordEvent::Mark`] with this id came before it, every event after it after.
     pub fn record_mark(&self) -> u32 {
         self.record_mark
     }

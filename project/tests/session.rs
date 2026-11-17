@@ -2627,3 +2627,137 @@ fn turning_record_on_again_cancels_an_owed_disarm() {
         "the new take records"
     );
 }
+
+// --- Fix round 3: refusal lasts until the automatic record-off reaches the engine. ---
+
+/// A session at the note cap whose automatic record-off found the engine's command queue full:
+/// one recorded note waits to be committed, the queue is drained again, and the person has
+/// made room by deleting a note. Returns the session's rig.
+fn overflowed_with_an_owed_disarm() -> (Session, Arc<Mutex<Controller>>, AudioProcessor, u32) {
+    let (mut session, controller, mut processor) = rig();
+    let synth = add_synth(&mut session, "Init");
+    add_notes(
+        &mut session,
+        (0..99_999u32)
+            .map(|i| NewNote {
+                length: 10,
+                ..melodic(synth, (i % 64) * 240, (i % 128) as u8)
+            })
+            .collect(),
+    );
+    session.set_recording(true).unwrap();
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    settle(&mut session, &controller, &mut processor);
+    while controller
+        .lock()
+        .unwrap()
+        .send(Command::SetTempo { bpm: 120.0 })
+        .is_ok()
+    {}
+    let got = session.collect_recorded(&whole_notes(synth, 2), Instant::now());
+    assert_eq!(got.stopped.map(|s| s.dropped), Some(1));
+    render(&mut processor, 4);
+    let edit = NotesEdit {
+        base_revision: session.view().notes_revision,
+        add: Vec::new(),
+        update: Vec::new(),
+        delete: vec![1],
+    };
+    session.edit_notes(edit, Instant::now()).unwrap();
+    (session, controller, processor, synth)
+}
+
+#[test]
+fn retry_success_must_still_refuse_already_recorded_notes() {
+    let (mut session, controller, mut processor, synth) = overflowed_with_an_owed_disarm();
+    // Played while Record shows off, before the poll that sends the record-off.
+    play_a_note(&session, &mut processor, synth);
+    let got = poll(&mut session, &controller, &mut processor);
+    assert!(
+        got.revision.is_some(),
+        "the note recorded before the stop goes in"
+    );
+    let stopped = got.stopped.expect("the late note is reported");
+    assert_eq!((stopped.reason, stopped.dropped), ("engineBusy", 1));
+    assert_eq!(session.project().patterns[0].notes.len(), 99_999);
+    // The engine is off now: nothing more.
+    assert_eq!(
+        poll(&mut session, &controller, &mut processor),
+        Recorded::default()
+    );
+    assert_eq!(session.project().patterns[0].notes.len(), 99_999);
+}
+
+#[test]
+fn retry_success_must_refuse_held_notes_closed_by_disarm() {
+    let (mut session, controller, mut processor, synth) = overflowed_with_an_owed_disarm();
+    // A key goes down while Record shows off and is still held when the record-off lands.
+    session.live_note(synth, 70, 0.8, true).unwrap();
+    render(&mut processor, 4);
+    let first = poll(&mut session, &controller, &mut processor);
+    // The record-off lands and ends the take: its End closes the held note.
+    let second = poll(&mut session, &controller, &mut processor);
+    let refused: u32 = [&first, &second]
+        .iter()
+        .filter_map(|g| g.stopped.as_ref())
+        .map(|s| s.dropped)
+        .sum();
+    assert_eq!(refused, 1, "{first:?} {second:?}");
+    assert_eq!(second.revision, None, "{second:?}");
+    assert_eq!(session.project().patterns[0].notes.len(), 99_999);
+    session.live_note(synth, 70, 0.0, false).unwrap();
+    assert_eq!(
+        poll(&mut session, &controller, &mut processor),
+        Recorded::default()
+    );
+}
+
+#[test]
+fn a_refusal_running_survives_a_project_replacement() {
+    let (mut session, _controller, _processor, _synth) = overflowed_with_an_owed_disarm();
+    // The record-off is still owed when another project opens: the engine records on.
+    open_fixture(&mut session);
+    // The next collect sends the switch; what the engine recorded meanwhile is refused and
+    // reported, not taken into the new project.
+    let notes = session.project().patterns[0].notes.clone();
+    let got = session.collect_recorded(&whole_notes(1, 1), Instant::now());
+    assert_eq!(got.revision, None);
+    let stopped = got.stopped.expect("reported");
+    assert_eq!((stopped.reason, stopped.dropped), ("engineBusy", 1));
+    assert_eq!(session.project().patterns[0].notes, notes);
+}
+
+#[test]
+fn a_note_held_when_recording_stops_itself_is_refused_and_counted() {
+    let (mut session, controller, mut processor) = rig();
+    let synth = add_synth(&mut session, "Init");
+    add_notes(
+        &mut session,
+        (0..100_000u32)
+            .map(|i| NewNote {
+                length: 10,
+                ..melodic(synth, (i % 64) * 240, (i % 128) as u8)
+            })
+            .collect(),
+    );
+    session.set_recording(true).unwrap();
+    settle(&mut session, &controller, &mut processor);
+    // One whole note does not fit, and another key is still down when recording stops.
+    let mut events = whole_notes(synth, 1);
+    let held = |on| RecordEvent::Note {
+        channel: ChannelId(synth),
+        key: 90,
+        velocity: 0.8,
+        on,
+        tick: 50,
+        position: 50,
+    };
+    events.push(held(true));
+    let got = session.collect_recorded(&events, Instant::now());
+    assert_eq!(got.stopped.map(|s| s.dropped), Some(2), "the held note too");
+    // Its release later adds nothing and is not counted twice.
+    assert_eq!(
+        session.collect_recorded(&[held(false)], Instant::now()),
+        Recorded::default()
+    );
+}
