@@ -857,13 +857,243 @@
           "pattern": {
             "cells": {
               "1": [
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+              ]
+            },
+            "id": 0,
+            "name": "Pattern 1",
+            "steps": 16,
+            "swing": 1.0
+          },
+          "recording": false,
+          "timeSignature": {
+            "beats": 4,
+            "unit": 4
+          }
+        }
+      },
+      "view": {
+        "autosavedAt": null,
+        "bpm": 400.0,
+        "canRedo": false,
+        "canUndo": false,
+        "channels": [
+          {
+            "choke": 0,
+            "color": 0,
+            "id": 1,
+            "kind": "synth",
+            "missing": false,
+            "mute": false,
+            "name": "Init",
+            "pan": 0.0,
+            "preset": "Init",
+            "roll": false,
+            "sampleFrames": null,
+            "sampleName": null,
+            "sampler": {},
+            "solo": false,
+            "synth": {
+              "amp_attack": 5.0,
+              "amp_decay": 300.0,
+              "amp_release": 250.0,
+              "amp_sustain": 0.7,
+              "filter_cutoff": 4000.0,
+              "filter_drive": 0.0,
+              "filter_env_amt": 0.3,
+              "filter_keytrack": 0.5,
+              "filter_res": 0.2,
+              "filter_type": 0.0,
+              "flt_attack": 2.0,
+              "flt_decay": 400.0,
+              "flt_release": 300.0,
+              "flt_sustain": 0.2,
+              "glide": 0.0,
+              "lfo_amount": 0.0,
+              "lfo_rate": 2.0,
+              "lfo_shape": 0.0,
+              "lfo_target": 0.0,
+              "master": -6.0,
+              "noise_level": 0.0,
+              "osc1_detune": 0.25,
+              "osc1_fine": 0.0,
+              "osc1_level": 0.8,
+              "osc1_octave": 0.0,
+              "osc1_semi": 0.0,
+              "osc1_shape": 2.0,
+              "osc1_spread": 0.6,
+              "osc1_unison": 1.0,
+              "osc2_detune": 0.2,
+              "osc2_fine": 7.0,
+              "osc2_level": 0.4,
+              "osc2_octave": -1.0,
+              "osc2_semi": 0.0,
+              "osc2_shape": 3.0,
+              "osc2_spread": 0.5,
+              "osc2_unison": 1.0,
+              "sub_level": 0.0,
+              "sub_shape": 0.0,
+              "voice_mode": 0.0
+            },
+            "volume": 1.0
+          }
+        ],
+        "dirty": true,
+        "generation": 0,
+        "key": null,
+        "name": "Untitled",
+        "notesRevision": 1,
+        "path": null,
+        "pattern": {
+          "cells": {
+            "1": [
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null
+            ]
+          },
+          "id": 0,
+          "name": "Pattern 1",
+          "steps": 16,
+          "swing": 1.0
+        },
+        "recording": false,
+        "timeSignature": {
+          "beats": 4,
+          "unit": 4
+        }
+      }
+    },
+    {
+      "notes": [
+        71,
+        81,
+        78,
+        49,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "reply": {
+        "ok": {
+          "autosavedAt": null,
+          "bpm": 400.0,
+          "canRedo": false,
+          "canUndo": false,
+          "channels": [
+            {
+              "choke": 0,
+              "color": 0,
+              "id": 1,
+              "kind": "synth",
+              "missing": false,
+              "mute": false,
+              "name": "Init",
+              "pan": 0.0,
+              "preset": "Init",
+              "roll": false,
+              "sampleFrames": null,
+              "sampleName": null,
+              "sampler": {},
+              "solo": false,
+              "synth": {
+                "amp_attack": 5.0,
+                "amp_decay": 300.0,
+                "amp_release": 250.0,
+                "amp_sustain": 0.7,
+                "filter_cutoff": 4000.0,
+                "filter_drive": 0.0,
+                "filter_env_amt": 0.3,
+                "filter_keytrack": 0.5,
+                "filter_res": 0.2,
+                "filter_type": 0.0,
+                "flt_attack": 2.0,
+                "flt_decay": 400.0,
+                "flt_release": 300.0,
+                "flt_sustain": 0.2,
+                "glide": 0.0,
+                "lfo_amount": 0.0,
+                "lfo_rate": 2.0,
+                "lfo_shape": 0.0,
+                "lfo_target": 0.0,
+                "master": -6.0,
+                "noise_level": 0.0,
+                "osc1_detune": 0.25,
+                "osc1_fine": 0.0,
+                "osc1_level": 0.8,
+                "osc1_octave": 0.0,
+                "osc1_semi": 0.0,
+                "osc1_shape": 2.0,
+                "osc1_spread": 0.6,
+                "osc1_unison": 1.0,
+                "osc2_detune": 0.2,
+                "osc2_fine": 7.0,
+                "osc2_level": 0.4,
+                "osc2_octave": -1.0,
+                "osc2_semi": 0.0,
+                "osc2_shape": 3.0,
+                "osc2_spread": 0.5,
+                "osc2_unison": 1.0,
+                "sub_level": 0.0,
+                "sub_shape": 0.0,
+                "voice_mode": 0.0
+              },
+              "volume": 1.0
+            }
+          ],
+          "dirty": true,
+          "generation": 0,
+          "key": null,
+          "name": "Untitled",
+          "notesRevision": 1,
+          "path": null,
+          "pattern": {
+            "cells": {
+              "1": [
                 null
               ]
             },
             "id": 0,
             "name": "Pattern 1",
             "steps": 1,
-            "swing": 0.5
+            "swing": 1.0
           },
           "recording": false,
           "timeSignature": {
@@ -953,7 +1183,7 @@
           "id": 0,
           "name": "Pattern 1",
           "steps": 1,
-          "swing": 0.5
+          "swing": 1.0
         },
         "recording": false,
         "timeSignature": {
@@ -1109,7 +1339,7 @@
               "id": 0,
               "name": "Pattern 1",
               "steps": 16,
-              "swing": 0.5
+              "swing": 1.0
             },
             "recording": false,
             "timeSignature": {
@@ -1215,7 +1445,7 @@
           "id": 0,
           "name": "Pattern 1",
           "steps": 16,
-          "swing": 0.5
+          "swing": 1.0
         },
         "recording": false,
         "timeSignature": {
@@ -1371,7 +1601,7 @@
               "id": 0,
               "name": "Pattern 1",
               "steps": 16,
-              "swing": 0.5
+              "swing": 1.0
             },
             "recording": false,
             "timeSignature": {
@@ -1477,7 +1707,7 @@
           "id": 0,
           "name": "Pattern 1",
           "steps": 16,
-          "swing": 0.5
+          "swing": 1.0
         },
         "recording": false,
         "timeSignature": {
@@ -1871,7 +2101,7 @@
               "id": 0,
               "name": "Pattern 1",
               "steps": 256,
-              "swing": 0.5
+              "swing": 1.0
             },
             "recording": false,
             "timeSignature": {
@@ -2217,7 +2447,7 @@
           "id": 0,
           "name": "Pattern 1",
           "steps": 256,
-          "swing": 0.5
+          "swing": 1.0
         },
         "recording": false,
         "timeSignature": {
@@ -2608,7 +2838,7 @@
           "id": 0,
           "name": "Pattern 1",
           "steps": 256,
-          "swing": 0.5
+          "swing": 1.0
         },
         "recording": false,
         "timeSignature": {
@@ -2762,7 +2992,7 @@
               "id": 0,
               "name": "Pattern 1",
               "steps": 16,
-              "swing": 0.5
+              "swing": 1.0
             },
             "recording": false,
             "timeSignature": {
@@ -2868,7 +3098,7 @@
           "id": 0,
           "name": "Pattern 1",
           "steps": 16,
-          "swing": 0.5
+          "swing": 1.0
         },
         "recording": false,
         "timeSignature": {
@@ -3262,7 +3492,7 @@
               "id": 0,
               "name": "Pattern 1",
               "steps": 256,
-              "swing": 0.5
+              "swing": 1.0
             },
             "recording": false,
             "timeSignature": {
@@ -3608,7 +3838,7 @@
           "id": 0,
           "name": "Pattern 1",
           "steps": 256,
-          "swing": 0.5
+          "swing": 1.0
         },
         "recording": false,
         "timeSignature": {
@@ -3999,7 +4229,7 @@
           "id": 0,
           "name": "Pattern 1",
           "steps": 256,
-          "swing": 0.5
+          "swing": 1.0
         },
         "recording": false,
         "timeSignature": {
@@ -4336,6 +4566,16 @@
         "edit": {
           "kind": "setSwing",
           "swing": 0.5
+        },
+        "generation": 0
+      },
+      "command": "project_edit"
+    },
+    {
+      "args": {
+        "edit": {
+          "kind": "setSwing",
+          "swing": 1.5
         },
         "generation": 0
       },

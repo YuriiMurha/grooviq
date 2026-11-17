@@ -178,7 +178,7 @@ if (workspace || rustCrates.has("grooviq-project") || changed.some((path) => pat
   step("notes budget runner tests", "node", ["--test", "scripts/notes-edit-budget.test.mjs"]);
   step("notes edit budget", "node", ["scripts/notes-edit-budget.mjs"]);
 }
-if (workspace || rustCrates.has("grooviq-project"))
+if (workspace || rustCrates.has("grooviq-project") || changed.some((path) => path.startsWith("scripts/notes-edit-budget.")))
   step("real Session replay", "node", ["scripts/semantic-replay.mjs"]);
 if (tooling) {
   step("tooling: check-changed plans", "node", ["scripts/check-changed.mjs", "--plan", "--base", base]);

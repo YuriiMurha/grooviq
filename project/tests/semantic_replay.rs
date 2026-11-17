@@ -29,19 +29,23 @@ fn session_matches_shared_semantic_replay() {
     let mut actual = Vec::new();
     for step in fixture["steps"].as_array().unwrap() {
         let a = &step["args"];
-        let generation = a["generation"].as_u64().unwrap_or(0);
+        let generation = || {
+            a["generation"]
+                .as_u64()
+                .expect("command requires generation")
+        };
         let now = Instant::now();
         let result = match step["command"].as_str().unwrap() {
             "project_view" => Ok(wire(session.view())),
             "project_edit" => session
                 .apply_in(
-                    generation,
+                    generation(),
                     serde_json::from_value::<Edit>(a["edit"].clone()).unwrap(),
                     now,
                 )
                 .map(wire),
             "channel_add_synth" => session
-                .add_synth_channel_in(generation, a["preset"].as_str().unwrap(), now)
+                .add_synth_channel_in(generation(), a["preset"].as_str().unwrap(), now)
                 .map(wire),
             "notes_edit" => session
                 .edit_notes(
@@ -50,7 +54,7 @@ fn session_matches_shared_semantic_replay() {
                 )
                 .map(wire),
             "notes_undo" | "notes_redo" => session
-                .step_history_in(generation, step["command"] == "notes_undo", now)
+                .step_history_in(generation(), step["command"] == "notes_undo", now)
                 .map(wire),
             "project_new" => session.new_project().map(wire),
             other => panic!("unhandled replay command {other}"),
