@@ -248,6 +248,24 @@ test.describe("export (check 13)", () => {
 test.describe("a held Cmd+S (check 14, the UI's part)", () => {
   test.use({ seed: { ...kitSeed, files: { ...kitSeed.files, "/qa/projects/Held.grooviq": { kind: "project", project: project(KIT) } } } });
 
+  test("Save works as soon as the first project view commits", async ({ app, mock }) => {
+    await app.addInitScript(() => {
+      const observer = new MutationObserver(() => {
+        if (![...document.querySelectorAll("button[aria-haspopup='menu']")].some((button) => button.textContent?.includes("QA beat"))) return;
+        observer.disconnect();
+        const shell = (window as unknown as { __grooviqMock: { queueDialog: (path: string) => void } }).__grooviqMock;
+        shell.queueDialog("/qa/projects/Early.grooviq");
+        const mac = /^mac/i.test(navigator.platform) || /iphone|ipad/i.test(navigator.platform);
+        // Mutation observers run after the commit's layout effects, before passive effects.
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "s", metaKey: mac, ctrlKey: !mac, bubbles: true }));
+      });
+      observer.observe(document, { childList: true, subtree: true });
+    });
+    await app.reload();
+    await expect.poll(() => mock.calls("project_save_as")).toHaveLength(1);
+    await expect.poll(() => mock.view().then((view) => view.path)).toBe("/qa/projects/Early.grooviq");
+  });
+
   test("saves once per press, not once per key repeat", async ({ app, mock }) => {
     await mock.eval("(m) => m.queueDialog('/qa/projects/Held.grooviq')");
     await app.keyboard.press("ControlOrMeta+o");
