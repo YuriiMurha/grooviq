@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import { SYNTH_PRESETS } from "../../api/notes";
 import type { ChannelView } from "../../api/project";
-import { useProject } from "../../project/context";
 import { EnvelopeGraph } from "../controls/EnvelopeGraph";
 import type { ParamControl } from "../controls/gesture";
 import { Knob } from "../controls/Knob";
@@ -45,7 +44,6 @@ const SUB_GLYPHS = [glyph(0), glyph(3)];
  * shape, the filter curve, two envelopes with points to drag, the LFO and the voice section;
  * the presets and the volume in the title bar. Every one of the 40 parameters has a control. */
 export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onError }: Props) {
-  const { apply } = useProject();
   const params = useDeviceParams(channel.id, channel.synth, (id) => synthParam(id).default, onError);
   const v = params.value;
   const ctl = (id: string): ParamControl => ({ begin: () => params.begin(id), set: (x) => params.set(id, x) });
@@ -151,9 +149,8 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
           data-autofocus={channel.preset === name ? true : undefined}
           data-hint={`Loads the ${name} preset: every setting of this synth changes.`}
           onClick={() => {
-            // A preset replaces every value: no gesture of the old ones may land after it.
-            params.cancelAll();
-            void apply({ kind: "loadSynthPreset", channel: channel.id, preset: name });
+            // A preset replaces every value: `send` ends running gestures first.
+            void params.send({ kind: "loadSynthPreset", channel: channel.id, preset: name });
           }}
         >
           {name}

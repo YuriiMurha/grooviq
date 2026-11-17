@@ -695,23 +695,48 @@ test.describe("edits while a replacement is on its way", () => {
     return calls.slice(at + 1).filter((c) => c.cmd === "channel_param_live" || (c.cmd === "project_edit" && (c.args.edit as { kind: string }).kind === "setInstrumentParam"));
   };
 
+  /** Every project edit and live value sent after `cmd`. */
+  const anythingAfter = async (mock: Mock, cmd: string) => {
+    const calls = await mock.calls();
+    const at = calls.findIndex((c) => c.cmd === cmd);
+    return calls.slice(at + 1).filter((c) => c.cmd === "channel_param_live" || c.cmd === "project_edit");
+  };
+  /** Opens the editor, then starts `cmd` and holds it pending. */
+  async function startPending(page: Page, mock: Mock, cmd: string, start: string) {
+    await openUnderPrompt(page);
+    await mock.eval(`(m) => m.holdCommand("${cmd}")`);
+    if (start) {
+      await page.getByRole("button", { name: "Discard" }).click();
+      await openUnderPrompt(page);
+      await mock.eval("(m) => m.queueDialog('/qa/projects/Other.grooviq')");
+      await page.keyboard.press(start);
+    } else {
+      await page.getByRole("dialog", { name: "Restore your project?" }).getByRole("button", { name: "Restore" }).click();
+    }
+    await expect.poll(async () => (await mock.calls(cmd)).length).toBe(1);
+  }
+
   for (const [name, cmd, start] of [
     ["open", "project_open", "ControlOrMeta+o"],
     ["new", "project_new", "ControlOrMeta+n"],
     ["restore", "recovery_restore", ""],
   ] as const) {
+    test(`a_preset_chosen_while_${name}_is_pending_never_reaches_the_new_project`, async ({ app, mock }) => {
+      await startPending(app, mock, cmd, start);
+      // A's editor is still up while B is on its way: choosing a preset there does nothing.
+      await editor(app).getByRole("button", { name: "Trap Lead", exact: true }).evaluate((b: HTMLElement) => b.click());
+      await app.waitForTimeout(200);
+      await mock.eval(`(m) => m.releaseCommand("${cmd}")`);
+      await expect(editor(app)).toHaveCount(0);
+      await app.waitForTimeout(400);
+      expect(await anythingAfter(mock, cmd)).toEqual([]);
+      const b = await mock.view();
+      if (name === "new") expect(b.channels).toEqual([]);
+      else expect(await stored(mock)).toMatchObject({ preset: "Reese", synth: presetValues("Reese") });
+    });
+
     test(`a_key_pressed_while_${name}_is_pending_never_reaches_the_new_project`, async ({ app, mock }) => {
-      await openUnderPrompt(app);
-      await mock.eval(`(m) => m.holdCommand("${cmd}")`);
-      if (start) {
-        await app.getByRole("button", { name: "Discard" }).click();
-        await openUnderPrompt(app);
-        await mock.eval("(m) => m.queueDialog('/qa/projects/Other.grooviq')");
-        await app.keyboard.press(start);
-      } else {
-        await app.getByRole("dialog", { name: "Restore your project?" }).getByRole("button", { name: "Restore" }).click();
-      }
-      await expect.poll(async () => (await mock.calls(cmd)).length).toBe(1);
+      await startPending(app, mock, cmd, start);
       // A's editor is still up while B is on its way: its keys and drags change nothing.
       const knob = control(app, "filter_cutoff");
       await knob.focus();
@@ -745,5 +770,8 @@ test.describe("edits while a replacement is on its way", () => {
     await app.keyboard.press("ArrowUp");
     await expect.poll(() => paramEdits(mock)).toHaveLength(1);
     expect((await stored(mock)).synth.filter_cutoff).toBeGreaterThan(650);
+    // Presets too.
+    await editor(app).getByRole("button", { name: "Trap Lead", exact: true }).click();
+    await expect.poll(async () => (await stored(mock)).preset).toBe("Trap Lead");
   });
 });

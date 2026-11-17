@@ -147,7 +147,7 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }
           <p className="workspace-empty">F6 shows the channel rack, F7 the piano roll.</p>
         )}
       </div>
-      <DeviceWindows onError={onError} />
+      <DeviceWindows channels={view.channels} onError={onError} />
     </SelectionContext.Provider>
   );
 }

@@ -105,9 +105,8 @@ export class ParamGestures {
           st.members.set(id, m);
         }
         m.last = value;
-        if (m.gesture.input(value)) return true;
-        this.killGroup(st);
-        return false;
+        // A member only ends through `end()` or the group, both of which end the group first.
+        return m.gesture.input(value);
       },
       commit: () => {
         if (st.dead) return;

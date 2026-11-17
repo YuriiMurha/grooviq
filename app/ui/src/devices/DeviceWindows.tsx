@@ -1,6 +1,6 @@
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
+import type { ChannelView } from "../api/project";
 import { useSelection } from "../layout/selection";
-import { useProject } from "../project/context";
 import "./devices.css";
 import { SynthEditor } from "./synth/SynthEditor";
 import { closeDevice, raiseDevice, useOpenDevices } from "./windows";
@@ -8,11 +8,9 @@ import { closeDevice, raiseDevice, useOpenDevices } from "./windows";
 /** The open instrument editors, one floating window per channel, above the workspace. A window
  * whose channel is gone (removed, another project) closes. Focusing or pressing a window selects
  * its channel. */
-export function DeviceWindows({ onError }: { onError: (message: string) => void }) {
+export function DeviceWindows({ channels, onError }: { channels: ChannelView[]; onError: (message: string) => void }) {
   const open = useOpenDevices();
-  const { view } = useProject();
   const { channel: selected, select } = useSelection();
-  const channels = useMemo(() => view?.channels ?? [], [view?.channels]);
 
   useEffect(() => {
     for (const w of open) if (!channels.some((c) => c.id === w.channel && c.kind === "synth")) closeDevice(w.channel);
