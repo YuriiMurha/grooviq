@@ -211,34 +211,60 @@ test.describe("export (check 13)", () => {
     });
   }
 
-  test("Cancel over an existing file keeps that file", async ({ app, mock }) => {
-    await app.keyboard.press("ControlOrMeta+r");
-    const dialog = app.getByRole("dialog", { name: "Export WAV" });
-    await mock.eval("(m) => m.files.set('/qa/out/beat.wav', { kind: 'sample', seconds: 9 })");
-    await mock.eval("(m) => m.queueDialog('/qa/out/beat.wav')");
-    await dialog.getByRole("button", { name: "Export…" }).click();
-    await expect.poll(async () => Number(await dialog.getByRole("progressbar").getAttribute("aria-valuenow"))).toBeGreaterThan(0);
-    await dialog.getByRole("button", { name: "Cancel export" }).click();
-    await expect(dialog.getByRole("button", { name: "Export…" })).toBeVisible();
-    expect(await mock.eval<number>("(m) => m.files.get('/qa/out/beat.wav')?.seconds")).toBe(9);
-    expect(await mock.eval<string[]>("(m) => [...m.files.keys()].filter((k) => k.endsWith('.part'))")).toEqual([]);
-  });
+  test.describe("held export cancellation", () => {
+    test.use({ seed: { ...kitSeed, holdExport: true } });
 
-  test("Cancel leaves no file behind and goes back to the options", async ({ app, mock }) => {
-    await app.keyboard.press("ControlOrMeta+r");
-    const dialog = app.getByRole("dialog", { name: "Export WAV" });
-    await mock.eval("(m) => m.queueDialog('/qa/out/cancelled.wav')");
-    await dialog.getByRole("button", { name: "Export…" }).click();
-    await expect.poll(async () => Number(await dialog.getByRole("progressbar").getAttribute("aria-valuenow"))).toBeGreaterThan(0);
-    await dialog.getByRole("button", { name: "Cancel export" }).click();
-    await expect(dialog.getByRole("button", { name: "Export…" })).toBeVisible();
-    await expect(dialog.getByRole("alert")).toHaveCount(0);
-    expect(await mock.eval<boolean>("(m) => m.files.has('/qa/out/cancelled.wav')")).toBe(false);
+    test("Cancel over an existing file keeps that file", async ({ app, mock }) => {
+      await app.keyboard.press("ControlOrMeta+r");
+      const dialog = app.getByRole("dialog", { name: "Export WAV" });
+      await mock.eval("(m) => m.files.set('/qa/out/beat.wav', { kind: 'sample', seconds: 9 })");
+      await mock.eval("(m) => m.queueDialog('/qa/out/beat.wav')");
+      await dialog.getByRole("button", { name: "Export…" }).click();
+      await expect.poll(async () => Number(await dialog.getByRole("progressbar").getAttribute("aria-valuenow"))).toBeGreaterThan(0);
+      await dialog.getByRole("button", { name: "Cancel export" }).click();
+      await expect.poll(() => mock.calls("project_export_cancel")).toHaveLength(1);
+      await mock.eval("(m) => m.releaseExport()");
+      await expect(dialog.getByRole("button", { name: "Export…" })).toBeVisible();
+      expect(await mock.eval<number>("(m) => m.files.get('/qa/out/beat.wav')?.seconds")).toBe(9);
+      expect(await mock.eval<string[]>("(m) => [...m.files.keys()].filter((k) => k.endsWith('.part'))")).toEqual([]);
+    });
+
+    test("Cancel leaves no file behind and goes back to the options", async ({ app, mock }) => {
+      await app.keyboard.press("ControlOrMeta+r");
+      const dialog = app.getByRole("dialog", { name: "Export WAV" });
+      await mock.eval("(m) => m.queueDialog('/qa/out/cancelled.wav')");
+      await dialog.getByRole("button", { name: "Export…" }).click();
+      await expect.poll(async () => Number(await dialog.getByRole("progressbar").getAttribute("aria-valuenow"))).toBeGreaterThan(0);
+      await dialog.getByRole("button", { name: "Cancel export" }).click();
+      await expect.poll(() => mock.calls("project_export_cancel")).toHaveLength(1);
+      await mock.eval("(m) => m.releaseExport()");
+      await expect(dialog.getByRole("button", { name: "Export…" })).toBeVisible();
+      await expect(dialog.getByRole("alert")).toHaveCount(0);
+      expect(await mock.eval<boolean>("(m) => m.files.has('/qa/out/cancelled.wav')")).toBe(false);
+    });
   });
 });
 
 test.describe("a held Cmd+S (check 14, the UI's part)", () => {
   test.use({ seed: { ...kitSeed, files: { ...kitSeed.files, "/qa/projects/Held.grooviq": { kind: "project", project: project(KIT) } } } });
+
+  test("Save works as soon as the first project view commits", async ({ app, mock }) => {
+    await app.addInitScript(() => {
+      const observer = new MutationObserver(() => {
+        if (![...document.querySelectorAll("button[aria-haspopup='menu']")].some((button) => button.textContent?.includes("QA beat"))) return;
+        observer.disconnect();
+        const shell = (window as unknown as { __grooviqMock: { queueDialog: (path: string) => void } }).__grooviqMock;
+        shell.queueDialog("/qa/projects/Early.grooviq");
+        const mac = /^mac/i.test(navigator.platform) || /iphone|ipad/i.test(navigator.platform);
+        // Mutation observers run after the commit's layout effects, before passive effects.
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "s", metaKey: mac, ctrlKey: !mac, bubbles: true }));
+      });
+      observer.observe(document, { childList: true, subtree: true });
+    });
+    await app.reload();
+    await expect.poll(() => mock.calls("project_save_as")).toHaveLength(1);
+    await expect.poll(() => mock.view().then((view) => view.path)).toBe("/qa/projects/Early.grooviq");
+  });
 
   test("saves once per press, not once per key repeat", async ({ app, mock }) => {
     await mock.eval("(m) => m.queueDialog('/qa/projects/Held.grooviq')");

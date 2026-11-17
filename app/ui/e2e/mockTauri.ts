@@ -89,6 +89,8 @@ export interface MockSeed {
   recovery?: { savedAt: number; original: string | null; project: MockProject } | null;
   /** How long an export takes, in ms. */
   exportMs?: number;
+  /** Pause after the first progress event until releaseExport is called. */
+  holdExport?: boolean;
   /** The sampler's parameters (tests/fixtures/device-params.json); the fixture fills it in. */
   samplerParams?: { id: string; min: number; max: number; default: number }[];
   /** The synth's parameters (the same fixture). */
@@ -185,6 +187,7 @@ export function installMockTauri(seed: MockSeed): void {
   // --- The mock's state, readable from the tests as `window.__grooviqMock`. ---
   const files = new Map<string, MockFile>(Object.entries(seed.files ?? {}));
   const calls: { cmd: string; args: unknown; at: number }[] = [];
+  let releaseExport: (() => void) | null = null;
   const s = {
     project: normalise(seed.project ? clone(seed.project) : emptyProject()),
     path: null as string | null,
@@ -1179,6 +1182,11 @@ export function installMockTauri(seed: MockSeed): void {
           await new Promise((r) => setTimeout(r, total / steps));
           if (job.cancel) throw "The export was cancelled.";
           emit("export-progress", i / steps);
+          if (i === 1 && seed.holdExport) {
+            await new Promise<void>((resolve) => { releaseExport = resolve; });
+            releaseExport = null;
+            if (job.cancel) throw "The export was cancelled.";
+          }
         }
         files.set(path, { kind: "sample", seconds: 1 });
       } finally {
@@ -1404,6 +1412,10 @@ export function installMockTauri(seed: MockSeed): void {
     unregisterListener: (_event: string, id: number) => callbacks.delete(id),
   };
   w.__grooviqMock = {
+    releaseExport: () => {
+      if (!releaseExport) throw new Error("No export is held.");
+      releaseExport();
+    },
     calls,
     files,
     state: s,
