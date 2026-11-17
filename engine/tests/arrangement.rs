@@ -326,3 +326,45 @@ fn sparse_source_many_empty_clips() {
         }
     );
 }
+
+#[test]
+fn unsorted_source_partial_period_has_exact_events_and_budget() {
+    let p = pattern(vec![note(14, 9), note(6, 8), note(0, 3)]);
+    for offset in [5, 37] {
+        let clips = [clip(1, 10, 22, offset)];
+        let song = compile_pattern_clips(&p, &clips, 4).unwrap();
+        assert_eq!(song.length, 32);
+        assert_eq!(
+            song.notes
+                .iter()
+                .map(|n| (n.tick, n.length))
+                .collect::<Vec<_>>(),
+            vec![(11, 8), (19, 9), (21, 3), (27, 5)]
+        );
+        assert_eq!(
+            compile_pattern_clips(&p, &clips, 3),
+            Err(ArrangementError::TooManyNotes { limit: 3 })
+        );
+    }
+}
+
+#[test]
+fn empty_one_tick_source_many_maximum_length_clips() {
+    let p = vec![(
+        7,
+        PatternData {
+            length: 1,
+            notes: vec![],
+        },
+    )];
+    let clips: Vec<_> = (0..1_000)
+        .map(|id| clip(id, 0, MAX_SONG_TICKS, u32::MAX))
+        .collect();
+    assert_eq!(
+        compile_pattern_clips(&p, &clips, 0).unwrap(),
+        ArrangementData {
+            length: MAX_SONG_TICKS,
+            notes: vec![]
+        }
+    );
+}
