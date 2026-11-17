@@ -1508,3 +1508,146 @@ fn a_note_that_did_not_grow_the_pattern_keeps_it_long_once_the_growth_goes() {
     assert_eq!(notes(&s), before);
     assert_eq!(s.view().pattern.steps, 16);
 }
+
+#[test]
+fn an_identical_update_that_grows_the_pattern_round_trips() {
+    // The review's R8 case: the note is unchanged, but resubmitting it grows the pattern
+    // after the length was shortened by hand. That growth is a step of its own.
+    let (mut s, _, _, ch, _) = three_notes();
+    add_notes(&mut s, vec![melodic(ch, 5_000, 75)]);
+    s.apply(Edit::SetPatternLength { steps: 16 }, Instant::now())
+        .unwrap();
+    let n = *notes(&s).iter().find(|n| n.key == 75).unwrap();
+    edit_notes(&mut s, vec![], vec![n], vec![]);
+    assert_eq!(s.view().pattern.steps, 32);
+    let grown = state(&s);
+    undo(&mut s);
+    assert_eq!(s.view().pattern.steps, 16, "the growth alone is undone");
+    assert!(notes(&s).iter().any(|n| n.key == 75));
+    redo(&mut s);
+    assert_eq!(state(&s), grown);
+    // Undoing everything: the length set by hand.
+    undo(&mut s);
+    undo(&mut s);
+    assert_eq!(s.view().pattern.steps, 16);
+    assert!(!s.view().can_undo);
+}
+
+#[test]
+fn growth_does_not_round_a_note_already_inside_a_length_set_by_hand() {
+    let (mut s, _, _, ch, _) = three_notes();
+    s.apply(Edit::SetPatternLength { steps: 25 }, Instant::now())
+        .unwrap();
+    add_notes(
+        &mut s,
+        vec![NewNote {
+            tick: 0,
+            length: 20 * 240,
+            ..melodic(ch, 0, 75)
+        }],
+    );
+    assert_eq!(s.view().pattern.steps, 25);
+    undo(&mut s);
+    redo(&mut s);
+    assert_eq!(s.view().pattern.steps, 25);
+}
+
+#[test]
+fn growth_keeps_the_bar_of_its_time_through_signature_changes() {
+    let (mut s, c, mut p, ch, _) = three_notes();
+    s.set_recording(true).unwrap();
+    start_take(&mut s, &c, &mut p);
+    inject(&mut s, ch, 201, 70, 1);
+    s.apply(Edit::SetTimeSignature { beats: 3, unit: 4 }, Instant::now())
+        .unwrap();
+    s.apply(Edit::SetTempo { bpm: 77.0 }, Instant::now())
+        .unwrap();
+    inject(&mut s, ch, 202, 71, 25); // rounds to 36 steps in 3/4
+    assert_eq!(s.view().pattern.steps, 36);
+    s.apply(Edit::SetTimeSignature { beats: 5, unit: 8 }, Instant::now())
+        .unwrap();
+    inject(&mut s, ch, 201, 72, 25); // grows nothing now; 30 steps in 5/8
+    undo(&mut s);
+    assert_eq!(s.view().pattern.steps, 30);
+    redo(&mut s);
+    assert_eq!(s.view().pattern.steps, 36);
+    undo(&mut s);
+    undo(&mut s);
+    assert_eq!(s.view().pattern.steps, 16);
+}
+
+#[test]
+fn a_length_set_by_hand_to_the_length_it_has_does_not_dirty() {
+    let (mut s, _, _, ch, _) = three_notes();
+    add_notes(&mut s, vec![melodic(ch, 4_000, 75)]);
+    let loaded = Loaded {
+        project: s.project().clone(),
+        samples: HashMap::new(),
+        warnings: Vec::new(),
+    };
+    let decoded = decode_samples(&loaded);
+    s.open(Path::new("/p/x.grooviq"), loaded, decoded).unwrap();
+    s.apply(Edit::SetPatternLength { steps: 32 }, Instant::now())
+        .unwrap();
+    assert!(!s.view().dirty);
+}
+
+#[test]
+fn a_hundred_thousand_lengths_set_by_hand_keep_the_log_small() {
+    let (mut s, c, mut p, ch, _) = three_notes();
+    add_notes(&mut s, vec![melodic(ch, 5_000, 75)]);
+    for i in 0..100_000u32 {
+        s.apply(
+            Edit::SetPatternLength { steps: 1 + i % 200 },
+            Instant::now(),
+        )
+        .unwrap();
+        if i % 50 == 0 {
+            tick(&c, &mut p);
+        }
+    }
+    assert!(
+        s.history_log_len() <= 2,
+        "the log holds {} entries for one step",
+        s.history_log_len()
+    );
+    // The last length set by hand is what undo leaves.
+    let last = s.view().pattern.steps;
+    undo(&mut s);
+    assert_eq!(s.view().pattern.steps, last);
+}
+
+#[test]
+fn undo_and_new_edit_cycles_keep_the_log_small() {
+    // Each new edit forgets the undone one (redo is cleared): its growth leaves the log, and
+    // the lengths set by hand before it fold into the start.
+    let (mut s, c, mut p, ch, before) = three_notes();
+    for i in 0..1_000u32 {
+        add_notes(&mut s, vec![melodic(ch, 5_000 + i % 100, 75)]);
+        s.apply(Edit::SetPatternLength { steps: 16 }, Instant::now())
+            .unwrap();
+        undo(&mut s);
+        tick(&c, &mut p);
+    }
+    assert!(s.history_log_len() <= 2, "{}", s.history_log_len());
+    assert_eq!(notes(&s), before);
+    assert_eq!(s.view().pattern.steps, 16);
+}
+
+#[test]
+fn a_takes_growths_with_different_bars_stay_apart() {
+    // The live fixture's `keeps_each_growths_bar_within_one_take`: one take grows to 32 in
+    // 4/4; its next note, after a switch to 3/4, ends inside 32 and grows nothing (in 3/4 it
+    // would round to 36). Redo must give 32 again.
+    let (mut s, c, mut p, ch, _) = three_notes();
+    s.set_recording(true).unwrap();
+    start_take(&mut s, &c, &mut p);
+    inject(&mut s, ch, 301, 70, 25);
+    s.apply(Edit::SetTimeSignature { beats: 3, unit: 4 }, Instant::now())
+        .unwrap();
+    inject(&mut s, ch, 301, 71, 26);
+    let mut lengths = vec![s.view().pattern.steps];
+    lengths.push(undo(&mut s).view.pattern.steps);
+    lengths.push(redo(&mut s).view.pattern.steps);
+    assert_eq!(lengths, vec![32, 16, 32]);
+}

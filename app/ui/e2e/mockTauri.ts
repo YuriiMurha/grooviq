@@ -66,10 +66,12 @@ interface NoteChange {
   take?: number | null;
 }
 
-/** undo.rs `Growth`: a commit's latest note end and the length it grows the pattern to. */
+/** undo.rs `Growth`: a commit's latest note end, the length it grows the pattern to, and the
+ * bar (ticks) that length was rounded to. */
 interface Growth {
   end: number;
   to: number;
+  bar: number;
 }
 
 /** undo.rs `Length`: a commit's growth owned by a step (null: a step that left the history), or
@@ -342,6 +344,10 @@ export function installMockTauri(seed: MockSeed): void {
       if (take === null) pushHistory(step, prev.steps, growth);
       else recordHistory(step, take, prev.steps, growth);
       notesChanged();
+    } else if (growth && next.steps !== prev.steps) {
+      // session.rs: notes resubmitted as they were, growing a pattern shortened by hand, are
+      // a step holding only that growth.
+      pushHistory({ before: [], after: [] }, prev.steps, growth);
     }
     return true;
   };
@@ -387,14 +393,36 @@ export function installMockTauri(seed: MockSeed): void {
     }
     if (!dropped.size) return;
     for (const l of h.log) if ("owner" in l && l.owner !== null && dropped.has(l.owner)) l.owner = null;
+    compactLog();
+  };
+  /** undo.rs `append`: a length set by hand replaces one set right before it; a step's growth
+   * after its own growth with the same bar keeps the one reaching further. */
+  const appendLength = (log: LengthEntry[], entry: LengthEntry) => {
+    const last = log[log.length - 1];
+    if (last && "set" in last && "set" in entry) last.set = entry.set;
+    else if (last && "owner" in last && "owner" in entry && last.owner === entry.owner && last.growth.bar === entry.growth.bar) {
+      if (entry.growth.end > last.growth.end) last.growth = entry.growth;
+    } else log.push(entry);
+  };
+  /** undo.rs `NoteHistory::fold`: leading entries no step can take back play into the start. */
+  const foldLog = () => {
+    const h = s.history;
     let fixed = 0;
     while (fixed < h.log.length) {
       const l = h.log[fixed];
       if ("owner" in l && l.owner !== null) break;
       fixed++;
     }
+    if (!fixed) return;
     h.base = playLength(h.base, h.log.slice(0, fixed), () => true);
     h.log.splice(0, fixed);
+  };
+  /** undo.rs `NoteHistory::compact`. */
+  const compactLog = () => {
+    const log: LengthEntry[] = [];
+    for (const l of s.history.log) appendLength(log, l);
+    s.history.log = log;
+    foldLog();
   };
   const historyEmpty = () => !s.history.undo.length && !s.history.redo.length;
   /** undo.rs `NoteHistory::close`: every open take step closes. */
@@ -412,7 +440,10 @@ export function installMockTauri(seed: MockSeed): void {
     const gone = new Set(h.redo.map((r) => r.id));
     for (const r of h.redo) h.notes -= sizeOf(r);
     h.redo = [];
-    h.log = h.log.filter((l) => !("owner" in l) || l.owner === null || !gone.has(l.owner));
+    if (gone.size) {
+      h.log = h.log.filter((l) => !("owner" in l) || l.owner === null || !gone.has(l.owner));
+      compactLog();
+    }
     c.take = take;
     c.id = h.nextId++;
     h.notes += sizeOf(c);
@@ -421,7 +452,7 @@ export function installMockTauri(seed: MockSeed): void {
     return c.id;
   };
   const logGrowth = (owner: number, growth: Growth | null) => {
-    if (growth) s.history.log.push({ owner, growth });
+    if (growth) appendLength(s.history.log, { owner, growth: { ...growth } });
   };
   /** undo.rs `NoteHistory::push`. */
   const pushHistory = (c: NoteChange, steps: number, growth: Growth | null) => {
@@ -448,7 +479,9 @@ export function installMockTauri(seed: MockSeed): void {
   };
   /** undo.rs `NoteHistory::set_length`: undo never takes a length set by hand back. */
   const setLengthByHand = (steps: number) => {
-    if (!historyEmpty()) s.history.log.push({ set: steps });
+    if (historyEmpty()) return;
+    appendLength(s.history.log, { set: steps });
+    foldLog();
   };
   /** undo.rs `NoteHistory::length_after`. */
   const lengthAfter = (undo: boolean) => {
@@ -504,7 +537,7 @@ export function installMockTauri(seed: MockSeed): void {
     for (const n of touched) end = Math.max(end, n.tick + (n.length ?? STEP_TICKS));
     const to = Math.min(MAX_STEPS, Math.ceil(end / barTicks) * (barTicks / STEP_TICKS));
     // notes.rs `growth`: every commit's growth goes into the history's length log.
-    if (end > 0) lastGrowth = { end, to };
+    if (end > 0) lastGrowth = { end, to, bar: barTicks };
     if (end <= pat.steps * STEP_TICKS) return;
     pat.steps = Math.max(pat.steps, to);
   };

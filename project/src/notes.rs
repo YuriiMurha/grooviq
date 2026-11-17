@@ -200,6 +200,7 @@ fn growth(end: u32, bar_ticks: u32) -> Option<Growth> {
     Some(Growth {
         end,
         to: (bars * bar_ticks / STEP_TICKS).min(MAX_STEPS),
+        bar: bar_ticks,
     })
 }
 

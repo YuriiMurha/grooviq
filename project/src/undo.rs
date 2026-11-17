@@ -36,11 +36,12 @@ pub(crate) struct NoteChange {
 
 /// What a commit did to the length: the latest end among the notes it added or moved, and the
 /// length (in steps) that end grows the pattern to (`notes::apply`'s rule, with the bar of the
-/// time). The pattern grows to `to` if `end` is past its end then.
+/// time, `bar` ticks). The pattern grows to `to` if `end` is past its end then.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Growth {
     pub end: u32,
     pub to: u32,
+    pub bar: u32,
 }
 
 impl Growth {
@@ -55,6 +56,15 @@ impl Growth {
 }
 
 impl NoteChange {
+    /// A change of no notes: an edit that only grew the pattern (it resubmitted notes as they
+    /// were, after the length was shortened by hand). Its growth is its whole effect.
+    pub(crate) fn none() -> Self {
+        Self {
+            before: Vec::new(),
+            after: Vec::new(),
+        }
+    }
+
     /// What changed from `old` to `new`, or `None` if their notes are the same.
     pub(crate) fn between(old: &Pattern, new: &Pattern) -> Option<Self> {
         // Edits keep the order of the notes they leave and add at the end: skip the common
@@ -195,6 +205,12 @@ impl NoteHistory {
         *self = Self::default();
     }
 
+    /// Entries in the length log: a test hook for its bound. Not part of the API.
+    #[doc(hidden)]
+    pub fn log_len(&self) -> usize {
+        self.log.len()
+    }
+
     fn empty(&self) -> bool {
         self.undo.is_empty() && self.redo.is_empty()
     }
@@ -238,17 +254,44 @@ impl NoteHistory {
     /// The pattern's length was set by hand to `steps`: no undo takes it back.
     pub(crate) fn set_length(&mut self, steps: u32) {
         if !self.empty() {
-            self.log.push(Length::Set(steps));
+            append(&mut self.log, Length::Set(steps));
+            self.fold();
         }
     }
 
     fn grew(&mut self, owner: u64, growth: Option<Growth>) {
         if let Some(growth) = growth {
-            self.log.push(Length::Grew {
-                owner: Some(owner),
-                growth,
-            });
+            let owner = Some(owner);
+            append(&mut self.log, Length::Grew { owner, growth });
         }
+    }
+
+    /// Plays the log's leading entries that no step can take back (lengths set by hand, and
+    /// the growth of steps that left the history) into its start.
+    fn fold(&mut self) {
+        let fixed = self
+            .log
+            .iter()
+            .take_while(|l| !matches!(l, Length::Grew { owner: Some(_), .. }))
+            .count();
+        if fixed > 0 {
+            self.base = play(self.base, &self.log[..fixed], |_| true);
+            self.log.drain(..fixed);
+        }
+    }
+
+    /// Merges what [`append`] merges all through the log, then folds its start: after entries
+    /// left it (redo cleared) or became fixed (steps dropped). The log then holds at most one
+    /// length set by hand between two growths, and one growth per run of a step's commits
+    /// with one bar, so its size follows the history's steps and commits, never the number of
+    /// commands.
+    fn compact(&mut self) {
+        let mut log = Vec::with_capacity(self.log.len());
+        for l in self.log.drain(..) {
+            append(&mut log, l);
+        }
+        self.log = log;
+        self.fold();
     }
 
     /// Adds a step (open to `take`, if any) and returns its id: redo is cleared (it is a note
@@ -261,8 +304,11 @@ impl NoteHistory {
         }
         self.notes -= self.redo.iter().map(|s| s.change.size()).sum::<usize>();
         let gone: HashSet<u64> = self.redo.drain(..).map(|s| s.id).collect();
-        self.log
-            .retain(|l| !matches!(l, Length::Grew { owner: Some(o), .. } if gone.contains(o)));
+        if !gone.is_empty() {
+            self.log
+                .retain(|l| !matches!(l, Length::Grew { owner: Some(o), .. } if gone.contains(o)));
+            self.compact();
+        }
         let id = self.next_id;
         self.next_id += 1;
         self.notes += change.size();
@@ -298,14 +344,7 @@ impl NoteHistory {
                 *owner = None;
             }
         }
-        // Entries no step can take back any more: play them into the start.
-        let fixed = self
-            .log
-            .iter()
-            .take_while(|l| !matches!(l, Length::Grew { owner: Some(_), .. }))
-            .count();
-        self.base = play(self.base, &self.log[..fixed], |_| true);
-        self.log.drain(..fixed);
+        self.compact();
     }
 
     /// The change undo would take back.
@@ -349,6 +388,29 @@ impl NoteHistory {
             step.take = None;
             self.undo.push_back(step);
         }
+    }
+}
+
+/// Adds `entry` to the end of `log`, merging it with the last entry when that changes nothing
+/// the log plays to: a length set by hand replaces one set right before it, and a step's
+/// growth after its own growth with the same bar keeps only the one reaching further (with one
+/// bar, the length a note end grows to rises with the end, so growing to the further end does
+/// what growing to both in turn does, from any length).
+fn append(log: &mut Vec<Length>, entry: Length) {
+    match (log.last_mut(), entry) {
+        (Some(Length::Set(last)), Length::Set(steps)) => *last = steps,
+        (
+            Some(Length::Grew {
+                owner: was,
+                growth: last,
+            }),
+            Length::Grew { owner, growth },
+        ) if *was == owner && last.bar == growth.bar => {
+            if growth.end > last.end {
+                *last = growth;
+            }
+        }
+        _ => log.push(entry),
     }
 }
 
@@ -397,6 +459,7 @@ mod tests {
         Some(Growth {
             end: from * STEP_TICKS + 1,
             to,
+            bar: 3_840,
         })
     }
 
@@ -530,6 +593,57 @@ mod tests {
             assert_eq!(h.length_after(true), 32);
             h.undone();
         }
+    }
+
+    #[test]
+    fn lengths_set_by_hand_in_a_row_keep_only_the_last() {
+        let mut h = NoteHistory::default();
+        h.push(add(1..2), 16, grow(16, 32));
+        for steps in 1..=100_000 {
+            h.set_length(steps % 256 + 1);
+        }
+        assert_eq!(h.log.len(), 2);
+        assert_eq!(h.log[1], Length::Set(100_000 % 256 + 1));
+        h.undone();
+        assert_eq!(h.length_after(false), 100_000 % 256 + 1);
+    }
+
+    #[test]
+    fn a_steps_growths_in_a_row_with_one_bar_merge() {
+        let mut h = NoteHistory::default();
+        for (i, end) in [5_000, 4_000, 9_000, 7_000].into_iter().enumerate() {
+            let growth = Growth {
+                end,
+                to: end.div_ceil(3_840) * 16,
+                bar: 3_840,
+            };
+            h.record(add(i as u32..i as u32 + 1), 1, 16, Some(growth));
+        }
+        assert_eq!(h.log.len(), 1, "{:?}", h.log);
+        // Played, the one growth still reaches the furthest end (9,000 ticks: 48 steps).
+        assert_eq!(play(h.base, &h.log, |_| true), 48);
+        assert_eq!(h.length_after(true), 16);
+        // Another bar does not merge.
+        let other = Growth {
+            end: 10_000,
+            to: 42,
+            bar: 1_440,
+        };
+        h.record(add(9..10), 1, 48, Some(other));
+        assert_eq!(h.log.len(), 2);
+    }
+
+    #[test]
+    fn cleared_redo_takes_its_growth_out_of_the_log() {
+        let mut h = NoteHistory::default();
+        for i in 0..1_000 {
+            h.push(add(i..i + 1), 16, grow(16, 32));
+            h.set_length(16);
+            h.undone();
+        }
+        // Each new step dropped the undone one's growth and folded the lengths set by hand.
+        assert!(h.log.len() <= 2, "{:?}", h.log);
+        assert_eq!(h.base, 16);
     }
 
     #[test]

@@ -678,6 +678,13 @@ impl Session {
         }
     }
 
+    /// Entries in the undo history's length log: a test hook for its bound. Not part of the
+    /// API.
+    #[doc(hidden)]
+    pub fn history_log_len(&self) -> usize {
+        self.history.log_len()
+    }
+
     /// The current pattern's revision (see [`ProjectView::notes_revision`]).
     pub fn notes_revision(&self) -> u32 {
         self.current().revision
@@ -984,6 +991,11 @@ impl Session {
         match (notes, take) {
             (Some(notes), Some(take)) => self.history.record(notes, take, steps, growth),
             (Some(notes), None) => self.history.push(notes, steps, growth),
+            // Notes resubmitted as they were, growing a pattern shortened by hand: a step
+            // that holds only that growth, so undo and redo play the length it gave.
+            (None, _) if growth.is_some() && self.current().steps != steps => {
+                self.history.push(NoteChange::none(), steps, growth);
+            }
             (None, _) => {}
         }
         Ok(true)

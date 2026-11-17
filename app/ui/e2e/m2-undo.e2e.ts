@@ -239,3 +239,108 @@ test.describe("the live fixture's pattern length", () => {
     expect(lengths).toEqual([32, 48, 64, 40, 40, 40, 40, 40, 64]);
   });
 });
+
+test.describe("the live fixture's length log", () => {
+  test.use({ seed: { project: twoChannels([]) } });
+
+  /** Runs `body` in the page with the mock's IPC and state (as `ipc`, `m` and `steps()`). */
+  const inPage = <T,>(app: import("@playwright/test").Page, body: string) =>
+    app.evaluate(`(async () => {
+      const ipc = window.__TAURI_INTERNALS__;
+      const m = window.__grooviqMock;
+      const steps = () => m.view().pattern.steps;
+      const edit = (edit) => ipc.invoke("project_edit", { edit });
+      const add = async (tick) => {
+        const v = await ipc.invoke("project_view");
+        const note = { channel: 1, tick, length: 240, key: 60, velocity: 0.8, slide: false };
+        return ipc.invoke("notes_edit", { edit: { baseRevision: v.notesRevision, add: [note], update: [], delete: [] } });
+      };
+      ${body}
+    })()`) as Promise<T>;
+
+  test("keeps_a_hundred_thousand_lengths_set_by_hand_small", async ({ app }) => {
+    const out = await inPage<{ log: number; steps: number; undone: number }>(app, `
+      await add(5000);
+      for (let i = 0; i < 100000; i++) await edit({ kind: "setPatternLength", steps: 1 + (i % 200) });
+      const last = steps();
+      await ipc.invoke("notes_undo");
+      return { log: m.state.history.log.length, steps: last, undone: steps() };
+    `);
+    expect(out.log).toBeLessThanOrEqual(2);
+    expect(out.undone).toBe(out.steps);
+  });
+
+  test("forgets_the_growth_of_cleared_redo", async ({ app }) => {
+    const out = await inPage<{ log: number; steps: number }>(app, `
+      for (let i = 0; i < 1000; i++) {
+        await add(5000 + (i % 100));
+        await edit({ kind: "setPatternLength", steps: 16 });
+        await ipc.invoke("notes_undo");
+      }
+      return { log: m.state.history.log.length, steps: steps() };
+    `);
+    expect(out.log).toBeLessThanOrEqual(2);
+    expect(out.steps).toBe(16);
+  });
+
+  test("undoes_an_identical_update_that_grew_the_pattern", async ({ app }) => {
+    const out = await inPage<number[]>(app, `
+      await add(5000);
+      await edit({ kind: "setPatternLength", steps: 16 });
+      const v = await ipc.invoke("project_view");
+      const note = m.notes()[0];
+      await ipc.invoke("notes_edit", { edit: { baseRevision: v.notesRevision, add: [], update: [note], delete: [] } });
+      const out = [steps()];
+      await ipc.invoke("notes_undo"); out.push(steps(), m.notes().length);
+      await ipc.invoke("notes_redo"); out.push(steps());
+      return out;
+    `);
+    // Grown to 32; the undo takes only the growth back (the note stays); redo grows again.
+    expect(out).toEqual([32, 16, 1, 32]);
+  });
+
+  test("keeps_the_bar_of_each_growth", async ({ app }) => {
+    // The reviewer's case: growth rounded in 3/4, then a note in 5/8, then undo and redo.
+    const out = await inPage<number[]>(app, `
+      m.state.transport.playing = true;
+      const note = async (take, key, steps) => {
+        m.state.recordOpen.set("1:" + key, { tick: 0, velocity: 0.8, take });
+        m.hold(steps * 240);
+        await ipc.invoke("channel_note", { channel: 1, key, on: false, velocity: 0 });
+      };
+      await note(201, 70, 1);
+      await edit({ kind: "setTimeSignature", beats: 3, unit: 4 });
+      await edit({ kind: "setTempo", bpm: 77 });
+      await note(202, 71, 25);
+      const out = [steps()];
+      await edit({ kind: "setTimeSignature", beats: 5, unit: 8 });
+      await note(201, 72, 25); out.push(steps());
+      await ipc.invoke("notes_undo"); out.push(steps());
+      await ipc.invoke("notes_redo"); out.push(steps());
+      await ipc.invoke("notes_undo"); await ipc.invoke("notes_undo"); out.push(steps());
+      return out;
+    `);
+    expect(out).toEqual([36, 36, 30, 36, 16]);
+  });
+
+  test("keeps_each_growths_bar_within_one_take", async ({ app }) => {
+    // One take grows to 32 in 4/4; after a switch to 3/4 its next note grows nothing (it ends
+    // inside 32), though in 3/4 it would round to 36. Redo must give 32 again.
+    const out = await inPage<number[]>(app, `
+      m.state.transport.playing = true;
+      const note = async (take, key, steps) => {
+        m.state.recordOpen.set("1:" + key, { tick: 0, velocity: 0.8, take });
+        m.hold(steps * 240);
+        await ipc.invoke("channel_note", { channel: 1, key, on: false, velocity: 0 });
+      };
+      await note(301, 70, 25);
+      await edit({ kind: "setTimeSignature", beats: 3, unit: 4 });
+      await note(301, 71, 26);
+      const out = [steps()];
+      await ipc.invoke("notes_undo"); out.push(steps());
+      await ipc.invoke("notes_redo"); out.push(steps());
+      return out;
+    `);
+    expect(out).toEqual([32, 16, 32]);
+  });
+});
