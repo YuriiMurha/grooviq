@@ -294,7 +294,7 @@ test.describe("the sampler editor", () => {
     // Relinking asks for the file, points the channel at it and draws it, fetched once.
     await mock.eval("(m) => m.queueDialog('/qa/sounds/Hat.wav')");
     await relink.click();
-    await expect.poll(async () => (await mock.calls("channel_set_sample")).map((c) => c.args)).toEqual([{ channel: HAT, path: "/qa/sounds/Hat.wav" }]);
+    await expect.poll(async () => (await mock.calls("channel_set_sample")).map((c) => c.args)).toEqual([{ channel: HAT, path: "/qa/sounds/Hat.wav", generation: 0 }]);
     await expect(waveform(app, "Hat")).toBeVisible();
     await expect(relink).toHaveCount(0);
     await expect.poll(async () => (await waveformCalls(mock, HAT)).length).toBe(1);

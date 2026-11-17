@@ -73,6 +73,8 @@ const context: ProjectContextValue = {
   apply: async () => true,
   run: async () => true,
   setView: () => {},
+  stamp: () => ({ generation: view.generation, replacements: 0 }),
+  runFor: async () => true,
 };
 const api: NotesApi = {
   notesEdit: (edit) => engine.invoke("notes_edit", { edit }) as Promise<NotesAck>,

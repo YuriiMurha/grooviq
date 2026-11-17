@@ -741,7 +741,8 @@ impl Disk for Ops {
             "synced before the zip was complete"
         );
         self.step("sync")?;
-        file.sync_all()
+        // The production sync, as a save makes it.
+        grooviq_project::file::RealDisk.sync(file)
     }
 
     fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
@@ -2518,6 +2519,75 @@ fn waveform_peaks_cover_the_sample() {
     let synth = add_synth(&mut session, "Init");
     assert_eq!(session.waveform(synth, 4), None);
     assert_eq!(session.waveform(99, 4), None);
+}
+
+#[test]
+fn channel_requests_from_a_replaced_project_change_nothing() {
+    let (mut session, _, _) = rig();
+    let now = Instant::now();
+    let kick = add(&mut session, "kick", now);
+    let a = session.generation();
+    // B is opened over A (the same channel ids), clean.
+    let loaded = Loaded {
+        project: session.project().clone(),
+        samples: Default::default(),
+        warnings: vec![],
+    };
+    let decoded = decode_samples(&loaded);
+    session
+        .open(Path::new("/music/b.grooviq"), loaded, decoded)
+        .unwrap();
+    let before = session.view();
+    let refused = |r: Result<_, SessionError>| {
+        assert!(matches!(r, Err(SessionError::ProjectReplaced)), "{r:?}");
+    };
+    // Requests made in A, arriving after their files were decoded: refused, B as it was.
+    refused(session.add_channel_in(
+        a,
+        Path::new("/s/late.wav"),
+        sample_file("late.wav"),
+        buffer(),
+        now,
+    ));
+    refused(session.add_synth_channel_in(a, "Init", now));
+    refused(session.set_channel_sample_in(
+        a,
+        kick,
+        Path::new("/s/new.wav"),
+        sample_file("new.wav"),
+        buffer(),
+        now,
+    ));
+    assert_eq!(session.view(), before);
+    assert!(!session.view().dirty);
+    assert_eq!(
+        SessionError::ProjectReplaced.to_string(),
+        "Another project was opened before this was done, so nothing was changed."
+    );
+    // B's own go through.
+    let b = session.generation();
+    session
+        .add_channel_in(
+            b,
+            Path::new("/s/late.wav"),
+            sample_file("late.wav"),
+            buffer(),
+            now,
+        )
+        .unwrap();
+    session.add_synth_channel_in(b, "Init", now).unwrap();
+    let view = session
+        .set_channel_sample_in(
+            b,
+            kick,
+            Path::new("/s/new.wav"),
+            sample_file("new.wav"),
+            buffer(),
+            now,
+        )
+        .unwrap();
+    assert_eq!(view.channels.len(), 3);
+    assert!(view.dirty);
 }
 
 #[test]

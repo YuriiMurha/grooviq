@@ -27,6 +27,11 @@ export function rollEditsUnsettled(): boolean {
   return unsettledQueues.size > 0;
 }
 
+/** Resolves once every piano-roll edit queued now has been answered: what a save must hold. */
+export function rollEditsSettled(): Promise<void> {
+  return Promise.all([...unsettledQueues].map((q) => q.idle())).then(() => {});
+}
+
 /** What waits in the queue: an edit of the roll's, or a command, each for the project it was
  * made in (its generation). */
 type Queued = ({ edit: LocalEdit } | { command: NotesCommand }) & { generation: number };
@@ -76,6 +81,10 @@ export class CommitQueue {
     this.generation = generation;
   }
 
+  generationNow(): number {
+    return this.generation;
+  }
+
   /** Where failures and returned views go (the piano roll sets them once mounted). */
   setHooks(hooks: QueueHooks) {
     this.hooks = hooks;
@@ -87,10 +96,13 @@ export class CommitQueue {
     this.held = held;
   }
 
-  commit(edit: LocalEdit) {
-    if (this.closed) return;
+  /** Shows `edit` and queues it, for the project of `generation` (a held gesture's: the one it
+   * started in). An edit for another project, or made while a replacement is on its way, is
+   * dropped unshown. */
+  commit(edit: LocalEdit, generation = this.generation) {
+    if (this.closed || generation !== this.generation) return;
     this.store.apply(edit);
-    this.pending.push({ edit, generation: this.generation });
+    this.pending.push({ edit, generation });
     this.pump();
   }
 

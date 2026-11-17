@@ -245,14 +245,25 @@ pub trait Disk {
     fn written(&mut self, _file: &mut File) -> io::Result<()> {
         Ok(())
     }
-    /// Syncs the temp file's bytes to the disk.
+    /// Syncs the temp file's bytes to the disk (see [`sync_file`]).
     fn sync(&mut self, file: &File) -> io::Result<()> {
-        file.sync_all()
+        sync_file(file)
     }
     /// Puts the temp file in place (on Windows `rename` replaces an existing file too).
     fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
         fs::rename(from, to)
     }
+}
+
+/// Syncs `file`'s bytes to the disk: the one sync a save makes, whatever [`Disk`] runs it.
+/// Tests count the syncs that succeed (on their own thread), so a save that stops syncing
+/// fails one.
+#[doc(hidden)]
+pub fn sync_file(file: &File) -> io::Result<()> {
+    file.sync_all().inspect(|()| {
+        #[cfg(test)]
+        tests::SYNCED.with(|n| n.set(n.get() + 1));
+    })
 }
 
 /// The real disk.
@@ -796,6 +807,29 @@ fn zip_error(e: ZipError) -> LoadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Syncs [`sync_file`] made on this thread.
+        pub(super) static SYNCED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn a_save_syncs_its_temp_file_before_the_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let (p, samples) = project_of(1);
+        let before = SYNCED.with(|n| n.get());
+        save(&p, &samples, &path).unwrap();
+        assert_eq!(
+            SYNCED.with(|n| n.get()) - before,
+            1,
+            "the temp file was not synced"
+        );
+        // A refused save syncs nothing (nothing was written).
+        let tight = Limits { json: 10, ..LIMITS };
+        save_with_limits(&p, &samples, &path, false, tight).unwrap_err();
+        assert_eq!(SYNCED.with(|n| n.get()) - before, 1);
+    }
     use crate::model::{Channel, SampleRef};
 
     /// A tiny valid mono 16-bit WAV (`frames` frames of a ramp), built by hand.

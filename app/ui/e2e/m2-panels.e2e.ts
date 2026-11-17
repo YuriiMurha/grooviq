@@ -253,7 +253,7 @@ test.describe("synth channels", () => {
     await expect(menu.getByRole("menuitem", { name: "808 Glide" })).toBeFocused();
     await app.keyboard.press("Enter");
     await expect.poll(() => rows(app)).toEqual([...KIT, "808 Glide"]);
-    expect((await mock.calls("channel_add_synth")).map((c) => c.args)).toEqual([{ preset: "808 Glide" }]);
+    expect((await mock.calls("channel_add_synth")).map((c) => c.args)).toEqual([{ preset: "808 Glide", generation: 0 }]);
     const synth = (await mock.view()).channels[3];
     expect(synth).toMatchObject({ id: 4, name: "808 Glide", kind: "synth", preset: "808 Glide", roll: false });
     // The new synth is selected: the typing keyboard plays it.
@@ -738,7 +738,7 @@ test.describe("the mock follows Task 7 (fix round 1)", () => {
 
   test("presets_load_all_their_values", async ({ mock, app }) => {
     const synthOf = async (id: number) => (await mock.eval<{ channels: { id: number; synth: Record<string, number>; preset: string | null }[] }>("(m) => m.view()")).channels.find((c) => c.id === id)!;
-    await call(app, "channel_add_synth", { preset: "808 Glide" });
+    await call(app, "channel_add_synth", { preset: "808 Glide", generation: (await mock.view()).generation });
     expect((await synthOf(4)).synth).toEqual(presetValues("808 Glide"));
     expect((await synthOf(4)).synth.filter_cutoff).toBe(650);
     await call(app, "project_edit", { edit: { kind: "setInstrumentParam", channel: 4, param: "filter_cutoff", value: 123 }, generation: (await mock.view()).generation });
@@ -747,7 +747,7 @@ test.describe("the mock follows Task 7 (fix round 1)", () => {
     expect((await synthOf(4)).synth).toEqual(presetValues("808 Glide"));
     await call(app, "project_edit", { edit: { kind: "loadSynthPreset", channel: 4, preset: "Reese" }, generation: (await mock.view()).generation });
     expect(await synthOf(4)).toMatchObject({ synth: presetValues("Reese"), preset: "Reese" });
-    await call(app, "channel_add_synth", { preset: "Init" });
+    await call(app, "channel_add_synth", { preset: "Init", generation: (await mock.view()).generation });
     expect((await synthOf(5)).synth).toEqual(presetValues("Init"));
   });
 

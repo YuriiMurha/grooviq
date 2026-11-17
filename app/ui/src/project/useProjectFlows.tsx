@@ -49,11 +49,13 @@ interface Deps {
   stopIfPlaying: () => Promise<void>;
   /** A change was sent (or queued) and its view is not in yet: the project counts as unsaved. */
   unsettled: () => boolean;
+  /** Resolves once the piano roll's queued edits are in the engine's project. */
+  settle: () => Promise<void>;
 }
 
 /** Every project action (new, open, save, save as, export), the "Save changes?" guard, the
  * close request, crash recovery and the autosave clock. It returns the dialogs to render. */
-export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, unsettled }: Deps) {
+export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, unsettled, settle }: Deps) {
   const [pending, setPending] = useState<Pending | null>(null);
   const [recovery, setRecovery] = useState<RecoveryStatus | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -61,11 +63,13 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
   const viewRef = useRef(view);
   const busy = useRef(false);
   const unsettledRef = useRef(unsettled);
+  const settleRef = useRef(settle);
 
   useEffect(() => {
     viewRef.current = view;
     unsettledRef.current = unsettled;
-  }, [view, unsettled]);
+    settleRef.current = settle;
+  }, [view, unsettled, settle]);
 
   const fail = useCallback((e: unknown) => toast(errorText(e), true), [toast]);
 
@@ -90,6 +94,8 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
         filters: PROJECT_FILTER,
       });
       if (!path) return false;
+      // The notes the person drew are saved too, even those still on their way.
+      await settleRef.current();
       adopt(await enqueue(() => projectSaveAs(path)));
       return true;
     } catch (e) {
@@ -104,6 +110,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
     if (!current) return false;
     if (current.path === null) return saveAs();
     try {
+      await settleRef.current();
       adopt(await enqueue(projectSave));
       return true;
     } catch (e) {

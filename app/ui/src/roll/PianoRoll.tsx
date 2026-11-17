@@ -4,7 +4,7 @@ import type { ProjectKey } from "../api/project";
 import type { LiveFrame } from "../live/decode";
 import { useProject } from "../project/context";
 import { setRollHistory } from "../project/noteHistory";
-import { onProjectReplaceFailed, onProjectReplaced, onProjectReplacing } from "../project/replacement";
+import { isProjectReplacing, onProjectReplaceFailed, onProjectReplaced, onProjectReplacing } from "../project/replacement";
 import { isMac, isTypingTarget, modalIsOpen } from "../project/shortcuts";
 import { displayTicks } from "../transport/position";
 import { createCanvasRoll } from "./canvasRoll";
@@ -163,16 +163,24 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     return () => void listening.then((stop) => stop?.());
   }, [queue]);
   // New, Open or Restore: a held gesture is let go unsent, and what the queue holds for this
-  // project is dropped (its ids would land on the next project's notes).
+  // project is dropped (its ids would land on the next project's notes). No gesture starts
+  // while it is on its way, and one held when it ends is let go before the queue reopens.
   useEffect(() => {
-    const before = onProjectReplacing(() => {
+    const letGo = () => {
       abandon(store, gesture.current);
       gesture.current = null;
-      queue.replacing();
       dirty.current = true;
+    };
+    const before = onProjectReplacing(() => {
+      letGo();
+      queue.replacing();
     });
-    const after = onProjectReplaced(() => queue.reopened());
-    const failed = onProjectReplaceFailed(() => queue.reopened());
+    const reopen = () => {
+      letGo();
+      queue.reopened();
+    };
+    const after = onProjectReplaced(reopen);
+    const failed = onProjectReplaceFailed(reopen);
     return () => {
       before();
       after();
@@ -419,19 +427,27 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     const w = toWorld(view.current, x, y);
     return { x, y, tick: w.tick, key: w.key, button: e.button, shift: e.shiftKey };
   };
+  /** The project the held gesture started in: its edits are that project's. */
+  const gestureProject = useRef(0);
   const take = (step: Step) => {
     // A held stamp shows in the store only; the release sends it.
     if (step.preview) store.apply(step.preview);
-    if (step.edit) queue.commit(step.edit);
+    if (step.edit) queue.commit(step.edit, gestureProject.current);
     if (step.select) store.setSelection(step.select);
     if (step.lastLength !== undefined) lastLength.current = step.lastLength;
     dirty.current = true;
     return step.gesture;
   };
 
+  const letGo = () => {
+    abandon(store, gesture.current);
+    gesture.current = null;
+    dirty.current = true;
+  };
   const onPointerDown = (e: PointerEvent<HTMLCanvasElement>) => {
     const ctx = context();
-    if (!ctx || gesture.current) return;
+    if (!ctx || gesture.current || isProjectReplacing()) return;
+    gestureProject.current = queue.generationNow();
     e.preventDefault();
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -459,11 +475,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     if (ctx && held) take(endGesture(ctx, held, pointer(e)));
     dirty.current = true;
   };
-  const onPointerCancel = () => {
-    abandon(store, gesture.current);
-    gesture.current = null;
-    dirty.current = true;
-  };
+  const onPointerCancel = letGo;
 
   // What the toolbar buttons and the shortcuts do to the notes. Each works on the selected notes
   // of this channel; quantize, strum and humanize take all of its notes when none is selected.

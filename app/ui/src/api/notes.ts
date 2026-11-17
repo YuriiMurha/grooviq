@@ -126,7 +126,8 @@ export const notesUndo = (generation: number) => invoke<NotesAck | null>("notes_
  * none. */
 export const notesRedo = (generation: number) => invoke<NotesAck | null>("notes_redo", { generation });
 /** Adds a synth channel named after the preset. */
-export const channelAddSynth = (preset: string) => invoke<ProjectView>("channel_add_synth", { preset });
+export const channelAddSynth = (preset: string, generation: number) =>
+  invoke<ProjectView>("channel_add_synth", { preset, generation });
 /** Starts a note on a channel now (typing keyboard, roll keys, a synth row's preview): the press,
  * which its release names. Only from a key or a click. */
 export const channelNoteOn = (channel: number, key: number, velocity: number) =>

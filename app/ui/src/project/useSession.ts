@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorText, projectEdit, projectView, type Edit, type ProjectView } from "../api/project";
-import type { ProjectContextValue } from "./context";
+import type { ProjectContextValue, ProjectStamp } from "./context";
+import { isProjectReplacing, projectGeneration } from "./replacement";
 
 /** An edit whose project was replaced before its turn came: dropped without a toast. */
 const STALE = new Error("stale edit");
@@ -65,12 +66,23 @@ export function useSession(onError: (message: string) => void) {
   );
   /** A change was sent and its view is not in yet: the project may be dirtier than it shows. */
   const unsettled = useCallback(() => unanswered.current > 0, []);
+  const stamp = useCallback(
+    (): ProjectStamp => ({ generation: latest.current.view?.generation ?? 0, replacements: projectGeneration() }),
+    [],
+  );
+  const runFor = useCallback(
+    (at: ProjectStamp, command: (generation: number) => Promise<ProjectView>) =>
+      run(() =>
+        isProjectReplacing() || projectGeneration() !== at.replacements ? Promise.reject(STALE) : command(at.generation),
+      ),
+    [run],
+  );
 
   // The project the engine holds at start.
   useEffect(() => {
     enqueue(projectView).then(adopt, (e: unknown) => onError(errorText(e)));
   }, [adopt, enqueue, onError]);
 
-  const context: ProjectContextValue = { view: state.view, apply, run, setView: adopt };
+  const context: ProjectContextValue = { view: state.view, apply, run, setView: adopt, stamp, runFor };
   return { view: state.view, cleanSince: state.cleanSince, latest, adopt, enqueue, apply, unsettled, context };
 }

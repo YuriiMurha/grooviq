@@ -149,10 +149,12 @@ export const projectView = () => invoke<ProjectView>("project_view");
 /** Applies `edit`, made in the project of `generation`. */
 export const projectEdit = (edit: Edit, generation: number) =>
   invoke<ProjectView>("project_edit", { edit, generation });
-export const channelAdd = (path: string) => invoke<ProjectView>("channel_add", { path });
+/** Adds a channel playing the file at `path` to the project of `generation`. */
+export const channelAdd = (path: string, generation: number) =>
+  invoke<ProjectView>("channel_add", { path, generation });
 /** Points a channel at another sample (relinking a missing one). */
-export const channelSetSample = (channel: number, path: string) =>
-  invoke<ProjectView>("channel_set_sample", { channel, path });
+export const channelSetSample = (channel: number, path: string, generation: number) =>
+  invoke<ProjectView>("channel_set_sample", { channel, path, generation });
 /** Plays the channel's sample for a preview: the press, which its release names. Only ever from a
  * click or key press. */
 export const channelPreviewOn = (channel: number) => invoke<number>("channel_preview", { channel, on: true });

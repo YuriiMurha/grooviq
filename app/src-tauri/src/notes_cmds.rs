@@ -123,14 +123,15 @@ fn history(
     Ok(ack)
 }
 
-/// Adds a synth channel from a factory preset, named after it.
+/// Adds a synth channel from a factory preset, named after it, to the project of `generation`.
 #[tauri::command]
 pub async fn channel_add_synth(
     audio: State<'_, Audio>,
     preset: String,
+    generation: u64,
 ) -> Result<ProjectView, String> {
     lock(&audio.session)
-        .add_synth_channel(&preset, Instant::now())
+        .add_synth_channel_in(generation, &preset, Instant::now())
         .map_err(text)
 }
 

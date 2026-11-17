@@ -181,7 +181,7 @@ describe("ChannelRack", () => {
     mocks.open.mockResolvedValueOnce("/kit/Punchy 03.wav");
     await user.click(within(row).getByRole("button", { name: "Relink Kick" }));
     await waitFor(() =>
-      expect(engine.argsOf("channel_set_sample")).toEqual([{ channel: 1, path: "/kit/Punchy 03.wav" }]),
+      expect(engine.argsOf("channel_set_sample")).toEqual([{ channel: 1, path: "/kit/Punchy 03.wav", generation: 0 }]),
     );
     await waitFor(() => expect(within(row).queryByText("Missing")).toBeNull());
   });
@@ -226,7 +226,7 @@ describe("ChannelRack", () => {
       directory: false,
       filters: [{ name: "Audio", extensions: AUDIO }],
     });
-    expect(engine.argsOf("channel_add")).toEqual([{ path: "/kit/Kick.wav" }, { path: "/kit/Hat.flac" }]);
+    expect(engine.argsOf("channel_add")).toEqual([{ path: "/kit/Kick.wav", generation: 0 }, { path: "/kit/Hat.flac", generation: 0 }]);
     await screen.findByRole("group", { name: "Hat" });
   });
 

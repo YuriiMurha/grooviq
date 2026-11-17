@@ -34,7 +34,7 @@ import { Workspace } from "./layout/Workspace";
 import { ProjectMenu } from "./project/ProjectMenu";
 import { SaveState } from "./project/SaveState";
 import { stepNotesHistory, trackDrags } from "./project/noteHistory";
-import { rollEditsUnsettled } from "./roll/commitQueue";
+import { rollEditsSettled, rollEditsUnsettled } from "./roll/commitQueue";
 import { isTypingTarget, modalIsOpen, shortcutFor } from "./project/shortcuts";
 import { useProjectFlows } from "./project/useProjectFlows";
 import { useSession } from "./project/useSession";
@@ -105,6 +105,7 @@ export function App() {
     toast,
     stopIfPlaying,
     unsettled: () => session.unsettled() || rollEditsUnsettled(),
+    settle: rollEditsSettled,
   });
   const { perform, modalOpen } = flows;
 

@@ -363,6 +363,9 @@ pub enum SessionError {
     Backup(io::Error),
     /// `project::save` refused or failed; its message as it is.
     Save(io::Error),
+    /// The request was made in a project that was replaced (New, Open, Restore) before it
+    /// arrived: nothing was changed.
+    ProjectReplaced,
 }
 
 impl fmt::Display for SessionError {
@@ -405,6 +408,10 @@ impl fmt::Display for SessionError {
                 "The previous version could not be backed up, so it was not overwritten: {e}."
             ),
             Self::Save(e) => write!(f, "{e}"),
+            Self::ProjectReplaced => write!(
+                f,
+                "Another project was opened before this was done, so nothing was changed."
+            ),
         }
     }
 }
@@ -1168,6 +1175,57 @@ impl Session {
 
     /// Adds a channel playing `sample` after the others: named after the file's stem, in the
     /// next ink. The session keeps `file`'s bytes for saving.
+    /// [`Self::add_channel`] for a request made in the project of `generation`: refused with
+    /// [`SessionError::ProjectReplaced`] if another project was opened, started or restored
+    /// since (the sample was decoded meanwhile; the check is made at the change).
+    pub fn add_channel_in(
+        &mut self,
+        generation: u64,
+        path: &Path,
+        file: crate::SampleFile,
+        sample: Arc<SampleBuf>,
+        now: Instant,
+    ) -> Result<ProjectView, SessionError> {
+        self.same_project(generation)?;
+        self.add_channel(path, file, sample, now)
+    }
+
+    /// [`Self::add_synth_channel`] for a request made in the project of `generation` (see
+    /// [`Self::add_channel_in`]).
+    pub fn add_synth_channel_in(
+        &mut self,
+        generation: u64,
+        preset: &str,
+        now: Instant,
+    ) -> Result<ProjectView, SessionError> {
+        self.same_project(generation)?;
+        self.add_synth_channel(preset, now)
+    }
+
+    /// [`Self::set_channel_sample`] for a request made in the project of `generation` (see
+    /// [`Self::add_channel_in`]).
+    pub fn set_channel_sample_in(
+        &mut self,
+        generation: u64,
+        channel: u32,
+        path: &Path,
+        file: crate::SampleFile,
+        sample: Arc<SampleBuf>,
+        now: Instant,
+    ) -> Result<ProjectView, SessionError> {
+        self.same_project(generation)?;
+        self.set_channel_sample(channel, path, file, sample, now)
+    }
+
+    /// Refuses a request made in a project that was replaced since.
+    fn same_project(&self, generation: u64) -> Result<(), SessionError> {
+        if generation == self.generation {
+            Ok(())
+        } else {
+            Err(SessionError::ProjectReplaced)
+        }
+    }
+
     pub fn add_channel(
         &mut self,
         path: &Path,

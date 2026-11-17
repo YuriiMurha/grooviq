@@ -871,6 +871,10 @@ export function installMockTauri(seed: MockSeed): void {
   type WireNote = Required<MockNote>;
   /** The ack of a note request made for a project that was replaced since (session.rs
    * `refused_ack`): nothing changes, nothing is announced, the UI fetches the notes. */
+  /** session.rs `SessionError::ProjectReplaced`: a channel request made in a replaced project. */
+  const sameProject = (generation: unknown) => {
+    if (generation !== s.generation) throw "Another project was opened before this was done, so nothing was changed.";
+  };
   const refusedAck = () => ({ revision: s.notesRevision, addedIds: [], ignoredIds: [], reload: true, view: view() });
   const editNotes = (e: {
     generation: number;
@@ -1005,8 +1009,10 @@ export function installMockTauri(seed: MockSeed): void {
       return view();
     },
     channel_add: (a) => {
+      // session.rs `add_channel_in`: checked after the file is read, at the change.
       const path = String(a.path);
       readSample(path);
+      sameProject(a.generation);
       const p = s.project;
       if (p.channels.length >= MAX_CHANNELS) {
         throw `A project holds at most ${MAX_CHANNELS} channels; remove one to add another.`;
@@ -1031,6 +1037,7 @@ export function installMockTauri(seed: MockSeed): void {
     channel_set_sample: (a) => {
       const path = String(a.path);
       readSample(path);
+      sameProject(a.generation);
       const c = s.project.channels[channelIndex(a.channel)];
       c.sample = path;
       c.embedded = true;
@@ -1044,6 +1051,7 @@ export function installMockTauri(seed: MockSeed): void {
     notes_undo: (a) => (a.generation !== s.generation ? refusedAck() : stepHistory(true)),
     notes_redo: (a) => (a.generation !== s.generation ? refusedAck() : stepHistory(false)),
     channel_add_synth: (a) => {
+      sameProject(a.generation);
       const preset = String(a.preset);
       if (!PRESETS.includes(preset)) throw `There is no synth preset called "${preset}".`;
       const p = s.project;
@@ -1335,13 +1343,13 @@ export function installMockTauri(seed: MockSeed): void {
     test_tone: { on: bool },
     synth_note: { key: u8, on: bool },
     project_edit: { edit, generation: u64 },
-    channel_add: { path: str },
-    channel_set_sample: { channel: u32, path: str },
+    channel_add: { path: str, generation: u64 },
+    channel_set_sample: { channel: u32, path: str, generation: u64 },
     channel_preview: { channel: u32, on: bool, press: optional(u64) },
     notes_edit: { edit: notesEditArg },
     notes_undo: { generation: u64 },
     notes_redo: { generation: u64 },
-    channel_add_synth: { preset: str },
+    channel_add_synth: { preset: str, generation: u64 },
     channel_note: { channel: u32, key: u8, velocity: f32, on: bool, press: optional(u64) },
     channel_param_live: { channel: u32, param: str, value: f32 },
     channel_select: { channel: optional(u32) },
@@ -1406,6 +1414,8 @@ export function installMockTauri(seed: MockSeed): void {
     hold: (ticks: number | null) => {
       s.transport.held = ticks;
     },
+    /** A file as the mock holds it (a saved project's notes, ...), or null. */
+    file: (path: string) => clone(files.get(path) ?? null),
     /** Answers for the next open/save dialogs, in order (`null`: the person cancels). */
     queueDialog: (...answers: unknown[]) => s.dialogs.push(...answers),
     /** What the shell does on a window close or Cmd+Q: ask the UI while there are unsaved
