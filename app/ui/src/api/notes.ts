@@ -134,7 +134,7 @@ export const metronomeSet = (on: boolean) => invoke<null>("metronome_set", { on 
 
 /** Recording switched itself off because recorded notes did not fit in the pattern. */
 export interface RecordingStopped {
-  reason: "noteCap" | "noteIds" | "error";
+  reason: "noteCap" | "noteIds" | "engineBusy" | "error";
   /** Recorded notes that were not added. */
   dropped: number;
   /** A sentence to show. */

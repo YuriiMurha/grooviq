@@ -234,7 +234,8 @@ pub struct Recorded {
 #[serde(rename_all = "camelCase")]
 pub struct RecordingStopped {
     /// `"noteCap"` (the pattern holds [`MAX_NOTES_PER_PATTERN`]), `"noteIds"` (its note ids
-    /// are used up) or `"error"` (the pattern refused the notes).
+    /// are used up), `"engineBusy"` (notes played after recording switched itself off, before
+    /// the engine took the switch) or `"error"` (the pattern refused the notes).
     pub reason: &'static str,
     /// Recorded notes that were not added.
     pub dropped: u32,
@@ -473,6 +474,11 @@ pub struct Session {
     /// Recorded notes completed but not in the pattern yet: the engine did not take the
     /// pattern (its queue was full). Retried on the next collect.
     pending: Vec<NewNote>,
+    /// Recording switched itself off (the pattern was full) but the engine's queue refused the
+    /// switch: it is sent again on every collect until the engine takes it, and notes the
+    /// engine completes meanwhile are refused. Turning recording on again cancels it; a new
+    /// project keeps it (the engine records until it takes the switch).
+    owed_disarm: bool,
 }
 
 fn lock(controller: &Mutex<Controller>) -> MutexGuard<'_, Controller> {
@@ -509,6 +515,7 @@ impl Session {
             recorder: Recorder::new(),
             recording: false,
             pending: Vec::new(),
+            owed_disarm: false,
         };
         // A fresh queue always has room for a whole state.
         let synced = session.sync_engine();
@@ -1155,6 +1162,8 @@ impl Session {
     pub fn set_recording(&mut self, on: bool) -> Result<(), SessionError> {
         self.send(Command::SetRecording { on })?;
         self.recording = on;
+        // The engine took this switch after any owed one: it decides now.
+        self.owed_disarm = false;
         Ok(())
     }
 
@@ -1170,13 +1179,18 @@ impl Session {
     /// dropped. When notes do not fit (the note cap, or used-up ids), the ones that fit go in,
     /// recording is switched off, and [`Recorded::stopped`] says what was lost.
     pub fn collect_recorded(&mut self, events: &[RecordEvent], now: Instant) -> Recorded {
+        if self.owed_disarm && self.send(Command::SetRecording { on: false }).is_ok() {
+            self.owed_disarm = false;
+        }
         let fed = self.recorder.feed(events);
-        self.pending.extend(fed);
+        // Recording shows off while the engine has not taken the switch: what it completes
+        // meanwhile was played after the person was told, and is refused.
+        let refused = if self.owed_disarm { fed.len() } else { 0 };
+        if refused == 0 {
+            self.pending.extend(fed);
+        }
         let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
         self.pending.retain(|n| channels.contains(&n.channel));
-        if self.pending.is_empty() {
-            return Recorded::default();
-        }
         // What fits: the note cap, and the ids left (the used-up mark is never handed out).
         let pattern = self.current();
         let room = MAX_NOTES_PER_PATTERN.saturating_sub(pattern.notes.len());
@@ -1188,32 +1202,17 @@ impl Session {
         };
         let dropped = self.pending.len().saturating_sub(fits);
         self.pending.truncate(fits);
+
         let mut out = Recorded::default();
-        if !self.pending.is_empty() {
-            let edit = NotesEdit {
-                base_revision: self.current().revision,
-                add: self.pending.clone(),
-                update: Vec::new(),
-                delete: Vec::new(),
-            };
-            match self.apply_notes(&edit, now) {
-                Ok(applied) => {
-                    self.pending.clear();
-                    out.revision = (!applied.added_ids.is_empty()).then(|| self.current().revision);
-                }
-                // The engine's queue is full: the notes wait for the next collect.
-                Err(SessionError::Engine(_)) => {}
-                // Cannot happen after the checks above; never lose the notes silently.
-                Err(e) => {
-                    let lost = self.pending.len();
-                    self.pending.clear();
-                    out.stopped = Some(self.stop_recording(
-                        "error",
-                        dropped + lost,
-                        format!("Recording stopped: {e}"),
-                    ));
-                    return out;
-                }
+        match self.commit_pending(now) {
+            Ok(revision) => out.revision = revision,
+            Err((e, lost)) => {
+                out.stopped = Some(self.stop_recording(
+                    "error",
+                    dropped + refused + lost,
+                    format!("Recording stopped: {e}"),
+                ));
+                return out;
             }
         }
         if dropped > 0 {
@@ -1232,11 +1231,50 @@ impl Session {
             };
             out.stopped = Some(self.stop_recording(
                 reason,
-                dropped,
+                dropped + refused,
                 format!("Recording stopped: {why}. {notes} not added."),
+            ));
+        } else if refused > 0 {
+            let notes = if refused == 1 {
+                "1 note played since was".to_owned()
+            } else {
+                format!("{refused} notes played since were")
+            };
+            out.stopped = Some(self.stop_recording(
+                "engineBusy",
+                refused,
+                format!(
+                    "Recording is off, but the audio engine had not taken the switch yet: {notes} not added."
+                ),
             ));
         }
         out
+    }
+
+    /// Adds the waiting recorded notes as one edit. A full engine queue keeps them for the next
+    /// collect (`Ok(None)`); any other refusal loses them and says how many.
+    fn commit_pending(&mut self, now: Instant) -> Result<Option<u32>, (SessionError, usize)> {
+        if self.pending.is_empty() {
+            return Ok(None);
+        }
+        let edit = NotesEdit {
+            base_revision: self.current().revision,
+            add: self.pending.clone(),
+            update: Vec::new(),
+            delete: Vec::new(),
+        };
+        match self.apply_notes(&edit, now) {
+            Ok(applied) => {
+                self.pending.clear();
+                Ok((!applied.added_ids.is_empty()).then(|| self.current().revision))
+            }
+            Err(SessionError::Engine(_)) => Ok(None),
+            Err(e) => {
+                let lost = self.pending.len();
+                self.pending.clear();
+                Err((e, lost))
+            }
+        }
     }
 
     /// Switches recording off because recorded notes did not fit, and says so.
@@ -1246,9 +1284,8 @@ impl Session {
         dropped: usize,
         message: String,
     ) -> RecordingStopped {
-        // If the engine's queue is full the switch fails; later notes are refused the same
-        // way and reported again, so the flag follows the person's view: off.
-        let _ = self.send(Command::SetRecording { on: false });
+        // If the engine's queue is full the switch is owed: sent again on every collect.
+        self.owed_disarm = self.send(Command::SetRecording { on: false }).is_err();
         self.recording = false;
         RecordingStopped {
             reason,

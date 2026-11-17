@@ -1091,8 +1091,9 @@ export function installMockTauri(seed: MockSeed): void {
      * adds it): the engine bumps the notes revision and announces it. */
     addNote: (n: { channel: number; tick: number; length: number; key: number; velocity: number }) => {
       editPattern((pat) => {
-        pat.notes.push({ ...n, id: nextNoteId(), slide: false });
-        growToNotes(pat);
+        const note = { ...n, id: nextNoteId(), slide: false };
+        pat.notes.push(note);
+        growToNotes(pat, [note]);
       });
     },
     /** The notes as the engine holds them. */

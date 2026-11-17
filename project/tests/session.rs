@@ -2514,3 +2514,116 @@ fn recording_when_note_ids_run_out_keeps_what_fits_stops_and_says_so() {
     assert_eq!(session.project().patterns[0].notes.len(), 2);
     assert!(!session.view().recording);
 }
+
+// --- Fix round 2: the automatic record-off is owed until the engine takes it. ---
+
+#[test]
+fn overflow_disarm_is_retried_until_the_engine_takes_it() {
+    let (mut session, controller, mut processor) = rig();
+    let synth = add_synth(&mut session, "Init");
+    add_notes(
+        &mut session,
+        (0..99_999u32)
+            .map(|i| NewNote {
+                length: 10,
+                ..melodic(synth, (i % 64) * 240, (i % 128) as u8)
+            })
+            .collect(),
+    );
+    session.set_recording(true).unwrap();
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    settle(&mut session, &controller, &mut processor);
+    // The engine's command queue is full when the batch overflows: neither the note that
+    // fits nor the record-off goes through.
+    while controller
+        .lock()
+        .unwrap()
+        .send(Command::SetTempo { bpm: 120.0 })
+        .is_ok()
+    {}
+    let got = session.collect_recorded(&whole_notes(synth, 2), Instant::now());
+    assert_eq!(got.revision, None, "the note that fits waits");
+    assert_eq!(got.stopped.map(|s| s.dropped), Some(1));
+    assert!(!session.view().recording);
+    // Still full: the engine records on, and what it completes is refused and reported.
+    let got = session.collect_recorded(&whole_notes(synth, 1), Instant::now());
+    assert_eq!(got.revision, None);
+    let stopped = got.stopped.expect("reported");
+    assert_eq!((stopped.reason, stopped.dropped), ("engineBusy", 1));
+    // The queue drains: an empty poll commits the waiting note and switches the engine off.
+    render(&mut processor, 4);
+    assert!(
+        session
+            .collect_recorded(&[], Instant::now())
+            .revision
+            .is_some()
+    );
+    assert_eq!(session.project().patterns[0].notes.len(), 100_000);
+    poll(&mut session, &controller, &mut processor);
+    // Room again, and the person plays while Record shows off: nothing is recorded.
+    let edit = NotesEdit {
+        base_revision: session.view().notes_revision,
+        add: Vec::new(),
+        update: Vec::new(),
+        delete: vec![1],
+    };
+    session.edit_notes(edit, Instant::now()).unwrap();
+    play_a_note(&session, &mut processor, synth);
+    // The engine took the switch at the empty poll: it recorded nothing to refuse.
+    assert_eq!(
+        poll(&mut session, &controller, &mut processor),
+        Recorded::default()
+    );
+    assert_eq!(session.project().patterns[0].notes.len(), 99_999);
+}
+
+#[test]
+fn turning_record_on_again_cancels_an_owed_disarm() {
+    let (mut session, controller, mut processor) = rig();
+    let synth = add_synth(&mut session, "Init");
+    add_notes(
+        &mut session,
+        (0..100_000u32)
+            .map(|i| NewNote {
+                length: 10,
+                ..melodic(synth, (i % 64) * 240, (i % 128) as u8)
+            })
+            .collect(),
+    );
+    session.set_recording(true).unwrap();
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    settle(&mut session, &controller, &mut processor);
+    while controller
+        .lock()
+        .unwrap()
+        .send(Command::SetTempo { bpm: 120.0 })
+        .is_ok()
+    {}
+    let got = session.collect_recorded(&whole_notes(synth, 1), Instant::now());
+    assert_eq!(got.stopped.map(|s| s.dropped), Some(1));
+    render(&mut processor, 4);
+    // The person makes room and turns Record on again before the next poll.
+    let edit = NotesEdit {
+        base_revision: session.view().notes_revision,
+        add: Vec::new(),
+        update: Vec::new(),
+        delete: vec![1],
+    };
+    session.edit_notes(edit, Instant::now()).unwrap();
+    session.set_recording(true).unwrap();
+    assert_eq!(
+        session.collect_recorded(&[], Instant::now()),
+        Recorded::default()
+    );
+    assert!(
+        session.view().recording,
+        "the old disarm does not switch it off"
+    );
+    play_a_note(&session, &mut processor, synth);
+    assert!(
+        poll(&mut session, &controller, &mut processor)
+            .revision
+            .is_some(),
+        "the new take records"
+    );
+}

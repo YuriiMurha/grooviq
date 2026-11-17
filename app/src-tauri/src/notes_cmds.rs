@@ -9,6 +9,7 @@
 use crate::audio_log::{AudioLog, Level};
 use crate::{Audio, lock};
 use grooviq_engine::{Controller, RecordEvent};
+use grooviq_project::Pattern;
 use grooviq_project::notes::{NotesAck, NotesEdit, encode_notes};
 use grooviq_project::session::{ProjectView, Session, SessionError, waveform_peaks};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -43,15 +44,24 @@ fn text(e: SessionError) -> String {
     e.to_string()
 }
 
-/// The current pattern's notes, wire format v1, as raw bytes. Only the copy is made under the
-/// session's lock; sorting and encoding run on a blocking worker.
+/// The current pattern's notes, wire format v1, as raw bytes, made on a blocking worker (see
+/// [`encode_unlocked`]).
 #[tauri::command]
 pub async fn pattern_notes(audio: State<'_, Audio>) -> Result<Response, String> {
-    let pattern = lock(&audio.session).current_pattern();
-    let bytes = tauri::async_runtime::spawn_blocking(move || encode_notes(&pattern))
-        .await
-        .map_err(|e| format!("The work stopped unexpectedly: {e}"))?;
+    let session = Arc::clone(&audio.session);
+    let bytes =
+        tauri::async_runtime::spawn_blocking(move || encode_unlocked(&session, encode_notes))
+            .await
+            .map_err(|e| format!("The work stopped unexpectedly: {e}"))?;
     Ok(Response::new(bytes))
+}
+
+/// Copies the current pattern under the session's lock, then runs `encode` on the copy with
+/// the lock released: sorting and writing 100,000 notes must not hold up recording, live notes
+/// or edits.
+fn encode_unlocked(session: &Mutex<Session>, encode: impl FnOnce(&Pattern) -> Vec<u8>) -> Vec<u8> {
+    let pattern = lock(session).current_pattern();
+    encode(&pattern)
 }
 
 /// Applies one note edit (deletes, updates, adds).
@@ -211,5 +221,27 @@ pub(crate) fn record_loop(
             lock(log).push(Level::Warn, stopped.message.clone());
             let _ = app.emit(RECORDING_STOPPED, stopped);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grooviq_engine::{EngineConfig, engine};
+
+    #[test]
+    fn notes_are_encoded_without_the_session_lock() {
+        let (controller, _processor) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        let session = Mutex::new(Session::new(Arc::new(Mutex::new(controller))));
+        let bytes = encode_unlocked(&session, |pattern| {
+            assert!(
+                session.try_lock().is_ok(),
+                "the session is locked while the notes are encoded"
+            );
+            encode_notes(pattern)
+        });
+        assert_eq!(bytes, lock(&session).notes());
     }
 }
