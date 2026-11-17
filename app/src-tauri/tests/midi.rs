@@ -428,3 +428,214 @@ fn the_system_ports_list_without_error_and_refuse_a_name_that_is_not_there() {
     // Closing what was never opened is not an error either.
     ports.close(missing);
 }
+
+// ---- keys several keyboards hold at once ----
+
+/// A hub with two keyboards plugged in and the sink emptied.
+fn two_keyboards() -> Rig {
+    let mut rig = rig(&[]);
+    rig.ports.plug("Keys");
+    rig.ports.plug("Pads");
+    rig.hub.poll();
+    rig
+}
+
+#[test]
+fn a_key_another_keyboard_sustains_is_not_released_by_the_first() {
+    let rig = two_keyboards();
+    // Keys sustains C4; Pads presses and lets go of the same key.
+    rig.ports.send("Keys", &[CONTROL, 64, 127]);
+    rig.ports.send("Keys", &[NOTE_ON, 60, 100]);
+    rig.ports.send("Keys", &[NOTE_OFF, 60, 0]);
+    rig.ports.send("Pads", &[NOTE_ON, 60, 100]);
+    rig.ports.send("Pads", &[NOTE_OFF, 60, 0]);
+    let heard = rig.sent.take();
+    assert!(
+        !heard.contains(&off(1, 60)),
+        "silenced Keys' note: {heard:?}"
+    );
+    // The pedal lifting is the last owner letting go.
+    rig.ports.send("Keys", &[CONTROL, 64, 0]);
+    assert_eq!(rig.sent.take(), [off(1, 60)]);
+}
+
+#[test]
+fn the_last_keyboard_to_let_go_releases_the_key_once() {
+    let rig = two_keyboards();
+    rig.ports.send("Keys", &[NOTE_ON, 60, 100]);
+    rig.ports.send("Pads", &[NOTE_ON, 60, 100]);
+    rig.sent.take();
+    rig.ports.send("Pads", &[NOTE_OFF, 60, 0]);
+    assert_eq!(rig.sent.take(), [], "Keys still holds it");
+    rig.ports.send("Keys", &[NOTE_OFF, 60, 0]);
+    assert_eq!(rig.sent.take(), [off(1, 60)]);
+    // Different keys never share an owner.
+    rig.ports.send("Keys", &[NOTE_ON, 62, 100]);
+    rig.ports.send("Pads", &[NOTE_ON, 64, 100]);
+    rig.sent.take();
+    rig.ports.send("Pads", &[NOTE_OFF, 64, 0]);
+    assert_eq!(rig.sent.take(), [off(1, 64)]);
+}
+
+#[test]
+fn unplugging_or_disabling_one_keyboard_keeps_the_key_the_other_holds() {
+    let mut rig = two_keyboards();
+    rig.ports.send("Keys", &[NOTE_ON, 60, 100]);
+    rig.ports.send("Pads", &[NOTE_ON, 60, 100]);
+    rig.ports.send("Pads", &[NOTE_ON, 64, 100]);
+    rig.sent.take();
+
+    rig.ports.unplug("Keys");
+    rig.hub.poll();
+    assert_eq!(rig.sent.take(), [], "Pads still holds both keys");
+    rig.hub.set_enabled("Pads", false);
+    assert_eq!(sorted(rig.sent.take()), [off(1, 60), off(1, 64)]);
+}
+
+#[test]
+fn a_channel_change_releases_a_shared_key_once() {
+    let mut rig = two_keyboards();
+    rig.ports.send("Keys", &[NOTE_ON, 60, 100]);
+    rig.ports.send("Pads", &[NOTE_ON, 60, 100]);
+    rig.sent.take();
+    rig.selected.store(5, Ordering::Release);
+    rig.hub.release_stale();
+    assert_eq!(rig.sent.take(), [off(1, 60)]);
+    // The same key on the new channel is its own key.
+    rig.ports.send("Keys", &[NOTE_ON, 60, 100]);
+    rig.ports.send("Keys", &[NOTE_OFF, 60, 0]);
+    assert_eq!(rig.sent.take(), [on(5, 60, 100.0 / 127.0), off(5, 60)]);
+}
+
+// ---- the engine's queue, for real ----
+
+mod engine_queue {
+    use super::*;
+    use grooviq_app::midi::ControllerSink;
+    use grooviq_engine::{ChannelMix, ChannelSetup, Controller, EngineConfig, RecordEvent, engine};
+
+    /// A real controller and processor with channel 1, recording while playing.
+    fn recording_engine() -> (Arc<Mutex<Controller>>, grooviq_engine::AudioProcessor) {
+        let (mut controller, mut processor) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        controller
+            .add_channel(ChannelSetup::sampler(
+                ChannelId(1),
+                None,
+                Vec::new(),
+                ChannelMix::default(),
+            ))
+            .unwrap();
+        controller.send(Command::SetRecording { on: true }).unwrap();
+        controller.send(Command::Play).unwrap();
+        run(&mut processor, 4);
+        (Arc::new(Mutex::new(controller)), processor)
+    }
+
+    fn run(processor: &mut grooviq_engine::AudioProcessor, blocks: usize) {
+        for _ in 0..blocks {
+            processor.process(&mut [0.0; 512], 2);
+        }
+    }
+
+    /// Everything the audio thread recorded so far, as (key, on).
+    fn heard(controller: &Mutex<Controller>) -> Vec<(u8, bool)> {
+        let mut events = Vec::new();
+        controller.lock().unwrap().take_recorded(&mut events);
+        events
+            .into_iter()
+            .filter_map(|e| match e {
+                RecordEvent::Note { key, on, .. } => Some((key, on)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Fills the command queue until the controller refuses.
+    fn fill(controller: &Mutex<Controller>) {
+        let mut c = controller.lock().unwrap();
+        while c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+    }
+
+    #[test]
+    fn a_release_the_full_queue_refused_is_delivered_when_it_has_room() {
+        let (controller, mut processor) = recording_engine();
+        let sink = ControllerSink::new(Arc::clone(&controller));
+        sink.send(on(1, 60, 1.0));
+        run(&mut processor, 2);
+        assert_eq!(heard(&controller), [(60, true)]);
+
+        // The audio thread stalls: the queue fills and the key is let go meanwhile.
+        fill(&controller);
+        sink.send(off(1, 60));
+        assert_eq!(sink.owed(), 1, "kept, not dropped");
+        // It is still refused while the queue is full: nothing is lost, nothing blocks.
+        sink.retry();
+        assert_eq!(sink.owed(), 1);
+
+        run(&mut processor, 4);
+        sink.retry();
+        assert_eq!(sink.owed(), 0);
+        run(&mut processor, 2);
+        assert_eq!(heard(&controller), [(60, false)], "the note ends");
+    }
+
+    #[test]
+    fn a_note_pressed_again_cancels_the_release_still_owed() {
+        let (controller, mut processor) = recording_engine();
+        let sink = ControllerSink::new(Arc::clone(&controller));
+        sink.send(on(1, 60, 1.0));
+        run(&mut processor, 2);
+        heard(&controller);
+        fill(&controller);
+        sink.send(off(1, 60));
+        assert_eq!(sink.owed(), 1);
+        run(&mut processor, 4);
+        // The key goes down again before the owed release was delivered: that late off would cut
+        // the new note.
+        sink.send(on(1, 60, 1.0));
+        assert_eq!(sink.owed(), 0);
+        sink.retry();
+        run(&mut processor, 2);
+        assert_eq!(heard(&controller), [(60, true)]);
+    }
+
+    #[test]
+    fn a_release_for_a_removed_channel_is_dropped_not_kept() {
+        let (controller, mut processor) = recording_engine();
+        let sink = ControllerSink::new(Arc::clone(&controller));
+        sink.send(on(1, 60, 1.0));
+        run(&mut processor, 2);
+        controller
+            .lock()
+            .unwrap()
+            .remove_channel(ChannelId(1))
+            .unwrap();
+        run(&mut processor, 2);
+        // Refused because the channel is gone, not because the queue is full.
+        sink.send(off(1, 60));
+        assert_eq!(sink.owed(), 0);
+    }
+
+    #[test]
+    fn an_owed_release_is_dropped_once_its_channel_is_removed() {
+        let (controller, mut processor) = recording_engine();
+        let sink = ControllerSink::new(Arc::clone(&controller));
+        sink.send(on(1, 60, 1.0));
+        run(&mut processor, 2);
+        fill(&controller);
+        sink.send(off(1, 60));
+        assert_eq!(sink.owed(), 1);
+        // The queue drains, then the channel goes before the release is retried.
+        run(&mut processor, 4);
+        controller
+            .lock()
+            .unwrap()
+            .remove_channel(ChannelId(1))
+            .unwrap();
+        run(&mut processor, 2);
+        sink.retry();
+        assert_eq!(sink.owed(), 0, "nothing is owed to a channel that is gone");
+    }
+}

@@ -45,11 +45,16 @@ test.describe("MIDI keyboards", () => {
 });
 
 test.describe("no MIDI keyboard", () => {
-  test("the popover says so, and a keyboard plugged in replaces the message", async ({ app }) => {
+  test("the popover lists no switch, and a keyboard plugged in gets a working one", async ({ app, mock }) => {
     await openPopover(app);
-    await expect(app.getByText("No MIDI keyboard found.")).toBeVisible();
+    // Nothing plugged in: no switch at all.
+    await expect(app.getByRole("switch")).toHaveCount(0);
     await app.evaluate("window.__grooviqMock.midiPlug('KeyStep 37')");
     await expect(keyboard(app, "KeyStep 37")).toBeChecked();
-    await expect(app.getByText("No MIDI keyboard found.")).toHaveCount(0);
+    await expect(app.getByRole("switch")).toHaveCount(1);
+    // And the new keyboard's switch works.
+    await keyboard(app, "KeyStep 37").click();
+    await expect(keyboard(app, "KeyStep 37")).not.toBeChecked();
+    await expect.poll(() => disabled(mock)).toEqual(["KeyStep 37"]);
   });
 });

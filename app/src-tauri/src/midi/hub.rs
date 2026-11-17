@@ -10,6 +10,36 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 pub trait CommandSink: Send + Sync {
     /// Hands one command to the engine.
     fn send(&self, cmd: Command);
+
+    /// Tries again what the engine refused earlier. Called after every message and by the poll.
+    fn retry(&self) {}
+}
+
+/// Which keyboards own each key on each engine channel, counted across all inputs: the engine is
+/// told to release a key only when the last keyboard holding or sustaining it lets go.
+#[derive(Debug, Default)]
+struct Ledger {
+    owners: BTreeMap<(u32, u8), u32>,
+}
+
+impl Ledger {
+    fn acquire(&mut self, channel: u32, key: u8) {
+        *self.owners.entry((channel, key)).or_insert(0) += 1;
+    }
+
+    /// One owner lets go: whether it was the last.
+    fn release(&mut self, channel: u32, key: u8) -> bool {
+        match self.owners.get_mut(&(channel, key)) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            _ => {
+                self.owners.remove(&(channel, key));
+                true
+            }
+        }
+    }
 }
 
 /// One keyboard's state: the keys down, the keys its sustain pedal holds, and the pedal.
@@ -29,11 +59,21 @@ pub struct Player {
     pedal: bool,
     /// Set once the input is closed: a late message from it plays nothing.
     retired: bool,
+    /// Who owns which key, across the hub's inputs. A player made alone owns its own.
+    ledger: Arc<Mutex<Ledger>>,
 }
 
 impl Player {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A player whose keys are counted with the other inputs' in `ledger`.
+    fn sharing(ledger: &Arc<Mutex<Ledger>>) -> Self {
+        Self {
+            ledger: Arc::clone(ledger),
+            ..Self::default()
+        }
     }
 
     /// The commands `msg` causes when `channel` is selected (`None`: no channel, nothing plays).
@@ -46,7 +86,10 @@ impl Player {
         match msg {
             MidiMessage::NoteOn { key, velocity } => {
                 if let Some(channel) = channel {
-                    self.held.remove(&key);
+                    // Down or pedal-held already: still this player's key, only sounded again.
+                    if !self.down.contains(&key) && !self.held.remove(&key) {
+                        lock(&self.ledger).acquire(channel, key);
+                    }
                     self.down.insert(key);
                     commands.push(note(channel, key, f32::from(velocity) / 127.0, true));
                 }
@@ -56,7 +99,7 @@ impl Player {
                     if self.pedal {
                         self.held.insert(key);
                     } else if let Some(channel) = self.channel {
-                        commands.push(note(channel, key, 0.0, false));
+                        self.disown(channel, key, &mut commands);
                     }
                 }
             }
@@ -93,12 +136,20 @@ impl Player {
     /// Releases the notes the pedal holds, and with `keys` the ones still down as well.
     fn release(&mut self, commands: &mut Vec<Command>, keys: bool) {
         let Some(channel) = self.channel else { return };
+        let mut gone = std::mem::take(&mut self.held);
         if keys {
-            commands.extend(self.down.iter().map(|&k| note(channel, k, 0.0, false)));
-            self.down.clear();
+            gone.append(&mut self.down);
         }
-        commands.extend(self.held.iter().map(|&k| note(channel, k, 0.0, false)));
-        self.held.clear();
+        for key in gone {
+            self.disown(channel, key, commands);
+        }
+    }
+
+    /// This player no longer holds `key`: the engine hears it only if no other input does.
+    fn disown(&self, channel: u32, key: u8, commands: &mut Vec<Command>) {
+        if lock(&self.ledger).release(channel, key) {
+            commands.push(note(channel, key, 0.0, false));
+        }
     }
 }
 
@@ -147,6 +198,8 @@ pub struct MidiHub {
     /// Inputs plugged in at the last poll, sorted.
     listed: Vec<String>,
     open: BTreeMap<String, Arc<Mutex<Player>>>,
+    /// The keys every open input holds.
+    ledger: Arc<Mutex<Ledger>>,
     /// Inputs whose last open failed and was reported.
     failed: BTreeSet<String>,
 }
@@ -165,6 +218,7 @@ impl MidiHub {
             disabled: disabled.into_iter().collect(),
             listed: Vec::new(),
             open: BTreeMap::new(),
+            ledger: Arc::default(),
             failed: BTreeSet::new(),
         }
     }
@@ -184,6 +238,11 @@ impl MidiHub {
         self.apply(&mut poll);
         self.release_stale();
         poll
+    }
+
+    /// Tries again the releases the engine refused (a stalled audio thread).
+    pub fn retry_owed(&self) {
+        self.sink.retry();
     }
 
     /// Switches one input on or off, taking effect at once.
@@ -248,7 +307,7 @@ impl MidiHub {
             .cloned()
             .collect();
         for name in wanted {
-            let player = Arc::new(Mutex::new(Player::new()));
+            let player = Arc::new(Mutex::new(Player::sharing(&self.ledger)));
             match self.ports.open(&name, self.callback(&player)) {
                 Ok(()) => {
                     self.failed.remove(&name);
@@ -263,6 +322,7 @@ impl MidiHub {
                 }
             }
         }
+        self.sink.retry();
     }
 
     /// What an input does with each message it sends.
@@ -279,6 +339,7 @@ impl MidiHub {
             for cmd in player.handle(msg, channel) {
                 sink.send(cmd);
             }
+            sink.retry();
         })
     }
 }

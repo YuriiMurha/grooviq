@@ -199,7 +199,7 @@ fn start_audio(app: &AppHandle) -> Audio {
     let selected_channel: notes_cmds::SelectedChannel = Arc::new(AtomicU32::new(NO_CHANNEL));
     let midi = Arc::new(Mutex::new(MidiHub::new(
         Box::new(MidirPorts::new()),
-        Arc::new(midi_cmds::ControllerSink(Arc::clone(&controller))),
+        Arc::new(midi::ControllerSink::new(Arc::clone(&controller))),
         Arc::clone(&selected_channel),
         settings.midi_disabled.clone(),
     )));

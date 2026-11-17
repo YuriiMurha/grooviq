@@ -3,11 +3,13 @@
 
 mod hub;
 mod parse;
+mod sink;
 
 use std::collections::HashMap;
 
 pub use hub::{CommandSink, MidiHub, Player, Poll};
 pub use parse::{MidiMessage, parse};
+pub use sink::ControllerSink;
 
 /// The selected channel when none is selected: a MIDI keyboard then plays nothing.
 pub const NO_CHANNEL: u32 = u32::MAX;
