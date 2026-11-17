@@ -39,6 +39,18 @@
   --knob-gap: var(--bg);
   --reg-x: 2px;             /* the one misregistration vector, used everywhere */
   --reg-y: 2px;
+  --roll-row: #171b3d;      /* the piano roll: a white key's row */
+  --roll-row-black: #11142f;/* a black key's row */
+  --roll-outside: var(--well); /* past the pattern's end, and outside 0..127 */
+  --roll-line: rgba(243, 238, 228, 0.05); /* steps and rows */
+  --roll-beat: rgba(243, 238, 228, 0.12); /* beats, and the line under each C */
+  --roll-bar: rgba(243, 238, 228, 0.26);
+  --roll-select: var(--select);  /* a selected note's ring, the selection box's edge */
+  --roll-box: rgba(243, 238, 228, 0.10);
+  --roll-playhead: var(--accent);
+  --roll-key-white: #d9d3c6;
+  --roll-key-black: #20254c;
+  --roll-key-held: var(--accent);
   --hair: rgba(243, 238, 228, 0.06);
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   --z-overlay: 20;

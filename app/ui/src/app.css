@@ -299,6 +299,139 @@ input[type="checkbox"] {
   color: var(--faint);
 }
 
+/* ---------------- piano roll ---------------- */
+.roll {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.roll-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--panel);
+}
+
+.roll-tool {
+  padding: 4px 10px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-m);
+  color: var(--muted);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.roll-tool:hover {
+  color: var(--text);
+}
+
+.roll-tool[aria-pressed="true"] {
+  background: var(--raised);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.roll-snap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  color: var(--muted);
+}
+
+.roll-snap select {
+  padding: 3px 6px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+}
+
+.roll-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.roll-keys {
+  flex: none;
+  width: 56px;
+  overflow: hidden;
+  position: relative;
+  background: var(--well);
+  border-right: 1px solid var(--line);
+  touch-action: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.roll-keys-strip {
+  --key-px: 14px;
+  position: absolute;
+  inset: 0 0 auto 0;
+  will-change: transform;
+}
+
+.roll-key {
+  height: var(--key-px);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 4px;
+  box-sizing: border-box;
+  background: var(--roll-key-white);
+  border-bottom: 1px solid rgba(14, 17, 39, 0.25);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* A black key covers the left of its row; the white keys show past it. */
+.roll-key.black {
+  background: linear-gradient(to right, var(--roll-key-black) 60%, var(--roll-key-white) 60%);
+  border-bottom-color: transparent;
+}
+
+.roll-key.held {
+  background: var(--roll-key-held);
+}
+
+.roll-key.black.held {
+  background: linear-gradient(to right, var(--roll-key-held) 60%, var(--roll-key-white) 60%);
+}
+
+.roll-wrap {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.roll-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.roll-empty {
+  position: absolute;
+  inset: auto 0 16px 0;
+  margin: 0;
+  text-align: center;
+  color: var(--muted);
+  pointer-events: none;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
