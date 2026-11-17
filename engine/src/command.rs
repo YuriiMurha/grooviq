@@ -7,7 +7,7 @@ use crate::state::{
 };
 use grooviq_dsp::sampler::SampleBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Test-tone frequency range in Hz.
 const TONE_HZ: (f32, f32) = (20.0, 20_000.0);
@@ -20,18 +20,32 @@ const TONE_DB: (f32, f32) = (-60.0, 0.0);
 ///
 /// Live notes (keys, clicks, MIDI presses) take theirs from [`NoteId::live`]; the sequencer
 /// numbers its own notes with [`NoteId::SEQUENCED`] set, which a live note can never carry.
+///
+/// 64 bits: one id per note, never handed out twice in practice (2^63 notes of each kind), so a
+/// note held for any time never shares its id with a later one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NoteId(pub u32);
+pub struct NoteId(pub u64);
 
 impl NoteId {
     /// The bit of the sequencer's ids. [`crate::Controller::send`] rejects a note that has it.
-    pub const SEQUENCED: u32 = 1 << 31;
+    pub const SEQUENCED: u64 = 1 << 63;
 
-    /// A new id for a live note, never handed out before in this process (until 2^31 more
-    /// were). Its note-on and its note-off both carry it.
+    /// A new id for a live note, never handed out before in this process. Its note-on and its
+    /// note-off both carry it. (Counting from 1, it stays below 2^53, which JavaScript numbers
+    /// hold exactly, for longer than any session lasts.)
     pub fn live() -> Self {
-        static NEXT: AtomicU32 = AtomicU32::new(1);
-        Self(NEXT.fetch_add(1, Ordering::Relaxed) & !Self::SEQUENCED)
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self::live_number(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The `n`-th live id.
+    fn live_number(n: u64) -> Self {
+        Self(n & !Self::SEQUENCED)
+    }
+
+    /// The `n`-th id the sequencer gives.
+    pub(crate) fn sequenced_number(n: u64) -> Self {
+        Self(Self::SEQUENCED | (n & !Self::SEQUENCED))
     }
 
     fn is_live(self) -> bool {
@@ -546,5 +560,23 @@ mod tests {
         for (beats, unit) in [(0, 4), (17, 4), (4, 1), (4, 3), (4, 32)] {
             assert_eq!(sig(beats, unit), None, "{beats}/{unit}");
         }
+    }
+
+    #[test]
+    fn ids_do_not_repeat_past_the_old_31_bit_wrap() {
+        // Note 0 and note 2^31 (where a 31-bit count wrapped) and their neighbours: all
+        // distinct, and each in its own half.
+        let around = [0, 1, (1 << 31) - 1, 1 << 31, (1 << 31) + 1, 1 << 32];
+        let live: Vec<NoteId> = around.iter().map(|&n| NoteId::live_number(n)).collect();
+        let seq: Vec<NoteId> = around
+            .iter()
+            .map(|&n| NoteId::sequenced_number(n))
+            .collect();
+        let mut all = [live.clone(), seq.clone()].concat();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), 2 * around.len(), "{live:?} {seq:?}");
+        assert!(live.iter().all(|id| id.is_live()));
+        assert!(seq.iter().all(|id| !id.is_live()));
     }
 }

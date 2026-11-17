@@ -71,7 +71,7 @@ fn cnote(channel: u32, key: u8, on: bool) -> Command {
         key,
         velocity: 0.8,
         on,
-        id: NoteId(u32::from(key)),
+        id: NoteId(u64::from(key)),
     }
 }
 
@@ -110,7 +110,7 @@ fn a_synth_channel_plays_notes_like_the_global_synth() {
                     key,
                     velocity: 0.8,
                     on,
-                    id: NoteId(u32::from(key)),
+                    id: NoteId(u64::from(key)),
                 },
             )
         }));

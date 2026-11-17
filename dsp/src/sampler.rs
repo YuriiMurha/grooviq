@@ -232,7 +232,7 @@ struct Voice {
     /// Note-on order, for stealing the oldest voice.
     order: u64,
     /// The id of the note it plays: only that note's note-off ends it.
-    id: u32,
+    id: u64,
     /// Its note's key is down: the note-off has not arrived (a one-shot note plays on after).
     down: bool,
     /// Loop mode: the voice repeats `lo..hi` (`len` frames, a whole number) instead of ending.
@@ -482,7 +482,7 @@ struct Voices {
     counter: u64,
     /// Mono and legato: the held notes `(key, id)`, oldest first; the top one sounds.
     /// Beyond STACK the oldest is dropped from priority (its note-off is still its own).
-    stack: [(u8, u32); STACK],
+    stack: [(u8, u64); STACK],
     stack_len: usize,
     /// The last note-on's key: a slide with nothing held glides from it.
     last_pitch: Option<f32>,
@@ -523,7 +523,7 @@ impl Voices {
         sr: f32,
         buf: &SampleBuf,
         key: u8,
-        id: u32,
+        id: u64,
         velocity: f32,
         glide: Option<(f32, f32)>,
     ) {
@@ -620,7 +620,7 @@ impl Voices {
     }
 
     /// Adds a held note to the mono priority stack (dropping the oldest when full).
-    fn push_held(&mut self, key: u8, id: u32) {
+    fn push_held(&mut self, key: u8, id: u64) {
         if self.stack_len == STACK {
             self.stack.copy_within(1.., 0);
             self.stack_len -= 1;
@@ -636,7 +636,7 @@ impl Voices {
         sr: f32,
         buf: &SampleBuf,
         key: u8,
-        id: u32,
+        id: u64,
         velocity: f32,
         slide: bool,
     ) {
@@ -693,7 +693,7 @@ impl Voices {
         sr: f32,
         buf: &SampleBuf,
         key: u8,
-        id: u32,
+        id: u64,
         velocity: f32,
         slide: bool,
         legato: bool,
@@ -739,7 +739,7 @@ impl Voices {
     /// note releases (in one-shot mode it plays on; a looping note releases in either mode). In
     /// mono and legato modes, releasing the sounding note returns to the newest note still held,
     /// or releases it when none is.
-    fn note_off(&mut self, p: &[f32; PARAMS], sr: f32, key: u8, id: u32) {
+    fn note_off(&mut self, p: &[f32; PARAMS], sr: f32, key: u8, id: u64) {
         if let Some(j) = (0..self.stack_len).find(|&j| self.stack[j] == (key, id)) {
             let top = j + 1 == self.stack_len;
             self.stack.copy_within(j + 1..self.stack_len, j);

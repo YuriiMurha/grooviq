@@ -92,7 +92,7 @@ fn render_synth(params: &[(u32, f32)], phrase: &Phrase, beats: f32) -> (Vec<f32>
                 velocity: 0.85,
                 on: true,
                 slide,
-                id: u32::from(key),
+                id: u64::from(key),
             },
         ));
         ev.push((
@@ -103,7 +103,7 @@ fn render_synth(params: &[(u32, f32)], phrase: &Phrase, beats: f32) -> (Vec<f32>
                 velocity: 0.0,
                 on: false,
                 slide: false,
-                id: u32::from(key),
+                id: u64::from(key),
             },
         ));
     }

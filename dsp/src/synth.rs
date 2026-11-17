@@ -63,8 +63,8 @@ const VEL_RAMP_MS: f32 = 3.0;
 /// silence, while the old one rings out (poly) or fades out over STEAL_FADE_MS (mono, legato).
 const IN_PLACE_ATTACK_MS: f32 = 6.0;
 /// Poly mode: older notes of a key, still held, that a voice also plays for (a key struck
-/// again before its note ended). Past that, the newest of them is forgotten (its note-off finds
-/// nothing), so the outermost notes keep the key sounding.
+/// again before its note ended). A voice that already plays for that many takes no more: the
+/// next press of its key gets a voice of its own, so no held note is ever forgotten.
 const OWNED: usize = 7;
 /// Crossfade / glide time (linear) for knob moves that would otherwise step the sound: filter
 /// type, unison layout, LFO destination and tuning.
@@ -906,7 +906,7 @@ impl Lfo {
 #[derive(Clone, Copy, Debug)]
 struct Pending {
     key: u8,
-    id: u32,
+    id: u64,
     vel: f32,
     gate: bool,
     from: Option<f32>,
@@ -994,22 +994,28 @@ struct Ctx {
 /// Ids of held notes, oldest first, at most [`OWNED`].
 #[derive(Clone, Copy, Debug, Default)]
 struct Owners {
-    ids: [u32; OWNED],
+    ids: [u64; OWNED],
     len: u8,
 }
 
 impl Owners {
-    /// Adds `id` as the newest; when full, it is forgotten instead.
-    fn push(&mut self, id: u32) {
+    /// Adds `id` as the newest. Callers check [`Self::room`] first.
+    fn push(&mut self, id: u64) {
         let len = usize::from(self.len);
+        debug_assert!(len < OWNED, "a full owner list takes no more");
         if len < OWNED {
             self.ids[len] = id;
             self.len += 1;
         }
     }
 
+    /// How many more it takes.
+    fn room(&self) -> usize {
+        OWNED - usize::from(self.len)
+    }
+
     /// Removes `id`; whether it was there.
-    fn remove(&mut self, id: u32) -> bool {
+    fn remove(&mut self, id: u64) -> bool {
         let len = usize::from(self.len);
         let Some(i) = self.ids[..len].iter().position(|&o| o == id) else {
             return false;
@@ -1020,13 +1026,13 @@ impl Owners {
     }
 
     /// Takes the newest.
-    fn pop(&mut self) -> Option<u32> {
+    fn pop(&mut self) -> Option<u64> {
         let len = self.len.checked_sub(1)?;
         self.len = len;
         Some(self.ids[usize::from(len)])
     }
 
-    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+    fn iter(&self) -> impl Iterator<Item = u64> + '_ {
         self.ids[..usize::from(self.len)].iter().copied()
     }
 }
@@ -1037,7 +1043,7 @@ struct Voice {
     gate: bool,
     key: u8,
     /// The id of the note it plays: only that note's note-off ends it.
-    id: u32,
+    id: u64,
     /// Poly mode: the older notes of its key it also plays for, still held. When `id` ends, the
     /// newest of them takes over and the voice sounds on; it releases when the last one ends.
     older: Owners,
@@ -1265,7 +1271,7 @@ pub struct Synth {
     mode: u8,
     age: u64,
     /// Mono and legato: the held notes `(key, id)`, oldest first; the top one sounds.
-    stack: [(u8, u32); 16],
+    stack: [(u8, u64); 16],
     stack_len: usize,
     last_pitch: Option<f32>,
     last_voice: usize,
@@ -1664,7 +1670,7 @@ impl Synth {
         self.fade_out(i, j);
     }
 
-    fn poly_on(&mut self, key: u8, id: u32, vel: f32, slide: bool) {
+    fn poly_on(&mut self, key: u8, id: u64, vel: f32, slide: bool) {
         let age = self.next_age();
         let sr = self.cx.sr;
         if slide {
@@ -1699,7 +1705,8 @@ impl Synth {
         // place would jump its level mid-cycle, so the old note rings out (released if still
         // held) and the new one gets a voice of its own, with the same attack as any note.
         // Either way the key keeps one voice, which also plays for the key's older notes still
-        // held: a short note inside a long one hands the voice back to the long one.
+        // held: a short note inside a long one hands the voice back to the long one. A voice
+        // that plays for as many as it can keep is left alone: the new note gets its own.
         if !slide
             && self.retrigger_in_place()
             && let Some(i) = (0..NUM_VOICES)
@@ -1708,6 +1715,7 @@ impl Synth {
                     v.active && !v.fading && v.key == key
                 })
                 .max_by_key(|&i| self.voices[i].age)
+            && !(self.voices[i].gate && self.voices[i].older.room() == 0)
         {
             let cx = self.cx;
             let v = &mut self.voices[i];
@@ -1722,9 +1730,19 @@ impl Synth {
             self.last_voice = i;
             return;
         }
+        // The held voices of the key with room left hand their notes to the new voice and ring
+        // out, if all of them fit in it; otherwise none does, and the new note sounds alone.
+        let joins =
+            |v: &Voice| v.active && v.gate && !v.fading && v.key == key && v.older.room() > 0;
+        let owned: usize = self
+            .voices
+            .iter()
+            .filter(|v| joins(v))
+            .map(|v| 1 + usize::from(v.older.len))
+            .sum();
         let mut older = Owners::default();
-        for v in self.voices.iter_mut() {
-            if v.active && v.gate && !v.fading && v.key == key {
+        if owned <= OWNED {
+            for v in self.voices.iter_mut().filter(|v| joins(v)) {
                 for o in v.older.iter() {
                     older.push(o);
                 }
@@ -1758,7 +1776,7 @@ impl Synth {
 
     /// Ends note `id` on `key`. A voice that also plays for older held notes of the key sounds
     /// on for them (no release, no retrigger); it releases when the last of its notes ends.
-    fn poly_off(&mut self, key: u8, id: u32) {
+    fn poly_off(&mut self, key: u8, id: u64) {
         for v in self.voices.iter_mut() {
             if !(v.active && v.gate && !v.fading && v.key == key) {
                 continue;
@@ -1774,7 +1792,7 @@ impl Synth {
         }
     }
 
-    fn mono_on(&mut self, key: u8, id: u32, vel: f32, slide: bool) {
+    fn mono_on(&mut self, key: u8, id: u64, vel: f32, slide: bool) {
         // A re-struck key keeps its older note in the stack: that note is still held (a long
         // note with a shorter one inside it), and the sound returns to it when the newer ends.
         if self.stack_len == self.stack.len() {
@@ -1855,7 +1873,7 @@ impl Synth {
         self.fade_out(0, j);
     }
 
-    fn mono_off(&mut self, key: u8, id: u32) {
+    fn mono_off(&mut self, key: u8, id: u64) {
         if let Some(pos) = self.stack[..self.stack_len]
             .iter()
             .position(|&e| e == (key, id))
@@ -2125,7 +2143,7 @@ mod tests {
                         velocity,
                         on,
                         slide,
-                        id: u32::from(key),
+                        id: u64::from(key),
                     },
                 ))
             })
@@ -2250,7 +2268,7 @@ mod tests {
                     velocity: 0.9,
                     on,
                     slide: false,
-                    id: u32::from(key),
+                    id: u64::from(key),
                 })
                 .collect();
             s.process(&mut l[c..e], &mut r[c..e], None, &ev);
@@ -2332,7 +2350,7 @@ mod tests {
                     velocity: 0.9,
                     on,
                     slide: false,
-                    id: u32::from(key),
+                    id: u64::from(key),
                 })
                 .collect();
             s.process(&mut l[c..e], &mut r[c..e], None, &ev);
@@ -2422,7 +2440,7 @@ mod tests {
                             velocity: vel,
                             on: true,
                             slide: false,
-                            id: u32::from(key),
+                            id: u64::from(key),
                         });
                     }
                 }

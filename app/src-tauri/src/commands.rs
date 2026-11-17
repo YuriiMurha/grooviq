@@ -119,7 +119,7 @@ pub async fn synth_note(audio: State<'_, Audio>, key: u8, on: bool) -> Result<()
             velocity: NOTE_VELOCITY,
             on,
             // One note per key on this test path: the key names it.
-            id: NoteId(u32::from(key)),
+            id: NoteId(u64::from(key)),
         },
     )
 }

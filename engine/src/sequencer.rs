@@ -40,7 +40,7 @@ struct PendingOff {
     channel: ChannelId,
     key: u8,
     /// The id its note-on carried.
-    id: u32,
+    id: u64,
 }
 
 const NO_OFF: PendingOff = PendingOff {
@@ -63,7 +63,7 @@ pub(crate) struct Sequencer {
     /// Numbers the notes played: each note-on and its note-off carry the id it makes, so a
     /// note-off ends its own note, not another one on its key (a short note inside a long one,
     /// a live note). Ids have [`NoteId::SEQUENCED`] set, which a live note never has.
-    played: u32,
+    played: u64,
 }
 
 impl Sequencer {
@@ -185,7 +185,7 @@ impl Sequencer {
         if self.count == PENDING {
             return;
         }
-        let id = NoteId::SEQUENCED | (self.played & !NoteId::SEQUENCED);
+        let id = NoteId::sequenced_number(self.played).0;
         self.played = self.played.wrapping_add(1);
         let on = NoteEvent {
             offset: offset as u32,
@@ -348,6 +348,46 @@ mod tests {
         assert_eq!(at(24_000, 62), [true]);
         assert_eq!(at(24_025, 62), [false, true]);
         assert_eq!(at(24_050, 62), [false]);
+    }
+
+    /// The ids of the note-ons and note-offs of the block at `f0`, as (key, on, id).
+    fn ids(
+        seq: &mut Sequencer,
+        pattern: &PatternData,
+        clock: &mut TransportClock,
+        f0: u64,
+    ) -> Vec<(u8, bool, NoteId)> {
+        let mut sent = Vec::new();
+        seq.run(pattern, clock, f0, |_, e| {
+            sent.push((e.key, e.on, NoteId(e.id)));
+            Delivery::Taken
+        });
+        clock.mark_covered(f0 + BLOCK as u64);
+        sent
+    }
+
+    #[test]
+    fn a_held_note_never_shares_its_id_with_a_later_note_past_the_old_31_bit_wrap() {
+        // A long note on key 60 starts as the sequencer's first note; 2^31 notes later (where a
+        // 31-bit counter wrapped) another note on that key starts while the first is still held.
+        // Their ids differ, so the first one's note-off ends only the first.
+        let pattern = PatternData {
+            length: 16 * 240,
+            notes: vec![note(0, 1, 60, 3_000), note(240, 1, 60, 240)],
+        };
+        let mut clock = playing(120.0);
+        let mut seq = Sequencer::new();
+        let first = ids(&mut seq, &pattern, &mut clock, 0);
+        assert_eq!(first.len(), 1);
+        // The next note is number 2^31 (the first was number 0).
+        seq.played += (1 << 31) - 1;
+        let mut later = Vec::new();
+        for b in 1..=100 {
+            later.extend(ids(&mut seq, &pattern, &mut clock, b * BLOCK as u64));
+        }
+        let second = later.iter().find(|e| e.1).expect("the second note starts");
+        assert_ne!(second.2, first[0].2, "the held note's id was given again");
+        assert!(second.2.0 & NoteId::SEQUENCED != 0);
     }
 
     /// A tiny xorshift: the fuzz below is the same on every run and needs no crate.

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
-import { channelNote, TYPING_VELOCITY } from "../api/notes";
-import { channelPreview, errorText, type ChannelView } from "../api/project";
+import { channelNoteOff, channelNoteOn, TYPING_VELOCITY } from "../api/notes";
+import { channelPreviewOff, channelPreviewOn, errorText, type ChannelView } from "../api/project";
+import { Press } from "../keyboard/press";
 import { openDevice } from "../devices/windows";
 import { isTypingTarget } from "../project/shortcuts";
 import { Knob } from "./Knob";
@@ -33,7 +34,8 @@ const PREVIEW_KEY = 60;
  * are drawn by the step grid beside the rows. Pressing a row selects it; Delete on a focused row
  * or its context menu asks to remove it. */
 export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSelect, onRemove }: Props) {
-  const previewing = useRef(false);
+  /** The preview sounding now (its press), while the name is held. */
+  const previewing = useRef<Press | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const menuItem = useRef<HTMLButtonElement>(null);
   const { id, name } = channel;
@@ -41,13 +43,18 @@ export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSele
 
   // A preview plays only while the person holds the name down: the sample, or the synth's C4.
   const preview = (on: boolean) => {
-    if (previewing.current === on) return;
-    previewing.current = on;
-    const sent = synth ? channelNote(id, PREVIEW_KEY, on ? TYPING_VELOCITY : 0, on) : channelPreview(id, on);
-    // Stopping is best effort: the channel may just have been removed.
-    sent.catch((e: unknown) => {
-      if (on) onError(errorText(e));
-    });
+    const sounding = previewing.current;
+    if ((sounding !== null) === on) return;
+    if (on) {
+      const sent = synth ? channelNoteOn(id, PREVIEW_KEY, TYPING_VELOCITY) : channelPreviewOn(id);
+      previewing.current = new Press(sent, (e: unknown) => onError(errorText(e)));
+      return;
+    }
+    previewing.current = null;
+    // Stopping names this preview's own press; best effort: the channel may just have gone.
+    void sounding?.release((press) =>
+      synth ? channelNoteOff(id, PREVIEW_KEY, press) : channelPreviewOff(id, press),
+    );
   };
 
   // A preview held while the row goes away (F6 hides the rack, the channel is removed) or the

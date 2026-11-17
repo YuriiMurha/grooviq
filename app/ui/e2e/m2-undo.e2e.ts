@@ -305,8 +305,11 @@ test.describe("the live fixture's length log", () => {
       m.state.transport.playing = true;
       const note = async (take, key, steps) => {
         m.state.recordOpen.set("1:" + key, { tick: 0, velocity: 0.8, take });
+        // The note's press, as its note-on would have made it: the release names it.
+        const press = m.state.nextPress++;
+        m.state.presses.set(press, "1:" + key);
         m.hold(steps * 240);
-        await ipc.invoke("channel_note", { channel: 1, key, on: false, velocity: 0 });
+        await ipc.invoke("channel_note", { channel: 1, key, on: false, velocity: 0, press });
       };
       await note(201, 70, 1);
       await edit({ kind: "setTimeSignature", beats: 3, unit: 4 });
@@ -330,8 +333,11 @@ test.describe("the live fixture's length log", () => {
       m.state.transport.playing = true;
       const note = async (take, key, steps) => {
         m.state.recordOpen.set("1:" + key, { tick: 0, velocity: 0.8, take });
+        // The note's press, as its note-on would have made it: the release names it.
+        const press = m.state.nextPress++;
+        m.state.presses.set(press, "1:" + key);
         m.hold(steps * 240);
-        await ipc.invoke("channel_note", { channel: 1, key, on: false, velocity: 0 });
+        await ipc.invoke("channel_note", { channel: 1, key, on: false, velocity: 0, press });
       };
       await note(301, 70, 25);
       await edit({ kind: "setTimeSignature", beats: 3, unit: 4 });

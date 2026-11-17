@@ -73,7 +73,7 @@ pub fn perf_scenes() -> Vec<PerfScene> {
         key,
         velocity: 0.8,
         on: true,
-        id: NoteId(u32::from(key)),
+        id: NoteId(u64::from(key)),
     }));
     start.push(Command::Play);
     let beat = PerfScene {

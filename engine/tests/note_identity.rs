@@ -125,7 +125,7 @@ fn seq(tick: u32, length: u32, velocity: f32) -> SeqNote {
     }
 }
 
-fn live(on: bool, velocity: f32, id: u32) -> Command {
+fn live(on: bool, velocity: f32, id: u64) -> Command {
     Command::ChannelNote {
         channel: ChannelId(1),
         key: KEY,

@@ -63,7 +63,7 @@ fn on(offset: u32, key: u8, velocity: f32) -> NoteEvent {
         velocity,
         on: true,
         slide: false,
-        id: u32::from(key),
+        id: u64::from(key),
     }
 }
 
@@ -74,21 +74,21 @@ fn off(offset: u32, key: u8) -> NoteEvent {
         velocity: 0.0,
         on: false,
         slide: false,
-        id: u32::from(key),
+        id: u64::from(key),
     }
 }
 
 /// A note-on and note-off that name note `id` (the helpers above name each key's one note).
 fn on_n(offset: u32, key: u8, velocity: f32, id: u32) -> NoteEvent {
     NoteEvent {
-        id,
+        id: u64::from(id),
         ..on(offset, key, velocity)
     }
 }
 
 fn off_n(offset: u32, key: u8, id: u32) -> NoteEvent {
     NoteEvent {
-        id,
+        id: u64::from(id),
         ..off(offset, key)
     }
 }

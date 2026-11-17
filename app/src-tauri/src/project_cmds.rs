@@ -10,7 +10,8 @@ use crate::autosave_notice::AutosaveStatus;
 use crate::notes_cmds::notes_changed;
 use crate::{Audio, lock};
 use grooviq_engine::{
-    Command, ExportOptions, MAX_SAMPLE_SECONDS, SampleBuf, WavFormat, decode_sample, export_wav,
+    Command, ExportOptions, MAX_SAMPLE_SECONDS, NoteId, SampleBuf, WavFormat, decode_sample,
+    export_wav,
 };
 use grooviq_project::recovery::Recovery;
 use grooviq_project::session::{OpenReport, ProjectView, SaveJob, Session};
@@ -238,15 +239,25 @@ pub async fn channel_set_sample(
         .map_err(|e| e.to_string())
 }
 
-/// Starts or releases a preview of `channel`.
+/// Starts a preview of `channel` (`on`), returning its press, or releases the press `press`.
 #[tauri::command]
 pub async fn channel_preview(
     audio: State<'_, Audio>,
     channel: u32,
     on: bool,
-) -> Result<(), String> {
-    session(&audio)
-        .preview(channel, on)
+    press: Option<u64>,
+) -> Result<Option<u64>, String> {
+    let session = session(&audio);
+    if on {
+        return session
+            .preview_on(channel)
+            .map(|press| Some(press.0))
+            .map_err(|e| e.to_string());
+    }
+    let press = press.ok_or("A release names the press it ends.")?;
+    session
+        .preview_off(channel, NoteId(press))
+        .map(|()| None)
         .map_err(|e| e.to_string())
 }
 

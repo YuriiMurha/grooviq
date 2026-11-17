@@ -356,7 +356,7 @@ fn a_panic_restart_restores_synth_channels() {
         key,
         velocity: 0.9,
         on: true,
-        id: NoteId(u32::from(key)),
+        id: NoteId(u64::from(key)),
     };
     let mut buf = vec![0f32; 1024 * 2];
     // Channel 2 sounds, then channel 3 chokes it.

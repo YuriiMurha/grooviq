@@ -43,7 +43,7 @@ fn note_on(key: u8) -> Command {
         key,
         velocity: 1.0,
         on: true,
-        id: NoteId(u32::from(key)),
+        id: NoteId(u64::from(key)),
     }
 }
 
@@ -435,7 +435,7 @@ fn more_events_than_the_queue_holds_render_identically_for_any_callback_size() {
                 key: 36 + (i % 48) as u8,
                 velocity: 0.8,
                 on: i % 3 != 2,
-                id: NoteId(u32::from(36 + (i % 48) as u8)),
+                id: NoteId(u64::from(36 + (i % 48) as u8)),
             };
             (i, note)
         })
@@ -445,7 +445,7 @@ fn more_events_than_the_queue_holds_render_identically_for_any_callback_size() {
             key: 40 + (i % 40) as u8,
             velocity: 0.5,
             on: i % 2 == 0,
-            id: NoteId(u32::from(40 + (i % 40) as u8)),
+            id: NoteId(u64::from(40 + (i % 40) as u8)),
         };
         (5_000, note)
     }));

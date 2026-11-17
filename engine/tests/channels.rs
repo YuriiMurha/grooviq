@@ -571,7 +571,7 @@ fn busy() -> (EngineState, Vec<(u64, Command)>) {
                 key: 48 + (i % 24) as u8,
                 velocity: 0.5 + 0.01 * i as f32,
                 on: true,
-                id: NoteId(u32::from(48 + (i % 24) as u8)),
+                id: NoteId(u64::from(48 + (i % 24) as u8)),
             },
         ));
         ev.push((frame + 400, note(id, false)));

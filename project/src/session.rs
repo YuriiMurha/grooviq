@@ -32,7 +32,7 @@ use grooviq_engine::{
     STEP_TICKS, decode_sample,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -491,10 +491,6 @@ pub struct Session {
     owed_disarm: bool,
     /// The current pattern's note changes, for undo and redo.
     history: NoteHistory,
-    /// The live notes held (typing keyboard, previews) per channel and key, oldest first: the
-    /// id each note-on the engine took carried. A key's n-th release ends its n-th press, and
-    /// never a sequenced note or a MIDI press on the same key.
-    held: Mutex<BTreeMap<(u32, u8), VecDeque<NoteId>>>,
 }
 
 /// What committing waiting recorded notes did.
@@ -507,6 +503,36 @@ enum Commit {
 
 fn lock(controller: &Mutex<Controller>) -> MutexGuard<'_, Controller> {
     controller.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// `key` if it is a MIDI key (0..=127).
+fn checked_key(key: u8) -> Result<u8, SessionError> {
+    if key > 127 {
+        return Err(SessionError::InvalidValue(format!(
+            "Key {key} is outside 0 to 127."
+        )));
+    }
+    Ok(key)
+}
+
+fn live_note(channel: u32, key: u8, velocity: f32, press: NoteId) -> Command {
+    Command::ChannelNote {
+        channel: ChannelId(channel),
+        key,
+        velocity,
+        on: true,
+        id: press,
+    }
+}
+
+fn live_release(channel: u32, key: u8, press: NoteId) -> Command {
+    Command::ChannelNote {
+        channel: ChannelId(channel),
+        key,
+        velocity: 0.0,
+        on: false,
+        id: press,
+    }
 }
 
 /// `value` if it is a number, else `InvalidValue` naming `what`.
@@ -541,7 +567,6 @@ impl Session {
             pending: Vec::new(),
             owed_disarm: false,
             history: NoteHistory::default(),
-            held: Mutex::new(BTreeMap::new()),
         };
         // A fresh queue always has room for a whole state.
         let synced = session.sync_engine();
@@ -1241,57 +1266,28 @@ impl Session {
         Ok((kind, param_index(kind, param)?))
     }
 
-    /// Starts (`on`) or releases `key` on `channel` now: the typing keyboard and previews. Only
-    /// on the person's key or click.
-    pub fn live_note(
+    /// Starts `key` on `channel` now: the typing keyboard, the roll's keys, a synth row's
+    /// preview. Only on the person's key or click. The press it made: its release names it.
+    pub fn live_note_on(
         &self,
         channel: u32,
         key: u8,
         velocity: f32,
-        on: bool,
-    ) -> Result<(), SessionError> {
+    ) -> Result<NoteId, SessionError> {
         self.channel_index(channel)?;
-        if key > 127 {
-            return Err(SessionError::InvalidValue(format!(
-                "Key {key} is outside 0 to 127."
-            )));
-        }
+        let key = checked_key(key)?;
         let velocity = finite(velocity, "velocity")?.clamp(0.0, 1.0);
-        self.held_note(channel, key, velocity, on)
+        let press = NoteId::live();
+        self.send(live_note(channel, key, velocity, press))?;
+        Ok(press)
     }
 
-    /// Sends a live note-on with a new id, or the release of the oldest press of `key` that the
-    /// engine took (none taken: nothing to release, nothing is sent).
-    fn held_note(
-        &self,
-        channel: u32,
-        key: u8,
-        velocity: f32,
-        on: bool,
-    ) -> Result<(), SessionError> {
-        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
-        let note = |id, velocity, on| Command::ChannelNote {
-            channel: ChannelId(channel),
-            key,
-            velocity,
-            on,
-            id,
-        };
-        if on {
-            let id = NoteId::live();
-            self.send(note(id, velocity, true))?;
-            held.entry((channel, key)).or_default().push_back(id);
-            return Ok(());
-        }
-        let Some(ids) = held.get_mut(&(channel, key)) else {
-            return Ok(());
-        };
-        let id = ids.pop_front();
-        if ids.is_empty() {
-            held.remove(&(channel, key));
-        }
-        // A release the engine refuses is lost (#175), but only its own note keeps sounding.
-        id.map_or(Ok(()), |id| self.send(note(id, 0.0, false)))
+    /// Releases `press` (what [`Self::live_note_on`] returned) of `key` on `channel`. Each
+    /// producer names its own press, so a release never ends another one's note on the key.
+    pub fn live_note_off(&self, channel: u32, key: u8, press: NoteId) -> Result<(), SessionError> {
+        self.channel_index(channel)?;
+        let key = checked_key(key)?;
+        self.send(live_release(channel, key, press))
     }
 
     /// Sets an instrument parameter in the engine only, while a control moves: the project
@@ -1511,11 +1507,15 @@ impl Session {
         Ok(self.view())
     }
 
-    /// Starts (`on`) or releases a preview of `channel`: key 60 at velocity 0.8. Only on the
-    /// person's click or key: never call it on its own.
-    pub fn preview(&self, channel: u32, on: bool) -> Result<(), SessionError> {
-        self.channel_index(channel)?;
-        self.held_note(channel, DEFAULT_KEY, DEFAULT_VELOCITY, on)
+    /// Starts a preview of `channel`: key 60 at velocity 0.8. Only on the person's click or
+    /// key: never call it on its own. The press it made: its release names it.
+    pub fn preview_on(&self, channel: u32) -> Result<NoteId, SessionError> {
+        self.live_note_on(channel, DEFAULT_KEY, DEFAULT_VELOCITY)
+    }
+
+    /// Releases the preview `press` of `channel`.
+    pub fn preview_off(&self, channel: u32, press: NoteId) -> Result<(), SessionError> {
+        self.live_note_off(channel, DEFAULT_KEY, press)
     }
 
     /// Replaces the engine's state with the project's (stopping the transport first).

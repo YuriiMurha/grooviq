@@ -239,12 +239,13 @@ fn record_chord(
     channel: u32,
     keys: &[u8],
 ) -> Option<u32> {
-    for &key in keys {
-        session.live_note(channel, key, 0.8, true).unwrap();
-    }
+    let presses: Vec<_> = keys
+        .iter()
+        .map(|&key| session.live_note_on(channel, key, 0.8).unwrap())
+        .collect();
     render(processor, 6);
-    for &key in keys {
-        session.live_note(channel, key, 0.0, false).unwrap();
+    for (&key, &press) in keys.iter().zip(&presses) {
+        session.live_note_off(channel, key, press).unwrap();
     }
     render(processor, 2);
     let mut events = Vec::new();
@@ -543,11 +544,11 @@ fn recording_off_ends_the_take() {
     start_take(&mut session, &controller, &mut processor);
     record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
     // A key still held when Record goes off ends there, in the take it started in.
-    session.live_note(ch, 71, 0.8, true).unwrap();
+    let press2 = session.live_note_on(ch, 71, 0.8).unwrap();
     render(&mut processor, 4);
     session.set_recording(false).unwrap();
     render(&mut processor, 2);
-    session.live_note(ch, 71, 0.0, false).unwrap();
+    session.live_note_off(ch, 71, press2).unwrap();
     render(&mut processor, 2);
     let mut events = Vec::new();
     controller.lock().unwrap().take_recorded(&mut events);
@@ -573,15 +574,15 @@ fn notes_after_the_end_in_the_same_poll_start_the_next_take() {
     record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
     // Off and on again, and a note played, all before the recorder's next poll: the poll
     // holds the first take's end, then the second take's note.
-    session.live_note(ch, 71, 0.8, true).unwrap();
+    let press3 = session.live_note_on(ch, 71, 0.8).unwrap();
     render(&mut processor, 2);
     session.set_recording(false).unwrap();
     render(&mut processor, 2);
-    session.live_note(ch, 71, 0.0, false).unwrap();
+    session.live_note_off(ch, 71, press3).unwrap();
     session.set_recording(true).unwrap();
-    session.live_note(ch, 72, 0.8, true).unwrap();
+    let press4 = session.live_note_on(ch, 72, 0.8).unwrap();
     render(&mut processor, 2);
-    session.live_note(ch, 72, 0.0, false).unwrap();
+    session.live_note_off(ch, 72, press4).unwrap();
     render(&mut processor, 2);
     let mut events = Vec::new();
     controller.lock().unwrap().take_recorded(&mut events);
@@ -744,12 +745,10 @@ fn recording_switching_itself_off_ends_the_take() {
     start_take(&mut session, &controller, &mut processor);
     record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
     // Two more: one fits, recording switches itself off.
-    for key in [71, 72] {
-        session.live_note(ch, key, 0.8, true).unwrap();
-    }
+    let presses = [71, 72].map(|key| session.live_note_on(ch, key, 0.8).unwrap());
     render(&mut processor, 4);
-    for key in [71, 72] {
-        session.live_note(ch, key, 0.0, false).unwrap();
+    for (key, press) in [71, 72].into_iter().zip(presses) {
+        session.live_note_off(ch, key, press).unwrap();
     }
     render(&mut processor, 2);
     let mut events = Vec::new();
@@ -775,9 +774,9 @@ fn a_take_that_grew_the_pattern_undoes_to_its_starting_length() {
     // 16 steps at 140 BPM last about 1286 blocks: a note held across the loop's end runs past
     // it and grows the pattern to the next bar, in a later poll of the same take.
     render(&mut processor, 1_240);
-    session.live_note(ch, 71, 0.8, true).unwrap();
+    let press6 = session.live_note_on(ch, 71, 0.8).unwrap();
     render(&mut processor, 120);
-    session.live_note(ch, 71, 0.0, false).unwrap();
+    session.live_note_off(ch, 71, press6).unwrap();
     render(&mut processor, 2);
     let mut events = Vec::new();
     controller.lock().unwrap().take_recorded(&mut events);
@@ -801,9 +800,9 @@ fn a_take_that_grew_the_pattern_undoes_to_its_starting_length() {
 
 /// Plays `key` for a few blocks without collecting.
 fn play_key(session: &Session, processor: &mut AudioProcessor, channel: u32, key: u8) {
-    session.live_note(channel, key, 0.8, true).unwrap();
+    let press7 = session.live_note_on(channel, key, 0.8).unwrap();
     render(processor, 2);
-    session.live_note(channel, key, 0.0, false).unwrap();
+    session.live_note_off(channel, key, press7).unwrap();
     render(processor, 2);
 }
 
@@ -947,8 +946,8 @@ fn fill_the_recording_queue(
     let mut sent = 0;
     while controller.lock().unwrap().record_dropped() == 0 {
         for _ in 0..50 {
-            session.live_note(channel, 20, 0.5, true).unwrap();
-            session.live_note(channel, 20, 0.0, false).unwrap();
+            let press8 = session.live_note_on(channel, 20, 0.5).unwrap();
+            session.live_note_off(channel, 20, press8).unwrap();
         }
         render(processor, 1);
         sent += 1;
@@ -974,7 +973,7 @@ fn late_completion_after(
     session.set_recording(true).unwrap();
     start_take(&mut session, &controller, &mut processor);
     record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
-    session.live_note(ch, 71, 0.8, true).unwrap();
+    let press9 = session.live_note_on(ch, 71, 0.8).unwrap();
     render(&mut processor, 1_300);
     fill_the_recording_queue(&session, &controller, &mut processor, ch);
     session.set_recording(false).unwrap();
@@ -988,9 +987,9 @@ fn late_completion_after(
     session.collect_recorded(&events, Instant::now());
     // Take B, collected while 71 (of take A) is still down.
     session.set_recording(true).unwrap();
-    session.live_note(ch, 72, 0.8, true).unwrap();
+    let press10 = session.live_note_on(ch, 72, 0.8).unwrap();
     render(&mut processor, b_blocks);
-    session.live_note(ch, 72, 0.0, false).unwrap();
+    session.live_note_off(ch, 72, press10).unwrap();
     render(&mut processor, 2);
     collect(&mut session, &controller).revision.unwrap();
     assert!(keys(&session).contains(&72) && !keys(&session).contains(&71));
@@ -1002,7 +1001,7 @@ fn late_completion_after(
     );
     between(&mut session);
     // 71 lets go: it completes now, in take A.
-    session.live_note(ch, 71, 0.0, false).unwrap();
+    session.live_note_off(ch, 71, press9).unwrap();
     render(&mut processor, 2);
     collect(&mut session, &controller).revision.unwrap();
     assert!(keys(&session).contains(&71));
@@ -1057,11 +1056,11 @@ fn a_late_note_whose_take_was_undone_is_a_new_step() {
     session.set_recording(true).unwrap();
     start_take(&mut session, &controller, &mut processor);
     record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
-    session.live_note(ch, 71, 0.8, true).unwrap();
+    let press11 = session.live_note_on(ch, 71, 0.8).unwrap();
     render(&mut processor, 2);
     undo(&mut session);
     assert!(session.view().can_redo);
-    session.live_note(ch, 71, 0.0, false).unwrap();
+    session.live_note_off(ch, 71, press11).unwrap();
     render(&mut processor, 2);
     collect(&mut session, &controller).revision.unwrap();
     assert!(!session.view().can_redo, "a note change clears redo");
@@ -1246,9 +1245,9 @@ fn a_shorter_length_set_by_hand_after_a_take_stays() {
     s.set_recording(true).unwrap();
     start_take(&mut s, &controller, &mut processor);
     render(&mut processor, 1_240);
-    s.live_note(ch, 80, 0.8, true).unwrap();
+    let press = s.live_note_on(ch, 80, 0.8).unwrap();
     render(&mut processor, 120);
-    s.live_note(ch, 80, 0.0, false).unwrap();
+    s.live_note_off(ch, 80, press).unwrap();
     render(&mut processor, 2);
     collect(&mut s, &controller).revision.unwrap();
     let after = notes(&s);
@@ -1298,31 +1297,29 @@ fn repeated_late_growth_on_the_real_engine_undoes_to_the_start() {
     let (mut s, c, mut p, ch, before) = three_notes();
     s.set_recording(true).unwrap();
     start_take(&mut s, &c, &mut p);
-    for key in [70, 71, 74] {
-        s.live_note(ch, key, 0.8, true).unwrap();
-    }
+    let [p70, p71, p74] = [70, 71, 74].map(|key| s.live_note_on(ch, key, 0.8).unwrap());
     render(&mut p, 1_300);
-    s.live_note(ch, 70, 0.0, false).unwrap();
+    s.live_note_off(ch, 70, p70).unwrap();
     render(&mut p, 2);
     collect(&mut s, &c).revision.unwrap();
     assert_eq!(s.view().pattern.steps, 32);
     s.set_recording(true).unwrap();
-    s.live_note(ch, 72, 0.8, true).unwrap();
+    let p72 = s.live_note_on(ch, 72, 0.8).unwrap();
     render(&mut p, 2_600);
-    s.live_note(ch, 72, 0.0, false).unwrap();
+    s.live_note_off(ch, 72, p72).unwrap();
     render(&mut p, 2);
     collect(&mut s, &c).revision.unwrap();
-    s.live_note(ch, 71, 0.0, false).unwrap();
+    s.live_note_off(ch, 71, p71).unwrap();
     render(&mut p, 2);
     collect(&mut s, &c).revision.unwrap();
     s.set_recording(true).unwrap();
-    s.live_note(ch, 73, 0.8, true).unwrap();
+    let p73 = s.live_note_on(ch, 73, 0.8).unwrap();
     render(&mut p, 2_600);
-    s.live_note(ch, 73, 0.0, false).unwrap();
+    s.live_note_off(ch, 73, p73).unwrap();
     render(&mut p, 2);
     collect(&mut s, &c).revision.unwrap();
     render(&mut p, 1_300);
-    s.live_note(ch, 74, 0.0, false).unwrap();
+    s.live_note_off(ch, 74, p74).unwrap();
     render(&mut p, 2);
     collect(&mut s, &c).revision.unwrap();
     let last = state(&s);

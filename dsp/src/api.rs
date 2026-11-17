@@ -20,7 +20,7 @@ pub struct NoteEvent {
     /// The note's identity, the same on its note-on and its note-off: a note-off ends the note
     /// whose note-on carried its id (and key), and nothing if that note never started or has
     /// already ended. Notes held at once need distinct ids.
-    pub id: u32,
+    pub id: u64,
 }
 
 pub trait Device: Send {

@@ -1149,11 +1149,11 @@ fn preview_sends_a_note_on_the_channel_only_when_asked() {
     session
         .save(Some(&dir.path().join("p.grooviq")), dir.path())
         .unwrap();
-    session.preview(kick, true).unwrap();
+    let press1 = session.preview_on(kick).unwrap();
     assert!(render(&mut processor, 20) > 0.01);
-    session.preview(kick, false).unwrap();
+    session.preview_off(kick, press1).unwrap();
     assert!(matches!(
-        session.preview(42, true),
+        session.preview_on(42),
         Err(SessionError::UnknownChannel(42))
     ));
     assert!(!session.view().dirty, "a preview is not an edit");
@@ -2038,12 +2038,9 @@ fn start_take(controller: &Mutex<Controller>, processor: &mut AudioProcessor) ->
     events
 }
 
-#[test]
-fn live_releases_of_one_key_end_its_presses_oldest_first() {
-    // A looping sampler (each note sounds until its release) and two presses of one key that
-    // overlap, told apart by velocity: the first release ends the first press, the second the
-    // second.
-    let (mut session, _controller, mut processor) = rig();
+/// A looping kick channel (each note sounds until its release) and its processor, warmed up.
+fn looping_kick() -> (Session, Arc<Mutex<Controller>>, AudioProcessor, u32) {
+    let (mut session, controller, mut processor) = rig();
     let now = Instant::now();
     let kick = add(&mut session, "kick", now);
     session
@@ -2057,25 +2054,71 @@ fn live_releases_of_one_key_end_its_presses_oldest_first() {
         )
         .unwrap();
     render(&mut processor, 4);
-    session.live_note(kick, 60, 1.0, true).unwrap();
-    render(&mut processor, 40);
-    let loud = render(&mut processor, 10);
-    session.live_note(kick, 60, 0.2, true).unwrap();
-    render(&mut processor, 40);
-    let both = render(&mut processor, 10);
-    assert!((both - 1.2 * loud).abs() < 1e-3 * loud, "{both} vs {loud}");
-    session.live_note(kick, 60, 0.0, false).unwrap();
-    render(&mut processor, 200);
-    let left = render(&mut processor, 10);
+    (session, controller, processor, kick)
+}
+
+/// The steady level once the last change has settled.
+fn settled(processor: &mut AudioProcessor) -> f32 {
+    render(processor, 200);
+    render(processor, 10)
+}
+
+#[test]
+fn a_preview_and_a_typing_note_on_one_key_each_end_their_own() {
+    // The typing keyboard holds key 60 (velocity 1) and the row's preview plays key 60 too
+    // (velocity 0.8): whichever lets go first, the other sounds on until its own release.
+    for preview_first in [true, false] {
+        let (session, _controller, mut processor, kick) = looping_kick();
+        let typing = session.live_note_on(kick, 60, 1.0).unwrap();
+        let typing_level = settled(&mut processor);
+        let preview = session.preview_on(kick).unwrap();
+        let both = settled(&mut processor);
+        assert!(
+            (both - 1.8 * typing_level).abs() < 1e-3,
+            "{both} vs {typing_level}"
+        );
+        let alone = if preview_first {
+            session.preview_off(kick, preview).unwrap();
+            typing_level
+        } else {
+            session.live_note_off(kick, 60, typing).unwrap();
+            0.8 * typing_level
+        };
+        let left = settled(&mut processor);
+        assert!(
+            (left - alone).abs() < 1e-3,
+            "preview first {preview_first}: {left}, expected {alone}"
+        );
+        if preview_first {
+            session.live_note_off(kick, 60, typing).unwrap();
+        } else {
+            session.preview_off(kick, preview).unwrap();
+        }
+        assert!(settled(&mut processor) < 1e-4, "both ended");
+    }
+}
+
+#[test]
+fn a_refused_preview_leaves_the_typing_note_to_its_own_release() {
+    let (session, controller, mut processor, kick) = looping_kick();
+    let typing = session.live_note_on(kick, 60, 1.0).unwrap();
+    let typing_level = settled(&mut processor);
+    {
+        let mut c = controller.lock().unwrap();
+        while c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+    }
     assert!(
-        (left - 0.2 * loud).abs() < 1e-3 * loud,
-        "the quiet second press sounds on: {left} vs {loud}"
+        session.preview_on(kick).is_err(),
+        "the full queue refuses it"
     );
-    session.live_note(kick, 60, 0.0, false).unwrap();
-    render(&mut processor, 200);
-    assert!(render(&mut processor, 10) < 1e-4, "both ended");
-    // A release with no press left ends nothing and is not an error.
-    session.live_note(kick, 60, 0.0, false).unwrap();
+    // No press was made, so the preview has nothing to release; the typing note sounds on.
+    let left = settled(&mut processor);
+    assert!(
+        (left - typing_level).abs() < 1e-3,
+        "{left} vs {typing_level}"
+    );
+    session.live_note_off(kick, 60, typing).unwrap();
+    assert!(settled(&mut processor) < 1e-4);
 }
 
 #[test]
@@ -2085,12 +2128,12 @@ fn recording_stop_sends_end_and_adds_the_notes() {
     session.set_recording(true).unwrap();
     assert!(session.view().recording);
     let mut events = start_take(&controller, &mut processor);
-    session.live_note(synth, 64, 0.9, true).unwrap();
+    let press3 = session.live_note_on(synth, 64, 0.9).unwrap();
     render(&mut processor, 40);
     // Stopped while the key is held: the take ends there.
     session.set_recording(false).unwrap();
     render(&mut processor, 2);
-    session.live_note(synth, 64, 0.0, false).unwrap();
+    session.live_note_off(synth, 64, press3).unwrap();
     render(&mut processor, 2);
     controller.lock().unwrap().take_recorded(&mut events);
     assert!(
@@ -2124,11 +2167,11 @@ fn editing_while_recording_keeps_both() {
     session.set_recording(true).unwrap();
     let mut events = start_take(&controller, &mut processor);
     let start = session.view().notes_revision;
-    session.live_note(synth, 60, 0.8, true).unwrap();
+    let press4 = session.live_note_on(synth, 60, 0.8).unwrap();
     render(&mut processor, 10);
     // The person draws a note while the take runs.
     let drawn = add_notes(&mut session, vec![melodic(synth, 1_920, 72)]);
-    session.live_note(synth, 60, 0.0, false).unwrap();
+    session.live_note_off(synth, 60, press4).unwrap();
     render(&mut processor, 2);
     controller.lock().unwrap().take_recorded(&mut events);
     session
@@ -2148,9 +2191,9 @@ fn recorded_notes_of_a_removed_channel_are_dropped() {
     let synth = add_synth(&mut session, "Init");
     session.set_recording(true).unwrap();
     let mut events = start_take(&controller, &mut processor);
-    session.live_note(synth, 60, 0.8, true).unwrap();
+    let press5 = session.live_note_on(synth, 60, 0.8).unwrap();
     render(&mut processor, 4);
-    session.live_note(synth, 60, 0.0, false).unwrap();
+    session.live_note_off(synth, 60, press5).unwrap();
     render(&mut processor, 4);
     controller.lock().unwrap().take_recorded(&mut events);
     session
@@ -2169,9 +2212,9 @@ fn opening_a_project_mid_take_records_nothing_into_it() {
     let synth = add_synth(&mut session, "Init");
     session.set_recording(true).unwrap();
     let mut events = start_take(&controller, &mut processor);
-    session.live_note(synth, 60, 0.8, true).unwrap();
+    let press6 = session.live_note_on(synth, 60, 0.8).unwrap();
     render(&mut processor, 4);
-    session.live_note(synth, 60, 0.0, false).unwrap();
+    session.live_note_off(synth, 60, press6).unwrap();
     render(&mut processor, 1);
     // A whole note of the old take is still queued when the next project opens.
     controller.lock().unwrap().take_recorded(&mut events);
@@ -2368,9 +2411,9 @@ fn poll(
 
 /// A whole note played and released during a take, not yet collected.
 fn play_a_note(session: &Session, processor: &mut AudioProcessor, channel: u32) {
-    session.live_note(channel, 60, 0.8, true).unwrap();
+    let press7 = session.live_note_on(channel, 60, 0.8).unwrap();
     render(processor, 4);
-    session.live_note(channel, 60, 0.0, false).unwrap();
+    session.live_note_off(channel, 60, press7).unwrap();
     render(processor, 2);
 }
 
@@ -2420,8 +2463,8 @@ fn a_queued_play_then_open_records_nothing_into_the_new_project_but_the_next_tak
     render(&mut processor, 2);
     // Play and a whole note are still queued when the project opens.
     controller.lock().unwrap().send(Command::Play).unwrap();
-    session.live_note(synth, 60, 0.8, true).unwrap();
-    session.live_note(synth, 60, 0.0, false).unwrap();
+    let press8 = session.live_note_on(synth, 60, 0.8).unwrap();
+    session.live_note_off(synth, 60, press8).unwrap();
     let notes = open_fixture(&mut session);
     assert_eq!(
         poll(&mut session, &controller, &mut processor).revision,
@@ -2738,7 +2781,7 @@ fn retry_success_must_still_refuse_already_recorded_notes() {
 fn retry_success_must_refuse_held_notes_closed_by_disarm() {
     let (mut session, controller, mut processor, synth) = overflowed_with_an_owed_disarm();
     // A key goes down while Record shows off and is still held when the record-off lands.
-    session.live_note(synth, 70, 0.8, true).unwrap();
+    let press9 = session.live_note_on(synth, 70, 0.8).unwrap();
     render(&mut processor, 4);
     let first = poll(&mut session, &controller, &mut processor);
     // The record-off lands and ends the take: its End closes the held note.
@@ -2751,7 +2794,7 @@ fn retry_success_must_refuse_held_notes_closed_by_disarm() {
     assert_eq!(refused, 1, "{first:?} {second:?}");
     assert_eq!(second.revision, None, "{second:?}");
     assert_eq!(session.project().patterns[0].notes.len(), 99_999);
-    session.live_note(synth, 70, 0.0, false).unwrap();
+    session.live_note_off(synth, 70, press9).unwrap();
     assert_eq!(
         poll(&mut session, &controller, &mut processor),
         Recorded::default()

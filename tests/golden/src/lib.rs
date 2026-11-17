@@ -10,11 +10,13 @@ use grooviq_engine::{Command, EngineConfig, NoteId, render_offline};
 
 pub mod devices;
 pub mod drums;
+pub mod nested;
 pub mod notes;
 pub mod perf;
 pub mod synth_presets;
 
 pub use drums::{KIT, LOOPS, decode_samples, drums_4ch_project, kit_dir};
+pub use nested::nested_notes_project;
 pub use notes::notes_m2_project;
 pub use synth_presets::synth_preset_scene;
 
@@ -54,7 +56,7 @@ pub fn scenes() -> Vec<Scene> {
         key,
         velocity: 1.0,
         on,
-        id: NoteId(u32::from(key)),
+        id: NoteId(u64::from(key)),
     };
     // Key 39 starts while 36 is held: a legato slide. Then both release.
     events.extend([

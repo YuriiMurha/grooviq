@@ -39,7 +39,7 @@ mod counts {
                 velocity: 0.8,
                 on: true,
                 slide: false,
-                id: u32::from(first + i as u8),
+                id: u64::from(first + i as u8),
             })
             .collect()
     }

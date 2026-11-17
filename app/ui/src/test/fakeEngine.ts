@@ -15,6 +15,8 @@ export function createFakeEngine(initial: ProjectView) {
   const calls: Call[] = [];
   /** The pattern's notes (`pattern_notes`, `notes_edit`), empty unless a test sets them. */
   let notes: WireNote[] = [];
+  /** Presses handed out by `channel_note` / `channel_preview` note-ons. */
+  let presses = 0;
   /** Paths `channel_add` refuses, with the loader's sentence. */
   const refuse = new Map<string, string>();
 
@@ -124,8 +126,9 @@ export function createFakeEngine(initial: ProjectView) {
         return touch();
       }
       case "channel_preview":
-      case "channel_select":
       case "channel_note":
+        return args?.on ? ++presses : null;
+      case "channel_select":
         return null;
       case "pattern_notes":
         return encodeNotes(view.notesRevision, notes);

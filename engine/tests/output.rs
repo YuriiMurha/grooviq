@@ -63,7 +63,7 @@ fn note_on(key: u8) -> Command {
         key,
         velocity: 1.0,
         on: true,
-        id: NoteId(u32::from(key)),
+        id: NoteId(u64::from(key)),
     }
 }
 

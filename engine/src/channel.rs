@@ -378,7 +378,7 @@ mod tests {
             velocity: 0.5,
             on,
             slide: false,
-            id: u32::from(key),
+            id: u64::from(key),
         };
         for e in [
             ev(10, 1, true),

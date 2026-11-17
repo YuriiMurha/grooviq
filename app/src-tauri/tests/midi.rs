@@ -96,7 +96,7 @@ fn up(key: u8) -> MidiMessage {
 
 /// The id these tests give a key's one press on the sink.
 fn press_id(key: u8) -> NoteId {
-    NoteId(u32::from(key))
+    NoteId(u64::from(key))
 }
 
 /// Lets go of a key's press [`press_id`] on the channel as it is now.
@@ -1614,6 +1614,34 @@ mod voices {
             );
         }
         assert_eq!(failures, Vec::<String>::new());
+    }
+
+    /// Two releases of one key are owed (a loud older press, a quiet newer one) and the queue
+    /// has room for exactly one: the older debt is paid first, so the loud note ends and the
+    /// quiet one sounds on until the next retry.
+    #[test]
+    fn review_partial_debt_payment_is_oldest_first() {
+        let mut rig = rig(Kind::Sampler, 0.0);
+        let instance = rig.sink.press(1, 60, 1.0, NoteId(1)).expect("pressed");
+        rig.sink.press(1, 60, 0.2, NoteId(2)).expect("pressed");
+        let both = rig.listen(0.4);
+        rig.fill(usize::MAX);
+        rig.sink.release(1, 60, instance, &[NoteId(1), NoteId(2)]);
+        assert_eq!(rig.sink.owed(), 2);
+        rig.render(4);
+        let room = rig.capacity - 1;
+        assert_eq!(rig.fill(room), room);
+        rig.sink.retry();
+        assert_eq!(rig.sink.owed(), 1, "one release fit");
+        let left = rig.listen(1.0);
+        assert!(
+            (left - both / 6.0).abs() < 1e-3,
+            "the quiet newer note sounds on: {left} (both: {both})"
+        );
+        rig.render(8);
+        rig.sink.retry();
+        assert_eq!(rig.sink.owed(), 0);
+        assert!(rig.listen(1.0) < SILENT);
     }
 
     /// The re-press is refused too (the queue is still full): the old note must still end.
