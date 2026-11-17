@@ -675,7 +675,7 @@ fn a_finished_empty_wav_with_trailing_metadata_is_still_empty() {
 
 #[test]
 fn an_unfinished_payload_that_looks_like_chunks_is_still_sound() {
-    // Nothing is guessed from what follows an unfinished header: it is all sound.
+    // Unknown and malformed chunks after an unfinished header remain sound.
     // A second `data` chunk, and a `LIST` whose size (1000) runs past the end of the file.
     for (chunk, frames) in [
         (
@@ -824,4 +824,178 @@ fn a_final_metadata_chunk_whose_pad_byte_was_counted_but_not_written_is_empty() 
         decode_sample(&bytes, Some("wav"), 600.0),
         Err(SampleError::Empty)
     );
+}
+
+fn footer_chunk(tag: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut chunk = tag.to_vec();
+    chunk.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    chunk.extend_from_slice(body);
+    if body.len() % 2 == 1 {
+        chunk.push(0);
+    }
+    chunk
+}
+
+#[test]
+fn unfinished_known_metadata_preserves_exact_audio() {
+    let mut failures = Vec::new();
+    for size in [0, u32::MAX] {
+        for footer in [
+            list_info(b"title"),
+            footer_chunk(b"_PMX", b"xml"),
+            footer_chunk(b"bext", &[42; 602]),
+            footer_chunk(b"iXML", b"<xml/>"),
+        ] {
+            let mut bytes = wav_with_sizes(3, 0, size);
+            let expected = decode_sample(&bytes, Some("wav"), 600.0).unwrap();
+            bytes.extend_from_slice(&footer);
+            let actual = decode_sample(&bytes, Some("wav"), 600.0).unwrap();
+            if actual.l != expected.l || actual.r != expected.r {
+                failures.push((size, footer[..4].to_vec(), actual.len()));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "metadata decoded as audio: {failures:?}"
+    );
+}
+
+#[test]
+fn unfinished_metadata_excludes_the_pad_after_odd_audio() {
+    let mut failures = Vec::new();
+    for size in [0, u32::MAX] {
+        for bits in [8u16, 24] {
+            let align = bits / 8;
+            let mut bytes = wav_with_sizes(0, 0, size);
+            bytes[28..32].copy_from_slice(&(48_000 * u32::from(align)).to_le_bytes());
+            bytes[32..34].copy_from_slice(&align.to_le_bytes());
+            bytes[34..36].copy_from_slice(&bits.to_le_bytes());
+            let audio: Vec<u8> = if bits == 8 {
+                vec![128; 3]
+            } else {
+                (1..=9).collect()
+            };
+            bytes.extend_from_slice(&audio);
+            let expected = decode_sample(&bytes, Some("wav"), 600.0).unwrap();
+            assert_eq!(expected.len(), 3);
+            bytes.push(0); // RIFF's pad is outside the data chunk.
+            bytes.extend_from_slice(&list_info(b"title"));
+            let actual = decode_sample(&bytes, Some("wav"), 600.0).unwrap();
+            if actual.l != expected.l || actual.r != expected.r {
+                failures.push((bits, size, actual.len()));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "pad or footer decoded as audio: {failures:?}"
+    );
+}
+
+#[test]
+fn unfinished_metadata_boundary_cases() {
+    let known = footer_chunk(b"_PMX", b"odd");
+    let mut multi = list_info(b"title");
+    multi.extend_from_slice(&known);
+    multi.extend_from_slice(&footer_chunk(b"iXML", b"xml"));
+    for size in [0, u32::MAX] {
+        let mut bytes = wav_with_sizes(3, 0, size);
+        let expected = decode_sample(&bytes, Some("wav"), 600.0).unwrap();
+        bytes.extend_from_slice(&multi);
+        assert_eq!(
+            decode_sample(&bytes, Some("wav"), 600.0).unwrap().l,
+            expected.l
+        );
+        let mut bad_info = list_info(b"title");
+        bad_info[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        let cases = [
+            known[..7].to_vec(),               // short header
+            known[..known.len() - 1].to_vec(), // missing odd pad
+            [b"bext".as_slice(), &u32::MAX.to_le_bytes(), b"body"].concat(),
+            footer_chunk(b"JUNK", b"unknown"),
+            footer_chunk(b"data", b"second data"),
+            footer_chunk(b"LIST", b"adtl"),
+            bad_info,
+            [known.clone(), vec![1, 2]].concat(), // valid prefix, not EOF
+            [vec![1], known.clone()].concat(),    // unaligned mono frame
+        ];
+        for tail in cases {
+            let mut bytes = wav_with_sizes(3, 0, size);
+            bytes.extend_from_slice(&tail);
+            let mut finished = bytes.clone();
+            let riff = (finished.len() - 8) as u32;
+            let data = (finished.len() - 44) as u32;
+            finished[4..8].copy_from_slice(&riff.to_le_bytes());
+            finished[40..44].copy_from_slice(&data.to_le_bytes());
+            let expected = decode_sample(&finished, Some("wav"), 600.0).unwrap();
+            let actual = decode_sample(&bytes, Some("wav"), 600.0).unwrap();
+            assert_eq!(actual.l, expected.l, "preserve {tail:?}, size {size}");
+        }
+        let mut empty = wav_with_sizes(0, 0, size);
+        empty.extend_from_slice(&multi);
+        assert_eq!(
+            decode_sample(&empty, Some("wav"), 600.0),
+            Err(SampleError::Unfinished)
+        );
+    }
+}
+
+#[test]
+fn unfinished_metadata_uses_stereo_frames_and_finished_wavs_keep_their_data() {
+    let dir = TempDir::new();
+    let path = dir.path("stereo.wav");
+    write_wav(&path, 2, 48_000, 16, false, 3);
+    let original = std::fs::read(path).unwrap();
+    let expected = decode_sample(&original, Some("wav"), 600.0).unwrap();
+    for size in [0, u32::MAX] {
+        let mut bytes = original.clone();
+        bytes[4..8].copy_from_slice(&0u32.to_le_bytes());
+        bytes[40..44].copy_from_slice(&size.to_le_bytes());
+        bytes.extend_from_slice(&footer_chunk(b"_PMX", b"four"));
+        let actual = decode_sample(&bytes, Some("wav"), 600.0).unwrap();
+        assert_eq!(actual.l, expected.l);
+        assert_eq!(actual.r, expected.r);
+        let mut unaligned = original.clone();
+        unaligned.extend_from_slice(&[1, 2]);
+        unaligned.extend_from_slice(&footer_chunk(b"_PMX", b"xx"));
+        let length = (unaligned.len() - 44) as u32;
+        unaligned[40..44].copy_from_slice(&length.to_le_bytes());
+        let riff = (unaligned.len() - 8) as u32;
+        unaligned[4..8].copy_from_slice(&riff.to_le_bytes());
+        let all = decode_sample(&unaligned, Some("wav"), 600.0).unwrap();
+        unaligned[4..8].copy_from_slice(&0u32.to_le_bytes());
+        unaligned[40..44].copy_from_slice(&size.to_le_bytes());
+        assert_eq!(
+            decode_sample(&unaligned, Some("wav"), 600.0).unwrap().l,
+            all.l
+        );
+    }
+    let mut finished = original;
+    finished.extend_from_slice(&footer_chunk(b"_PMX", b"four"));
+    let riff = (finished.len() - 8) as u32;
+    finished[4..8].copy_from_slice(&riff.to_le_bytes());
+    assert_eq!(
+        decode_sample(&finished, Some("wav"), 600.0).unwrap().l,
+        expected.l
+    );
+}
+
+#[test]
+fn finished_audio_that_spells_metadata_is_preserved() {
+    let mut bytes = wav_with_sizes(3, 0, 0);
+    bytes.extend_from_slice(&footer_chunk(b"_PMX", b"four"));
+    let riff = (bytes.len() - 8) as u32;
+    let data = (bytes.len() - 44) as u32;
+    bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+    bytes[40..44].copy_from_slice(&data.to_le_bytes());
+    let actual = decode_sample(&bytes, Some("wav"), 600.0).unwrap();
+    let expected: Vec<f32> = bytes[44..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|v| i16::from_le_bytes([v[0], v[1]]) as f32 / 32768.0)
+        .collect();
+    assert_eq!(actual.l, expected);
+    assert_eq!(actual.r, expected);
 }
