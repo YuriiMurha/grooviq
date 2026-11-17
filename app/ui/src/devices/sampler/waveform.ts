@@ -7,9 +7,28 @@
  * window's size, so a resize redraws from what is already there. */
 export const WAVEFORM_POINTS = 2048;
 
-/** The narrowest region the start and end markers leave between them (a fraction of the
- * sample). The engine plays at least one frame of any region. */
-export const MIN_REGION = 0.001;
+/** The neighbouring f32 values of `x` (the engine stores parameters as f32): start stays
+ * below end by the smallest step the engine can hold, so any region it accepts stays reachable.
+ * The UI does not know the sample's length in frames; the engine plays at least one frame of a
+ * narrower region (`grooviq_dsp::sampler`). */
+const F32 = new Float32Array(1);
+const BITS = new Int32Array(F32.buffer);
+
+/** The f32 just below the one the engine stores for `x` (0 at the bottom of the range). */
+export function f32Below(x: number): number {
+  F32[0] = x;
+  if (F32[0] <= 0) return 0;
+  BITS[0] -= 1; // a positive float's next value down
+  return F32[0];
+}
+
+/** The f32 just above the one the engine stores for `x` (1 at the top of the range). */
+export function f32Above(x: number): number {
+  F32[0] = Math.max(0, x);
+  if (F32[0] >= 1) return 1;
+  BITS[0] += 1;
+  return F32[0];
+}
 
 export type Marker = "start" | "end" | "loop_start";
 
@@ -83,16 +102,26 @@ export function markerPosition(m: Marker, r: Region): number {
 
 /** The values a marker may take now, so that start stays before end. */
 export function markerRange(m: Marker, r: Region): [number, number] {
-  if (m === "start") return [0, Math.max(0, r.end - MIN_REGION)];
-  if (m === "end") return [Math.min(1, r.start + MIN_REGION), 1];
+  if (m === "start") return [0, f32Below(r.end)];
+  if (m === "end") return [f32Above(r.start), 1];
   return [0, 1];
+}
+
+/** A marker's value after a key moves it by `delta` (towards `delta`'s sign): kept in its range,
+ * and never moved the other way (a region stored out of order or tighter than the range stays
+ * where it is). */
+export function nudgeMarker(m: Marker, r: Region, value: number, delta: number): number {
+  const [min, max] = markerRange(m, r);
+  // Stored as the engine holds it: an f32 inside the range is still inside it.
+  const next = Math.fround(Math.min(max, Math.max(min, value + delta)));
+  return (delta > 0 && next < value) || (delta < 0 && next > value) ? value : next;
 }
 
 /** The marker's value with the pointer at `at` (0..1 of the sample): start and end stop short
  * of each other; the loop point is that place as a fraction of the played region. */
 export function dragMarker(m: Marker, at: number, r: Region): number {
   const [min, max] = markerRange(m, r);
-  if (m !== "loop_start") return clamp(at, min, max);
+  if (m !== "loop_start") return Math.fround(clamp(at, min, max));
   const [lo, hi] = played(r);
   if (hi - lo <= 0) return 0;
   const f = r.reverse ? (hi - at) / (hi - lo) : (at - lo) / (hi - lo);

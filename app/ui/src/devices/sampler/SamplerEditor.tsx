@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { channelWaveform } from "../../api/notes";
+import { useSampleRevision } from "../../rack/sampleRevision";
 import type { ChannelView } from "../../api/project";
 import { EnvelopeGraph } from "../controls/EnvelopeGraph";
 import type { ParamControl } from "../controls/gesture";
@@ -32,10 +33,12 @@ const CHOKE_OPTIONS = ["Off", ...Array.from({ length: CHOKE_GROUPS }, (_, i) => 
 const MARKERS: Marker[] = ["start", "end", "loop_start"];
 
 /** The channel's waveform peaks: fetched once per sample (not again on a resize or an edit),
- * `null` while on its way, `"none"` when there is no sample to draw. */
+ * `null` while on its way, `"none"` when there is no sample to draw. A relink is another sample
+ * even under the same file name. */
 function usePeaks(channel: number, sample: string | null, missing: boolean): Float32Array | null | "none" {
+  const revision = useSampleRevision(channel);
   const has = sample !== null && !missing;
-  const key = `${channel}\n${sample ?? ""}\n${missing}`;
+  const key = `${channel}\n${sample ?? ""}\n${missing}\n${revision}`;
   const [got, setGot] = useState<{ key: string; peaks: Float32Array | "none" } | null>(null);
   useEffect(() => {
     if (!has) return;

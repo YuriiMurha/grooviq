@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, ty
 import { drawnScale, useBoxSize, useLatest } from "../controls/gesture";
 import { useDeviceScale } from "../deviceScale";
 import type { Gesture } from "../paramGestures";
-import { dragMarker, markerAt, markerPosition, markerRange, peaksToPoints, type Marker, type Region } from "./waveform";
+import { dragMarker, markerAt, markerPosition, markerRange, nudgeMarker, peaksToPoints, type Marker, type Region } from "./waveform";
 
 /** One arrow key press moves a region marker this much of the sample (Shift: a fifth of it). */
 const KEY_STEP = 0.001;
@@ -170,16 +170,12 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
   const onCancel = () => stop()?.gesture.cancel();
 
   const onKeyDown = (id: Marker) => (e: KeyboardEvent<HTMLDivElement>) => {
-    const [min, max] = markerRange(id, region);
     const value = regionValue(region, id);
     const step = (id === "loop_start" ? LOOP_KEY_STEP : KEY_STEP) * (e.shiftKey ? FINE : 1);
-    const dir = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1, PageUp: PAGE, PageDown: -PAGE }[e.key];
-    let next: number;
-    if (e.key === "Home") next = min;
-    else if (e.key === "End") next = max;
-    else if (dir !== undefined) next = Math.min(max, Math.max(min, value + dir * step));
-    else return;
+    const dir = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1, PageUp: PAGE, PageDown: -PAGE, Home: -Infinity, End: Infinity }[e.key];
+    if (dir === undefined) return;
     e.preventDefault();
+    const next = nudgeMarker(id, region, value, dir * step);
     if (next !== value) set(id, next);
   };
 

@@ -78,6 +78,9 @@ async function dragTo(page: Page, handle: Locator, x: number) {
   for (let i = 1; i <= 8; i++) await page.mouse.move(from.x + ((x - from.x) * i) / 8, from.y);
 }
 
+/** Lets two frames go by (whatever a key or a render would send has gone out). */
+const frames = (page: Page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+
 async function shot(page: Page, info: TestInfo, name: string, dialog = editor(page)) {
   await info.attach(`${name}-aria`, { body: await dialog.ariaSnapshot(), contentType: "text/yaml" });
   await page.screenshot({ path: info.outputPath(`${name}.png`) });
@@ -295,5 +298,179 @@ test.describe("the sampler editor", () => {
     await expect(waveform(app, "Hat")).toBeVisible();
     await expect(relink).toHaveCount(0);
     await expect.poll(async () => (await waveformCalls(mock, HAT)).length).toBe(1);
+  });
+
+  test("enums_switch_and_send_their_values", async ({ app, mock }) => {
+    await open(app);
+    const filter = control(app, "filter_type");
+    await filter.getByRole("radio", { name: "HP", exact: true }).click();
+    await expect(filter.getByRole("radio", { checked: true })).toHaveAccessibleName("HP");
+    await app.keyboard.press("ArrowLeft");
+    await expect(filter.getByRole("radio", { checked: true })).toHaveAccessibleName("LP");
+    await control(app, "voice_mode").getByRole("radio", { name: "Legato", exact: true }).click();
+    await expect.poll(() => paramEdits(mock)).toEqual([
+      ["filter_type", 2],
+      ["filter_type", 1],
+      ["voice_mode", 2],
+    ]);
+    expect((await stored(mock)).sampler).toMatchObject({ filter_type: 1, voice_mode: 2 });
+  });
+
+  /** The centre of a point (a circle) of a graph, in page px. */
+  const point = (graph: Locator, i: number) =>
+    graph.evaluate((svg, i) => {
+      const c = svg.querySelectorAll("circle")[i].getBoundingClientRect();
+      return { x: c.x + c.width / 2, y: c.y + c.height / 2 };
+    }, i);
+
+  test("envelope_points_preview_live_and_commit_each_changed_parameter_once", async ({ app, mock }) => {
+    await open(app);
+    // The amp envelope's decay point (decay time and sustain level): right and down.
+    const amp = editor(app).getByRole("img", { name: "Amp envelope" });
+    let pt = await point(amp, 1);
+    await app.mouse.move(pt.x, pt.y);
+    await app.mouse.down();
+    await app.mouse.move(pt.x + 15, pt.y + 20, { steps: 4 });
+    await app.mouse.move(pt.x + 30, pt.y + 40, { steps: 4 });
+    await expect.poll(() => liveValue(mock, "sustain")).toBeLessThan(1);
+    await expect.poll(() => liveValue(mock, "decay")).toBeGreaterThan(500);
+    expect(await paramEdits(mock)).toEqual([]);
+    await app.mouse.up();
+    await expect.poll(async () => (await paramEdits(mock)).length).toBe(2);
+    const edits1 = Object.fromEntries(await paramEdits(mock));
+    expect(Object.keys(edits1).sort()).toEqual(["decay", "sustain"]);
+    expect(edits1.decay).toBeGreaterThan(500);
+    expect(edits1.sustain).toBeLessThan(1);
+    expect((await stored(mock)).sampler).toMatchObject({ decay: edits1.decay, sustain: edits1.sustain, attack: 0, release: 40 });
+
+    // The filter envelope's release point, to the right: only its release changes.
+    const flt = editor(app).getByRole("img", { name: "Filter envelope" });
+    pt = await point(flt, 2);
+    await app.mouse.move(pt.x, pt.y);
+    await app.mouse.down();
+    await app.mouse.move(pt.x + 30, pt.y, { steps: 6 });
+    await expect.poll(() => liveValue(mock, "flt_release")).toBeGreaterThan(40);
+    await app.mouse.up();
+    await expect.poll(async () => (await paramEdits(mock)).length).toBe(3);
+    const [param, value] = (await paramEdits(mock))[2];
+    expect(param).toBe("flt_release");
+    expect(value).toBeGreaterThan(40);
+
+    // A drag the pointer cancels puts the engine back and sends nothing.
+    pt = await point(amp, 0);
+    await app.mouse.move(pt.x, pt.y);
+    await app.mouse.down();
+    await app.mouse.move(pt.x + 30, pt.y, { steps: 6 });
+    await expect.poll(() => liveValue(mock, "attack")).toBeGreaterThan(0);
+    await amp.locator("..").dispatchEvent("pointercancel", { pointerId: 1, bubbles: true });
+    await expect.poll(() => liveValue(mock, "attack")).toBe(0);
+    await app.mouse.up();
+    expect(await paramEdits(mock)).toHaveLength(3);
+    expect((await stored(mock)).sampler.attack).toBe(0);
+  });
+
+  test("the_filter_graph_drags_cutoff_and_resonance", async ({ app, mock }) => {
+    await open(app);
+    const graph = editor(app).getByRole("img", { name: "Filter response" });
+    const at = await centre(graph);
+    await app.mouse.move(at.x, at.y);
+    await app.mouse.down();
+    await app.mouse.move(at.x + 40, at.y - 30, { steps: 6 });
+    await expect.poll(() => liveValue(mock, "cutoff")).toBeGreaterThan(2000);
+    await expect.poll(() => liveValue(mock, "res")).toBeGreaterThan(0);
+    expect(await paramEdits(mock)).toEqual([]);
+    await app.mouse.up();
+    await expect.poll(async () => (await paramEdits(mock)).length).toBe(2);
+    const sent = Object.fromEntries(await paramEdits(mock));
+    expect(Object.keys(sent).sort()).toEqual(["cutoff", "res"]);
+    expect(sent.cutoff).toBeGreaterThan(2000);
+    expect(sent.res).toBeGreaterThan(0);
+    await expect(control(app, "cutoff")).toHaveAttribute("aria-valuenow", String(Number(sent.cutoff!.toFixed(4))));
+
+    // Cancelled mid-drag: both back, no edit.
+    await app.mouse.move(at.x, at.y);
+    await app.mouse.down();
+    await app.mouse.move(at.x - 40, at.y + 20, { steps: 6 });
+    await expect.poll(() => liveValue(mock, "cutoff")).toBeLessThan(sent.cutoff!);
+    await graph.locator("..").dispatchEvent("pointercancel", { pointerId: 1, bubbles: true });
+    await expect.poll(() => liveValue(mock, "cutoff")).toBeCloseTo(sent.cutoff!, 3);
+    await app.mouse.up();
+    expect(await paramEdits(mock)).toHaveLength(2);
+  });
+});
+
+test.describe("a narrow region", () => {
+  // A few frames of a long sample: valid for the engine, which only widens a region shorter
+  // than one frame.
+  const p = project(["Kick"]);
+  p.channels[0].sampler = { start: Math.fround(0.1), end: Math.fround(0.1002), loop: 1, loop_start: 0.5 };
+  test.use({ seed: { project: p, files: soundsFor(["Kick"]) } });
+
+  test("a_narrow_region_is_kept_and_nudged_inwards", async ({ app, mock }) => {
+    await open(app);
+    const start = control(app, "start");
+    const end = control(app, "end");
+    // Opening it and pressing the markers without moving them changes nothing.
+    await start.click();
+    await end.click();
+    await expect(start).toHaveAttribute("aria-valuenow", "0.1");
+    expect(await paramEdits(mock)).toEqual([]);
+
+    // The keys move each marker the way they point, never past the other one. A step (0.1% of
+    // the sample) is wider than this region: the start stops one f32 step below the end.
+    await start.focus();
+    await app.keyboard.press("ArrowRight");
+    await expect.poll(async () => (await paramEdits(mock)).length).toBe(1);
+    let s = (await stored(mock)).sampler;
+    expect(s.start).toBeGreaterThan(Math.fround(0.1));
+    expect(s.start).toBeLessThan(s.end);
+    expect(s.start).toBeGreaterThan(s.end - 1e-7);
+    expect(s.end).toBe(Math.fround(0.1002));
+    // Pushed against each other, an inward nudge has nowhere to go and sends nothing.
+    await app.keyboard.press("ArrowRight");
+    await end.focus();
+    await app.keyboard.press("ArrowLeft");
+    await frames(app);
+    expect(await paramEdits(mock)).toHaveLength(1);
+    // Outwards they move freely; then the end comes back towards the start, staying after it.
+    await start.focus();
+    await app.keyboard.press("Home");
+    await expect.poll(async () => (await stored(mock)).sampler.start).toBe(0);
+    await end.focus();
+    await app.keyboard.press("ArrowLeft");
+    await expect.poll(async () => (await paramEdits(mock)).length).toBe(3);
+    s = (await stored(mock)).sampler;
+    expect(s.end).toBeLessThan(Math.fround(0.1002));
+    expect(s.end).toBeGreaterThan(Math.fround(0.099));
+  });
+});
+
+test.describe("overlapping relinks", () => {
+  const p = project(["Hat"]);
+  p.channels[0].embedded = false;
+  test.use({ seed: { project: p, files: { "/a/Hat.wav": { kind: "sample" }, "/b/Hat.wav": { kind: "sample" } } } });
+
+  test("each_relinked_sample_is_drawn_from_its_own_peaks", async ({ app, mock }) => {
+    await open(app, "Hat");
+    const hat = editor(app, "Hat");
+    const relink = hat.getByRole("button", { name: "Relink Hat" });
+    // Pick /a/Hat.wav and hold its load; while Relink is still there, pick /b/Hat.wav and hold
+    // the pick. A loads and is drawn, then B's pick comes back: same file name, another sample.
+    await mock.eval("(m) => { m.queueDialog('/a/Hat.wav'); m.holdCommand('channel_set_sample'); }");
+    await relink.click();
+    await expect.poll(async () => (await mock.calls("channel_set_sample")).length).toBe(1);
+    await mock.eval("(m) => { m.queueDialog('/b/Hat.wav'); m.holdCommand('plugin:dialog|open'); }");
+    await relink.click();
+    await expect.poll(async () => (await mock.calls("plugin:dialog|open")).length).toBe(2);
+    await mock.eval("(m) => m.releaseCommand('channel_set_sample')");
+    await expect(waveform(app, "Hat")).toBeVisible();
+    await expect.poll(async () => (await mock.calls("channel_waveform")).length).toBe(1);
+    await mock.eval("(m) => m.releaseCommand('plugin:dialog|open')");
+    await expect.poll(() => mock.eval<string>("(m) => m.state.project.channels[0].sample")).toBe("/b/Hat.wav");
+    await expect.poll(async () => (await mock.calls("channel_waveform")).length).toBe(2);
+    await expect(waveform(app, "Hat")).toBeVisible();
+    // Each relink fetched once: nothing more after it settles.
+    await frames(app);
+    expect(await mock.calls("channel_waveform")).toHaveLength(2);
   });
 });

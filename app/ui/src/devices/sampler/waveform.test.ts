@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MIN_REGION, decodePeaks, dragMarker, markerAt, markerPosition, markerRange, peaksToPoints, type Marker, type Region } from "./waveform";
+import { decodePeaks, dragMarker, f32Above, f32Below, markerAt, markerPosition, markerRange, nudgeMarker, peaksToPoints, type Marker, type Region } from "./waveform";
 
 /** The polygon as [x, y] pairs. */
 const pairs = (pts: Float32Array) => Array.from({ length: pts.length / 2 }, (_, i) => [pts[2 * i], pts[2 * i + 1]]);
@@ -65,10 +65,13 @@ describe("waveform", () => {
     expect(markerAt(10, 0)).toBe(0);
 
     const r: Region = { start: 0.2, end: 0.6, loopStart: 0.5, reverse: false };
-    // Start and end never cross: each stops a minimum region short of the other.
-    expect(dragMarker("start", 0.9, r)).toBeCloseTo(0.6 - MIN_REGION, 9);
-    expect(dragMarker("end", 0.1, r)).toBeCloseTo(0.2 + MIN_REGION, 9);
-    expect(dragMarker("start", 0.3, r)).toBe(0.3);
+    // Start and end never cross: each stops one f32 step short of the other (the engine holds
+    // f32 values, and plays at least one frame of a region narrower than that).
+    expect(dragMarker("start", 0.9, r)).toBe(f32Below(0.6));
+    expect(dragMarker("start", 0.9, r)).toBeLessThan(Math.fround(0.6));
+    expect(dragMarker("end", 0.1, r)).toBe(f32Above(0.2));
+    expect(dragMarker("end", 0.1, r)).toBeGreaterThan(Math.fround(0.2));
+    expect(dragMarker("start", 0.3, r)).toBe(Math.fround(0.3));
     expect(dragMarker("end", 2, r)).toBe(1);
     expect(dragMarker("start", -1, r)).toBe(0);
 
@@ -96,8 +99,7 @@ describe("waveform", () => {
     for (let i = 0; i < 2000; i++) {
       const a = rnd();
       const b = rnd();
-      const region: Region = { start: Math.min(a, b), end: Math.max(a, b) + MIN_REGION, loopStart: rnd(), reverse: rnd() < 0.5 };
-      if (region.end > 1) continue;
+      const region: Region = { start: Math.fround(Math.min(a, b)), end: f32Above(Math.max(a, b)), loopStart: rnd(), reverse: rnd() < 0.5 };
       const marker = (["start", "end", "loop_start"] as Marker[])[i % 3];
       const at = rnd() * 1.4 - 0.2;
       const value = dragMarker(marker, at, region);
@@ -109,6 +111,71 @@ describe("waveform", () => {
       const loop = markerPosition("loop_start", next);
       expect(loop).toBeGreaterThanOrEqual(next.start - 1e-9);
       expect(loop).toBeLessThanOrEqual(next.end + 1e-9);
+    }
+  });
+
+  it("narrow_regions_stay_as_stored_and_nudges_never_reverse", () => {
+    // The f32 neighbours, as the engine stores parameters.
+    expect(f32Below(Math.fround(0.5))).toBe(Math.fround(0.5) - 2 ** -25);
+    expect(f32Above(Math.fround(0.5))).toBe(Math.fround(0.5) + 2 ** -24);
+    expect(f32Below(0)).toBe(0);
+    expect(f32Above(1)).toBe(1);
+    expect(f32Above(0)).toBeGreaterThan(0);
+    // A value between two f32s: the neighbours of the f32 the engine stores for it.
+    expect(f32Below(0.1)).toBeLessThan(Math.fround(0.1));
+    expect(f32Above(0.1)).toBeGreaterThan(Math.fround(0.1));
+
+    // A region a fifth of a thousandth wide (a few frames of a long sample) is valid: its range
+    // contains it, and a nudge moves inwards by up to the step, never outwards past the other.
+    const narrow: Region = { start: Math.fround(0.1), end: Math.fround(0.1002), loopStart: 0, reverse: false };
+    for (const m of ["start", "end"] as const) {
+      const [lo, hi] = markerRange(m, narrow);
+      expect(narrow[m]).toBeGreaterThanOrEqual(lo);
+      expect(narrow[m]).toBeLessThanOrEqual(hi);
+    }
+    const right = nudgeMarker("start", narrow, narrow.start, 0.001);
+    expect(right).toBeGreaterThan(narrow.start);
+    expect(right).toBeLessThan(narrow.end);
+    const left = nudgeMarker("end", narrow, narrow.end, -0.001);
+    expect(left).toBeLessThan(narrow.end);
+    expect(left).toBeGreaterThan(narrow.start);
+    // Outwards they move freely.
+    expect(nudgeMarker("start", narrow, narrow.start, -0.001)).toBe(Math.fround(0.1 - 0.001));
+    expect(nudgeMarker("end", narrow, narrow.end, 0.001)).toBe(Math.fround(0.1002 + 0.001));
+    // Already one step apart: an inward nudge has nowhere to go and stays.
+    const tight: Region = { start: Math.fround(0.3), end: f32Above(Math.fround(0.3)), loopStart: 0, reverse: false };
+    expect(nudgeMarker("start", tight, tight.start, 0.001)).toBe(tight.start);
+    expect(nudgeMarker("end", tight, tight.end, -0.001)).toBe(tight.end);
+    // Stored out of order (the engine plays either order): a nudge never jumps the other way.
+    const crossed: Region = { start: Math.fround(0.8), end: Math.fround(0.2), loopStart: 0, reverse: false };
+    expect(nudgeMarker("start", crossed, crossed.start, 0.001)).toBe(crossed.start);
+    expect(nudgeMarker("start", crossed, crossed.start, Infinity)).toBe(crossed.start);
+    expect(nudgeMarker("start", crossed, crossed.start, -0.001)).toBe(f32Below(crossed.end));
+    expect(nudgeMarker("end", crossed, crossed.end, -Infinity)).toBe(crossed.end);
+    // Home and End go to the ends of the range, in their own direction.
+    expect(nudgeMarker("start", narrow, narrow.start, -Infinity)).toBe(0);
+    expect(nudgeMarker("start", narrow, narrow.start, Infinity)).toBe(f32Below(narrow.end));
+    expect(nudgeMarker("end", narrow, narrow.end, Infinity)).toBe(1);
+
+    // Every nudge of every marker, from any valid region: towards its sign or not at all, an
+    // f32, inside its range, and start stays before end.
+    let seed = 11;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    for (let i = 0; i < 3000; i++) {
+      const a = Math.fround(rnd());
+      const w = [0, 2 ** -20, 1e-4, 1e-3, 0.05][i % 5];
+      const region: Region = { start: a, end: Math.min(1, f32Above(a + w)), loopStart: Math.fround(rnd()), reverse: rnd() < 0.5 };
+      if (!(region.start < region.end)) continue;
+      const marker = (["start", "end", "loop_start"] as Marker[])[i % 3];
+      const value = marker === "loop_start" ? region.loopStart : region[marker];
+      const delta = (rnd() - 0.5) * 0.01;
+      const next = nudgeMarker(marker, region, value, delta);
+      expect(Math.sign(next - value) === Math.sign(delta) || next === value).toBe(true);
+      expect(Math.fround(next)).toBe(next);
+      const [lo, hi] = markerRange(marker, region);
+      if (next !== value) expect(next >= lo && next <= hi).toBe(true);
+      const moved = { ...region, [marker === "loop_start" ? "loopStart" : marker]: next };
+      expect(moved.start).toBeLessThan(moved.end);
     }
   });
 });

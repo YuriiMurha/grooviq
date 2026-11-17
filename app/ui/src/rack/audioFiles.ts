@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { channelSetSample, errorText, type ChannelView, type ProjectView } from "../api/project";
 import { isProjectReplacing, projectGeneration } from "../project/replacement";
+import { sampleReplaced } from "./sampleRevision";
 
 /** The sample formats the loader reads. */
 export const AUDIO_EXTENSIONS = ["wav", "aif", "aiff", "flac", "mp3", "ogg"];
@@ -30,7 +31,13 @@ export function relinkChannel(
   const generation = projectGeneration();
   pickSound(`Find the sample for ${channel.name}`).then(
     (path) => {
-      if (path !== null && projectGeneration() === generation && !isProjectReplacing()) void run(() => channelSetSample(channel.id, path));
+      if (path === null || projectGeneration() !== generation || isProjectReplacing()) return;
+      void run(async () => {
+        const view = await channelSetSample(channel.id, path);
+        // Before the view lands, so what is drawn from the old file is fetched again once.
+        sampleReplaced(channel.id);
+        return view;
+      });
     },
     (e: unknown) => onError(errorText(e)),
   );
