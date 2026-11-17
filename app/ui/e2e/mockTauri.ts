@@ -542,6 +542,7 @@ export function installMockTauri(seed: MockSeed): void {
     return buf;
   };
   const RealWebSocket = window.WebSocket;
+  const sockets = new Set<LiveSocket>();
   class LiveSocket {
     binaryType = "arraybuffer";
     readyState = 0;
@@ -554,6 +555,7 @@ export function installMockTauri(seed: MockSeed): void {
       setTimeout(() => {
         if (this.readyState !== 0) return;
         this.readyState = 1;
+        sockets.add(this);
         this.onopen?.(new Event("open"));
         this.timer = setInterval(() => {
           if (s.livePaused) return;
@@ -564,6 +566,7 @@ export function installMockTauri(seed: MockSeed): void {
     send() {}
     close() {
       if (this.timer) clearInterval(this.timer);
+      sockets.delete(this);
       this.readyState = 3;
     }
     addEventListener() {}
@@ -1038,6 +1041,14 @@ export function installMockTauri(seed: MockSeed): void {
       emit("tauri://drag-over", { position: { x: 400, y: 300 } });
       if (drop) emit("tauri://drag-drop", { paths, position: { x: 400, y: 300 } });
       else emit("tauri://drag-leave", null);
+    },
+    /** Delivers one frame now that says `playing` whatever the transport does: a frame the
+     * engine rendered earlier and the stream delivers late. */
+    injectLive: (playing: boolean) => {
+      const data = encodeLive();
+      const v = new DataView(data);
+      v.setUint8(1, (v.getUint8(1) & ~1) | (playing ? 1 : 0));
+      for (const socket of sockets) socket.onmessage?.(new MessageEvent("message", { data }));
     },
     /** Holds back live frames (`true`) or lets them flow again. */
     pauseLive: (on: boolean) => {

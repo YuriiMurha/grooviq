@@ -762,3 +762,46 @@ test.describe("stuck notes when the project is replaced (fix round 2)", () => {
     ]);
   });
 });
+
+test.describe("stale and genuine stops after Play (fix round 3)", () => {
+  test.use({ seed: kitSeed });
+
+  test("a_stale_stopped_frame_after_play_is_ignored", async ({ app, mock }) => {
+    const play = app.getByRole("button", { name: "Play" });
+    await app.waitForTimeout(100);
+    // The stream holds a stopped frame rendered before Play took effect and delivers it late.
+    await mock.eval("(m) => m.pauseLive(true)");
+    await play.click();
+    await expect(play).toHaveAttribute("aria-pressed", "true");
+    await nameButton(app, "Kick").focus();
+    await app.keyboard.down("z");
+    await expect.poll(() => live(mock)).toEqual(["1:48"]);
+    await mock.eval("(m) => m.injectLive(false)");
+    await mock.eval("(m) => m.pauseLive(false)");
+    // The engine plays: the UI says so, and Z keeps sounding.
+    await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(true);
+    await app.waitForTimeout(400);
+    await expect(play).toHaveAttribute("aria-pressed", "true");
+    expect(await live(mock)).toEqual(["1:48"]);
+    await app.keyboard.up("z");
+    await expect.poll(() => live(mock)).toEqual([]);
+  });
+
+  test("a_genuine_stop_before_any_playing_frame_is_adopted", async ({ app, mock }) => {
+    const play = app.getByRole("button", { name: "Play" });
+    await nameButton(app, "Kick").focus();
+    await app.keyboard.down("z");
+    await expect.poll(() => live(mock)).toEqual(["1:48"]);
+    // Play is accepted, but the engine stops at once (the speaker guard): no frame ever says
+    // playing. The UI follows the stopped frames after its wait and lets go of Z.
+    await mock.eval("(m) => m.pauseLive(true)");
+    await play.click();
+    await mock.eval("(m) => { m.state.transport.playing = false; m.pauseLive(false); }");
+    await expect(play).toHaveAttribute("aria-pressed", "false");
+    await expect.poll(() => live(mock)).toEqual([]);
+    await app.keyboard.up("z");
+    // Space plays again (the UI knows it is stopped).
+    await app.keyboard.press("Space");
+    await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(true);
+  });
+});

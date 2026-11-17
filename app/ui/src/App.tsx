@@ -39,6 +39,7 @@ import { Toasts, type Toast } from "./toast/Toasts";
 import { KeyboardToggle } from "./transport/KeyboardToggle";
 import { MetronomeButton } from "./transport/MetronomeButton";
 import { RecordButton } from "./transport/RecordButton";
+import { PlayGuard } from "./transport/playGuard";
 import { TransportBar } from "./transport/TransportBar";
 
 /** How long a toast stays. */
@@ -61,8 +62,8 @@ export function App() {
   // of every held key then.
   const [releaseKeys, setReleaseKeys] = useState(0);
   const releaseHeld = useCallback(() => setReleaseKeys((n) => n + 1), []);
-  // The live frame counter when Play last took effect: an older "stopped" frame says nothing.
-  const playedAtFrames = useRef(-1n);
+  // Doubts "stopped" frames right after a Play (they may predate it).
+  const playGuard = useRef(new PlayGuard());
   const [latencyFrames, setLatencyFrames] = useState<number | null>(null);
   const latest = useRef<LiveFrame | null>(null);
   const nextToast = useRef(0);
@@ -110,7 +111,7 @@ export function App() {
   const play = useCallback(() => {
     transportPlay().then(
       () => {
-        playedAtFrames.current = latest.current?.frames ?? -1n;
+        playGuard.current.played();
         setPlayingNow(true);
       },
       (e: unknown) => toast(errorText(e), true),
@@ -249,13 +250,16 @@ export function App() {
           const before = latest.current;
           latest.current = frame;
           if (before?.tone !== frame.tone) setTone(frame.tone);
-          if (before?.playing !== frame.playing) {
-            playingRef.current = frame.playing;
-            setPlaying(frame.playing);
-            if (!frame.playing) releaseHeld();
-          } else if (!frame.playing && playingRef.current && frame.frames > playedAtFrames.current) {
-            // The engine stopped while the stream said nothing in between (a stall, a stop the UI
-            // did not ask for): the UI's own state is what disagrees, so it follows the frame.
+          const believed = playGuard.current.believe(frame.playing);
+          if (frame.playing) {
+            // A Play the UI did not send (another window): followed on the edge.
+            if (before?.playing !== true) {
+              playingRef.current = true;
+              setPlaying(true);
+            }
+          } else if (believed && (before?.playing === true || playingRef.current)) {
+            // The engine stopped: seen as an edge, or only against the UI's own state (a stall,
+            // a stop the UI did not ask for). The UI follows and lets go of held keys.
             playingRef.current = false;
             setPlaying(false);
             releaseHeld();
