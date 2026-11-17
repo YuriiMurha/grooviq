@@ -9,35 +9,6 @@ export interface ParamControl {
   set: (value: number) => void;
 }
 
-/** The gestures of one drag that moves several parameters (an envelope point, the filter curve):
- * each begins when the drag first moves it, and they all end together. */
-export class GestureSet {
-  private gestures = new Map<string, { gesture: Gesture; last: number }>();
-
-  constructor(private readonly begin: (id: string) => Gesture) {}
-
-  /** `false` once the editor ended the drag (Escape, focus lost, a preset): stop following it. */
-  input(id: string, value: number): boolean {
-    let g = this.gestures.get(id);
-    if (!g) {
-      g = { gesture: this.begin(id), last: value };
-      this.gestures.set(id, g);
-    }
-    g.last = value;
-    return g.gesture.input(value);
-  }
-
-  commit() {
-    for (const g of this.gestures.values()) g.gesture.commit(g.last);
-    this.gestures.clear();
-  }
-
-  cancel() {
-    for (const g of this.gestures.values()) g.gesture.cancel();
-    this.gestures.clear();
-  }
-}
-
 /** A wheel gesture ends this long after its last event. */
 const WHEEL_SETTLE_MS = 300;
 

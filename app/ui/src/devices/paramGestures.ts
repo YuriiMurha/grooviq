@@ -33,8 +33,28 @@ export interface Gesture {
   cancel(): void;
 }
 
+/** One pointer drag over several parameters (an envelope point, the filter curve). It lives and
+ * dies as a whole: once the owner ends it, or any member, no member can start or move again, so
+ * a drag that changes direction after a cancel cannot bring an untouched parameter to life. */
+export interface GestureGroup {
+  alive(): boolean;
+  /** Moves `id` (its gesture starts on its first move); `false` once the group has ended. */
+  input(id: string, value: number): boolean;
+  /** Ends it, storing every member it moved. */
+  commit(): void;
+  /** Ends it, putting every member back. */
+  cancel(): void;
+}
+
+interface GroupState {
+  dead: boolean;
+  members: Map<string, { gesture: Gesture; last: number }>;
+}
+
 interface Active {
   token: number;
+  /** The drag this gesture is part of, if any. */
+  group?: GroupState;
   /** What was shown when it started: where a cancel puts it back. */
   origin: number;
   /** The engine heard a live value of it. */
@@ -42,9 +62,11 @@ interface Active {
 }
 
 export const DEAD_GESTURE: Gesture = { alive: () => false, input: () => false, commit: () => {}, cancel: () => {} };
+export const DEAD_GROUP: GestureGroup = { alive: () => false, input: () => false, commit: () => {}, cancel: () => {} };
 
 export class ParamGestures {
   private active = new Map<string, Active>();
+  private groups = new Set<GroupState>();
   /** Values shown instead of the project's: moving, or committed and on their way. */
   private moving: Record<string, number> = {};
   /** The latest edit on its way per id: its number and value. */
@@ -55,15 +77,58 @@ export class ParamGestures {
   /** The project was replaced: nothing may reach the engine or the project any more. */
   private abandoned = false;
 
-  constructor(private readonly sink: GestureSink) {}
+  /** `suspended`: no new gesture or change may start (a project replacement is on its way). */
+  constructor(
+    private readonly sink: GestureSink,
+    private readonly suspended: () => boolean = () => false,
+  ) {}
 
   /** Starts a gesture. A gesture already running on `id` (a wheel turn, then a drag) hands over
    * to it and keeps its start. */
   begin(id: string): Gesture {
+    if (this.suspended()) return DEAD_GESTURE;
+    return this.beginIn(id, undefined);
+  }
+
+  /** Starts a drag over several parameters. */
+  group(): GestureGroup {
+    if (this.closed || this.suspended()) return DEAD_GROUP;
+    const st: GroupState = { dead: false, members: new Map() };
+    this.groups.add(st);
+    return {
+      alive: () => !st.dead,
+      input: (id, value) => {
+        if (st.dead) return false;
+        let m = st.members.get(id);
+        if (!m) {
+          m = { gesture: this.beginIn(id, st), last: value };
+          st.members.set(id, m);
+        }
+        m.last = value;
+        if (m.gesture.input(value)) return true;
+        this.killGroup(st);
+        return false;
+      },
+      commit: () => {
+        if (st.dead) return;
+        st.dead = true;
+        this.groups.delete(st);
+        for (const m of st.members.values()) m.gesture.commit(m.last);
+      },
+      cancel: () => this.killGroup(st),
+    };
+  }
+
+  private beginIn(id: string, group: GroupState | undefined): Gesture {
     if (this.closed) return DEAD_GESTURE;
-    const before = this.active.get(id);
+    let before = this.active.get(id);
+    // Another drag holds this parameter: that whole drag ends first (one pointer, one drag).
+    if (before?.group && before.group !== group) {
+      this.killGroup(before.group);
+      before = undefined;
+    }
     const token = this.nextToken++;
-    this.active.set(id, { token, origin: before?.origin ?? this.shownValue(id), heard: before?.heard ?? false });
+    this.active.set(id, { token, group, origin: before?.origin ?? this.shownValue(id), heard: before?.heard ?? false });
     const mine = () => !this.closed && this.active.get(id)?.token === token;
     return {
       alive: mine,
@@ -95,7 +160,7 @@ export class ParamGestures {
 
   /** A one-shot change (a click, a key): one edit, after ending any gesture on `id`. */
   set(id: string, value: number) {
-    if (this.closed) return;
+    if (this.closed || this.suspended()) return;
     if (this.active.has(id)) this.end(id, true);
     if (value === this.shownValue(id)) return;
     this.store(id, value, false);
@@ -104,6 +169,8 @@ export class ParamGestures {
   /** Cancels every running gesture (a preset is loading, the window lost focus). */
   cancelAll() {
     if (this.closed) return;
+    // Drags first, moved or not: one cancelled before its first move must stay dead.
+    for (const st of [...this.groups]) this.killGroup(st);
     for (const id of [...this.active.keys()]) this.end(id, true);
   }
 
@@ -115,6 +182,8 @@ export class ParamGestures {
 
   /** The project was replaced: drops everything and sends nothing, not even a restore. */
   abandon() {
+    for (const st of this.groups) st.dead = true;
+    this.groups.clear();
     for (const id of [...this.active.keys()]) this.sink.dropLive(id);
     this.active.clear();
     this.pending.clear();
@@ -134,6 +203,15 @@ export class ParamGestures {
     this.sink.dropLive(id);
     if (restore && a.heard) this.sink.restore(id, a.origin);
     this.showSettled(id);
+    // A member ended from outside its drag ends the whole drag.
+    if (a.group) this.killGroup(a.group);
+  }
+
+  private killGroup(st: GroupState) {
+    if (st.dead) return;
+    st.dead = true;
+    this.groups.delete(st);
+    for (const m of st.members.values()) m.gesture.cancel();
   }
 
   /** Stops showing a value of `id` unless an edit of it is still on its way. */

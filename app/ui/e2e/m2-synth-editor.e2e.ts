@@ -577,3 +577,173 @@ test.describe("stepped parameters", () => {
     await expect(oct).toHaveAttribute("aria-valuenow", String(value));
   });
 });
+
+/** Live values sent for `param` since the call log had `from` entries. */
+const livesSince = async (mock: Mock, param: string, from: number) =>
+  (await mock.calls()).slice(from).filter((c) => c.cmd === "channel_param_live" && c.args.param === param).map((c) => c.args.value as number);
+const blur = (page: Page) => page.evaluate(() => window.dispatchEvent(new Event("blur")));
+const pressReese = (page: Page) => editor(page).getByRole("button", { name: "Reese", exact: true }).evaluate((b: HTMLElement) => b.click());
+
+test.describe("graph drags after the editor ends them", () => {
+  test.use({ seed: { project: withSynth(), files: soundsFor(KIT) } });
+
+  test("a_filter_drag_cancelled_by_blur_does_not_start_its_other_parameter", async ({ app, mock }) => {
+    await open(app);
+    const at = await centre(editor(app).locator(".filter-display"));
+    await app.mouse.move(at.x, at.y);
+    await app.mouse.down();
+    await app.mouse.move(at.x + 40, at.y, { steps: 4 });
+    await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
+    await blur(app);
+    await expect.poll(() => liveValue(mock, "filter_cutoff")).toBe(650);
+    const from = (await mock.calls()).length;
+    // Now only up and down: resonance was never part of this drag before it ended.
+    await app.mouse.move(at.x + 40, at.y - 40, { steps: 4 });
+    await app.mouse.up();
+    await twoFrames(app);
+    expect(await livesSince(mock, "filter_res", from)).toEqual([]);
+    expect(await livesSince(mock, "filter_cutoff", from)).toEqual([]);
+    expect(await paramEdits(mock)).toEqual([]);
+    expect((await stored(mock)).synth).toMatchObject({ filter_cutoff: 650, filter_res: 0.05 });
+  });
+
+  test("a_filter_drag_cut_short_by_a_preset_leaves_the_preset", async ({ app, mock }) => {
+    await open(app);
+    const at = await centre(editor(app).locator(".filter-display"));
+    await app.mouse.move(at.x, at.y);
+    await app.mouse.down();
+    await app.mouse.move(at.x + 40, at.y, { steps: 4 });
+    await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
+    await pressReese(app);
+    await expect.poll(async () => (await stored(mock)).preset).toBe("Reese");
+    await app.mouse.move(at.x + 40, at.y - 40, { steps: 4 });
+    await app.mouse.up();
+    await app.waitForTimeout(200);
+    expect(await paramEdits(mock)).toEqual([]);
+    expect((await stored(mock)).synth).toEqual(presetValues("Reese"));
+    expectShown(await shown(app), presetValues("Reese"));
+  });
+
+  test("an_envelope_point_cancelled_by_blur_does_not_start_its_other_parameter", async ({ app, mock }) => {
+    await open(app);
+    const graph = editor(app).getByRole("img", { name: "Amp envelope" });
+    const pt = await graph.evaluate((svg) => {
+      const c = svg.querySelectorAll("circle")[1].getBoundingClientRect();
+      return { x: c.x + c.width / 2, y: c.y + c.height / 2 };
+    });
+    await app.mouse.move(pt.x, pt.y);
+    await app.mouse.down();
+    await app.mouse.move(pt.x, pt.y - 30, { steps: 4 });
+    await expect.poll(() => liveValue(mock, "amp_sustain")).toBeGreaterThan(0.12);
+    await blur(app);
+    await expect.poll(() => liveValue(mock, "amp_sustain")).toBeCloseTo(0.12, 6);
+    const from = (await mock.calls()).length;
+    // Now sideways only: the decay time.
+    await app.mouse.move(pt.x - 40, pt.y - 30, { steps: 4 });
+    await app.mouse.up();
+    await twoFrames(app);
+    expect(await livesSince(mock, "amp_decay", from)).toEqual([]);
+    expect(await livesSince(mock, "amp_sustain", from)).toEqual([]);
+    expect(await paramEdits(mock)).toEqual([]);
+    expect((await stored(mock)).synth).toMatchObject({ amp_decay: 4500, amp_sustain: 0.12 });
+  });
+
+  test("a_graph_drag_cancelled_before_it_moves_stays_dead", async ({ app, mock }) => {
+    await open(app);
+    const from = (await mock.calls()).length;
+    const at = await centre(editor(app).locator(".filter-display"));
+    await app.mouse.move(at.x, at.y);
+    await app.mouse.down();
+    await blur(app);
+    await app.mouse.move(at.x + 40, at.y - 40, { steps: 4 });
+    await app.mouse.up();
+    // The same for an envelope point.
+    const pt = await editor(app)
+      .getByRole("img", { name: "Amp envelope" })
+      .evaluate((svg) => {
+        const c = svg.querySelectorAll("circle")[1].getBoundingClientRect();
+        return { x: c.x + c.width / 2, y: c.y + c.height / 2 };
+      });
+    await app.mouse.move(pt.x, pt.y);
+    await app.mouse.down();
+    await blur(app);
+    await app.mouse.move(pt.x - 30, pt.y - 30, { steps: 4 });
+    await app.mouse.up();
+    await twoFrames(app);
+    const sent = (await mock.calls()).slice(from).filter((c) => c.cmd === "channel_param_live" || c.cmd === "project_edit");
+    expect(sent).toEqual([]);
+  });
+});
+
+test.describe("edits while a replacement is on its way", () => {
+  test.use({
+    seed: {
+      project: withSynth(),
+      files: { ...soundsFor(KIT), "/qa/projects/Other.grooviq": { kind: "project", project: replacement() } },
+      recovery: { savedAt: 1_794_860_000, original: "/qa/projects/Other.grooviq", project: replacement() },
+    },
+  });
+
+  /** Opens the editor past the recovery prompt (it stays up behind) and presses keys on cutoff. */
+  async function openUnderPrompt(page: Page) {
+    await opener(page).evaluate((b: HTMLElement) => b.click());
+    await expect(editor(page)).toBeVisible();
+  }
+  const sentAfter = async (mock: Mock, cmd: string) => {
+    const calls = await mock.calls();
+    const at = calls.findIndex((c) => c.cmd === cmd);
+    return calls.slice(at + 1).filter((c) => c.cmd === "channel_param_live" || (c.cmd === "project_edit" && (c.args.edit as { kind: string }).kind === "setInstrumentParam"));
+  };
+
+  for (const [name, cmd, start] of [
+    ["open", "project_open", "ControlOrMeta+o"],
+    ["new", "project_new", "ControlOrMeta+n"],
+    ["restore", "recovery_restore", ""],
+  ] as const) {
+    test(`a_key_pressed_while_${name}_is_pending_never_reaches_the_new_project`, async ({ app, mock }) => {
+      await openUnderPrompt(app);
+      await mock.eval(`(m) => m.holdCommand("${cmd}")`);
+      if (start) {
+        await app.getByRole("button", { name: "Discard" }).click();
+        await openUnderPrompt(app);
+        await mock.eval("(m) => m.queueDialog('/qa/projects/Other.grooviq')");
+        await app.keyboard.press(start);
+      } else {
+        await app.getByRole("dialog", { name: "Restore your project?" }).getByRole("button", { name: "Restore" }).click();
+      }
+      await expect.poll(async () => (await mock.calls(cmd)).length).toBe(1);
+      // A's editor is still up while B is on its way: its keys and drags change nothing.
+      const knob = control(app, "filter_cutoff");
+      await knob.focus();
+      await app.keyboard.press("ArrowUp");
+      await app.keyboard.press("ArrowUp");
+      await dragUp(app, knob, 30);
+      // It takes no input at all: the knob does not move.
+      await expect(knob).toHaveAttribute("aria-valuenow", "650");
+      await app.mouse.up();
+      await app.waitForTimeout(200);
+      await expect(knob).toHaveAttribute("aria-valuenow", "650");
+      await mock.eval(`(m) => m.releaseCommand("${cmd}")`);
+      await expect(editor(app)).toHaveCount(0);
+      await app.waitForTimeout(400);
+      expect(await sentAfter(mock, cmd)).toEqual([]);
+      const b = await mock.view();
+      if (name === "new") expect(b.channels).toEqual([]);
+      else expect((await stored(mock)).synth).toEqual(presetValues("Reese"));
+    });
+  }
+
+  test("a_failed_open_leaves_the_editor_usable", async ({ app, mock }) => {
+    await app.getByRole("button", { name: "Discard" }).click();
+    await open(app);
+    await mock.eval("(m) => m.queueDialog('/qa/projects/Missing.grooviq')");
+    await app.keyboard.press("ControlOrMeta+o");
+    await expect.poll(async () => (await mock.calls("project_open")).length).toBe(1);
+    await app.waitForTimeout(200);
+    await expect(editor(app)).toBeVisible();
+    await control(app, "filter_cutoff").focus();
+    await app.keyboard.press("ArrowUp");
+    await expect.poll(() => paramEdits(mock)).toHaveLength(1);
+    expect((await stored(mock)).synth.filter_cutoff).toBeGreaterThan(650);
+  });
+});

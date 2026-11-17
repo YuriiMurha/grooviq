@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ParamGestures, type GestureSink } from "./paramGestures";
 
 /** A sink that records what the owner sends; edits resolve when the test says so. */
-function harness(stored: Record<string, number>) {
+function harness(stored: Record<string, number>, suspended: () => boolean = () => false) {
   const log: string[] = [];
   const edits: { id: string; v: number; resolve: (ok: boolean) => void }[] = [];
   let shown: Record<string, number> = {};
@@ -27,7 +27,7 @@ function harness(stored: Record<string, number>) {
       shown = { ...m };
     },
   };
-  const g = new ParamGestures(sink);
+  const g = new ParamGestures(sink, suspended);
   const settle = async (ok = true) => {
     for (const e of edits.splice(0)) e.resolve(ok);
     await Promise.resolve();
@@ -159,5 +159,93 @@ describe("parameter gestures", () => {
     drag.input(800);
     drag.cancel();
     expect(log.slice(-1)).toEqual(["restore cutoff 650"]);
+  });
+});
+
+describe("gesture groups (one pointer drag over several parameters)", () => {
+  it("a_group_cancelled_before_it_moves_accepts_nothing", () => {
+    const { g, log } = harness({ cutoff: 650, res: 0.05 });
+    const drag = g.group();
+    g.cancelAll();
+    expect(drag.alive()).toBe(false);
+    expect(drag.input("cutoff", 900)).toBe(false);
+    expect(drag.input("res", 0.5)).toBe(false);
+    drag.commit();
+    expect(log).toEqual([]);
+  });
+
+  it("once_the_owner_ends_it_no_new_member_can_start", () => {
+    const { g, log } = harness({ cutoff: 650, res: 0.05 });
+    const drag = g.group();
+    expect(drag.input("cutoff", 900)).toBe(true);
+    g.cancelAll();
+    // The pointer now moves only up and down: resonance was never part of the drag.
+    expect(drag.input("res", 0.5)).toBe(false);
+    drag.commit();
+    expect(log).toEqual(["live cutoff 900", "drop cutoff", "restore cutoff 650"]);
+  });
+
+  it("a_member_ended_elsewhere_ends_and_restores_the_whole_group", () => {
+    const { g, log } = harness({ decay: 4500, sustain: 0.12 });
+    const drag = g.group();
+    drag.input("sustain", 0.4);
+    drag.input("decay", 3000);
+    // A one-shot change of one member (a key on its field) ends the drag for both.
+    g.set("sustain", 0.5);
+    expect(drag.alive()).toBe(false);
+    expect(drag.alive()).toBe(false);
+    expect(drag.input("decay", 2000)).toBe(false);
+    drag.commit();
+    expect(log).toEqual([
+      "live sustain 0.4",
+      "live decay 3000",
+      "drop sustain",
+      "restore sustain 0.12",
+      // At once, not when the pointer next moves.
+      "drop decay",
+      "restore decay 4500",
+      "edit sustain 0.5",
+    ]);
+  });
+
+  it("a_group_commits_each_member_once_and_cancels_together", async () => {
+    const { g, log, settle } = harness({ cutoff: 650, res: 0.05 });
+    const drag = g.group();
+    drag.input("cutoff", 900);
+    drag.input("res", 0.3);
+    drag.commit();
+    drag.commit();
+    drag.cancel();
+    expect(log.filter((l) => l.startsWith("edit"))).toEqual(["edit cutoff 900", "edit res 0.3"]);
+    await settle();
+    const other = g.group();
+    other.input("cutoff", 1000);
+    other.cancel();
+    expect(other.alive()).toBe(false);
+    expect(log.slice(-2)).toEqual(["drop cutoff", "restore cutoff 900"]);
+  });
+
+  it("a_closed_owner_hands_out_dead_groups", () => {
+    const { g, log } = harness({ cutoff: 650 });
+    g.dispose();
+    const drag = g.group();
+    expect(drag.input("cutoff", 900)).toBe(false);
+    expect(log).toEqual([]);
+  });
+});
+
+describe("a suspended owner (a project replacement on its way)", () => {
+  it("starts_nothing_and_changes_nothing", () => {
+    let paused = true;
+    const { g, log, shown } = harness({ cutoff: 650 }, () => paused);
+    expect(g.begin("cutoff").input(900)).toBe(false);
+    expect(g.group().input("cutoff", 900)).toBe(false);
+    g.set("cutoff", 900);
+    expect(log).toEqual([]);
+    expect(shown()).toEqual({});
+    // A failed replacement: the editor works again.
+    paused = false;
+    g.set("cutoff", 900);
+    expect(log).toEqual(["edit cutoff 900"]);
   });
 });

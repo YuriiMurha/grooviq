@@ -1,6 +1,6 @@
 import { useRef, useState, type PointerEvent } from "react";
-import type { Gesture } from "../paramGestures";
-import { GestureSet, drawnScale, useBoxSize } from "./gesture";
+import type { GestureGroup } from "../paramGestures";
+import { drawnScale, useBoxSize } from "./gesture";
 import { dragHandle, envCurve, envPoints, handleAt, type EnvBox, type EnvHandle, type EnvShape } from "./envelope";
 import { fromNorm, toNorm, type ParamRange } from "./paramDrag";
 
@@ -21,8 +21,8 @@ export interface EnvelopeGraphProps {
   decay: EnvParam;
   sustain: EnvParam;
   release: EnvParam;
-  /** A gesture of the editor's owner on one parameter. */
-  begin: (id: string) => Gesture;
+  /** A drag of the editor's owner over several parameters. */
+  group: () => GestureGroup;
 }
 
 const HANDLES: Record<EnvHandle, ("attack" | "decay" | "sustain" | "release")[]> = {
@@ -34,12 +34,12 @@ const HANDLES: Record<EnvHandle, ("attack" | "decay" | "sustain" | "release")[]>
 /** An ADSR curve with three points to drag: the peak (attack time), the decay end (decay time
  * and sustain level) and the release end (release time). The number fields beside it are the
  * keyboard way in. */
-export function EnvelopeGraph({ name, attack, decay, sustain, release, begin }: EnvelopeGraphProps) {
+export function EnvelopeGraph({ name, attack, decay, sustain, release, group }: EnvelopeGraphProps) {
   const host = useRef<HTMLDivElement>(null);
   const { w, h } = useBoxSize(host);
   const [hot, setHot] = useState<EnvHandle | null>(null);
   // `dx`, `dy`: where the pointer grabbed the point, from its centre, so a grab never moves it.
-  const drag = useRef<{ handle: EnvHandle; dx: number; dy: number; gestures: GestureSet } | null>(null);
+  const drag = useRef<{ handle: EnvHandle; dx: number; dy: number; gestures: GestureGroup } | null>(null);
   const params = { attack, decay, sustain, release };
   const shape: EnvShape = {
     attack: toNorm(attack.param, attack.value),
@@ -69,7 +69,7 @@ export function EnvelopeGraph({ name, attack, decay, sustain, release, begin }: 
     const p = envPoints(shape, box);
     const [hx, hy] = handle === "attack" ? [p.xA, p.yTop] : handle === "decay" ? [p.xD, p.yS] : [p.xR, p.yBottom];
     drag.current?.gestures.cancel();
-    drag.current = { handle, dx: x - hx, dy: y - hy, gestures: new GestureSet(begin) };
+    drag.current = { handle, dx: x - hx, dy: y - hy, gestures: group() };
     setHot(handle);
   };
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
@@ -87,7 +87,7 @@ export function EnvelopeGraph({ name, attack, decay, sustain, release, begin }: 
       const v = fromNorm(p.param, next[key]);
       if (v === p.value) continue;
       if (!d.gestures.input(p.id, v)) {
-        // The editor ended it (Escape, focus lost, a preset).
+        // The editor ended it (Escape, focus lost, a preset): every member is already back.
         drag.current = null;
         setHot(null);
         return;

@@ -133,7 +133,7 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
           decay={{ id: `${w}_decay`, param: synthParam(`${w}_decay`), value: v(`${w}_decay`) }}
           sustain={{ id: `${w}_sustain`, param: synthParam(`${w}_sustain`), value: v(`${w}_sustain`) }}
           release={{ id: `${w}_release`, param: synthParam(`${w}_release`), value: v(`${w}_release`) }}
-          begin={params.begin}
+          group={params.group}
         />
         <div className="env-fields">{slot(w, "foot")}</div>
       </>,
@@ -196,7 +196,7 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
                 res={{ param: synthParam("filter_res"), value: v("filter_res") }}
                 drive={v("filter_drive")}
                 envAmount={v("filter_env_amt")}
-                begin={params.begin}
+                group={params.group}
               />
               <div className="filter-knobs">{slot("filter", "foot", { size: 30 })}</div>
             </>,

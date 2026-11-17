@@ -19,7 +19,7 @@ import {
 import { formatClock } from "./ago";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ExportDialog } from "./ExportDialog";
-import { projectReplaced, projectReplacing } from "./replacement";
+import { projectReplaceFailed, projectReplaced, projectReplacing } from "./replacement";
 import type { MenuAction } from "./shortcuts";
 
 const PROJECT_FILTER = [{ name: "Grooviq project", extensions: ["grooviq"] }];
@@ -109,24 +109,35 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: 
     }
   }, [adopt, enqueue, fail, saveAs]);
 
+  /** Sends a command that replaces the project (New, Open, Restore), telling what is keyed by
+   * the old project's channels before it goes and once it succeeded or failed. */
+  const replaceWith = useCallback(
+    async <T,>(command: () => Promise<T>): Promise<T> => {
+      projectReplacing();
+      try {
+        const result = await enqueue(command);
+        projectReplaced();
+        return result;
+      } catch (e) {
+        projectReplaceFailed();
+        throw e;
+      }
+    },
+    [enqueue],
+  );
+
   const newProject = useCallback(async () => {
     await stopIfPlaying();
-    projectReplacing();
-    const fresh = await enqueue(projectNew);
-    projectReplaced();
-    adopt(fresh);
+    adopt(await replaceWith(projectNew));
     setAutosavedAt(null);
-  }, [adopt, enqueue, stopIfPlaying]);
+  }, [adopt, replaceWith, stopIfPlaying]);
 
   const openProject = useCallback(async () => {
     const path = await openDialog({ title: "Open project", multiple: false, directory: false, filters: PROJECT_FILTER });
     if (typeof path !== "string") return;
     await stopIfPlaying();
-    projectReplacing();
-    const opened = await enqueue(() => projectOpen(path));
-    projectReplaced();
-    adoptOpened(opened);
-  }, [adoptOpened, enqueue, stopIfPlaying]);
+    adoptOpened(await replaceWith(() => projectOpen(path)));
+  }, [adoptOpened, replaceWith, stopIfPlaying]);
 
   /** Runs `proceed` now if nothing is unsaved, else after the "Save changes?" prompt. */
   const guarded = useCallback((why: Why, proceed: () => Promise<void>) => {
@@ -205,11 +216,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: 
 
   const restore = () => {
     setRecovery(null);
-    projectReplacing();
-    enqueue(recoveryRestore).then((restored) => {
-      projectReplaced();
-      adoptOpened(restored);
-    }, fail);
+    replaceWith(recoveryRestore).then(adoptOpened, fail);
   };
   const discard = () => {
     setRecovery(null);

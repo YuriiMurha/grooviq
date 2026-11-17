@@ -1,6 +1,6 @@
 import { useRef, useState, type PointerEvent } from "react";
-import { GestureSet, drawnScale, useBoxSize, useVerticalDrag, type ParamControl } from "../controls/gesture";
-import type { Gesture } from "../paramGestures";
+import { drawnScale, useBoxSize, useVerticalDrag, type ParamControl } from "../controls/gesture";
+import type { GestureGroup } from "../paramGestures";
 import { quantize, type ParamRange } from "../controls/paramDrag";
 import { filterDb, lfoWave, randomSteps } from "./waveShapes";
 
@@ -22,17 +22,17 @@ interface FilterProps {
   res: { param: ParamRange; value: number };
   drive: number;
   envAmount: number;
-  /** A gesture of the editor's owner on one parameter. */
-  begin: (id: string) => Gesture;
+  /** A drag of the editor's owner over several parameters. */
+  group: () => GestureGroup;
 }
 
 /** The filter's response; its knee is the cutoff. Drag sideways for the cutoff, up or down for
  * the resonance. */
-export function FilterDisplay({ type, cutoff, res, drive, envAmount, begin }: FilterProps) {
+export function FilterDisplay({ type, cutoff, res, drive, envAmount, group }: FilterProps) {
   const host = useRef<HTMLDivElement>(null);
   const { w, h } = useBoxSize(host);
   const [dragging, setDragging] = useState(false);
-  const drag = useRef<{ x: number; y: number; cutoff: number; res: number; scale: number; gestures: GestureSet } | null>(null);
+  const drag = useRef<{ x: number; y: number; cutoff: number; res: number; scale: number; gestures: GestureGroup } | null>(null);
   const top = 10;
   const bottom = h - 16;
   const fx = (f: number) => (Math.log10(f / F_LO) / DECADES) * w;
@@ -48,7 +48,7 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, begin }: Fi
       /* no pointer capture here */
     }
     drag.current?.gestures.cancel();
-    drag.current = { x: e.clientX, y: e.clientY, cutoff: cutoff.value, res: res.value, scale: drawnScale(e.currentTarget), gestures: new GestureSet(begin) };
+    drag.current = { x: e.clientX, y: e.clientY, cutoff: cutoff.value, res: res.value, scale: drawnScale(e.currentTarget), gestures: group() };
     setDragging(true);
   };
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
