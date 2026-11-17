@@ -15,7 +15,12 @@ pub const SHAPES: usize = 4;
 const STRIDE: usize = TABLE_LEN + 1;
 
 pub struct Wavetables {
+    /// One table after another (`table`): only the scalar reference and the tests read these; the
+    /// shipped synth reads the interleaved copy.
+    #[cfg(any(test, feature = "scalar-reference"))]
     data: Vec<f32>,
+    /// The same samples interleaved for the SIMD oscillator, see [`Wavetables::quad`].
+    quads: Vec<[f32; 4]>,
 }
 
 /// Number of harmonics kept at mip level `level`.
@@ -79,10 +84,38 @@ impl Wavetables {
                 data[base + TABLE_LEN] = data[base];
             }
         }
-        Self { data }
+        // Entry `i` of (shape pair `k`, level pair `l`): the four tables a morph blend reads.
+        let mut quads = Vec::with_capacity((SHAPES - 1) * (LEVELS - 1) * STRIDE);
+        for k in 0..SHAPES - 1 {
+            for l in 0..LEVELS - 1 {
+                let at = |shape: usize, level: usize| (shape * LEVELS + level) * STRIDE;
+                let (a, b, c, d) = (at(k, l), at(k, l + 1), at(k + 1, l), at(k + 1, l + 1));
+                for i in 0..STRIDE {
+                    quads.push([data[a + i], data[b + i], data[c + i], data[d + i]]);
+                }
+            }
+        }
+        Self {
+            #[cfg(any(test, feature = "scalar-reference"))]
+            data,
+            quads,
+        }
+    }
+
+    /// Tables `k` and `k + 1` at mip levels `l` and `l + 1` interleaved: entry `i` is
+    /// `[table(k, l)[i], table(k, l + 1)[i], table(k + 1, l)[i], table(k + 1, l + 1)[i]]`, so a
+    /// morph blend at one phase reads two 16-byte entries (`i` and `i + 1`) instead of eight
+    /// samples from four tables. Needs `k < SHAPES - 1` and `l < LEVELS - 1`.
+    #[inline(always)]
+    pub fn quad(&self, k: usize, l: usize) -> &[[f32; 4]; TABLE_LEN + 1] {
+        let base = (k * (LEVELS - 1) + l) * STRIDE;
+        self.quads[base..base + STRIDE]
+            .try_into()
+            .expect("a quad table has TABLE_LEN + 1 entries")
     }
 
     /// Table for `shape` at mip `level`, `TABLE_LEN + 1` samples (last = first, for interpolation).
+    #[cfg(any(test, feature = "scalar-reference"))]
     #[inline(always)]
     pub fn table(&self, shape: usize, level: usize) -> &[f32] {
         let base = (shape * LEVELS + level) * STRIDE;

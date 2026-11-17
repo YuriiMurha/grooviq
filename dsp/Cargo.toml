@@ -10,9 +10,18 @@ description = "Built-in instruments and effects (ranges live in each device modu
 [lib]
 name = "grooviq_dsp"
 
+[features]
+# Test hook: `Synth::scalar_reference` renders its voices with the plain scalar code the SIMD
+# kernels replaced, so tests can compare the two bit for bit. Never enabled in a shipped build.
+scalar-reference = []
+
 [dependencies]
 # Pure-Rust exp/pow: the same bits on every platform (bit-identical golden renders).
 libm = "0.2"
+# Portable SIMD (Zlib OR Apache-2.0 OR MIT), IEEE-exact operations only in the render path: the
+# synth's inner loops stay bit-identical to their scalar form on every platform. Pinned exactly:
+# a new release could change what an operation compiles to.
+wide = "=1.7.1"
 
 [dev-dependencies]
 # Without the default `disable_release`, the allocation check also runs in release test builds.
@@ -23,3 +32,7 @@ divan = "0.1.21"
 [[bench]]
 name = "kernels"
 harness = false
+
+[[test]]
+name = "synth_simd"
+required-features = ["scalar-reference"]

@@ -97,3 +97,18 @@ fn synth_init_block(bencher: Bencher, voices: usize) {
 fn synth_dark_pad_block(bencher: Bencher, voices: usize) {
     synth_block(bencher, "Dark Pad", voices);
 }
+
+/// Trap Lead played poly with seven unison voices on oscillator 1: the unison inner loop at its
+/// heaviest lead setting (seven wavetable reads per voice and sample, plus oscillator 2).
+#[divan::bench(args = VOICES)]
+fn synth_trap_lead_uni7_block(bencher: Bencher, voices: usize) {
+    let mut synth = Synth::new(SR);
+    let mut patch = preset("Trap Lead").expect("a factory preset");
+    patch.push((5, 7.0)); // OSC1_UNI
+    patch.push((38, 0.0)); // VOICE_MODE: poly (the preset is a legato lead: one voice)
+    for (index, value) in patch {
+        synth.set_param(index, value);
+    }
+    let (mut l, mut r) = settle(&mut synth, &chord(48, voices));
+    bencher.bench_local(|| synth.process(black_box(&mut l), black_box(&mut r), None, &[]));
+}
