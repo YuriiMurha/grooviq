@@ -5,7 +5,6 @@
 use grooviq_engine::{AudioProcessor, Command, Controller, EngineConfig, RecordEvent, engine};
 use grooviq_project::notes::{NewNote, NotesAck, NotesEdit};
 use grooviq_project::session::{Edit, Recorded, Session, SessionError};
-use grooviq_project::undo::MAX_UNDO;
 use grooviq_project::{
     Loaded, MAX_NOTES_PER_PATTERN, Note, Project, compile_pattern, decode_samples,
 };
@@ -348,22 +347,23 @@ fn a_new_edit_clears_redo() {
 fn history_is_capped_at_200() {
     let (mut session, _, _) = rig();
     let ch = add_synth(&mut session);
-    for i in 0..(MAX_UNDO + 5) {
+    // The budget users are promised, written out: a test derived from the constant follows it.
+    for i in 0..205 {
         add_notes(&mut session, vec![melodic(ch, 0, (i % 128) as u8)]);
     }
     let mut undone = 0;
     while session.undo_notes(Instant::now()).unwrap().is_some() {
         undone += 1;
     }
-    assert_eq!(undone, MAX_UNDO);
+    assert_eq!(undone, 200);
     // The oldest five stay: they dropped out of the history.
     assert_eq!(notes(&session).len(), 5);
     let mut redone = 0;
     while session.redo_notes(Instant::now()).unwrap().is_some() {
         redone += 1;
     }
-    assert_eq!(redone, MAX_UNDO);
-    assert_eq!(notes(&session).len(), MAX_UNDO + 5);
+    assert_eq!(redone, 200);
+    assert_eq!(notes(&session).len(), 205);
 }
 
 #[test]

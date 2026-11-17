@@ -479,3 +479,29 @@ fn ten_thousand_notes_edit_in_under_50_ms() {
     assert_eq!(notes(&session)[0].tick, shift);
     assert!(took < Duration::from_millis(50), "{took:?}");
 }
+
+/// Notes that start together go out by channel, then by id: the fixture's ticks all differ,
+/// so it cannot check either tie on its own.
+#[test]
+fn simultaneous_notes_go_out_by_channel_then_id() {
+    let mut pattern = Pattern::new(0, "ties");
+    for (id, channel) in [(7, 4), (2, 1), (1, 1)] {
+        pattern.notes.push(Note {
+            id,
+            channel,
+            tick: 0,
+            length: 240,
+            key: 60,
+            velocity: 0.8,
+            slide: false,
+        });
+    }
+    let bytes = encode_notes(&pattern);
+    let ids: Vec<u32> = bytes[16..]
+        .as_chunks::<24>()
+        .0
+        .iter()
+        .map(|n| u32::from_le_bytes([n[0], n[1], n[2], n[3]]))
+        .collect();
+    assert_eq!(ids, vec![1, 2, 7]);
+}

@@ -15,6 +15,21 @@ const note = (id: number, tick: number, o: Partial<WireNote> = {}): WireNote => 
 });
 
 describe("velocity lane", () => {
+  it("a_selected_note_of_another_channel_gets_no_velocity", () => {
+    const store = new NoteStore();
+    store.load(1, [note(1, 0), note(4, 0, { channel: 2 })]);
+    store.setSelection([1, 4]);
+    const acc = new Map<number, number>();
+    laneSet(store, 1, 0, 0.25, 10, acc);
+    expect([...acc]).toEqual([[1, 0.25]]);
+
+    // Only notes of other channels selected: this channel paints by position, as with no selection.
+    store.setSelection([4]);
+    const painted = new Map<number, number>();
+    laneSet(store, 1, 0, 0.5, 10, painted);
+    expect([...painted]).toEqual([[1, 0.5]]);
+  });
+
   it("lane_drag_sets_selected_velocities_and_clamps", () => {
     const store = new NoteStore();
     store.load(1, [note(1, 0), note(2, 240), note(3, 480), note(4, 720, { channel: 2 })]);
