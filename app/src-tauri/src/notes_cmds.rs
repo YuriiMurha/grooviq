@@ -253,7 +253,7 @@ pub(crate) fn record_loop(
                 controller.take_recorded(&mut events);
                 controller.record_dropped()
             };
-            // Every poll, events or not: notes the engine could not take yet are retried.
+            // Every poll, even idle/unarmed: retry UI releases and waiting recorded notes.
             let recorded = session.collect_recorded(&events, Instant::now());
             (recorded, now_dropped)
         };
