@@ -55,6 +55,18 @@
   --hair: rgba(243, 238, 228, 0.06);
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   --z-overlay: 20;
+  --z-device: 5;            /* device windows: above the workspace, below menus and dialogs */
+
+  /* ---- devices: one ink per section, the same on every built-in device ---- */
+  --dev-osc1: var(--ink-5);
+  --dev-osc2: var(--ink-6);
+  --dev-filter: var(--ink-3);
+  --dev-amp: var(--ink-1);
+  --dev-lfo: var(--ink-4);
+  --dev-mix: var(--ink-2);
+  --dev-voice: var(--accent);
+  --dev-card: #171b3b;      /* a section on the device panel */
+  --dev-shadow: 0 28px 64px -24px rgba(4, 5, 16, 0.85), 0 0 0 1px var(--line);
 
   /* ---- geometry ---- */
   --toolbar-h: 56px;

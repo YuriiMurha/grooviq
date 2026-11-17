@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
 import { channelNote, TYPING_VELOCITY } from "../api/notes";
 import { channelPreview, errorText, type ChannelView } from "../api/project";
+import { openDevice } from "../devices/windows";
 import { isTypingTarget } from "../project/shortcuts";
 import { Knob } from "./Knob";
 import { formatPan, formatVolume } from "./mixFormat";
@@ -146,6 +147,19 @@ export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSele
         <span className="channel-title">{name}</span>
         <span className="channel-sample">{synth ? (channel.preset ?? "Synth") : (channel.sampleName ?? "No sample")}</span>
       </button>
+      {synth && (
+        <button
+          type="button"
+          className="instrument-button"
+          aria-label={`Edit the ${name} synth`}
+          data-hint={`Opens the synth editor for ${name}: its sound, presets and envelopes.`}
+          onClick={(e) => openDevice(id, e.currentTarget)}
+        >
+          <svg viewBox="0 0 16 12" aria-hidden="true">
+            <path d="M1 6C3 0.5 5 0.5 7 6S11 11.5 13 6L15 3" />
+          </svg>
+        </button>
+      )}
       {channel.missing && (
         <>
           <span

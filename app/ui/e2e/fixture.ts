@@ -9,14 +9,15 @@ const DEVICE_PARAMS = JSON.parse(
   readFileSync(new URL("../../../tests/fixtures/device-params.json", import.meta.url), "utf8"),
 ) as { sampler: MockSeed["samplerParams"]; synth: MockSeed["synthParams"] };
 const SAMPLER_PARAMS = DEVICE_PARAMS.sampler;
-const SYNTH_PARAMS = DEVICE_PARAMS.synth;
+/** The synth's parameter ids, ranges and defaults, in the engine's order. */
+export const SYNTH_PARAMS = DEVICE_PARAMS.synth!;
 /** Every synth factory preset's 40 values in SPEC order (dsp/tests/params_fixture.rs writes it). */
 export const SYNTH_PRESETS = JSON.parse(
   readFileSync(new URL("../../../tests/fixtures/synth-presets.json", import.meta.url), "utf8"),
 ) as Record<string, number[]>;
 /** A preset's values by parameter id. */
 export const presetValues = (name: string): Record<string, number> =>
-  Object.fromEntries(SYNTH_PARAMS!.map((p, i) => [p.id, SYNTH_PRESETS[name][i]]));
+  Object.fromEntries(SYNTH_PARAMS.map((p, i) => [p.id, SYNTH_PRESETS[name][i]]));
 
 // Grid geometry (src/rack/gridModel.ts): 28 px cells, 6 px gaps, 4 px edge.
 const CELL = 28;
