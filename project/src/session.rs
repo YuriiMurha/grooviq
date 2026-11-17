@@ -188,6 +188,9 @@ pub struct ChannelView {
     /// The channel has a sample, but it is not loaded (not in the file, or it did not decode):
     /// it is silent until relinked.
     pub missing: bool,
+    /// The loaded sample's length in frames (`None` without one): the sampler editor keeps a
+    /// region at least one frame long.
+    pub sample_frames: Option<u64>,
     pub volume: f32,
     pub pan: f32,
     pub mute: bool,
@@ -642,6 +645,7 @@ impl Session {
             color: c.color,
             sample_name,
             missing: c.sample.is_some() && !self.decoded.contains_key(&c.id),
+            sample_frames: self.decoded.get(&c.id).map(|s| s.len() as u64),
             volume: c.volume,
             pan: c.pan,
             mute: c.mute,

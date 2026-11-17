@@ -400,10 +400,14 @@ test.describe("the sampler editor", () => {
 });
 
 test.describe("a narrow region", () => {
-  // A few frames of a long sample: valid for the engine, which only widens a region shorter
-  // than one frame.
+  // 9.6 frames of a 48,000-frame sample: valid for the engine, which only widens a region
+  // shorter than one frame (and then plays something other than what the editor shows).
+  const FRAMES = 48_000;
   const p = project(["Kick"]);
   p.channels[0].sampler = { start: Math.fround(0.1), end: Math.fround(0.1002), loop: 1, loop_start: 0.5 };
+  p.channels[0].frames = FRAMES;
+  /** Frames between two region ends, counted as the engine counts them. */
+  const between = (start: number, end: number) => end * FRAMES - start * FRAMES;
   test.use({ seed: { project: p, files: soundsFor(["Kick"]) } });
 
   test("a_narrow_region_is_kept_and_nudged_inwards", async ({ app, mock }) => {
@@ -417,14 +421,14 @@ test.describe("a narrow region", () => {
     expect(await paramEdits(mock)).toEqual([]);
 
     // The keys move each marker the way they point, never past the other one. A step (0.1% of
-    // the sample) is wider than this region: the start stops one f32 step below the end.
+    // the sample, 48 frames) is wider than this region: the start stops a frame before the end.
     await start.focus();
     await app.keyboard.press("ArrowRight");
     await expect.poll(async () => (await paramEdits(mock)).length).toBe(1);
     let s = (await stored(mock)).sampler;
     expect(s.start).toBeGreaterThan(Math.fround(0.1));
-    expect(s.start).toBeLessThan(s.end);
-    expect(s.start).toBeGreaterThan(s.end - 1e-7);
+    expect(between(s.start, s.end)).toBeGreaterThanOrEqual(1);
+    expect(between(s.start, s.end)).toBeLessThan(1.01);
     expect(s.end).toBe(Math.fround(0.1002));
     // Pushed against each other, an inward nudge has nowhere to go and sends nothing.
     await app.keyboard.press("ArrowRight");
@@ -442,6 +446,41 @@ test.describe("a narrow region", () => {
     s = (await stored(mock)).sampler;
     expect(s.end).toBeLessThan(Math.fround(0.1002));
     expect(s.end).toBeGreaterThan(Math.fround(0.099));
+    // End pushed down to the start at 0: it stops one frame in.
+    await app.keyboard.press("Home");
+    await expect.poll(async () => (await paramEdits(mock)).length).toBe(4);
+    s = (await stored(mock)).sampler;
+    expect(s.start).toBe(0);
+    expect(between(s.start, s.end)).toBeGreaterThanOrEqual(1);
+    expect(between(s.start, s.end)).toBeLessThan(1.01);
+  });
+});
+
+test.describe("a region stored out of order", () => {
+  // An older or hand-edited project: loading clamps start and end one by one, and the engine
+  // plays either order.
+  const p = project(["Kick"]);
+  p.channels[0].sampler = { start: Math.fround(0.8), end: Math.fround(0.2) };
+  test.use({ seed: { project: p, files: soundsFor(["Kick"]) } });
+
+  test("keys_never_move_a_crossed_marker_the_other_way", async ({ app, mock }) => {
+    await open(app);
+    // Inwards (towards the other marker's side) there is nowhere to go: nothing is sent.
+    await control(app, "start").focus();
+    await app.keyboard.press("ArrowRight");
+    await app.keyboard.press("End");
+    await control(app, "end").focus();
+    await app.keyboard.press("ArrowLeft");
+    await app.keyboard.press("Home");
+    await frames(app);
+    expect(await paramEdits(mock)).toEqual([]);
+    expect((await stored(mock)).sampler).toMatchObject({ start: Math.fround(0.8), end: Math.fround(0.2) });
+    // The way it points, a key puts it back in order.
+    await control(app, "start").focus();
+    await app.keyboard.press("ArrowLeft");
+    await expect.poll(async () => (await paramEdits(mock)).length).toBe(1);
+    const s = (await stored(mock)).sampler;
+    expect(s.start).toBeLessThan(s.end);
   });
 });
 

@@ -41,6 +41,8 @@ export interface MockChannel {
   synth?: Record<string, number>;
   preset?: string | null;
   choke?: number;
+  /** The sample's length in frames (default: its file's seconds at 48 kHz). */
+  frames?: number;
 }
 
 /** A note. A step hit needs only channel, tick and velocity: the rest defaults to a plain step
@@ -224,6 +226,11 @@ export function installMockTauri(seed: MockSeed): void {
   const isRoll = (id: number) => s.project.pattern.notes.some((n) => n.channel === id && !plain(n));
   // session.rs: missing = a sample reference without decoded bytes. The path is never opened.
   const missing = (c: MockChannel) => c.sample !== null && c.embedded === false;
+  /** A sample file's length (a second unless the file says otherwise). */
+  const sampleSeconds = (path: string) => {
+    const f = files.get(path);
+    return f?.kind === "sample" ? (f.seconds ?? 1) : 1;
+  };
   const view = () => {
     const p = s.project;
     const steps = p.pattern.steps;
@@ -246,6 +253,8 @@ export function installMockTauri(seed: MockSeed): void {
         color: c.color,
         sampleName: c.sample ? fileName(c.sample) : null,
         missing: missing(c),
+        // session.rs: the decoded sample's length; none while it is missing.
+        sampleFrames: c.sample === null || missing(c) ? null : (c.frames ?? Math.round(48_000 * sampleSeconds(c.sample))),
         volume: c.volume,
         pan: c.pan,
         mute: c.mute,

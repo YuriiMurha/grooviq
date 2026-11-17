@@ -107,6 +107,8 @@ fn adding_a_channel_names_it_after_the_file_and_gives_it_the_next_ink() {
     assert_eq!(view.channels[0].name, "Kick 01");
     assert_eq!(view.channels[0].sample_name.as_deref(), Some("Kick 01.wav"));
     assert!(!view.channels[0].missing);
+    // The sampler editor keeps a region at least one frame long.
+    assert_eq!(view.channels[0].sample_frames, Some(4_800));
     assert_eq!(view.channels[0].color, 0);
     assert_eq!(view.channels[1].color, 1);
     assert_ne!(kick, snare);
@@ -982,6 +984,9 @@ fn opening_a_project_with_a_missing_sample_keeps_the_channel_and_warns() {
         .iter()
         .map(|c| (c.name.clone(), c.missing))
         .collect();
+    // A missing sample has no length to show.
+    let frames: Vec<Option<u64>> = view.channels.iter().map(|c| c.sample_frames).collect();
+    assert_eq!(frames, vec![Some(4_800), None, None]);
     assert_eq!(
         missing,
         vec![

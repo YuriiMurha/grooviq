@@ -155,7 +155,7 @@ export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onE
     <WaveformView
       name={channel.name}
       peaks={missing ? null : (peaks ?? EMPTY)}
-      region={{ start: v("start"), end: v("end"), loopStart: v("loop_start"), reverse: v("reverse") >= 0.5 }}
+      region={{ start: v("start"), end: v("end"), loopStart: v("loop_start"), reverse: v("reverse") >= 0.5, frames: channel.sampleFrames }}
       loop={v("loop") >= 0.5}
       markers={markers}
       begin={(id) => params.begin(id)}

@@ -7,10 +7,9 @@
  * window's size, so a resize redraws from what is already there. */
 export const WAVEFORM_POINTS = 2048;
 
-/** The neighbouring f32 values of `x` (the engine stores parameters as f32): start stays
- * below end by the smallest step the engine can hold, so any region it accepts stays reachable.
- * The UI does not know the sample's length in frames; the engine plays at least one frame of a
- * narrower region (`grooviq_dsp::sampler`). */
+// The engine stores parameters as f32 and plays a region at least one frame long: one shorter
+// than that is widened to a frame when a note starts (`grooviq_dsp::sampler`), so it would not
+// play what the editor shows. The markers' limits are f32 values that leave a whole frame.
 const F32 = new Float32Array(1);
 const BITS = new Int32Array(F32.buffer);
 
@@ -30,6 +29,28 @@ export function f32Above(x: number): number {
   return F32[0];
 }
 
+/** At least a frame between `start` and `end`, counted as the engine counts it
+ * (`start * len` and `end * len` in f64, `end - start >= 1`). */
+const frameApart = (start: number, end: number, frames: number) => end * frames - start * frames >= 1;
+
+/** The latest f32 start that leaves a frame before `end` (one f32 step without a length). */
+function lastStart(end: number, frames: number | null): number {
+  if (!frames) return f32Below(end);
+  let s = Math.fround(end - 1 / frames);
+  if (s <= 0) return 0;
+  while (s > 0 && !frameApart(s, end, frames)) s = f32Below(s);
+  return s;
+}
+
+/** The earliest f32 end that leaves a frame after `start`. */
+function firstEnd(start: number, frames: number | null): number {
+  if (!frames) return f32Above(start);
+  let e = Math.fround(start + 1 / frames);
+  if (e >= 1) return 1;
+  while (e < 1 && !frameApart(start, e, frames)) e = f32Above(e);
+  return e;
+}
+
 export type Marker = "start" | "end" | "loop_start";
 
 /** The region as the parameters hold it. */
@@ -38,6 +59,8 @@ export interface Region {
   end: number;
   loopStart: number;
   reverse: boolean;
+  /** The sample's length in frames, `null` while unknown (no sample loaded). */
+  frames: number | null;
 }
 
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
@@ -100,10 +123,12 @@ export function markerPosition(m: Marker, r: Region): number {
   return r.reverse ? hi - at : lo + at;
 }
 
-/** The values a marker may take now, so that start stays before end. */
+/** The values a marker may take now: f32s that keep start at least a frame before end. A
+ * region stored narrower than that (or out of order) can be outside its own range: it stays as
+ * it is until a marker is moved. */
 export function markerRange(m: Marker, r: Region): [number, number] {
-  if (m === "start") return [0, f32Below(r.end)];
-  if (m === "end") return [f32Above(r.start), 1];
+  if (m === "start") return [0, lastStart(r.end, r.frames)];
+  if (m === "end") return [firstEnd(r.start, r.frames), 1];
   return [0, 1];
 }
 
@@ -125,5 +150,5 @@ export function dragMarker(m: Marker, at: number, r: Region): number {
   const [lo, hi] = played(r);
   if (hi - lo <= 0) return 0;
   const f = r.reverse ? (hi - at) / (hi - lo) : (at - lo) / (hi - lo);
-  return clamp(f, 0, 1);
+  return Math.fround(clamp(f, 0, 1));
 }
