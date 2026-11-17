@@ -18,6 +18,7 @@ pub mod comp;
 pub mod delay;
 pub mod drive;
 pub mod eq;
+pub mod fattener;
 pub mod limiter;
 pub mod ott;
 pub mod reverb;
@@ -32,6 +33,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
         "synth" => &synth::SPEC,
         "sampler" => &sampler::SPEC,
         "eq" => &eq::SPEC,
+        "fattener" => &fattener::SPEC,
         "comp" => &comp::SPEC,
         "limiter" => &limiter::SPEC,
         "drive" => &drive::SPEC,
@@ -51,6 +53,7 @@ pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
         "synth" => Box::new(synth::Synth::new(sample_rate)),
         "sampler" => Box::new(sampler::Sampler::new(sample_rate)),
         "eq" => Box::new(eq::Eq::new(sample_rate)),
+        "fattener" => Box::new(fattener::Fattener::new(sample_rate)),
         "comp" => Box::new(comp::Comp::new(sample_rate)),
         "limiter" => Box::new(limiter::Limiter::new(sample_rate)),
         "drive" => Box::new(drive::Drive::new(sample_rate)),
