@@ -39,6 +39,10 @@ pub trait Device: Send {
     /// Clears all internal state (voices, delay lines, envelopes).
     fn reset(&mut self);
 
+    /// Cuts every sounding note (a choke group): each fades out linearly over 3 ms, then frees
+    /// its voice. Notes that arrive after the call are unaffected. Effects ignore it.
+    fn choke(&mut self) {}
+
     /// Host tempo, for tempo-synced devices.
     fn set_tempo(&mut self, _bpm: f32) {}
 
