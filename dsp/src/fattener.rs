@@ -2,7 +2,7 @@
 //! (within the +/-1 sample ceiling); Colour tilts around 700 Hz before saturation.
 //! Fixed 2 ms attack / 80 ms release, no lookahead or true-peak claim. This inexpensive
 //! base-rate nonlinear stage can alias; it is a colour effect, not a transparent limiter.
-use crate::util::{OnePole, Smooth, clamp_param, fast_tanh, onepole_gain, sane};
+use crate::util::{OnePole, Smooth, clamp_param, fast_tanh, flush, onepole_gain, sane};
 use crate::{Device, NoteEvent};
 
 /// Amount, Colour: `(minimum, maximum, neutral startup)`.
@@ -99,7 +99,12 @@ impl Device for Fattener {
             } else {
                 self.release
             };
-            self.envelope = peak + (self.envelope - peak) * coef;
+            self.envelope = flush(peak + (self.envelope - peak) * coef);
+            // The shared additive flush can round a slow decay onto a tiny plateau.
+            // Cut that inaudible tail too, so silence reaches exact zero at every rate.
+            if self.envelope < 1.0e-20 {
+                self.envelope = 0.;
+            }
             let threshold = 0.8 - 0.6 * a;
             let gain = if self.envelope > threshold {
                 threshold / self.envelope
@@ -118,5 +123,46 @@ impl Device for Fattener {
         self.amount.snap();
         self.colour.snap();
         self.fresh = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn detector_flushes_subnormals_and_long_silence() {
+        for sr in [22050., 48000., 192000.] {
+            let mut d = Fattener::new(sr);
+            d.envelope = f32::MIN_POSITIVE / 2.;
+            d.process(&mut [0.], &mut [0.], None, &[]);
+            assert_eq!(d.envelope, 0.);
+            d.process(&mut [1.; 128], &mut [1.; 128], None, &[]);
+            assert!(d.envelope > 0.);
+            for _ in 0..(sr as usize * 10 / 128 + 1) {
+                d.process(&mut [0.; 128], &mut [0.; 128], None, &[]);
+            }
+            assert_eq!(d.envelope, 0.);
+        }
+    }
+    #[test]
+    fn hot_fixture_engages_each_factory_detector() {
+        for name in PRESETS {
+            let mut d = Fattener::new(48000.);
+            for (i, v) in preset(name).unwrap() {
+                d.set_param(i, v);
+            }
+            let threshold = 0.8 - 0.6 * d.amount.target;
+            let mut count = 0;
+            let mut ratio = 0.0_f32;
+            for i in 0..48000 {
+                let mut l = [if i % 1200 < 600 { 0.98 } else { -0.98 }];
+                let mut r = [if i % 900 < 450 { -0.91 } else { 0.91 }];
+                d.process(&mut l, &mut r, None, &[]);
+                count += usize::from(d.envelope > threshold);
+                ratio = ratio.max(d.envelope / threshold);
+            }
+            println!("{name}: {count}/48000 over threshold, peak envelope/threshold {ratio}");
+            assert!(count > 24000, "{name} did not substantially compress");
+        }
     }
 }

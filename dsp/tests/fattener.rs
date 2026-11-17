@@ -83,7 +83,7 @@ fn realtime_calls_allocate_nothing_and_extreme_inputs_stay_bounded() {
     let mut r = [-f32::MAX; 128];
     assert_no_alloc::assert_no_alloc(|| {
         d.set_param(0, 100.);
-        d.set_param(1, -100.);
+        d.set_param(1, 100.);
         d.process(&mut l, &mut r, None, &[]);
         d.reset();
     });
@@ -177,5 +177,294 @@ fn colour_changes_spectrum_and_channel_swap_is_symmetric() {
         for j in i + 1..renders.len() {
             assert_ne!(renders[i], renders[j]);
         }
+    }
+}
+
+fn sig(n: usize, ch: u32) -> Vec<f32> {
+    let mut s = 0x1234_5678u32 ^ ch;
+    (0..n)
+        .map(|i| {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            0.5 * libm::sinf(i as f32 * 0.013 * (ch + 1) as f32)
+                + 0.45 * (s as i32 as f32 / i32::MAX as f32)
+        })
+        .collect()
+}
+// automation events at sample-aligned points; host splits blocks at each event
+fn automated(block: usize, sr: f32) -> Vec<f32> {
+    let n = 20_000;
+    let (mut l, mut r) = (sig(n, 0), sig(n, 1));
+    let ev: [(usize, u32, f32); 8] = [
+        (0, 0, 0.3),
+        (1001, 0, 1.0),
+        (1001, 1, -1.0),
+        (1051, 0, 0.4),
+        (1107, 1, 0.3),
+        (5003, 1, 0.8),
+        (9999, 0, 0.0),
+        (12345, 1, 0.0),
+    ];
+    let mut d = Fattener::new(sr);
+    let mut i = 0;
+    while i < n {
+        for &(at, p, v) in &ev {
+            if at == i {
+                d.set_param(p, v);
+            }
+        }
+        let next_ev = ev.iter().map(|e| e.0).filter(|&a| a > i).min().unwrap_or(n);
+        let e = (i + block).min(next_ev).min(n);
+        d.process(&mut l[i..e], &mut r[i..e], None, &[]);
+        i = e;
+    }
+    l.into_iter().zip(r).flat_map(|(a, b)| [a, b]).collect()
+}
+#[test]
+fn sample_aligned_automation_is_bit_exact_across_blocks() {
+    for sr in [22050., 44100., 48000., 96000., 192000.] {
+        let a = automated(1, sr);
+        for b in [2, 7, 37, 64, 128, 1024] {
+            assert!(
+                a.iter()
+                    .zip(automated(b, sr))
+                    .all(|(x, y)| x.to_bits() == y.to_bits()),
+                "sr {sr} block {b}"
+            );
+        }
+    }
+}
+#[test]
+fn reset_after_automation_matches_fresh_device() {
+    let n = 4096;
+    let fresh = {
+        let mut d = Fattener::new(48000.);
+        d.set_param(0, 0.7);
+        d.set_param(1, 0.4);
+        let (mut l, mut r) = (sig(n, 0), sig(n, 1));
+        d.process(&mut l, &mut r, None, &[]);
+        (l, r)
+    };
+    let mut d = Fattener::new(48000.);
+    let (mut l, mut r) = (sig(n, 2), sig(n, 3));
+    d.process(&mut l[..100], &mut r[..100], None, &[]);
+    d.set_param(0, 0.7);
+    d.set_param(1, 0.4); // mid-ramp
+    d.process(&mut l[100..150], &mut r[100..150], None, &[]);
+    d.reset();
+    // case A: host re-sends params after reset
+    let (mut l, mut r) = (sig(n, 0), sig(n, 1));
+    d.set_param(0, 0.7);
+    d.set_param(1, 0.4);
+    d.process(&mut l, &mut r, None, &[]);
+    assert!(
+        l == fresh.0 && r == fresh.1,
+        "reset+resend differs from fresh"
+    );
+    // case B: host does not resend
+    let mut d = Fattener::new(48000.);
+    let (mut l, mut r) = (sig(n, 2), sig(n, 3));
+    d.process(&mut l[..100], &mut r[..100], None, &[]);
+    d.set_param(0, 0.7);
+    d.set_param(1, 0.4);
+    d.process(&mut l[100..150], &mut r[100..150], None, &[]);
+    d.reset();
+    let (mut l, mut r) = (sig(n, 0), sig(n, 1));
+    d.process(&mut l, &mut r, None, &[]);
+    assert!(
+        l == fresh.0 && r == fresh.1,
+        "reset without resend differs from fresh"
+    );
+}
+#[test]
+fn nonfinite_input_does_not_poison_state() {
+    let mut d = Fattener::new(48000.);
+    d.set_param(0, 0.8);
+    d.set_param(1, 0.5);
+    let mut l = [0.3f32; 64];
+    let mut r = l;
+    l[5] = f32::NAN;
+    r[9] = f32::INFINITY;
+    l[20] = f32::NEG_INFINITY;
+    d.process(&mut l, &mut r, None, &[]);
+    let mut l2 = [0.3f32; 4096];
+    let mut r2 = l2;
+    d.process(&mut l2, &mut r2, None, &[]);
+    assert!(
+        l.iter()
+            .chain(&r)
+            .chain(&l2)
+            .chain(&r2)
+            .all(|x| x.is_finite() && x.abs() <= 1.0)
+    );
+}
+#[test]
+fn right_only_transient_ducks_left() {
+    let run = |hit: f32| {
+        let mut d = Fattener::new(48000.);
+        d.set_param(0, 1.0);
+        let mut l = vec![0.05f32; 4800];
+        let mut r = vec![0.0f32; 4800];
+        for x in &mut r[2400..2500] {
+            *x = hit;
+        }
+        d.process(&mut l, &mut r, None, &[]);
+        l[2500]
+    };
+    let (with, without) = (run(1.0), run(0.0));
+    println!("left at 2500 with right hit {with}, without {without}");
+    assert!(with < without * 0.5);
+}
+
+fn sine(hz: f32, sr: f32, n: usize, amp: f32) -> Vec<f32> {
+    (0..n)
+        .map(|i| amp * libm::sinf(2. * std::f32::consts::PI * hz * i as f32 / sr))
+        .collect()
+}
+#[test]
+fn reset_then_new_values_match_fresh() {
+    let n = 4096;
+    let x = sine(330., 48000., n, 0.6);
+    let fresh = {
+        let mut d = Fattener::new(48000.);
+        d.set_param(0, 0.9);
+        d.set_param(1, -0.8);
+        let (mut l, mut r) = (x.clone(), x.clone());
+        d.process(&mut l, &mut r, None, &[]);
+        l
+    };
+    let mut d = Fattener::new(48000.);
+    d.set_param(0, 0.1);
+    d.set_param(1, 0.5);
+    let (mut l, mut r) = (x.clone(), x.clone());
+    d.process(&mut l, &mut r, None, &[]);
+    d.reset();
+    d.set_param(0, 0.9);
+    d.set_param(1, -0.8);
+    let (mut l, mut r) = (x.clone(), x.clone());
+    d.process(&mut l, &mut r, None, &[]);
+    assert!(l == fresh);
+}
+#[test]
+fn colour_jump_is_smoothed_per_sample() {
+    let x = sine(100., 48000., 9600, 0.3);
+    let run = |jump: bool| {
+        let mut d = Fattener::new(48000.);
+        d.set_param(0, 1.);
+        d.set_param(1, -1.);
+        let (mut l, mut r) = (x.clone(), x.clone());
+        d.process(&mut l[..4800], &mut r[..4800], None, &[]);
+        if jump {
+            d.set_param(1, 1.);
+        }
+        d.process(&mut l[4800..], &mut r[4800..], None, &[]);
+        l
+    };
+    let (a, b) = (run(true), run(false));
+    assert!(
+        a[5000..]
+            .iter()
+            .zip(&b[5000..])
+            .any(|(a, b)| (a - b).abs() > 0.05)
+    );
+    assert!(
+        (a[4800] - b[4800]).abs() < 0.01,
+        "colour step {}",
+        (a[4800] - b[4800]).abs()
+    );
+}
+fn settle_ms(sr: f32) -> f32 {
+    // Amount jump on a constant 0.1 input: ms until within 1% of final
+    let n = sr as usize / 5;
+    let mut d = Fattener::new(sr);
+    let (mut l, mut r) = (vec![0.1f32; n], vec![0.1f32; n]);
+    d.process(&mut l[..1], &mut r[..1], None, &[]);
+    d.set_param(0, 1.);
+    d.process(&mut l[1..], &mut r[1..], None, &[]);
+    let fin = l[n - 1];
+    (l.iter()
+        .position(|v| (v - fin).abs() < 0.01 * fin.abs())
+        .unwrap() as f32)
+        * 1000.
+        / sr
+}
+fn release_ms(sr: f32) -> f32 {
+    // right hit then quiet: ms for the left to recover to 90% of its steady value
+    let n = sr as usize;
+    let mut d = Fattener::new(sr);
+    d.set_param(0, 1.);
+    let mut l = vec![0.05f32; n];
+    let mut r = vec![0.0f32; n];
+    let h = n / 4;
+    for x in &mut r[h..h + (sr as usize / 100)] {
+        *x = 1.;
+    }
+    d.process(&mut l, &mut r, None, &[]);
+    let fin = l[n - 1];
+    let start = h + sr as usize / 100;
+    (l[start..].iter().position(|v| *v > 0.9 * fin).unwrap() as f32) * 1000. / sr
+}
+fn tilt_db(sr: f32) -> f32 {
+    // Amount small, colour +1 vs -1 gain at 3 kHz, in dB
+    let e = |c: f32| {
+        let mut d = Fattener::new(sr);
+        d.set_param(0, 0.05);
+        d.set_param(1, c);
+        let x = sine(3000., sr, sr as usize / 2, 0.01);
+        let (mut l, mut r) = (x.clone(), x.clone());
+        d.process(&mut l, &mut r, None, &[]);
+        let t = &l[l.len() / 2..];
+        t.iter().map(|v| v * v).sum::<f32>()
+    };
+    10. * libm::log10f(e(1.) / e(-1.))
+}
+#[test]
+fn time_constants_and_tilt_follow_sample_rate() {
+    for (a, b, what) in [
+        (settle_ms(48000.), settle_ms(192000.), "smooth"),
+        (release_ms(48000.), release_ms(192000.), "release"),
+        (tilt_db(48000.), tilt_db(192000.), "tilt"),
+    ] {
+        println!("{what}: {a} vs {b}");
+        assert!(
+            (a - b).abs() <= 0.1 * a.abs().max(b.abs()),
+            "{what}: {a} vs {b}"
+        );
+    }
+}
+
+#[test]
+fn short_transient_attack_tracks_physical_time() {
+    let probe = |sr: f32| {
+        let mut d = Fattener::new(sr);
+        d.set_param(0, 1.);
+        let n = (sr * 0.001) as usize;
+        let mut l = vec![0.05; n];
+        let mut r = vec![1.; n];
+        d.process(&mut l, &mut r, None, &[]);
+        l[n - 1]
+    };
+    let (a, b) = (probe(48000.), probe(192000.));
+    println!("attack endpoint: {a} vs {b}");
+    assert!((a - b).abs() < 0.005);
+}
+#[test]
+fn extreme_inputs_both_colour_signs() {
+    for c in [-1., 1.] {
+        let mut d = Fattener::new(48000.);
+        d.set_param(0, 1.);
+        d.set_param(1, c);
+        let mut l = [f32::MAX; 128];
+        let mut r = [-f32::MAX; 128];
+        d.process(&mut l, &mut r, None, &[]);
+        assert!(l.iter().chain(&r).all(|v| v.is_finite() && v.abs() <= 1.));
+        let mut reference = Fattener::new(48000.);
+        reference.set_param(0, 1.);
+        reference.set_param(1, c);
+        let (mut bounded_l, mut bounded_r) = ([1.; 128], [-1.; 128]);
+        reference.process(&mut bounded_l, &mut bounded_r, None, &[]);
+        assert_eq!(l, bounded_l);
+        assert_eq!(r, bounded_r);
     }
 }
