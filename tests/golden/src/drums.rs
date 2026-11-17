@@ -22,14 +22,17 @@ pub fn kit_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("samples")
 }
 
-/// A hit of one step (the default length and key) at `step`.
+/// A hit of one step (the default length and key) at `step`; its id is set by
+/// [`drums_4ch_project`].
 fn hit(channel: u32, step: u32, velocity: f32) -> Note {
     Note {
+        id: 0,
         channel,
         tick: step * grooviq_engine::STEP_TICKS,
         length: grooviq_engine::STEP_TICKS,
         key: grooviq_project::DEFAULT_KEY,
         velocity,
+        slide: false,
     }
 }
 
@@ -44,14 +47,18 @@ fn channel(id: u32, name: &str, file: &str, sampler: &[(&str, f32)]) -> Channel 
             path: PathBuf::from(file),
             file: None,
         }),
+        instrument: grooviq_engine::InstrumentKind::Sampler,
         sampler: sampler
             .iter()
             .map(|&(k, v)| (k.to_string(), v))
             .collect::<BTreeMap<_, _>>(),
+        synth: BTreeMap::new(),
+        preset: None,
         volume: 1.0,
         pan: 0.0,
         mute: false,
         solo: false,
+        choke: 0,
     }
 }
 
@@ -89,6 +96,10 @@ pub fn drums_4ch_project(samples_dir: &Path) -> (Project, SampleFiles) {
         note
     }));
     notes.push(hit(clap, 12, 0.8));
+    for (note, id) in notes.iter_mut().zip(1..) {
+        note.id = id;
+    }
+    let next_note_id = notes.len() as u32 + 1;
 
     let project = Project {
         name: "Drums 4ch".into(),
@@ -105,6 +116,8 @@ pub fn drums_4ch_project(samples_dir: &Path) -> (Project, SampleFiles) {
             steps: 16,
             swing: 0.5,
             notes,
+            next_note_id,
+            revision: 1,
         }],
         current_pattern: 0,
         next_id: 5,

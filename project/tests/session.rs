@@ -135,11 +135,13 @@ fn toggling_a_step_adds_a_note_at_its_tick_and_sends_the_pattern() {
     assert_eq!(
         session.project().patterns[0].notes,
         vec![Note {
+            id: 1,
             channel: kick,
             tick: 1_200,
             length: 240,
             key: 60,
             velocity: 0.8,
+            slide: false,
         }]
     );
     let pattern = controller.lock().unwrap().state().pattern.clone();
@@ -830,11 +832,15 @@ fn channel(id: u32, name: &str, entry: Option<&str>) -> Channel {
             path: PathBuf::from(format!("/gone/{}.wav", name.to_lowercase())),
             file: entry.map(Into::into),
         }),
+        instrument: grooviq_engine::InstrumentKind::Sampler,
         sampler: BTreeMap::new(),
+        synth: BTreeMap::new(),
+        preset: None,
         volume: 1.0,
         pan: 0.0,
         mute: false,
         solo: false,
+        choke: 0,
     }
 }
 
@@ -850,15 +856,18 @@ fn loaded_with_a_missing_sample() -> Loaded {
     project
         .channels
         .push(channel(3, "Hat", Some("samples/2-hat.wav")));
-    for (channel, tick) in [(1, 0), (2, 0), (2, 960), (3, 0)] {
+    for (id, (channel, tick)) in (1..).zip([(1, 0), (2, 0), (2, 960), (3, 0)]) {
         project.patterns[0].notes.push(Note {
+            id,
             channel,
             tick,
             length: 240,
             key: 60,
             velocity: 0.8,
+            slide: false,
         });
     }
+    project.patterns[0].next_note_id = 5;
     let mut samples = std::collections::HashMap::new();
     samples.insert(1, sample_file("kick.wav"));
     samples.insert(
@@ -1286,13 +1295,15 @@ fn the_grid_shows_only_hits_that_start_on_a_step() {
     let mut loaded = loaded_with_a_missing_sample();
     let notes = &mut loaded.project.patterns[0].notes;
     notes.clear();
-    for (tick, velocity) in [(100, 0.3), (480, 0.6), (16 * 240, 0.9)] {
+    for (id, (tick, velocity)) in (1..).zip([(100, 0.3), (480, 0.6), (16 * 240, 0.9)]) {
         notes.push(Note {
+            id,
             channel: 1,
             tick,
             length: 240,
             key: 60,
             velocity,
+            slide: false,
         });
     }
     let decoded = decode_samples(&loaded);
@@ -1540,4 +1551,203 @@ fn only_one_save_runs_at_a_time() {
     drop(job);
     session.save_failed();
     assert!(session.begin_save(Some(&b)).is_ok());
+}
+
+/// A project with one sampler channel (id 1, no sample) whose only pattern holds `notes`
+/// and counts note ids from `next_note_id`, opened in a fresh session.
+fn opened_with_notes(notes: Vec<Note>, next_note_id: u32) -> Session {
+    let mut project = Project::new();
+    project.channels.push(Channel {
+        sample: None,
+        ..channel(1, "Kick", None)
+    });
+    project.next_id = 2;
+    project.patterns[0].notes = notes;
+    project.patterns[0].next_note_id = next_note_id;
+    let loaded = Loaded {
+        project,
+        samples: Default::default(),
+        warnings: Vec::new(),
+    };
+    let decoded = decode_samples(&loaded);
+    let (mut session, _, _) = rig();
+    session
+        .open(Path::new("/p/notes.grooviq"), loaded, decoded)
+        .unwrap();
+    session
+}
+
+fn plain(id: u32, tick: u32) -> Note {
+    Note {
+        id,
+        channel: 1,
+        tick,
+        length: 240,
+        key: 60,
+        velocity: 0.8,
+        slide: false,
+    }
+}
+
+#[test]
+fn a_pattern_out_of_note_ids_refuses_new_notes_and_never_repeats_one() {
+    let now = Instant::now();
+    let ids =
+        |s: &Session| -> Vec<u32> { s.project().patterns[0].notes.iter().map(|n| n.id).collect() };
+
+    // One id left: the first step gets it, the next additions are refused, by both paths.
+    let mut s = opened_with_notes(Vec::new(), u32::MAX - 1);
+    s.apply(
+        Edit::ToggleStep {
+            channel: 1,
+            step: 0,
+        },
+        now,
+    )
+    .unwrap();
+    assert_eq!(ids(&s), vec![u32::MAX - 1]);
+    for edit in [
+        Edit::ToggleStep {
+            channel: 1,
+            step: 1,
+        },
+        Edit::SetStepVelocity {
+            channel: 1,
+            step: 2,
+            velocity: 0.5,
+        },
+    ] {
+        let what = format!("{edit:?}");
+        let result = s.apply(edit, now);
+        assert!(
+            matches!(result, Err(SessionError::NoteIdsUsedUp)),
+            "{what}: {result:?}"
+        );
+        assert_eq!(ids(&s), vec![u32::MAX - 1], "nothing added");
+    }
+    // Changing and removing notes still works.
+    s.apply(
+        Edit::SetStepVelocity {
+            channel: 1,
+            step: 0,
+            velocity: 0.5,
+        },
+        now,
+    )
+    .unwrap();
+    s.apply(
+        Edit::ToggleStep {
+            channel: 1,
+            step: 0,
+        },
+        now,
+    )
+    .unwrap();
+    assert!(ids(&s).is_empty());
+
+    // Opening (which validates) renumbers a used-up pattern, so additions work again.
+    let mut s = opened_with_notes(vec![plain(7, 0)], u32::MAX);
+    s.apply(
+        Edit::ToggleStep {
+            channel: 1,
+            step: 1,
+        },
+        now,
+    )
+    .unwrap();
+    assert_eq!(ids(&s), vec![1, 2]);
+    assert!(
+        SessionError::NoteIdsUsedUp
+            .to_string()
+            .contains("open it again"),
+        "the message says how to get ids back"
+    );
+}
+
+#[test]
+fn reopening_renumbers_a_pattern_out_of_note_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ids.grooviq");
+    let mut project = Project::new();
+    project.channels.push(Channel {
+        sample: None,
+        ..channel(1, "Kick", None)
+    });
+    project.next_id = 2;
+    project.patterns[0].notes = vec![plain(9, 0), plain(u32::MAX - 1, 240)];
+    project.patterns[0].next_note_id = u32::MAX;
+    grooviq_project::save(&project, &Default::default(), &path).unwrap();
+
+    let loaded = load(&path).unwrap();
+    assert_eq!(
+        loaded.warnings,
+        vec![
+            "Pattern \"Pattern 1\": its note ids left no room for new notes; 2 notes were renumbered."
+                .to_string()
+        ]
+    );
+    let decoded = decode_samples(&loaded);
+    let (mut s, _, _) = rig();
+    s.open(&path, loaded, decoded).unwrap();
+    s.apply(
+        Edit::ToggleStep {
+            channel: 1,
+            step: 2,
+        },
+        Instant::now(),
+    )
+    .unwrap();
+    let ids: Vec<u32> = s.project().patterns[0].notes.iter().map(|n| n.id).collect();
+    assert_eq!(ids, vec![1, 2, 3]);
+}
+
+#[test]
+fn step_additions_stop_at_the_note_cap() {
+    let now = Instant::now();
+    let cap = grooviq_project::MAX_NOTES_PER_PATTERN as u32;
+    let full: Vec<Note> = (1..=cap).map(|id| plain(id, 0)).collect();
+    let mut s = opened_with_notes(full, cap + 1);
+    for edit in [
+        Edit::ToggleStep {
+            channel: 1,
+            step: 1,
+        },
+        Edit::SetStepVelocity {
+            channel: 1,
+            step: 2,
+            velocity: 0.5,
+        },
+    ] {
+        let what = format!("{edit:?}");
+        let result = s.apply(edit, now);
+        assert!(
+            matches!(result, Err(SessionError::TooManyNotes)),
+            "{what}: {result:?}"
+        );
+        assert_eq!(
+            s.project().patterns[0].notes.len(),
+            cap as usize,
+            "nothing added"
+        );
+        assert!(!s.view().dirty, "a refused edit changes nothing");
+    }
+    assert!(SessionError::TooManyNotes.to_string().contains("100000"));
+    // Removing makes room again.
+    s.apply(
+        Edit::ToggleStep {
+            channel: 1,
+            step: 0,
+        },
+        now,
+    )
+    .unwrap();
+    s.apply(
+        Edit::ToggleStep {
+            channel: 1,
+            step: 1,
+        },
+        now,
+    )
+    .unwrap();
+    assert_eq!(s.project().patterns[0].notes.len(), 1);
 }
