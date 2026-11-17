@@ -307,7 +307,7 @@ enum UnfinishedWav {
 /// A WAV recorder that stops before it can come back to fill in its header leaves a RIFF size
 /// of 0 (never filled in), 0xFFFF_FFFF (streamed) or one that does not match the file, and a
 /// data chunk size of 0 or 0xFFFF_FFFF. Other tools read such a file to its end; this returns the file with
-/// the sizes made true so the reader does the same. `None` when this is not a WAV, or its header
+/// the sizes made true, excluding a complete known metadata footer. `None` when this is not a WAV, or its header
 /// is finished: a writer that backpatched the RIFF size also backpatched the data size, so a
 /// data size of 0 there is an empty recording, whatever metadata follows it.
 fn unfinished_wav_header(bytes: &[u8]) -> Option<UnfinishedWav> {
@@ -320,10 +320,29 @@ fn unfinished_wav_header(bytes: &[u8]) -> Option<UnfinishedWav> {
     // 0xFFFF_FFFF (streamed) and anything else further off is an unfinished header.
     let off = bytes.len() as i64 - 8 - i64::from(riff_size);
     let riff_unfinished = !(-1..=1).contains(&off);
+    let mut frame_bytes = None;
     let mut at = 12usize;
     while let Some(chunk) = bytes.get(at..at + 8) {
         let size = u32::from_le_bytes(chunk[4..8].try_into().ok()?);
         if &chunk[..4] != b"data" {
+            if &chunk[..4] == b"fmt "
+                && size >= 16
+                && let Some(fmt) = bytes.get(at + 8..at + 24)
+            {
+                let encoding = u16::from_le_bytes(fmt[..2].try_into().ok()?);
+                let channels = u16::from_le_bytes(fmt[2..4].try_into().ok()?);
+                let align = u16::from_le_bytes(fmt[12..14].try_into().ok()?);
+                let bits = u16::from_le_bytes(fmt[14..16].try_into().ok()?);
+                // Recovery applies only to fixed-width PCM/float frames, not codec blocks.
+                if matches!(encoding, 1 | 3 | 0xfffe)
+                    && channels > 0
+                    && bits > 0
+                    && bits % 8 == 0
+                    && u32::from(align) == u32::from(channels) * u32::from(bits / 8)
+                {
+                    frame_bytes = Some(usize::from(align));
+                }
+            }
             // Chunks are padded to an even size.
             at = at.checked_add(8 + size as usize + (size as usize & 1))?;
             continue;
@@ -334,16 +353,86 @@ fn unfinished_wav_header(bytes: &[u8]) -> Option<UnfinishedWav> {
             0 if !riff_unfinished => None,
             0 | u32::MAX if after == 0 => Some(UnfinishedWav::NoSound),
             0 | u32::MAX => {
-                let mut fixed = bytes.to_vec();
+                let audio_end = frame_bytes.map_or(bytes.len(), |align| {
+                    metadata_suffix(&bytes[sound..], align) + sound
+                });
+                if audio_end == sound {
+                    return Some(UnfinishedWav::NoSound);
+                }
+                let mut fixed = bytes[..audio_end].to_vec();
                 let end = |n: usize| u32::try_from(n).unwrap_or(u32::MAX - 1).min(u32::MAX - 1);
-                fixed[4..8].copy_from_slice(&end(bytes.len() - 8).to_le_bytes());
-                fixed[at + 4..at + 8].copy_from_slice(&end(after).to_le_bytes());
+                fixed[4..8].copy_from_slice(&end(audio_end - 8).to_le_bytes());
+                fixed[at + 4..at + 8].copy_from_slice(&end(audio_end - sound).to_le_bytes());
                 Some(UnfinishedWav::Sound(fixed))
             }
             _ => None,
         };
     }
     None
+}
+
+/// Find the earliest frame-aligned known metadata suffix. PCM spelling an entire valid
+/// footer is inherently ambiguous: only unfinished files accept this narrow recovery cost.
+/// One backward pass memoizes suffix validity in one bit per byte; LIST subchunk walks share
+/// an input-sized budget. Adversarial nesting therefore cannot cause quadratic work. When
+/// that budget is exhausted, preserve the audio rather than guess.
+fn metadata_suffix(bytes: &[u8], align: usize) -> usize {
+    let n = bytes.len();
+    let mut valid = vec![0u8; n / 8 + 1];
+    valid[n / 8] |= 1 << (n % 8);
+    let mut first = n;
+    let mut budget = n;
+    for at in (0..n.saturating_sub(7)).rev() {
+        let tag = &bytes[at..at + 4];
+        if !matches!(tag, b"LIST" | b"_PMX" | b"bext" | b"iXML") {
+            continue;
+        }
+        let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        let Some(end) = (at + 8).checked_add(size) else {
+            continue;
+        };
+        let Some(next) = end.checked_add(size & 1) else {
+            continue;
+        };
+        if next > n || valid[next / 8] & (1 << (next % 8)) == 0 {
+            continue;
+        }
+        if tag == b"LIST" {
+            if size < 4 || &bytes[at + 8..at + 12] != b"INFO" {
+                continue;
+            }
+            let mut sub = at + 12;
+            while sub < end {
+                if budget == 0 {
+                    return n;
+                }
+                budget -= 1;
+                if end - sub < 8 {
+                    break;
+                }
+                let len = u32::from_le_bytes(bytes[sub + 4..sub + 8].try_into().unwrap()) as usize;
+                let Some(next_sub) = sub
+                    .checked_add(8)
+                    .and_then(|v| v.checked_add(len))
+                    .and_then(|v| v.checked_add(len & 1))
+                else {
+                    break;
+                };
+                if next_sub > end {
+                    break;
+                }
+                sub = next_sub;
+            }
+            if sub != end {
+                continue;
+            }
+        }
+        valid[at / 8] |= 1 << (at % 8);
+        if at % align == 0 {
+            first = at;
+        }
+    }
+    first
 }
 
 /// `bytes` (an Ogg stream) with the pages whose checksum fails removed, or `None` when every
@@ -496,5 +585,22 @@ mod tests {
         let scan = scan_ogg(&src, src.len() * 4);
         assert!(scan.repaired.is_none());
         assert_eq!(scan.hashed, src.len());
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::metadata_suffix;
+
+    #[test]
+    fn dense_overrun_markers_and_short_inputs_are_preserved() {
+        for n in 0..16 {
+            assert_eq!(metadata_suffix(&vec![0; n], 2), n);
+        }
+        let mut bytes = Vec::new();
+        for _ in 0..131_072 {
+            bytes.extend_from_slice(b"_PMX\xff\xff\xff\xff");
+        }
+        assert_eq!(metadata_suffix(&bytes, 4), bytes.len());
     }
 }
