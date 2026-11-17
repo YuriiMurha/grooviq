@@ -147,19 +147,21 @@ export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSele
         <span className="channel-title">{name}</span>
         <span className="channel-sample">{synth ? (channel.preset ?? "Synth") : (channel.sampleName ?? "No sample")}</span>
       </button>
-      {synth && (
-        <button
-          type="button"
-          className="instrument-button"
-          aria-label={`Edit the ${name} synth`}
-          data-hint={`Opens the synth editor for ${name}: its sound, presets and envelopes.`}
-          onClick={(e) => openDevice(id, e.currentTarget)}
-        >
-          <svg viewBox="0 0 16 12" aria-hidden="true">
-            <path d="M1 6C3 0.5 5 0.5 7 6S11 11.5 13 6L15 3" />
-          </svg>
-        </button>
-      )}
+      <button
+        type="button"
+        className="instrument-button"
+        aria-label={`Edit the ${name} ${synth ? "synth" : "sampler"}`}
+        data-hint={
+          synth
+            ? `Opens the synth editor for ${name}: its sound, presets and envelopes.`
+            : `Opens the sampler editor for ${name}: its sample's region and loop, pitch, envelopes and filter.`
+        }
+        onClick={(e) => openDevice(id, e.currentTarget)}
+      >
+        <svg viewBox="0 0 16 12" aria-hidden="true">
+          <path d={synth ? "M1 6C3 0.5 5 0.5 7 6S11 11.5 13 6L15 3" : "M2 4.5V7.5M5 2V10M8 3.5V8.5M11 1V11M14 4.5V7.5"} />
+        </svg>
+      </button>
       {channel.missing && (
         <>
           <span

@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { DeviceScale } from "./deviceScale";
 import { DESIGN_H, DESIGN_W, clampPlacement, fitScale, initialPlacement, type Placement } from "./windowPlacement";
 
 const FOCUSABLE = "button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])";
@@ -134,7 +135,7 @@ export function DeviceWindow({ title, device, color, index, z, toolbar, opener, 
             </svg>
           </button>
         </div>
-        {children}
+        <DeviceScale.Provider value={scale}>{children}</DeviceScale.Provider>
       </div>
     </div>
   );

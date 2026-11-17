@@ -1,4 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
+import { channelSetSample, errorText, type ChannelView, type ProjectView } from "../api/project";
+import { isProjectReplacing, projectGeneration } from "../project/replacement";
+import { sampleReplaced } from "./sampleRevision";
 
 /** The sample formats the loader reads. */
 export const AUDIO_EXTENSIONS = ["wav", "aif", "aiff", "flac", "mp3", "ogg"];
@@ -15,4 +18,27 @@ export async function pickSounds(): Promise<string[]> {
 export async function pickSound(title: string): Promise<string | null> {
   const picked = await open({ title, multiple: false, directory: false, filters: AUDIO_FILTER });
   return typeof picked === "string" ? picked : null;
+}
+
+/** Asks for the file `channel`'s sample should come from and points the channel at it (the rack's
+ * and the sampler editor's Relink). A pick that comes back after the project was replaced is
+ * dropped: channel ids start again in a new project. */
+export function relinkChannel(
+  channel: Pick<ChannelView, "id" | "name">,
+  run: (command: () => Promise<ProjectView>) => Promise<boolean>,
+  onError: (message: string) => void,
+) {
+  const generation = projectGeneration();
+  pickSound(`Find the sample for ${channel.name}`).then(
+    (path) => {
+      if (path === null || projectGeneration() !== generation || isProjectReplacing()) return;
+      void run(async () => {
+        const view = await channelSetSample(channel.id, path);
+        // Before the view lands, so what is drawn from the old file is fetched again once.
+        sampleReplaced(channel.id);
+        return view;
+      });
+    },
+    (e: unknown) => onError(errorText(e)),
+  );
 }

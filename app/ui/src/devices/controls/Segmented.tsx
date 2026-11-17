@@ -1,8 +1,8 @@
 import { useRef, type KeyboardEvent, type ReactNode } from "react";
 
 export interface SegmentedProps {
-  /** The parameter id, for `data-param`. */
-  id: string;
+  /** The parameter id, for `data-param` (none for a setting that is not a parameter). */
+  id?: string;
   /** The accessible name ("Filter type"). */
   name: string;
   /** One label per value, from `min` up. */

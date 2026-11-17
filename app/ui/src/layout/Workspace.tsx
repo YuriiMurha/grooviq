@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from "react";
 import { channelSelect } from "../api/notes";
-import { errorText } from "../api/project";
+import { errorText, type ChannelView } from "../api/project";
 import { DeviceWindows } from "../devices/DeviceWindows";
 import { useTypingKeyboard } from "../keyboard/useTypingKeyboard";
 import type { LiveFrame } from "../live/decode";
 import { useProject } from "../project/context";
 import { isTypingTarget, modalIsOpen } from "../project/shortcuts";
+import { relinkChannel } from "../rack/audioFiles";
 import { ChannelRack } from "../rack/ChannelRack";
 import { PianoRoll } from "../roll/PianoRoll";
 import { DEFAULT_PANELS, panelFor, rollTarget, splitAfterDrag, togglePanel, type Panels } from "./panels";
@@ -27,7 +28,7 @@ interface Props {
 /** The channel rack and the piano roll, stacked, each toggled by its key (F6, F7), with a
  * splitter between them; the selected channel they and the typing keyboard share. */
 export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }: Props) {
-  const { view } = useProject();
+  const { view, run } = useProject();
   const [panels, setPanels] = useState<Panels>(DEFAULT_PANELS);
   const [chosen, setChosen] = useState<number | null>(null);
   const area = useRef<HTMLDivElement>(null);
@@ -44,6 +45,8 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }
   }, [channel, onError]);
 
   useTypingKeyboard(keyboard, channel, onError, { release: releaseKeys, recording: view?.recording ?? false });
+
+  const relink = useCallback((c: ChannelView) => relinkChannel(c, run, onError), [run, onError]);
 
   const openRoll = useCallback((id: number) => {
     setChosen(id);
@@ -147,7 +150,7 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }
           <p className="workspace-empty">F6 shows the channel rack, F7 the piano roll.</p>
         )}
       </div>
-      <DeviceWindows channels={view.channels} onError={onError} />
+      <DeviceWindows channels={view.channels} onError={onError} onRelink={relink} />
     </SelectionContext.Provider>
   );
 }

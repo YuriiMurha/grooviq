@@ -17,6 +17,8 @@ export interface ChannelView {
   sampleName: string | null;
   /** The sample could not be found when the project opened. */
   missing: boolean;
+  /** The loaded sample's length in frames; `null` without one (missing, none, or a synth). */
+  sampleFrames: number | null;
   /** Linear gain, 0..2 (1 = 0 dB). */
   volume: number;
   /** -1..1. */
