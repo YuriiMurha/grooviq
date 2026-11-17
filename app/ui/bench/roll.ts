@@ -16,6 +16,8 @@ import { rollStats } from "../src/roll/stats";
 import { channel, createFakeEngine, project } from "../src/test/fakeEngine";
 
 const NOTES = 10_000;
+/** Another channel's notes, drawn behind the edited channel's as ghosts. */
+const GHOSTS = 3_000;
 const STEPS = 256;
 const PATTERN_TICKS = STEPS * 240;
 const LOW_KEY = 48;
@@ -38,16 +40,20 @@ export interface BenchResult {
 }
 
 // --- The fake engine and the Tauri shim the notes commands go through. ---
-const view: ProjectView = project([channel(1, "Lead", { kind: "synth", preset: "Init", roll: true, color: 0 })], {}, STEPS);
+const view: ProjectView = project(
+  [channel(1, "Lead", { kind: "synth", preset: "Init", roll: true, color: 0 }), channel(2, "Pad", { kind: "synth", preset: "Init", roll: true, color: 2 })],
+  {},
+  STEPS,
+);
 const engine = createFakeEngine(view);
 let seed = 2024;
 const rand = (n: number) => {
   seed = (seed * 1664525 + 1013904223) >>> 0;
   return seed % n;
 };
-engine.notes = Array.from({ length: NOTES }, (_, i) => ({
+engine.notes = Array.from({ length: NOTES + GHOSTS }, (_, i) => ({
   id: i + 1,
-  channel: 1,
+  channel: i < NOTES ? 1 : 2,
   tick: rand(PATTERN_TICKS - 960),
   length: 60 + rand(900),
   key: LOW_KEY + rand(KEY_SPAN),
@@ -101,11 +107,11 @@ const notes = () => engine.notes as WireNote[];
 function top(tick: number, key: number): WireNote | null {
   let best: WireNote | null = null;
   for (const n of notes()) {
-    if (n.key === key && n.tick <= tick && tick < n.tick + n.length && (!best || n.tick >= best.tick)) best = n;
+    if (n.channel === 1 && n.key === key && n.tick <= tick && tick < n.tick + n.length && (!best || n.tick >= best.tick)) best = n;
   }
   return best;
 }
-const inBox = (t0: number, t1: number) => notes().filter((n) => n.tick < t1 && n.tick + n.length > t0).length;
+const inBox = (t0: number, t1: number) => notes().filter((n) => n.channel === 1 && n.tick < t1 && n.tick + n.length > t0).length;
 
 async function drag(from: { x: number; y: number }, path: (t: number) => { x: number; y: number }, ms: number) {
   pointer("pointerdown", from);

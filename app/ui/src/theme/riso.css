@@ -42,6 +42,7 @@
   --roll-row: #171b3d;      /* the piano roll: a white key's row */
   --roll-row-black: #11142f;/* a black key's row */
   --roll-outside: var(--well); /* past the pattern's end, and outside 0..127 */
+  --roll-dim: rgba(5, 7, 20, 0.58);  /* laid over the rows outside the project's scale */
   --roll-line: rgba(243, 238, 228, 0.05); /* steps and rows */
   --roll-beat: rgba(243, 238, 228, 0.12); /* beats, and the line under each C */
   --roll-bar: rgba(243, 238, 228, 0.26);

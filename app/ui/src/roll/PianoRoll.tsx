@@ -1,17 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent, type RefObject } from "react";
-import { onNotesChanged, notesEdit, patternNotes } from "../api/notes";
+import { onNotesChanged, notesEdit, patternNotes, type WireNote } from "../api/notes";
+import type { ProjectKey } from "../api/project";
 import type { LiveFrame } from "../live/decode";
 import { useProject } from "../project/context";
-import { isTypingTarget, modalIsOpen } from "../project/shortcuts";
+import { isMac, isTypingTarget, modalIsOpen } from "../project/shortcuts";
 import { displayTicks } from "../transport/position";
 import { createCanvasRoll } from "./canvasRoll";
 import { CommitQueue, type NotesApi } from "./commitQueue";
 import { createRollRenderer, readRollPalette, type RollPalette, type RollRenderer } from "./glRoll";
 import { KeyColumn } from "./KeyColumn";
+import { copy, duplicate, paste, type Clip } from "./clipboard";
 import { NoteStore, buildInstances } from "./noteStore";
-import { DEFAULT_GRID, GRIDS, barTicks, gridTicks } from "./snap";
+import { RollToolbar } from "./RollToolbar";
+import { scaleMask } from "./scales";
+import { DEFAULT_GRID, GRIDS, barTicks, gridTicks, snapTick } from "./snap";
 import { rollStats } from "./stats";
-import { endGesture, moveGesture, startGesture, EDGE_PX, type Gesture, type Pointer, type Step, type Tool, type ToolContext } from "./tools";
+import { endGesture, moveGesture, startGesture, EDGE_PX, TOOL_BUTTONS, type Gesture, type Pointer, type Step, type Tool, type ToolContext } from "./tools";
+import { changed, humanize, quantize, strum } from "./transforms";
+import { VelocityLane } from "./VelocityLane";
 import { Playhead, clampView, scrollBy, toWorld, zoomAt, type RollView } from "./view";
 
 const API: NotesApi = { notesEdit, patternNotes };
@@ -24,13 +30,12 @@ const STEP_TICKS = 240;
 const TICKS_PER_WHOLE = 3840;
 const EMPTY_HINT = "Click to draw a note, right-click to delete it. F6 goes back to the channel rack.";
 
-const TOOLS: { tool: Tool; label: string; key: string; hint: string }[] = [
-  { tool: "draw", label: "Draw", key: "KeyP", hint: "Draw: click to add a note, drag a note to move it, drag its right edge to resize it (P)." },
-  { tool: "paint", label: "Paint", key: "KeyB", hint: "Paint: drag along a row to put a note in every grid cell (B)." },
-  { tool: "select", label: "Select", key: "KeyE", hint: "Select: drag a box around notes, Shift adds to the selection; drag a selected note to move them all (E)." },
-  { tool: "slice", label: "Slice", key: "KeyC", hint: "Slice: click a note to cut it at the nearest grid line (C)." },
-  { tool: "delete", label: "Delete", key: "KeyD", hint: "Delete: click or drag over notes to delete them (D)." },
-];
+/** What Mod+C copied, kept while the roll is closed and reopened. */
+let clipboard: Clip | null = null;
+/** How far a strum spreads each voice (ticks), and the humanize amounts: about 15 ms, 10 ms and a tenth of the range at 120 BPM. */
+const STRUM_TICKS = 30;
+const HUMANIZE_TICKS = 20;
+const HUMANIZE_VELOCITY = 0.1;
 
 interface Props {
   /** The channel being edited. */
@@ -50,7 +55,7 @@ interface Props {
 /** The piano roll: the channel's notes on a WebGL2 canvas (2D without it), edited with five
  * tools, beside a column of keys that plays the channel. */
 export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = false, onError = () => {}, api = API, releaseKeys = 0 }: Props) {
-  const { view: project, setView } = useProject();
+  const { view: project, setView, apply } = useProject();
   const store = useMemo(() => new NoteStore(), []);
   const queue = useMemo(() => new CommitQueue(store, api), [store, api]);
   const report = useRef(onError);
@@ -63,6 +68,12 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   const [gridIndex, setGridIndex] = useState(GRIDS.indexOf(DEFAULT_GRID));
   const [use2d, setUse2d] = useState(false);
   const [empty, setEmpty] = useState(true);
+  const [snapScale, setSnapScale] = useState(true);
+  const [slide, setSlide] = useState(false);
+  const [ghosts, setGhosts] = useState(true);
+  const [lane, setLane] = useState(true);
+  const [chord, setChord] = useState("");
+  const [inversion, setInversion] = useState(0);
 
   const canvas = useRef<HTMLCanvasElement>(null);
   const wrap = useRef<HTMLDivElement>(null);
@@ -71,19 +82,58 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   const palette = useRef<RollPalette | null>(null);
   const view = useRef<RollView>({ tickPx: 0.1, keyPx: 14, scrollTick: 0, topKey: 84, width: 0, height: 0 });
   const centred = useRef<number | null | undefined>(undefined);
+  /** The key the view was centred on, kept in the middle as the roll is resized until the person scrolls or zooms. */
+  const centreKey = useRef<number | null>(null);
   const gesture = useRef<Gesture | null>(null);
   const lastLength = useRef(STEP_TICKS);
   const tempId = useRef(0);
   const dirty = useRef(true);
-  const built = useRef<{ version: number; channel: number | null; renderer: RollRenderer | null }>({ version: -1, channel: null, renderer: null });
+  const built = useRef<{ version: number; channel: number | null; renderer: RollRenderer | null; ghosts: string }>({ version: -1, channel: null, renderer: null, ghosts: "" });
+  const pointerTick = useRef<number | null>(null);
+  const humanizeSeed = useRef(1);
 
   const sig = project?.timeSignature ?? { beats: 4, unit: 4 };
   const grid = gridTicks(GRIDS[gridIndex], sig);
   // What the draw loop and the pointer handlers read: the latest props, without re-subscribing.
-  const scene = useRef({ channel, ink: 0, sig, steps: 16, bpm: 120, sampleRate, tool, grid });
+  const projectKey: ProjectKey | null = project?.key ?? null;
+  const inkOf = useMemo(() => {
+    const colours = new Map(project?.channels.map((c) => [c.id, c.color]));
+    return { sig: project?.channels.map((c) => `${c.id}:${c.color}`).join(",") ?? "", of: (c: number) => colours.get(c) ?? 0 };
+  }, [project?.channels]);
+  const scene = useRef({
+    channel,
+    ink: 0,
+    sig,
+    steps: 16,
+    bpm: 120,
+    sampleRate,
+    tool,
+    grid,
+    key: null as ProjectKey | null,
+    snapScale,
+    slide,
+    ghosts,
+    chord: null as { name: string; inversion: number } | null,
+    inkOf,
+  });
   const ink = project?.channels.find((c) => c.id === channel)?.color ?? 0;
   useEffect(() => {
-    scene.current = { channel, ink, sig, steps: project?.pattern.steps ?? 16, bpm: project?.bpm ?? 120, sampleRate, tool, grid };
+    scene.current = {
+      channel,
+      ink,
+      sig,
+      steps: project?.pattern.steps ?? 16,
+      bpm: project?.bpm ?? 120,
+      sampleRate,
+      tool,
+      grid,
+      key: projectKey,
+      snapScale,
+      slide,
+      ghosts,
+      chord: chord ? { name: chord, inversion } : null,
+      inkOf,
+    };
     dirty.current = true;
   });
 
@@ -101,6 +151,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   useEffect(() => {
     store.setSelection([]);
     centred.current = undefined;
+    centreKey.current = null;
     gesture.current = null;
   }, [store, channel]);
 
@@ -115,7 +166,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
       palette.current = readRollPalette(document.documentElement);
       const made = use2d ? createCanvasRoll(el) : createRollRenderer(el);
       renderer.current = made;
-      built.current = { version: -1, channel: null, renderer: made };
+      built.current = { version: -1, channel: null, renderer: made, ghosts: "" };
       dirty.current = true;
       if (made) {
         if (STATS) rollStats.renderer = made.kind;
@@ -147,7 +198,9 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     const el = wrap.current;
     if (!el) return;
     const ro = new ResizeObserver(() => {
-      view.current = clampView({ ...view.current, width: el.clientWidth, height: el.clientHeight });
+      const v = { ...view.current, width: el.clientWidth, height: el.clientHeight };
+      if (centreKey.current !== null) v.topKey = centreKey.current + v.height / v.keyPx / 2;
+      view.current = clampView(v);
       dirty.current = true;
     });
     ro.observe(el);
@@ -183,14 +236,17 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
       }
 
       const b = built.current;
-      if (b.version !== store.version || b.channel !== s.channel || b.renderer !== r) {
-        const { data, count } = s.channel === null ? { data: new Float32Array(0), count: 0 } : buildInstances(store, s.channel);
+      // Ghosts are in the buffer with their channels' inks: either changing rebuilds it.
+      const ghostKey = s.ghosts ? s.inkOf.sig : "";
+      if (b.version !== store.version || b.channel !== s.channel || b.renderer !== r || b.ghosts !== ghostKey) {
+        const { data, count, own } =
+          s.channel === null ? { data: new Float32Array(0), count: 0, own: 0 } : buildInstances(store, s.channel, { ghosts: s.ghosts, inkOf: s.inkOf.of });
         r.setNotes(data, count);
         if (STATS) rollStats.bufferBuilds++;
-        built.current = { version: store.version, channel: s.channel, renderer: r };
+        built.current = { version: store.version, channel: s.channel, renderer: r, ghosts: ghostKey };
         dirty.current = true;
-        if ((count === 0) !== shownEmpty) {
-          shownEmpty = count === 0;
+        if ((own === 0) !== shownEmpty) {
+          shownEmpty = own === 0;
           setEmpty(shownEmpty);
         }
         // Centre on the channel's notes the first time they are there.
@@ -204,6 +260,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
           }
           const mid = hi >= 0 ? (lo + hi + 1) / 2 : 60.5;
           view.current = clampView({ ...v, topKey: mid + v.height / v.keyPx / 2 });
+          centreKey.current = mid;
           centred.current = s.channel;
           v = view.current;
         }
@@ -234,6 +291,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
           beatTicks: Math.max(1, Math.round(TICKS_PER_WHOLE / s.sig.unit)),
           barTicks: barTicks(s.sig),
           endTick: loop,
+          scaleMask: s.key ? scaleMask(s.key.root, s.key.scale) : 0,
           drag: g?.kind === "move" ? [g.dTick, g.dKey] : [0, 0],
           resize: g?.kind === "resize" ? g.dLength : 0,
           minLength: g?.kind === "resize" ? g.minLength : 1,
@@ -245,6 +303,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
       if (STATS) {
         rollStats.draws++;
         rollStats.view = v;
+        rollStats.scaleMask = s.key ? scaleMask(s.key.root, s.key.scale) : 0;
       }
       dirty.current = false;
       shownPlayhead = at;
@@ -264,6 +323,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      centreKey.current = null;
       const scale = e.deltaMode === 1 ? 16 : 1;
       const v = view.current;
       if (e.ctrlKey || e.metaKey) {
@@ -285,7 +345,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     if (keyboard) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.repeat || modalIsOpen() || isTypingTarget(e.target)) return;
-      const t = TOOLS.find((x) => x.key === e.code);
+      const t = TOOL_BUTTONS.find((x) => x.key === e.code);
       if (!t) return;
       e.preventDefault();
       setTool(t.tool);
@@ -294,6 +354,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [keyboard]);
 
+  const newId = () => --tempId.current;
   const context = (): ToolContext | null => {
     const s = scene.current;
     if (s.channel === null) return null;
@@ -304,7 +365,10 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
       grid: s.grid,
       lastLength: lastLength.current,
       view: view.current,
-      newId: () => --tempId.current,
+      newId,
+      scale: s.snapScale && s.key ? s.key : null,
+      slide: s.slide,
+      chord: s.chord,
     };
   };
   const pointer = (e: PointerEvent<HTMLCanvasElement>): Pointer => {
@@ -337,6 +401,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     const ctx = context();
     if (!ctx) return;
     const p = pointer(e);
+    pointerTick.current = p.tick;
     const held = gesture.current;
     if (held) {
       gesture.current = take(moveGesture(ctx, held, p));
@@ -356,35 +421,123 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     dirty.current = true;
   };
 
+  // What the toolbar buttons and the shortcuts do to the notes. Each works on the selected notes
+  // of this channel; quantize, strum and humanize take all of its notes when none is selected.
+  const worked = (): WireNote[] => {
+    const ch = scene.current.channel;
+    if (ch === null) return [];
+    const picked = store.selectedNotes(ch);
+    return picked.length ? picked : store.channelNotes(ch).map((id) => store.get(id)!);
+  };
+  const transform = (run: (notes: WireNote[]) => WireNote[]) => {
+    const before = worked();
+    const edit = changed(before, run(before));
+    if (edit) queue.commit(edit);
+  };
+  const select = (notes: WireNote[]) => {
+    store.setSelection(notes.map((n) => n.id));
+    dirty.current = true;
+  };
+  const add = (notes: WireNote[]) => {
+    if (!notes.length) return;
+    queue.commit({ add: notes, update: [], delete: [] });
+    select(notes);
+  };
+  const actions = {
+    quantize: () => transform((ns) => quantize(ns, scene.current.grid)),
+    strum: (direction: "up" | "down") => transform((ns) => strum(ns, STRUM_TICKS, direction)),
+    humanize: () => transform((ns) => humanize(ns, HUMANIZE_TICKS, HUMANIZE_VELOCITY, humanizeSeed.current++)),
+    selectAll: () => {
+      const ch = scene.current.channel;
+      if (ch !== null) store.setSelection(store.channelNotes(ch));
+      dirty.current = true;
+    },
+    copy: () => {
+      const ch = scene.current.channel;
+      const picked = ch === null ? [] : store.selectedNotes(ch);
+      if (picked.length) clipboard = copy(picked);
+    },
+    paste: () => {
+      const s = scene.current;
+      if (!clipboard || s.channel === null) return;
+      const at = snapTick(Math.max(0, pointerTick.current ?? view.current.scrollTick), s.grid, "floor");
+      add(paste(clipboard, at, s.channel, newId));
+    },
+    duplicate: () => {
+      const s = scene.current;
+      const picked = s.channel === null ? [] : store.selectedNotes(s.channel);
+      add(duplicate(picked, barTicks(s.sig)).map((n) => ({ ...n, id: newId() })));
+    },
+    remove: () => {
+      const ids = store.selectedNotes(scene.current.channel ?? undefined).map((n) => n.id);
+      if (ids.length) queue.commit({ add: [], update: [], delete: ids });
+    },
+    slide: (on: boolean) => {
+      setSlide(on);
+      const picked = store.selectedNotes(scene.current.channel ?? undefined);
+      const edit = changed(picked, picked.map((n) => ({ ...n, slide: on })));
+      if (edit) queue.commit(edit);
+    },
+  };
+  const run = useRef(actions);
+  useEffect(() => {
+    run.current = actions;
+  });
+
+  // Edit shortcuts (Mod = Cmd on macOS, Ctrl elsewhere). Keys are matched by code: Alt+Q types
+  // another letter on a Mac. They stand aside for text fields, dialogs and the channel rack.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat || modalIsOpen() || isTypingTarget(e.target)) return;
+      if ((e.target as Element | null)?.closest?.(".panel-rack")) return;
+      const mod = isMac(navigator.platform) ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+      let act: (() => void) | null = null;
+      if (mod && !e.altKey && !e.shiftKey) {
+        if (e.code === "KeyA") act = () => run.current.selectAll();
+        else if (e.code === "KeyC") act = () => run.current.copy();
+        else if (e.code === "KeyV") act = () => run.current.paste();
+        else if (e.code === "KeyB") act = () => run.current.duplicate();
+      } else if (!mod && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && (e.code === "Delete" || e.code === "Backspace")) {
+        act = () => run.current.remove();
+      } else if (!mod && !e.metaKey && !e.ctrlKey && e.altKey && !e.shiftKey && e.code === "KeyQ") {
+        act = () => run.current.quantize();
+      }
+      if (!act) return;
+      e.preventDefault();
+      act();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   const keyAt = useCallback((y: number) => Math.floor(view.current.topKey - y / view.current.keyPx), []);
   const reportKey = useCallback((m: string) => report.current(m), []);
 
   return (
     <div className="roll">
-      <div className="roll-tools" role="toolbar" aria-label="Piano roll tools">
-        {TOOLS.map((t) => (
-          <button
-            key={t.tool}
-            type="button"
-            className="roll-tool"
-            aria-pressed={tool === t.tool}
-            data-hint={t.hint}
-            onClick={() => setTool(t.tool)}
-          >
-            {t.label}
-          </button>
-        ))}
-        <label className="roll-snap" data-hint="The grid notes snap to when they are drawn, moved, resized or sliced.">
-          Snap
-          <select value={gridIndex} onChange={(e) => setGridIndex(Number(e.target.value))}>
-            {GRIDS.map((g, i) => (
-              <option key={g.name} value={i}>
-                {g.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+      <RollToolbar
+        tool={tool}
+        onTool={setTool}
+        gridIndex={gridIndex}
+        onGrid={setGridIndex}
+        projectKey={projectKey}
+        onKey={(key) => void apply({ kind: "setProjectKey", key })}
+        snapScale={snapScale}
+        onSnapScale={setSnapScale}
+        slide={slide}
+        onSlide={actions.slide}
+        ghosts={ghosts}
+        onGhosts={setGhosts}
+        lane={lane}
+        onLane={setLane}
+        chord={chord}
+        onChord={setChord}
+        inversion={inversion}
+        onInversion={setInversion}
+        onQuantize={actions.quantize}
+        onStrum={actions.strum}
+        onHumanize={actions.humanize}
+      />
       <div className="roll-body">
         <KeyColumn channel={channel} keyAt={keyAt} strip={strip} onError={reportKey} releaseKeys={releaseKeys} />
         <div className="roll-wrap" ref={wrap}>
@@ -403,6 +556,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
           {empty && channel !== null && <p className="roll-empty">{EMPTY_HINT}</p>}
         </div>
       </div>
+      {lane && <VelocityLane store={store} queue={queue} channel={channel} view={view} ink={ink} />}
     </div>
   );
 }

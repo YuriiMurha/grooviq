@@ -214,4 +214,69 @@ describe("piano roll tools", () => {
     d.gesture(at(10, 60));
     expect(d.edits).toEqual([{ add: [], update: [], delete: [1] }]);
   });
+
+  it("scale_snap_puts_drawn_painted_and_moved_notes_in_key", () => {
+    // C major: key 61 (C#) is a tie between C and D, and snaps down to 60.
+    const draw = setup([], "draw");
+    draw.ctx.scale = { root: 0, scale: "major" };
+    draw.gesture(at(10, 61));
+    expect(draw.edits[0]?.add[0]).toMatchObject({ key: 60 });
+    // Without the snap it lands where it was clicked.
+    draw.ctx.scale = null;
+    draw.gesture(at(500, 61));
+    expect(draw.edits[1]?.add[0]).toMatchObject({ key: 61 });
+
+    // Paint puts the whole stroke in the snapped row.
+    const paint = setup([], "paint");
+    paint.ctx.scale = { root: 0, scale: "major" };
+    paint.gesture(at(10, 66), at(500, 66));
+    expect(paint.edits.flatMap((e) => e?.add ?? []).map((n) => n.key)).toEqual([65, 65, 65]);
+
+    // A drag moves the grabbed note to a key in the scale; the others keep their distance to it.
+    const move = setup([note(1, 0, 240, 60), note(2, 480, 240, 67)], "select");
+    move.ctx.scale = { root: 0, scale: "major" };
+    move.store.setSelection([1, 2]);
+    // One row up from C is C#, which snaps back down to C: nothing moves.
+    move.gesture(at(10, 60), at(10, 61));
+    expect(move.edits).toHaveLength(0);
+    // Two rows up is D: both move two rows.
+    move.gesture(at(10, 60), at(10, 62));
+    expect(move.edits[0]?.update.map((n) => n.key)).toEqual([62, 69]);
+  });
+
+  it("slide_notes_are_drawn_when_the_slide_toggle_is_on", () => {
+    const draw = setup([], "draw");
+    draw.ctx.slide = true;
+    draw.gesture(at(10, 60));
+    expect(draw.edits[0]?.add[0]).toMatchObject({ slide: true });
+    const paint = setup([], "paint");
+    paint.ctx.slide = true;
+    paint.gesture(at(10, 60), at(300, 60));
+    expect(paint.edits.flatMap((e) => e?.add ?? []).every((n) => n.slide)).toBe(true);
+    // Off by default.
+    const plain = setup([], "draw");
+    plain.gesture(at(10, 60));
+    expect(plain.edits[0]?.add[0]).toMatchObject({ slide: false });
+  });
+
+  it("a_chord_stamp_adds_every_voice_selected_and_dragged_together", () => {
+    const { store, ctx, edits, gesture } = setup([], "draw");
+    ctx.chord = { name: "major", inversion: 0 };
+    gesture(at(1000, 60));
+    const added = edits[0]!.add;
+    expect(added.map((n) => [n.tick, n.key, n.length, n.id])).toEqual([
+      [960, 60, 240, -1],
+      [960, 64, 240, -2],
+      [960, 67, 240, -3],
+    ]);
+    expect(store.selectedIds()).toEqual([-1, -2, -3]);
+    // In key: D major triad on D in C major, F# snapped to F.
+    ctx.scale = { root: 0, scale: "major" };
+    gesture(at(2000, 62));
+    expect(edits[1]!.add.map((n) => n.key)).toEqual([62, 65, 69]);
+    // Dragged before release the whole chord moves, and the edit that follows is the move.
+    ctx.scale = null;
+    gesture(at(3000, 60), at(3000, 62), at(3500, 63));
+    expect(edits[3]!.update.map((n) => [n.tick, n.key])).toEqual([[3360, 63], [3360, 67], [3360, 70]]);
+  });
 });

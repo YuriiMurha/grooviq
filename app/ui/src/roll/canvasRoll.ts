@@ -1,6 +1,6 @@
 import { FALLBACK, type Rgba } from "../rack/palette";
-import type { RollPalette, RollRenderer, RollScene } from "./glRoll";
-import { FLAG_SELECTED, INSTANCE_STRIDE } from "./noteStore";
+import { GHOST_ALPHA, type RollPalette, type RollRenderer, type RollScene } from "./glRoll";
+import { FLAG_GHOST, FLAG_SELECTED, FLAG_SLIDE, INK_SHIFT, INSTANCE_STRIDE } from "./noteStore";
 
 // The piano roll on a 2D canvas, for when WebGL2 is not there: the same picture, drawing only
 // the rows, lines and notes in view.
@@ -12,6 +12,18 @@ const RING = 1.5;
 
 const css = ([r, g, b, a]: Rgba, scale = 1) =>
   `rgba(${Math.round(r * scale * 255)}, ${Math.round(g * scale * 255)}, ${Math.round(b * scale * 255)}, ${a})`;
+
+/** The outline of a note as a path: a box, or for a slide note one whose right edge leans from
+ * the top corner in towards the bottom. `inset` shrinks it all round. */
+function outline(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, slide: boolean, inset: number) {
+  const lean = slide ? Math.min(h, w / 2) : 0;
+  ctx.beginPath();
+  ctx.moveTo(x + inset, y + inset);
+  ctx.lineTo(x + w - inset, y + inset);
+  ctx.lineTo(x + w - lean - inset, y + h - inset);
+  ctx.lineTo(x + inset, y + h - inset);
+  ctx.closePath();
+}
 
 export function createCanvasRoll(canvas: HTMLCanvasElement): RollRenderer | null {
   const ctx = canvas.getContext("2d", { alpha: false });
@@ -39,6 +51,10 @@ export function createCanvasRoll(canvas: HTMLCanvasElement): RollRenderer | null
       for (let k = Math.max(0, Math.floor(bottomKey)); k <= Math.min(127, Math.floor(v.topKey)); k++) {
         ctx.fillStyle = css(BLACK.has(k % 12) ? p.rowBlack : p.row);
         ctx.fillRect(0, y(k + 1), v.width, v.keyPx);
+        if (s.scaleMask && ((s.scaleMask >> k % 12) & 1) === 0) {
+          ctx.fillStyle = css(p.dim);
+          ctx.fillRect(0, y(k + 1), v.width, v.keyPx);
+        }
         ctx.fillStyle = css(k % 12 === 0 ? p.beat : p.line);
         ctx.fillRect(0, y(k) - hair, v.width, hair);
       }
@@ -59,10 +75,12 @@ export function createCanvasRoll(canvas: HTMLCanvasElement): RollRenderer | null
       }
 
       // The notes in view, the selected ones moved by the drag.
-      const ink = p.inks[s.ink] ?? FALLBACK;
+      const own = Math.min(5, Math.max(0, s.ink));
       for (let i = 0; i < count; i++) {
         const o = i * INSTANCE_STRIDE;
-        const selected = (data[o + 4] & FLAG_SELECTED) !== 0;
+        const flags = data[o + 4] | 0;
+        const selected = (flags & FLAG_SELECTED) !== 0;
+        const slide = (flags & FLAG_SLIDE) !== 0;
         let tick = data[o];
         let len = data[o + 1];
         let key = data[o + 2];
@@ -76,14 +94,19 @@ export function createCanvasRoll(canvas: HTMLCanvasElement): RollRenderer | null
         const w = Math.max(len * v.tickPx, 2);
         const top = y(key + 1);
         const h = v.keyPx - 1;
+        const index = flags >> INK_SHIFT === 0 ? own : (flags >> INK_SHIFT) - 1;
+        const ink = (slide ? p.inksB : p.inks)[index] ?? FALLBACK;
+        ctx.globalAlpha = (flags & FLAG_GHOST) !== 0 ? GHOST_ALPHA : 1;
         if (selected) {
           ctx.fillStyle = css(p.select);
-          ctx.fillRect(x, top, w, h);
+          outline(ctx, x, top, w, h, slide, 0);
+          ctx.fill();
         }
-        const inset = selected ? RING : 0;
         ctx.fillStyle = css(ink, QUIET + (1 - QUIET) * Math.min(1, Math.max(0, data[o + 3])));
-        ctx.fillRect(x + inset, top + inset, w - 2 * inset, h - 2 * inset);
+        outline(ctx, x, top, w, h, slide, selected ? RING : 0);
+        ctx.fill();
       }
+      ctx.globalAlpha = 1;
 
       if (s.playhead !== null) {
         ctx.fillStyle = css(p.playhead);

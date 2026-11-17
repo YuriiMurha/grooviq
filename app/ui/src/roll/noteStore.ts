@@ -168,6 +168,13 @@ export class NoteStore {
     return out;
   }
 
+  /** The selected notes, of `channel` only when given. */
+  selectedNotes(channel?: number): WireNote[] {
+    const out: WireNote[] = [];
+    for (let i = 0; i < this.count; i++) if (this.selected[i] && (channel === undefined || this.channels[i] === channel)) out.push(this.note(i));
+    return out;
+  }
+
   /** Slots in drawing order: by key, then by start tick (later starts on top). */
   drawOrder(): Int32Array {
     return this.order.subarray(0, this.count);
@@ -257,26 +264,55 @@ export class NoteStore {
 export const INSTANCE_STRIDE = 5;
 export const FLAG_SELECTED = 1;
 export const FLAG_SLIDE = 2;
+/** A note of another channel, drawn faint and never edited. Its channel's ink is `(flags >> 3) - 1`. */
+export const FLAG_GHOST = 4;
+export const INK_SHIFT = 3;
 
 /** The buffer `buildInstances` fills, kept between builds: a rebuild allocates nothing. */
 let scratch = new Float32Array(0);
 
-/** The renderer's instance records for one channel's notes, in drawing order. The records are
- * valid until the next build (renderers copy or redraw them before then). */
-export function buildInstances(store: NoteStore, channel: number): { data: Float32Array; count: number } {
+/** The renderer's instance records for one channel's notes, in drawing order; with `ghosts`, the
+ * notes of the other channels come first (faint, in their own channel's ink, never selected),
+ * so the channel's own notes draw on top. The records are valid until the next build
+ * (renderers copy or redraw them before then). */
+export function buildInstances(
+  store: NoteStore,
+  channel: number,
+  ghosts?: { ghosts: boolean; inkOf: (channel: number) => number },
+): { data: Float32Array; count: number; own: number } {
   const order = store.drawOrder();
+  const want = ghosts?.ghosts ? order.length : 0;
   if (scratch.length < order.length * INSTANCE_STRIDE) scratch = new Float32Array(Math.max(order.length * INSTANCE_STRIDE, scratch.length * 2));
   const data = scratch;
   let o = 0;
-  for (let p = 0; p < order.length; p++) {
-    const slot = order[p];
-    if (store.channels[slot] !== channel) continue;
+  const put = (slot: number, flags: number) => {
     data[o] = store.ticks[slot];
     data[o + 1] = store.lengths[slot];
     data[o + 2] = store.keys[slot];
     data[o + 3] = store.velocities[slot];
-    data[o + 4] = (store.selected[slot] ? FLAG_SELECTED : 0) | (store.slides[slot] ? FLAG_SLIDE : 0);
+    data[o + 4] = flags | (store.slides[slot] ? FLAG_SLIDE : 0);
     o += INSTANCE_STRIDE;
+  };
+  if (want && ghosts) {
+    // The ink of each channel is looked up once per run of notes, not per note.
+    let last = -1;
+    let flags = 0;
+    for (let p = 0; p < order.length; p++) {
+      const slot = order[p];
+      const c = store.channels[slot];
+      if (c === channel) continue;
+      if (c !== last) {
+        last = c;
+        flags = FLAG_GHOST | ((ghosts.inkOf(c) + 1) << INK_SHIFT);
+      }
+      put(slot, flags);
+    }
   }
-  return { data: data.subarray(0, o), count: o / INSTANCE_STRIDE };
+  const ghostCount = o / INSTANCE_STRIDE;
+  for (let p = 0; p < order.length; p++) {
+    const slot = order[p];
+    if (store.channels[slot] === channel) put(slot, store.selected[slot] ? FLAG_SELECTED : 0);
+  }
+  const count = o / INSTANCE_STRIDE;
+  return { data: data.subarray(0, o), count, own: count - ghostCount };
 }
