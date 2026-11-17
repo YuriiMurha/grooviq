@@ -33,6 +33,16 @@ check: ui-install ## Everything CI runs: fmt, clippy, workspace tests, UI lint/t
 check-changed: ## Only the checks the changes against origin/main need (ARGS=--plan prints the plan)
 	node scripts/check-changed.mjs $(ARGS)
 
+.PHONY: replay replay-update
+replay: ui-install ## Compare the real offline Session and both browser mocks against the shared command transcript
+	$(CARGO) test -p grooviq-project --test semantic_replay
+	npm --prefix $(UI) exec -- playwright install chromium webkit
+	npm --prefix $(UI) run e2e -- --config playwright.replay.config.ts
+
+replay-update: ## Regenerate the real-Session transcript intentionally, then verify both browser mocks
+	GROOVIQ_UPDATE_REPLAY=1 $(CARGO) test -p grooviq-project --test semantic_replay
+	$(MAKE) replay
+
 qa-ui: ui-install ## Playwright on the web build with the mock engine (WebKit and Chromium); shots in app/ui/e2e-results
 	cd $(UI) && npx playwright install chromium webkit && npm run e2e
 

@@ -62,7 +62,7 @@ fn session_matches_shared_semantic_replay() {
         actual.push(json!({"reply":reply,"view":wire(session.view()),"notes":session.notes()}));
     }
     // Explicit maintenance mode; ordinary cargo tests only verify, never bless drift.
-    if std::env::var_os("GROOVIQ_UPDATE_REPLAY").is_some() {
+    if std::env::var("GROOVIQ_UPDATE_REPLAY").as_deref() == Ok("1") {
         fixture["expected"] = json!(actual);
         std::fs::write(path, serde_json::to_string_pretty(&fixture).unwrap() + "\n").unwrap();
     }

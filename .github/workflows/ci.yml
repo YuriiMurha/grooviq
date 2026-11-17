@@ -67,6 +67,10 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test -- --run
+      - name: Semantic replay browser
+        run: npx playwright install --with-deps chromium
+      - name: Real Session / mock semantic replay
+        run: npm run e2e -- --config playwright.replay.config.ts --project chromium
       - run: npm run build
 
   # Not a required check: Playwright against the web build with the mock engine

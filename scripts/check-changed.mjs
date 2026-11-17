@@ -155,6 +155,8 @@ if (ui) {
   step("ui lint", "npm", ["run", "lint"], uiDir);
   step("ui typecheck", "npm", ["run", "typecheck"], uiDir);
   step("ui tests", "npm", ["test", "--", "--run"], uiDir);
+  step("semantic replay browser", "npx", ["playwright", "install", "chromium"], uiDir);
+  step("semantic replay", "npm", ["run", "e2e", "--", "--config", "playwright.replay.config.ts", "--project", "chromium"], uiDir);
 }
 // The app crate's build script embeds the built UI, so it needs app/ui/dist.
 if (ui || workspace || rustCrates.has("grooviq-app")) step("ui build", "npm", ["run", "build"], uiDir);
