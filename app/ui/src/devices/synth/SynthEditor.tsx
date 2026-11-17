@@ -3,6 +3,7 @@ import { SYNTH_PRESETS } from "../../api/notes";
 import type { ChannelView } from "../../api/project";
 import { useProject } from "../../project/context";
 import { EnvelopeGraph } from "../controls/EnvelopeGraph";
+import type { ParamControl } from "../controls/gesture";
 import { Knob } from "../controls/Knob";
 import { Segmented } from "../controls/Segmented";
 import { DeviceWindow } from "../DeviceWindow";
@@ -47,6 +48,7 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
   const { apply } = useProject();
   const params = useDeviceParams(channel.id, channel.synth, (id) => synthParam(id).default, onError);
   const v = params.value;
+  const ctl = (id: string): ParamControl => ({ begin: () => params.begin(id), set: (x) => params.set(id, x) });
 
   const control = ({ id, kind }: Placement, opts: { row?: boolean; size?: number } = {}) => {
     const p = synthParam(id);
@@ -79,8 +81,7 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
         variant={kind === "field" ? "field" : "knob"}
         row={opts.row}
         size={opts.size}
-        onInput={(x) => params.input(id, x)}
-        onCommit={(x) => params.commit(id, x)}
+        control={ctl(id)}
       />
     );
   };
@@ -114,8 +115,7 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
           unison={Math.round(v(`${pre}unison`))}
           detune={v(`${pre}detune`)}
           spread={v(`${pre}spread`)}
-          onInput={(x) => params.input(`${pre}shape`, x)}
-          onCommit={(x) => params.commit(`${pre}shape`, x)}
+          control={ctl(`${pre}shape`)}
         />
         <div className="osc-knobs">{slot(`osc${n}`, "side", { row: true, size: 27 })}</div>
       </div>,
@@ -133,8 +133,7 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
           decay={{ id: `${w}_decay`, param: synthParam(`${w}_decay`), value: v(`${w}_decay`) }}
           sustain={{ id: `${w}_sustain`, param: synthParam(`${w}_sustain`), value: v(`${w}_sustain`) }}
           release={{ id: `${w}_release`, param: synthParam(`${w}_release`), value: v(`${w}_release`) }}
-          onInput={params.input}
-          onCommit={params.commit}
+          begin={params.begin}
         />
         <div className="env-fields">{slot(w, "foot")}</div>
       </>,
@@ -151,7 +150,11 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
           aria-pressed={channel.preset === name}
           data-autofocus={channel.preset === name ? true : undefined}
           data-hint={`Loads the ${name} preset: every setting of this synth changes.`}
-          onClick={() => void apply({ kind: "loadSynthPreset", channel: channel.id, preset: name })}
+          onClick={() => {
+            // A preset replaces every value: no gesture of the old ones may land after it.
+            params.cancelAll();
+            void apply({ kind: "loadSynthPreset", channel: channel.id, preset: name });
+          }}
         >
           {name}
         </button>
@@ -193,8 +196,7 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
                 res={{ param: synthParam("filter_res"), value: v("filter_res") }}
                 drive={v("filter_drive")}
                 envAmount={v("filter_env_amt")}
-                onInput={params.input}
-                onCommit={params.commit}
+                begin={params.begin}
               />
               <div className="filter-knobs">{slot("filter", "foot", { size: 30 })}</div>
             </>,
@@ -228,8 +230,7 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
                   rate={v("lfo_rate")}
                   amountParam={synthParam("lfo_amount")}
                   amount={v("lfo_amount")}
-                  onInput={(x) => params.input("lfo_amount", x)}
-                  onCommit={(x) => params.commit("lfo_amount", x)}
+                  control={ctl("lfo_amount")}
                 />
                 <div className="lfo-knobs">{slot("lfo", "side", { row: true, size: 26 })}</div>
               </div>

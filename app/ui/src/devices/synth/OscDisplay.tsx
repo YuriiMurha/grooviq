@@ -1,10 +1,11 @@
 import { useRef } from "react";
-import { useBoxSize, useVerticalDrag, type ParamHandlers } from "../controls/gesture";
+import { useBoxSize, useVerticalDrag, type ParamControl } from "../controls/gesture";
 import type { ParamRange } from "../controls/paramDrag";
 import { shapeName } from "./synthLayout";
 import { oscWave } from "./waveShapes";
 
-interface Props extends ParamHandlers {
+interface Props {
+  control: ParamControl;
   n: 1 | 2;
   shapeParam: ParamRange;
   shape: number;
@@ -18,10 +19,10 @@ const path = (pts: [number, number][]) => pts.map(([x, y], i) => `${i ? "L" : "M
 
 /** One cycle of the oscillator, morphing with its shape; the unison copies fan out behind it
  * with detune and spread. Drag up or down to morph. */
-export function OscDisplay({ n, shapeParam, shape, level, unison, detune, spread, onInput, onCommit }: Props) {
+export function OscDisplay({ n, shapeParam, shape, level, unison, detune, spread, control }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const { w, h } = useBoxSize(host);
-  const { dragging, pointer } = useVerticalDrag(shapeParam, shape, { onInput, onCommit }, host);
+  const { dragging, pointer } = useVerticalDrag(shapeParam, shape, control, host);
 
   const padX = 10;
   const top = 20;

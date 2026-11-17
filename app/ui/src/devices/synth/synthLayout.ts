@@ -1,5 +1,5 @@
-// The synth editor's parameters and where each one sits. Ranges and defaults come from the
-// engine's table (tests/fixtures/device-params.json, which a Rust test keeps in step with
+// The synth editor's parameters and where each one sits. Ranges, defaults and which ones are
+// whole numbers come from the engine's table (tests/fixtures/device-params.json, which a Rust test keeps in step with
 // `grooviq_dsp::synth`); this file adds only how each one is shown and changed.
 
 import deviceParams from "../../../../../tests/fixtures/device-params.json";
@@ -17,18 +17,17 @@ interface Meta {
   does: string;
   unit: Unit;
   curve?: Curve;
-  stepped?: boolean;
   options?: string[];
 }
 
 const SHAPE_DOES = "Morphs the waveform from sine through triangle and saw to square.";
 const osc = (n: 1 | 2): Record<string, Meta> => ({
   [`osc${n}_shape`]: { label: "Shape", name: `Osc ${n} shape`, does: `Osc ${n}: ${SHAPE_DOES}`, unit: "shape" },
-  [`osc${n}_octave`]: { label: "Oct", name: `Osc ${n} octave`, does: `Osc ${n}: the octave it plays in.`, unit: "oct", stepped: true },
-  [`osc${n}_semi`]: { label: "Semi", name: `Osc ${n} semi`, does: `Osc ${n}: tunes it in semitones.`, unit: "st", stepped: true },
+  [`osc${n}_octave`]: { label: "Oct", name: `Osc ${n} octave`, does: `Osc ${n}: the octave it plays in.`, unit: "oct" },
+  [`osc${n}_semi`]: { label: "Semi", name: `Osc ${n} semi`, does: `Osc ${n}: tunes it in semitones.`, unit: "st" },
   [`osc${n}_fine`]: { label: "Fine", name: `Osc ${n} fine`, does: `Osc ${n}: fine tuning in cents.`, unit: "ct" },
   [`osc${n}_level`]: { label: "Level", name: `Osc ${n} level`, does: `Osc ${n}: how loud it is in the mix. 0 turns it off.`, unit: "pct" },
-  [`osc${n}_unison`]: { label: "Uni", name: `Osc ${n} unison`, does: `Osc ${n}: how many detuned copies play together.`, unit: "voices", stepped: true },
+  [`osc${n}_unison`]: { label: "Uni", name: `Osc ${n} unison`, does: `Osc ${n}: how many detuned copies play together.`, unit: "voices" },
   [`osc${n}_detune`]: { label: "Detune", name: `Osc ${n} detune`, does: `Osc ${n}: how far the unison copies drift apart in pitch.`, unit: "pct" },
   [`osc${n}_spread`]: { label: "Spread", name: `Osc ${n} spread`, does: `Osc ${n}: how wide the unison copies sit between left and right.`, unit: "pct" },
 });
@@ -43,9 +42,9 @@ const META: Record<string, Meta> = {
   ...osc(1),
   ...osc(2),
   sub_level: { label: "Level", name: "Sub level", does: "A sub oscillator an octave below osc 1: its level.", unit: "pct" },
-  sub_shape: { label: "Sub shape", name: "Sub shape", does: "The sub oscillator's wave.", unit: "enum", stepped: true, options: ["Sine", "Square"] },
+  sub_shape: { label: "Sub shape", name: "Sub shape", does: "The sub oscillator's wave.", unit: "enum", options: ["Sine", "Square"] },
   noise_level: { label: "Level", name: "Noise level", does: "White noise mixed in: its level.", unit: "pct" },
-  filter_type: { label: "Filter type", name: "Filter type", does: "The filter: low-pass (12 or 24 dB per octave), high-pass or band-pass.", unit: "enum", stepped: true, options: ["LP 12", "LP 24", "HP", "BP"] },
+  filter_type: { label: "Filter type", name: "Filter type", does: "The filter: low-pass (12 or 24 dB per octave), high-pass or band-pass.", unit: "enum", options: ["LP 12", "LP 24", "HP", "BP"] },
   filter_cutoff: { label: "Cutoff", name: "Filter cutoff", does: "The filter's cutoff frequency.", unit: "Hz", curve: "log" },
   filter_res: { label: "Res", name: "Filter resonance", does: "The filter's resonance: a peak at the cutoff.", unit: "pct" },
   filter_drive: { label: "Drive", name: "Filter drive", does: "Saturates the sound before the filter.", unit: "pct" },
@@ -53,12 +52,12 @@ const META: Record<string, Meta> = {
   filter_keytrack: { label: "Key trk", name: "Filter key tracking", does: "How much the cutoff follows the key played.", unit: "pct" },
   ...env("amp", "Amp"),
   ...env("flt", "Filter"),
-  lfo_shape: { label: "LFO shape", name: "LFO shape", does: "The LFO's wave.", unit: "enum", stepped: true, options: ["Sine", "Triangle", "Saw", "Square", "Random"] },
+  lfo_shape: { label: "LFO shape", name: "LFO shape", does: "The LFO's wave.", unit: "enum", options: ["Sine", "Triangle", "Saw", "Square", "Random"] },
   lfo_rate: { label: "Rate", name: "LFO rate", does: "How fast the LFO moves.", unit: "rate", curve: "log" },
   lfo_amount: { label: "Amount", name: "LFO amount", does: "How strongly the LFO moves its target.", unit: "pct" },
-  lfo_target: { label: "LFO target", name: "LFO target", does: "What the LFO moves.", unit: "enum", stepped: true, options: ["Cutoff", "Pitch", "Shape", "Volume"] },
+  lfo_target: { label: "LFO target", name: "LFO target", does: "What the LFO moves.", unit: "enum", options: ["Cutoff", "Pitch", "Shape", "Volume"] },
   glide: { label: "Glide", name: "Glide", does: "How long a note slides from the previous one in mono and legato.", unit: "glide", curve: "sqr" },
-  voice_mode: { label: "Voice mode", name: "Voice mode", does: "Poly plays chords; mono plays one note; legato slides between held notes.", unit: "enum", stepped: true, options: ["Poly", "Mono", "Legato"] },
+  voice_mode: { label: "Voice mode", name: "Voice mode", does: "Poly plays chords; mono plays one note; legato slides between held notes.", unit: "enum", options: ["Poly", "Mono", "Legato"] },
   master: { label: "Volume", name: "Volume", does: "The synth's output level.", unit: "dB" },
 };
 
@@ -75,8 +74,9 @@ export interface SynthParam extends ParamRange {
 export const SYNTH_PARAMS: SynthParam[] = deviceParams.synth.map((p) => {
   const m = META[p.id];
   if (!m) throw new Error(`The synth editor has no place for "${p.id}".`);
-  const { curve = "lin", stepped = false, ...rest } = m;
-  return { id: p.id, min: p.min, max: p.max, default: p.default, curve, stepped, ...rest };
+  const { curve = "lin", ...rest } = m;
+  // `stepped` is the engine's: it rounds these on set (`grooviq_dsp::synth::is_stepped`).
+  return { id: p.id, min: p.min, max: p.max, default: p.default, curve, stepped: p.stepped, ...rest };
 });
 
 const BY_ID = new Map(SYNTH_PARAMS.map((p) => [p.id, p]));

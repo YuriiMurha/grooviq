@@ -111,6 +111,7 @@ export function DeviceWindow({ title, device, color, index, z, toolbar, opener, 
         className="device-frame"
         role="dialog"
         aria-label={label}
+        data-device-window=""
         style={{ width: DESIGN_W, height: DESIGN_H, transform: scale === 1 ? undefined : `scale(${scale})` }}
         onKeyDown={onKeyDown}
       >

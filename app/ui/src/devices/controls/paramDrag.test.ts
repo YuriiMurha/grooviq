@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LiveCoalescer, dragValue, fromNorm, keyValue, toNorm, wheelValue, type ParamRange } from "./paramDrag";
+import { LiveCoalescer, dragValue, fromNorm, keyValue, quantize, toNorm, wheelValue, type ParamRange } from "./paramDrag";
 
 const lin: ParamRange = { min: 0, max: 1, default: 0.5, curve: "lin", stepped: false };
 const cutoff: ParamRange = { min: 20, max: 20000, default: 4000, curve: "log", stepped: false };
@@ -25,6 +25,32 @@ describe("parameter drags", () => {
     expect(dragValue(octave, 0, 28, false)).toBe(1);
     expect(dragValue(octave, 0, -60, false)).toBe(-2);
     expect(dragValue(octave, 0, 500, false)).toBe(3);
+  });
+
+  it("stepped_values_round_half_away_from_zero_like_rust", () => {
+    // The synth's `set_param` uses f32::round: halves go away from zero.
+    const semi: ParamRange = { min: -12, max: 12, default: 0, curve: "lin", stepped: true };
+    for (const [v, want] of [
+      [-1.5, -2],
+      [1.5, 2],
+      [-0.5, -1],
+      [0.5, 1],
+      [-2.5, -3],
+      [2.5, 3],
+      [-1.49, -1],
+      [-2.51, -3],
+      [-0.4, 0],
+      [-2.999, -3],
+      [-3.4, -3],
+      [3.6, 3],
+    ] as const) {
+      expect(quantize(octave, v), `octave ${v}`).toBe(want);
+    }
+    expect(quantize(semi, -11.5)).toBe(-12);
+    expect(quantize(semi, -12.5)).toBe(-12);
+    expect(quantize(semi, 11.5)).toBe(12);
+    // A drag that lands on a negative half step rounds the same way.
+    expect(dragValue(octave, 0, -45, false)).toBe(-2);
   });
 
   it("norm_round_trips_on_every_curve", () => {

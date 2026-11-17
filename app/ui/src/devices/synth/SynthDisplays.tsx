@@ -1,5 +1,6 @@
 import { useRef, useState, type PointerEvent } from "react";
-import { drawnScale, useBoxSize, useVerticalDrag, type ParamHandlers } from "../controls/gesture";
+import { GestureSet, drawnScale, useBoxSize, useVerticalDrag, type ParamControl } from "../controls/gesture";
+import type { Gesture } from "../paramGestures";
 import { quantize, type ParamRange } from "../controls/paramDrag";
 import { filterDb, lfoWave, randomSteps } from "./waveShapes";
 
@@ -21,17 +22,17 @@ interface FilterProps {
   res: { param: ParamRange; value: number };
   drive: number;
   envAmount: number;
-  onInput: (id: "filter_cutoff" | "filter_res", value: number) => void;
-  onCommit: (id: "filter_cutoff" | "filter_res", value: number) => void;
+  /** A gesture of the editor's owner on one parameter. */
+  begin: (id: string) => Gesture;
 }
 
 /** The filter's response; its knee is the cutoff. Drag sideways for the cutoff, up or down for
  * the resonance. */
-export function FilterDisplay({ type, cutoff, res, drive, envAmount, onInput, onCommit }: FilterProps) {
+export function FilterDisplay({ type, cutoff, res, drive, envAmount, begin }: FilterProps) {
   const host = useRef<HTMLDivElement>(null);
   const { w, h } = useBoxSize(host);
   const [dragging, setDragging] = useState(false);
-  const drag = useRef<{ x: number; y: number; cutoff: number; res: number; scale: number; moved: Set<"filter_cutoff" | "filter_res"> } | null>(null);
+  const drag = useRef<{ x: number; y: number; cutoff: number; res: number; scale: number; gestures: GestureSet } | null>(null);
   const top = 10;
   const bottom = h - 16;
   const fx = (f: number) => (Math.log10(f / F_LO) / DECADES) * w;
@@ -46,7 +47,8 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, onInput, on
     } catch {
       /* no pointer capture here */
     }
-    drag.current = { x: e.clientX, y: e.clientY, cutoff: cutoff.value, res: res.value, scale: drawnScale(e.currentTarget), moved: new Set() };
+    drag.current?.gestures.cancel();
+    drag.current = { x: e.clientX, y: e.clientY, cutoff: cutoff.value, res: res.value, scale: drawnScale(e.currentTarget), gestures: new GestureSet(begin) };
     setDragging(true);
   };
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
@@ -59,24 +61,25 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, onInput, on
     d.y = e.clientY;
     const c = quantize(cutoff.param, xf(fx(d.cutoff) + dx));
     const r = quantize(res.param, d.res + (dy / RES_PX) * (res.param.max - res.param.min));
+    let alive = true;
     if (c !== d.cutoff) {
       d.cutoff = c;
-      d.moved.add("filter_cutoff");
-      onInput("filter_cutoff", c);
+      alive = d.gestures.input("filter_cutoff", c);
     }
-    if (r !== d.res) {
+    if (alive && r !== d.res) {
       d.res = r;
-      d.moved.add("filter_res");
-      onInput("filter_res", r);
+      alive = d.gestures.input("filter_res", r);
     }
+    // The editor ended it (Escape, focus lost, a preset): let the rest of it go.
+    if (!alive) finish(false);
   };
-  const end = () => {
+  const finish = (commit: boolean) => {
     const d = drag.current;
     drag.current = null;
     setDragging(false);
     if (!d) return;
-    if (d.moved.has("filter_cutoff")) onCommit("filter_cutoff", d.cutoff);
-    if (d.moved.has("filter_res")) onCommit("filter_res", d.res);
+    if (commit) d.gestures.commit();
+    else d.gestures.cancel();
   };
 
   const N = Math.max(90, Math.round(w / 2));
@@ -96,9 +99,9 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, onInput, on
       data-hint="The filter's response. Drag sideways for the cutoff, up or down for the resonance (Shift for fine)."
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
-      onPointerUp={end}
-      onPointerCancel={end}
-      onLostPointerCapture={end}
+      onPointerUp={() => finish(true)}
+      onPointerCancel={() => finish(false)}
+      onLostPointerCapture={() => finish(false)}
     >
       {w > 0 && (
         <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} role="img" aria-label="Filter response">
@@ -133,7 +136,8 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, onInput, on
   );
 }
 
-interface LfoProps extends ParamHandlers {
+interface LfoProps {
+  control: ParamControl;
   shape: number;
   rate: number;
   amountParam: ParamRange;
@@ -141,10 +145,10 @@ interface LfoProps extends ParamHandlers {
 }
 
 /** Two cycles of the LFO, as tall as its amount. Drag up or down for the amount. */
-export function LfoDisplay({ shape, rate, amountParam, amount, onInput, onCommit }: LfoProps) {
+export function LfoDisplay({ shape, rate, amountParam, amount, control }: LfoProps) {
   const host = useRef<HTMLDivElement>(null);
   const { w, h } = useBoxSize(host);
-  const { dragging, pointer } = useVerticalDrag(amountParam, amount, { onInput, onCommit }, host);
+  const { dragging, pointer } = useVerticalDrag(amountParam, amount, control, host);
   const pad = 8;
   const mid = h / 2;
   const amp = (h / 2 - pad) * Math.max(0.04, amount);

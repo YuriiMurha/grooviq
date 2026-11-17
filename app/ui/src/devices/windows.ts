@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { onProjectReplaced } from "../project/replacement";
 
 // The open device windows, one per channel, in the order they opened. Anything can open one (the
 // rack's instrument button); `DeviceWindows` draws them. Raising a window changes only its
@@ -36,6 +37,11 @@ export function raiseDevice(channel: number) {
   const w = open.find((x) => x.channel === channel);
   if (w && w.z !== top) set(open.map((x) => (x === w ? { ...x, z: ++top } : x)));
 }
+
+// Channel ids start again in a new project: no window carries over.
+onProjectReplaced(() => {
+  if (open.length) set([]);
+});
 
 function subscribe(listener: () => void) {
   listeners.add(listener);

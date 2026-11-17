@@ -1,5 +1,5 @@
 import { useRef, type CSSProperties, type KeyboardEvent } from "react";
-import { useVerticalDrag, type ParamHandlers } from "./gesture";
+import { useVerticalDrag, type ParamControl } from "./gesture";
 import { keyValue, toNorm, type ParamRange } from "./paramDrag";
 
 /** The knob's arc: 270° from the lower left. */
@@ -22,7 +22,8 @@ const TRACK = arc(ARC_START, ARC_START + ARC_SWEEP);
 
 const GESTURES = "Drag up or down (Shift for fine), scroll or use the arrow keys; double-click resets it.";
 
-export interface KnobProps extends ParamHandlers {
+export interface KnobProps {
+  control: ParamControl;
   /** The parameter id, for `data-param`. */
   id: string;
   param: ParamRange;
@@ -44,16 +45,17 @@ export interface KnobProps extends ParamHandlers {
 }
 
 /** A device control: drag vertically (Shift fine), wheel, arrow keys, Home/End, double-click for
- * the default. Moves report `onInput`; the end of each gesture `onCommit`. */
-export function Knob({ id, param, value, label, name, format, does, variant = "knob", row, size, onInput, onCommit }: KnobProps) {
+ * the default. Drags and wheel turns are gestures of the editor's owner; keys and the
+ * double-click are one-shot changes. */
+export function Knob({ id, param, value, label, name, format, does, variant = "knob", row, size, control }: KnobProps) {
   const el = useRef<HTMLDivElement>(null);
-  const { dragging, pointer } = useVerticalDrag(param, value, { onInput, onCommit }, el);
+  const { dragging, pointer } = useVerticalDrag(param, value, control, el);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     const next = keyValue(param, value, e.key, e.shiftKey);
     if (next === null) return;
     e.preventDefault();
-    if (next !== value) onCommit(next);
+    if (next !== value) control.set(next);
   };
 
   const text = format(value);
@@ -78,7 +80,7 @@ export function Knob({ id, param, value, label, name, format, does, variant = "k
       style={size ? ({ "--ks": `${size}px` } as CSSProperties) : undefined}
       onKeyDown={onKeyDown}
       onDoubleClick={() => {
-        if (value !== param.default) onCommit(param.default);
+        if (value !== param.default) control.set(param.default);
       }}
       {...pointer}
     >

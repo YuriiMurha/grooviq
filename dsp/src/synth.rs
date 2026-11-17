@@ -212,8 +212,9 @@ pub const SPEC: [(f32, f32, f32); NUM_PARAMS] = [
     (-36.0, 6.0, -6.0),      // 39 master
 ];
 
-/// Parameters that are integers or enums (rounded on set).
-fn is_stepped(i: usize) -> bool {
+/// Parameters that are integers or enums: `set_param` rounds them (`f32::round`, ties away from
+/// zero). The editors step them the same way (`tests/fixtures/device-params.json`).
+pub fn is_stepped(i: usize) -> bool {
     matches!(
         i,
         OSC1_OCT

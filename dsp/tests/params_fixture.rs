@@ -5,13 +5,18 @@
 
 use grooviq_dsp::{sampler, synth};
 
-fn table(ids: &[&str], spec: &[(f32, f32, f32)]) -> String {
+/// One row per parameter; `stepped` says the device rounds it to a whole number on set.
+fn table(ids: &[&str], spec: &[(f32, f32, f32)], stepped: fn(usize) -> bool) -> String {
     assert_eq!(ids.len(), spec.len(), "ids and SPEC differ in length");
     let rows: Vec<String> = ids
         .iter()
         .zip(spec)
-        .map(|(id, (min, max, default))| {
-            format!(r#"    {{ "id": "{id}", "min": {min}, "max": {max}, "default": {default} }}"#)
+        .enumerate()
+        .map(|(i, (id, (min, max, default)))| {
+            let stepped = stepped(i);
+            format!(
+                r#"    {{ "id": "{id}", "min": {min}, "max": {max}, "default": {default}, "stepped": {stepped} }}"#
+            )
         })
         .collect();
     rows.join(",\n")
@@ -20,8 +25,8 @@ fn table(ids: &[&str], spec: &[(f32, f32, f32)]) -> String {
 fn generated() -> String {
     format!(
         "{{\n  \"synth\": [\n{}\n  ],\n  \"sampler\": [\n{}\n  ]\n}}\n",
-        table(&synth::PARAM_IDS, &synth::SPEC),
-        table(&sampler::PARAM_IDS, &sampler::SPEC)
+        table(&synth::PARAM_IDS, &synth::SPEC, synth::is_stepped),
+        table(&sampler::PARAM_IDS, &sampler::SPEC, sampler::is_stepped)
     )
 }
 

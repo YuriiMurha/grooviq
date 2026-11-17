@@ -45,10 +45,18 @@ export function fromNorm(p: ParamRange, n: number): number {
   return quantize(p, v);
 }
 
-/** Clamps to the range; whole numbers for a stepped parameter. */
+/** Clamps to the range; whole numbers for a stepped parameter (rounded like the engine). */
 export function quantize(p: ParamRange, v: number): number {
   const x = Math.min(p.max, Math.max(p.min, Number.isFinite(v) ? v : p.default));
-  return p.stepped ? Math.round(x) : x;
+  return p.stepped ? roundHalfAway(x) : x;
+}
+
+/** Rounds to a whole number with halves away from zero, as Rust's `f32::round` does (the
+ * engine rounds stepped parameters that way; `Math.round` sends -1.5 to -1, not -2). */
+export function roundHalfAway(x: number): number {
+  const r = Math.sign(x) * Math.round(Math.abs(x));
+  return r === 0 ? 0 : r; // never -0: it would show as "-0" and differ from a stored 0
+
 }
 
 /** Pixels of drag for the whole range. */

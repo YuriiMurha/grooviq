@@ -1,11 +1,41 @@
 import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import type { Gesture } from "../paramGestures";
 import { dragNorm, fromNorm, toNorm, wheelValue, type ParamRange } from "./paramDrag";
 
-/** How a control reports a change: `onInput` while a gesture moves (the engine hears it live),
- * `onCommit` once when it ends (the project stores it). */
-export interface ParamHandlers {
-  onInput: (value: number) => void;
-  onCommit: (value: number) => void;
+/** How a control changes its parameter: a gesture from the editor's owner (live while it moves,
+ * one commit or a cancel at its end), or a one-shot `set` (a key, a double-click). */
+export interface ParamControl {
+  begin: () => Gesture;
+  set: (value: number) => void;
+}
+
+/** The gestures of one drag that moves several parameters (an envelope point, the filter curve):
+ * each begins when the drag first moves it, and they all end together. */
+export class GestureSet {
+  private gestures = new Map<string, { gesture: Gesture; last: number }>();
+
+  constructor(private readonly begin: (id: string) => Gesture) {}
+
+  /** `false` once the editor ended the drag (Escape, focus lost, a preset): stop following it. */
+  input(id: string, value: number): boolean {
+    let g = this.gestures.get(id);
+    if (!g) {
+      g = { gesture: this.begin(id), last: value };
+      this.gestures.set(id, g);
+    }
+    g.last = value;
+    return g.gesture.input(value);
+  }
+
+  commit() {
+    for (const g of this.gestures.values()) g.gesture.commit(g.last);
+    this.gestures.clear();
+  }
+
+  cancel() {
+    for (const g of this.gestures.values()) g.gesture.cancel();
+    this.gestures.clear();
+  }
 }
 
 /** A wheel gesture ends this long after its last event. */
@@ -27,12 +57,19 @@ export function useLatest<T>(value: T): RefObject<T> {
 }
 
 /** A vertical drag (Shift for fine) and the wheel on one parameter. The drag keeps its own
- * unrounded position, so stepped values move after enough travel. */
-export function useVerticalDrag(param: ParamRange, value: number, handlers: ParamHandlers, el: RefObject<HTMLElement | SVGSVGElement | null>) {
+ * unrounded position, so stepped values move after enough travel. A pointer cancel, or a capture
+ * lost before the button came up, cancels the gesture; so does the editor (Escape, focus lost). */
+export function useVerticalDrag(param: ParamRange, value: number, control: ParamControl, el: RefObject<HTMLElement | SVGSVGElement | null>) {
   const [dragging, setDragging] = useState(false);
-  const drag = useRef<{ y: number; n: number; last: number; moved: boolean; scale: number } | null>(null);
-  const latest = useLatest({ param, value, handlers });
+  const drag = useRef<{ y: number; n: number; last: number; moved: boolean; scale: number; gesture: Gesture } | null>(null);
+  const latest = useLatest({ param, value, control });
 
+  const stop = () => {
+    const d = drag.current;
+    drag.current = null;
+    setDragging(false);
+    return d;
+  };
   const onPointerDown = (e: ReactPointerEvent<Element>) => {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -42,7 +79,8 @@ export function useVerticalDrag(param: ParamRange, value: number, handlers: Para
     } catch {
       /* no pointer capture here */
     }
-    drag.current = { y: e.clientY, n: toNorm(param, value), last: value, moved: false, scale: drawnScale(e.currentTarget) };
+    drag.current?.gesture.cancel();
+    drag.current = { y: e.clientY, n: toNorm(param, value), last: value, moved: false, scale: drawnScale(e.currentTarget), gesture: control.begin() };
     setDragging(true);
   };
   const onPointerMove = (e: ReactPointerEvent<Element>) => {
@@ -55,45 +93,49 @@ export function useVerticalDrag(param: ParamRange, value: number, handlers: Para
     if (v === d.last) return;
     d.last = v;
     d.moved = true;
-    handlers.onInput(v);
+    // The editor ended it (Escape, focus lost, a preset): stop following the pointer.
+    if (!d.gesture.input(v)) stop();
   };
-  const end = (commit: boolean) => {
-    const d = drag.current;
-    drag.current = null;
-    setDragging(false);
-    if (d?.moved && commit) handlers.onCommit(d.last);
+  const onPointerUp = () => {
+    const d = stop();
+    if (!d) return;
+    if (d.moved) d.gesture.commit(d.last);
+    else d.gesture.cancel();
   };
+  const cancel = () => stop()?.gesture.cancel();
 
-  // The wheel needs a listener that may prevent the page from scrolling: React's is passive.
+  // The wheel needs a listener that may prevent the page from scrolling: React's is passive. A
+  // run of wheel events is one gesture, committed once it settles.
   useEffect(() => {
     const node = el.current as HTMLElement | null;
     if (!node) return;
-    let settle: ReturnType<typeof setTimeout> | null = null;
-    let current: number | null = null;
-    // The handlers of the latest render, when the wheel settles.
-    const commitLatest = (v: number) => latest.current.handlers.onCommit(v);
+    let wheel: { gesture: Gesture; value: number; timer: ReturnType<typeof setTimeout> | null } | null = null;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const { param: p, value: v, handlers: h } = latest.current;
-      const next = wheelValue(p, current ?? v, e.deltaY || e.deltaX, e.shiftKey);
-      if (next === (current ?? v)) return;
-      current = next;
-      h.onInput(next);
-      if (settle) clearTimeout(settle);
-      settle = setTimeout(() => {
-        settle = null;
-        const done = current;
-        current = null;
-        if (done !== null) commitLatest(done);
+      const { param: p, value: v, control: c } = latest.current;
+      // A turn the editor already ended (Escape, focus lost, a preset) is over: start afresh.
+      if (wheel && !wheel.gesture.alive()) {
+        if (wheel.timer) clearTimeout(wheel.timer);
+        wheel = null;
+      }
+      wheel ??= { gesture: c.begin(), value: v, timer: null };
+      const next = wheelValue(p, wheel.value, e.deltaY || e.deltaX, e.shiftKey);
+      if (next === wheel.value || !wheel.gesture.input(next)) return;
+      wheel.value = next;
+      if (wheel.timer) clearTimeout(wheel.timer);
+      const mine = wheel;
+      wheel.timer = setTimeout(() => {
+        if (wheel === mine) wheel = null;
+        mine.gesture.commit(mine.value);
       }, WHEEL_SETTLE_MS);
     };
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => {
       node.removeEventListener("wheel", onWheel);
-      if (settle) {
-        clearTimeout(settle);
-        if (current !== null) commitLatest(current);
-      }
+      // Unmounting never commits: the editor's owner cancels what is left.
+      if (wheel?.timer) clearTimeout(wheel.timer);
+      wheel?.gesture.cancel();
+      wheel = null;
     };
   }, [el, latest]);
 
@@ -102,9 +144,11 @@ export function useVerticalDrag(param: ParamRange, value: number, handlers: Para
     pointer: {
       onPointerDown,
       onPointerMove,
-      onPointerUp: () => end(true),
-      onPointerCancel: () => end(true),
-      onLostPointerCapture: () => end(true),
+      onPointerUp,
+      onPointerCancel: cancel,
+      // After a pointerup this finds nothing; without one (the element went away, the browser
+      // took the pointer) it cancels.
+      onLostPointerCapture: cancel,
     },
   };
 }

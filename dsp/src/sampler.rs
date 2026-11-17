@@ -968,13 +968,19 @@ fn hermite(x: &[f32], pos: f64, index: impl Fn(i64) -> i64) -> f32 {
     ((c3 * t + c2) * t + c1) * t + y1
 }
 
+/// Parameters that are integers or enums: `set_param` rounds them (`f32::round`, ties away from
+/// zero). The editors step them the same way (`tests/fixtures/device-params.json`).
+pub fn is_stepped(i: usize) -> bool {
+    matches!(i, ROOT | FILTER_TYPE | VOICE_MODE)
+}
+
 impl Device for Sampler {
     fn set_param(&mut self, index: u32, value: f32) {
         let Some(mut v) = clamp_param(&SPEC, index, value) else {
             return;
         };
         let i = index as usize;
-        if i == ROOT || i == FILTER_TYPE || i == VOICE_MODE {
+        if is_stepped(i) {
             v = v.round();
         }
         let old = self.p[i];

@@ -19,6 +19,7 @@ import {
 import { formatClock } from "./ago";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ExportDialog } from "./ExportDialog";
+import { projectReplaced, projectReplacing } from "./replacement";
 import type { MenuAction } from "./shortcuts";
 
 const PROJECT_FILTER = [{ name: "Grooviq project", extensions: ["grooviq"] }];
@@ -110,7 +111,10 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: 
 
   const newProject = useCallback(async () => {
     await stopIfPlaying();
-    adopt(await enqueue(projectNew));
+    projectReplacing();
+    const fresh = await enqueue(projectNew);
+    projectReplaced();
+    adopt(fresh);
     setAutosavedAt(null);
   }, [adopt, enqueue, stopIfPlaying]);
 
@@ -118,7 +122,10 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: 
     const path = await openDialog({ title: "Open project", multiple: false, directory: false, filters: PROJECT_FILTER });
     if (typeof path !== "string") return;
     await stopIfPlaying();
-    adoptOpened(await enqueue(() => projectOpen(path)));
+    projectReplacing();
+    const opened = await enqueue(() => projectOpen(path));
+    projectReplaced();
+    adoptOpened(opened);
   }, [adoptOpened, enqueue, stopIfPlaying]);
 
   /** Runs `proceed` now if nothing is unsaved, else after the "Save changes?" prompt. */
@@ -198,7 +205,11 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: 
 
   const restore = () => {
     setRecovery(null);
-    enqueue(recoveryRestore).then(adoptOpened, fail);
+    projectReplacing();
+    enqueue(recoveryRestore).then((restored) => {
+      projectReplaced();
+      adoptOpened(restored);
+    }, fail);
   };
   const discard = () => {
     setRecovery(null);

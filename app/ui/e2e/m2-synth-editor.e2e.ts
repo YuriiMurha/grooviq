@@ -307,3 +307,273 @@ test.describe("the synth editor", () => {
     expect((await mock.view()).channels.map((c) => c.id)).toEqual([1, 2]);
   });
 });
+
+/** Drags a control straight up by `px` and keeps the button down. */
+async function dragUp(page: Page, el: Locator, px: number) {
+  const at = await centre(el);
+  await page.mouse.move(at.x, at.y);
+  await page.mouse.down();
+  for (let i = 1; i <= 4; i++) await page.mouse.move(at.x, at.y - (i * px) / 4);
+}
+
+const twoFrames = (page: Page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+
+test.describe("ending a gesture early", () => {
+  test.use({ seed: { project: withSynth(), files: soundsFor(KIT) } });
+
+  test("escape_mid_drag_restores_the_value_without_an_edit", async ({ app, mock }) => {
+    await open(app);
+    await dragUp(app, control(app, "filter_cutoff"), 40);
+    await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
+    await app.keyboard.press("Escape");
+    await expect(editor(app)).toHaveCount(0);
+    await app.mouse.up();
+    await twoFrames(app);
+    expect(await liveValue(mock, "filter_cutoff")).toBe(650);
+    expect(await paramEdits(mock)).toEqual([]);
+    expect((await stored(mock)).synth.filter_cutoff).toBe(650);
+  });
+
+  test("window_blur_mid_drag_restores_the_value_without_an_edit", async ({ app, mock }) => {
+    await open(app);
+    const knob = control(app, "filter_cutoff");
+    await dragUp(app, knob, 40);
+    await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
+    await app.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await expect.poll(() => liveValue(mock, "filter_cutoff")).toBe(650);
+    await expect(knob).toHaveAttribute("aria-valuenow", "650");
+    // The rest of that gesture does nothing.
+    await app.mouse.move(0, 0);
+    await app.mouse.up();
+    await twoFrames(app);
+    expect(await liveValue(mock, "filter_cutoff")).toBe(650);
+    expect(await paramEdits(mock)).toEqual([]);
+  });
+
+  test("pointer_cancel_restores_the_value_without_an_edit", async ({ app, mock }) => {
+    await open(app);
+    for (const el of [control(app, "filter_cutoff"), editor(app).locator(".osc-display").first()]) {
+      await dragUp(app, el, 40);
+      await el.dispatchEvent("pointercancel", { pointerId: 1, bubbles: true });
+      await app.mouse.up();
+    }
+    // An envelope point too: the amp sustain point.
+    const graph = editor(app).getByRole("img", { name: "Amp envelope" });
+    const pt = await graph.evaluate((svg) => {
+      const c = svg.querySelectorAll("circle")[1].getBoundingClientRect();
+      return { x: c.x + c.width / 2, y: c.y + c.height / 2 };
+    });
+    await app.mouse.move(pt.x, pt.y);
+    await app.mouse.down();
+    await app.mouse.move(pt.x, pt.y - 30, { steps: 4 });
+    await expect.poll(() => liveValue(mock, "amp_sustain")).toBeGreaterThan(0.12);
+    await editor(app).locator(".env-graph").first().dispatchEvent("pointercancel", { pointerId: 1, bubbles: true });
+    await app.mouse.up();
+    await twoFrames(app);
+    expect(await liveValue(mock, "filter_cutoff")).toBe(650);
+    expect(await liveValue(mock, "osc1_shape")).toBe(0);
+    expect(await liveValue(mock, "amp_sustain")).toBeCloseTo(0.12, 6);
+    expect(await paramEdits(mock)).toEqual([]);
+    expectShown(await shown(app), presetValues("808 Glide"));
+  });
+
+  test("escape_mid_filter_drag_restores_both_values", async ({ app, mock }) => {
+    await open(app);
+    const fd = editor(app).locator(".filter-display");
+    const at = await centre(fd);
+    await app.mouse.move(at.x, at.y);
+    await app.mouse.down();
+    await app.mouse.move(at.x + 40, at.y - 30, { steps: 5 });
+    await expect.poll(() => liveValue(mock, "filter_res")).toBeGreaterThan(0.05);
+    await app.keyboard.press("Escape");
+    await app.mouse.up();
+    await twoFrames(app);
+    expect(await liveValue(mock, "filter_cutoff")).toBe(650);
+    expect(await liveValue(mock, "filter_res")).toBeCloseTo(0.05, 6);
+    expect(await paramEdits(mock)).toEqual([]);
+  });
+
+  test("closing_during_a_wheel_gesture_sends_no_edit", async ({ app, mock }) => {
+    await open(app);
+    await control(app, "filter_cutoff").hover();
+    await app.mouse.wheel(0, -100);
+    await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
+    await app.keyboard.press("Escape");
+    await expect(editor(app)).toHaveCount(0);
+    await app.waitForTimeout(600);
+    expect(await paramEdits(mock)).toEqual([]);
+    expect(await liveValue(mock, "filter_cutoff")).toBe(650);
+  });
+
+  test("removing_the_channel_mid_gesture_sends_no_edit", async ({ app, mock }) => {
+    await open(app);
+    await dragUp(app, control(app, "filter_cutoff"), 40);
+    await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
+    await app.getByRole("button", { name: /^Bass / }).focus();
+    await app.keyboard.press("Delete");
+    await app.getByRole("dialog", { name: "Remove Bass?" }).getByRole("button", { name: "Remove" }).press("Enter");
+    await expect(editor(app)).toHaveCount(0);
+    await app.mouse.up();
+    await app.waitForTimeout(400);
+    expect((await mock.calls("project_edit")).map((c) => (c.args.edit as { kind: string }).kind)).toEqual(["removeChannel"]);
+  });
+});
+
+test.describe("presets during a gesture", () => {
+  test.use({ seed: { project: withSynth(), files: soundsFor(KIT) } });
+
+  test("a_preset_during_a_wheel_gesture_wins", async ({ app, mock }) => {
+    await open(app);
+    await control(app, "filter_cutoff").hover();
+    await app.mouse.wheel(0, -100);
+    await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
+    await editor(app).getByRole("button", { name: "Reese", exact: true }).evaluate((b: HTMLElement) => b.click());
+    await app.waitForTimeout(600);
+    expect(await paramEdits(mock)).toEqual([]);
+    expect(await stored(mock)).toMatchObject({ preset: "Reese", synth: presetValues("Reese") });
+    expectShown(await shown(app), presetValues("Reese"));
+  });
+
+  test("a_preset_during_a_drag_wins", async ({ app, mock }) => {
+    await open(app);
+    await dragUp(app, control(app, "filter_cutoff"), 40);
+    await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
+    await editor(app).getByRole("button", { name: "Reese", exact: true }).evaluate((b: HTMLElement) => b.click());
+    await app.mouse.move(0, 0);
+    await app.mouse.up();
+    await app.waitForTimeout(300);
+    expect(await paramEdits(mock)).toEqual([]);
+    expect(await stored(mock)).toMatchObject({ preset: "Reese", synth: presetValues("Reese") });
+    expectShown(await shown(app), presetValues("Reese"));
+  });
+});
+
+/** Another project, with a different synth at the same channel id. */
+function replacement(): MockProject {
+  const p = withSynth();
+  p.name = "Other";
+  p.channels[2] = { ...p.channels[2], name: "Replacement", synth: presetValues("Reese"), preset: "Reese" };
+  return p;
+}
+
+test.describe("replacing the project", () => {
+  test.use({
+    seed: {
+      project: withSynth(),
+      files: { ...soundsFor(KIT), "/qa/projects/Other.grooviq": { kind: "project", project: replacement() }, "/qa/projects/Same.grooviq": { kind: "project", project: withSynth() } },
+    },
+  });
+
+  test("opening_another_project_closes_the_editor", async ({ app, mock }) => {
+    await open(app);
+    await dragUp(app, control(app, "filter_cutoff"), 40);
+    await mock.eval("(m) => m.queueDialog('/qa/projects/Other.grooviq')");
+    await app.keyboard.press("ControlOrMeta+o");
+    await expect.poll(() => mock.view().then((v) => v.path)).toBe("/qa/projects/Other.grooviq");
+    await app.mouse.up();
+    await app.waitForTimeout(400);
+    await expect(app.getByRole("dialog")).toHaveCount(0);
+    expect(await paramEdits(mock)).toEqual([]);
+    expect((await stored(mock)).synth).toEqual(presetValues("Reese"));
+  });
+
+  test("reopening_the_same_file_closes_the_editor", async ({ app, mock }) => {
+    await mock.eval("(m) => m.queueDialog('/qa/projects/Same.grooviq')");
+    await app.keyboard.press("ControlOrMeta+o");
+    await expect.poll(() => mock.view().then((v) => v.path)).toBe("/qa/projects/Same.grooviq");
+    await open(app);
+    await control(app, "filter_cutoff").hover();
+    await app.mouse.wheel(0, -100);
+    await mock.eval("(m) => m.queueDialog('/qa/projects/Same.grooviq')");
+    await app.keyboard.press("ControlOrMeta+o");
+    await expect(editor(app)).toHaveCount(0);
+    await app.waitForTimeout(600);
+    expect(await paramEdits(mock)).toEqual([]);
+    expect((await stored(mock)).synth).toEqual(presetValues("808 Glide"));
+  });
+});
+
+/** The kit plus two synth channels, "Bass" (3) and "Lead" (4). */
+function twoSynths(): MockProject {
+  const p = withSynth();
+  p.channels.push({ ...p.channels[2], id: 4, name: "Lead", color: 4, synth: presetValues("Trap Lead"), preset: "Trap Lead" });
+  p.nextId = 5;
+  return p;
+}
+
+test.describe("playing from an editor", () => {
+  test.use({ seed: { project: twoSynths(), files: soundsFor(KIT) } });
+  const noteCalls = async (mock: Mock) => (await mock.calls("channel_note")).map((c) => [c.args.channel, c.args.key, c.args.on]);
+
+  test("the_typing_keyboard_plays_the_focused_editors_channel", async ({ app, mock }) => {
+    await app.getByRole("button", { name: "Edit the Bass synth" }).click();
+    await app.getByRole("button", { name: "Edit the Lead synth" }).evaluate((b: HTMLElement) => b.click());
+    const bass = app.getByRole("dialog", { name: "Bass synth" });
+    const lead = app.getByRole("dialog", { name: "Lead synth" });
+    await bass.locator('[data-param="filter_cutoff"]').focus();
+    await app.keyboard.down("z");
+    await expect.poll(() => noteCalls(mock)).toEqual([[3, 48, true]]);
+    // Focus moves to the other editor: the held note ends on Bass, the next plays on Lead.
+    await lead.locator('[data-param="filter_cutoff"]').focus();
+    await expect.poll(() => noteCalls(mock)).toEqual([
+      [3, 48, true],
+      [3, 48, false],
+    ]);
+    await app.keyboard.up("z");
+    await app.keyboard.press("x");
+    await expect.poll(() => noteCalls(mock)).toEqual([
+      [3, 48, true],
+      [3, 48, false],
+      [4, 50, true],
+      [4, 50, false],
+    ]);
+    expect(await mock.eval<string[]>("(m) => m.live()")).toEqual([]);
+  });
+
+  test("space_plays_and_stops_from_inside_an_editor", async ({ app, mock }) => {
+    await open(app);
+    await control(app, "filter_cutoff").focus();
+    await app.keyboard.press(" ");
+    await expect.poll(async () => (await mock.calls("transport_play")).length).toBe(1);
+    await app.keyboard.press(" ");
+    await expect.poll(async () => (await mock.calls("transport_stop")).length).toBe(1);
+    // On a preset button, Space plays too and does not load the preset.
+    await editor(app).getByRole("button", { name: "Reese", exact: true }).focus();
+    await app.keyboard.press(" ");
+    await expect.poll(async () => (await mock.calls("transport_play")).length).toBe(2);
+    expect((await mock.calls("project_edit")).length).toBe(0);
+  });
+
+  test("a_text_input_keeps_its_keys_while_an_editor_is_open", async ({ app, mock }) => {
+    await open(app);
+    await app.getByRole("textbox", { name: "BPM" }).focus();
+    await app.keyboard.press("z");
+    await app.keyboard.press(" ");
+    await app.waitForTimeout(200);
+    expect(await noteCalls(mock)).toEqual([]);
+    expect(await mock.calls("transport_play")).toEqual([]);
+  });
+});
+
+test.describe("stepped parameters", () => {
+  test.use({ seed: { project: withSynth(), files: soundsFor(KIT) } });
+
+  test("stepped_drags_preview_and_commit_whole_values", async ({ app, mock }) => {
+    await open(app);
+    const oct = control(app, "osc1_octave");
+    const at = await centre(oct);
+    await app.mouse.move(at.x, at.y);
+    await app.mouse.down();
+    // Down through the negative half steps, a few pixels at a time.
+    for (let i = 1; i <= 30; i++) await app.mouse.move(at.x, at.y + i * 2);
+    await app.mouse.up();
+    await expect.poll(() => paramEdits(mock)).toHaveLength(1);
+    const lives = (await liveCalls(mock, "osc1_octave")).map((c) => c.args.value as number);
+    expect(lives.length).toBeGreaterThan(0);
+    for (const v of lives) expect(Number.isInteger(v), `live ${v}`).toBe(true);
+    const [[, value]] = await paramEdits(mock);
+    expect(Number.isInteger(value)).toBe(true);
+    expect(value).toBeLessThan(-1);
+    await expect(oct).toHaveAttribute("aria-valuenow", String(value));
+  });
+});

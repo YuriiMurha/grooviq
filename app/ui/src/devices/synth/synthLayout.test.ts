@@ -5,14 +5,16 @@ import { SYNTH_PARAMS, SYNTH_SECTIONS } from "./synthLayout";
 /** The engine's parameter table, which a Rust test keeps in step with `grooviq_dsp::synth`. */
 const FIXTURE = (
   JSON.parse(readFileSync(new URL("../../../../../tests/fixtures/device-params.json", import.meta.url), "utf8")) as {
-    synth: { id: string; min: number; max: number; default: number }[];
+    synth: { id: string; min: number; max: number; default: number; stepped: boolean }[];
   }
 ).synth;
 
 describe("synth layout", () => {
   it("the_layout_matches_the_device_params_fixture", () => {
-    // Every parameter, in the engine's order, with its range and default.
-    expect(SYNTH_PARAMS.map(({ id, min, max, default: d }) => ({ id, min, max, default: d }))).toEqual(FIXTURE);
+    // Every parameter, in the engine's order, with its range, default and whether the engine
+    // rounds it (the fixture's `stepped` comes from `grooviq_dsp::synth::is_stepped`).
+    expect(SYNTH_PARAMS.map(({ id, min, max, default: d, stepped }) => ({ id, min, max, default: d, stepped }))).toEqual(FIXTURE);
+    expect(FIXTURE.filter((p) => p.stepped).length).toBeGreaterThan(0);
 
     // Each one is placed on the editor exactly once.
     const placed = SYNTH_SECTIONS.flatMap((s) => s.controls.map((c) => c.id));
