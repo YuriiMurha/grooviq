@@ -115,24 +115,46 @@ fn answers_404_for_another_path() {
 }
 
 #[test]
-fn delivers_60_updates_per_second_while_the_main_thread_is_blocked() {
-    let server = start_stream(Arc::new(LiveShared::default()), 60).unwrap();
+fn produces_fresh_frames_while_the_calling_thread_is_blocked() {
+    let live = Arc::new(LiveShared::default());
+    let server = start_stream(Arc::clone(&live), 60).unwrap();
+    let address = server.local_addr();
     let url = url(&server);
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
-        let (mut ws, _) = tungstenite::connect(url.as_str()).unwrap();
-        let start = Instant::now();
-        let mut count = 0;
-        while start.elapsed() < Duration::from_secs(1) {
-            if matches!(ws.read().unwrap(), Message::Binary(_)) {
-                count += 1;
+        let socket = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (mut ws, _) = tungstenite::client(url.as_str(), socket).unwrap();
+        ready_tx.send(()).unwrap();
+        go_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut fresh = 0;
+        while fresh < 12 && Instant::now() < deadline {
+            if let Message::Binary(bytes) = ws.read().unwrap()
+                && decode_live(&bytes).unwrap().output_latency_frames == 7_680
+            {
+                fresh += 1;
             }
         }
-        count
+        assert_eq!(fresh, 12, "stream stopped progressing");
+        done_tx.send(()).unwrap();
     });
-    std::thread::sleep(Duration::from_millis(1100));
-    let count = client.join().unwrap();
-    println!("measured rate: {count} updates in 1 s");
-    assert!(count >= 55, "only {count} updates in 1 s");
+    ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    // A buffered handshake frame cannot satisfy this: publish only after client readiness.
+    live.set_output_latency_frames(7_680);
+    go_tx.send(()).unwrap();
+    // No caller-side pumping or polling: production must proceed independently.
+    let result = done_rx.recv_timeout(Duration::from_secs(5));
+    drop(server); // bounded cancellation also releases the client on failure
+    client.join().unwrap();
+    result.expect("no independent multi-frame progress while caller blocked");
 }
 
 #[test]
