@@ -1,6 +1,6 @@
-//! Micro-benchmarks of the instruments' inner loops: one 64-frame block (the engine's block)
-//! with 1, 4 or 16 voices sounding. `cargo bench -p grooviq-dsp`; divan also counts the
-//! allocations inside each timed block, which must stay at zero.
+//! Instrument kernels at 64 frames with 1, 4 or 16 voices, and effect kernels at 64/128 frames.
+//! `cargo bench -p grooviq-dsp`; divan reports allocations inside each timed block,
+//! which must stay at zero (the realtime suite enforces that requirement).
 
 use std::sync::Arc;
 
@@ -115,30 +115,40 @@ fn synth_trap_lead_uni7_block(bencher: Bencher, voices: usize) {
 }
 
 // Keep the device continuous, but replace the in-place output with fresh stereo input on
-// every timed call. Setup, preset allocation and warmup are outside the measured closure.
+// every timed call. Input synthesis, setup, preset allocation and warmup are not timed.
 #[divan::bench(args = grooviq_dsp::ott::PRESETS, consts = [64, 128])]
 fn multiband_block<const N: usize>(bencher: Bencher, name: &str) {
     let mut device = grooviq_dsp::ott::Ott::new(SR);
     for (index, value) in grooviq_dsp::ott::preset(name).unwrap() {
         device.set_param(index, value);
     }
-    let mut frame = 0usize;
+    // A cycling bank keeps the changing phase and loud/quiet quarters without timing sinf.
+    let inputs: Vec<([f32; N], [f32; N])> = (0..64)
+        .map(|block| {
+            let mut l = [0.0; N];
+            let mut r = [0.0; N];
+            for i in 0..N {
+                let t = (block * N + i) as f32 / SR;
+                let envelope = if i < N / 4 { 0.65 } else { 0.025 };
+                l[i] = envelope
+                    * (libm::sinf(t * 439.823)
+                        + 0.5 * libm::sinf(t * 6283.185)
+                        + 0.3 * libm::sinf(t * 43982.3));
+                r[i] = envelope
+                    * (libm::sinf(t * 552.92)
+                        + 0.4 * libm::sinf(t * 9424.778)
+                        + 0.25 * libm::sinf(t * 50265.484));
+            }
+            (l, r)
+        })
+        .collect();
+    let mut next = 0;
     let mut l = [0.0; N];
     let mut r = [0.0; N];
     let mut render = || {
-        for i in 0..N {
-            let t = frame as f32 / SR;
-            let envelope = if i < N / 4 { 0.65 } else { 0.025 };
-            l[i] = envelope
-                * (libm::sinf(t * 439.823)
-                    + 0.5 * libm::sinf(t * 6283.185)
-                    + 0.3 * libm::sinf(t * 43982.3));
-            r[i] = envelope
-                * (libm::sinf(t * 552.92)
-                    + 0.4 * libm::sinf(t * 9424.778)
-                    + 0.25 * libm::sinf(t * 50265.484));
-            frame = frame.wrapping_add(1);
-        }
+        l.copy_from_slice(&inputs[next].0);
+        r.copy_from_slice(&inputs[next].1);
+        next = (next + 1) % inputs.len();
         device.process(black_box(&mut l), black_box(&mut r), None, &[]);
     };
     for _ in 0..SETTLE_BLOCKS {

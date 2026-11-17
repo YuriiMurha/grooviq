@@ -59,7 +59,7 @@ fn multiband_presets_controls_and_reset_are_realtime_safe() {
             let mut finite = true;
             let mut matches = true;
             let mut changed = [false; 2];
-            let mut meter_changed = [false; 3];
+            let mut band_has_signal = [false; 3];
             let mut meter_min = [f32::INFINITY; 6];
             let mut meter_max = [f32::NEG_INFINITY; 6];
             super::realtime(|| {
@@ -81,8 +81,8 @@ fn multiband_presets_controls_and_reset_are_realtime_safe() {
                         changed[channel] |= (out[i] - source[i]).abs() > 1e-4;
                     }
                 }
-                for (band, active) in meter_changed.iter_mut().enumerate() {
-                    *active = device.meter(band as u32) > -100.0;
+                for (band, has_signal) in band_has_signal.iter_mut().enumerate() {
+                    *has_signal = device.meter(band as u32) > -100.0;
                 }
                 for (index, &(min, max, default)) in SPEC.iter().enumerate() {
                     for value in [
@@ -119,7 +119,7 @@ fn multiband_presets_controls_and_reset_are_realtime_safe() {
             });
             assert!(
                 (0..6).all(|i| meter_max[i] - meter_min[i] > 0.01),
-                "{name}: meters vary under stress"
+                "{name} at {rate}: one or more meters did not vary under stress"
             );
             assert!(finite, "{name} at {rate}: nonfinite output/meter");
             assert!(
@@ -128,11 +128,11 @@ fn multiband_presets_controls_and_reset_are_realtime_safe() {
             );
             assert!(
                 changed.into_iter().all(|x| x),
-                "{name}: both channels processed"
+                "{name} at {rate}: one or both channels were left dry"
             );
             assert!(
-                meter_changed.into_iter().all(|x| x),
-                "{name}: all bands active"
+                band_has_signal.into_iter().all(|x| x),
+                "{name} at {rate}: one or more bands carried no measurable signal"
             );
         }
     }
