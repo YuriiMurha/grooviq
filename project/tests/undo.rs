@@ -1150,6 +1150,7 @@ fn inject(session: &mut Session, ch: u32, take: u32, key: u8, steps: u32) {
         tick,
         position: 0,
         take,
+        id: grooviq_engine::NoteId(u64::from(key)),
     };
     let events = [note(true, 0), note(false, u64::from(steps * 240))];
     session
@@ -1385,6 +1386,8 @@ fn a_generated_sequence_keeps_the_undo_invariants() {
                     tick,
                     position,
                     take,
+                    // One press per key at a time.
+                    id: grooviq_engine::NoteId(u64::from(key)),
                 };
             match rng.below(10) {
                 // A key goes down in the running take.
@@ -1647,4 +1650,82 @@ fn a_takes_growths_with_different_bars_stay_apart() {
     lengths.push(undo(&mut s).view.pattern.steps);
     lengths.push(redo(&mut s).view.pattern.steps);
     assert_eq!(lengths, vec![32, 16, 32]);
+}
+
+/// One take of two presses of key 60 on `ch`: the rack's preview (velocity 0.8) for `outer`
+/// blocks, and a typed press (velocity 0.4) that starts `before` blocks in and is let go after
+/// `inner` blocks. Both releases come before recording is switched off.
+fn nested_take(
+    session: &mut Session,
+    processor: &mut AudioProcessor,
+    ch: u32,
+    (before, inner, outer): (usize, usize, usize),
+) {
+    session.set_recording(true).unwrap();
+    render(processor, 2);
+    let preview = session.preview_on(ch).unwrap();
+    render(processor, before);
+    let typed = session.live_note_on(ch, 60, 0.4).unwrap();
+    // Each release when its own press is due, whichever comes first.
+    let mut releases = [(before + inner, Some(typed)), (outer, None)];
+    releases.sort_by_key(|r| r.0);
+    let mut at = before;
+    for (due, press) in releases {
+        render(processor, due - at);
+        at = due;
+        match press {
+            Some(press) => session.live_note_off(ch, 60, press).unwrap(),
+            None => session.preview_off(ch, preview).unwrap(),
+        }
+    }
+    render(processor, 2);
+    session.set_recording(false).unwrap();
+    render(processor, 2);
+}
+
+#[test]
+fn nested_presses_of_one_key_record_their_own_lengths_and_each_take_undoes_in_one_step() {
+    let (mut session, controller, mut processor) = rig();
+    let ch = add_synth(&mut session);
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    render(&mut processor, 2);
+    // Take 1: the typed press is let go first. Take 2: the preview is.
+    nested_take(&mut session, &mut processor, ch, (40, 20, 120));
+    nested_take(&mut session, &mut processor, ch, (40, 80, 60));
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    assert!(
+        session
+            .collect_recorded(&events, Instant::now())
+            .revision
+            .is_some()
+    );
+    // 64 frames a block at 48 kHz, 960 ticks a beat: the ticks `blocks` last.
+    let bpm = f64::from(session.project().bpm);
+    let ticks = |blocks: usize| (blocks as f64 * 64.0 * bpm * 960.0 / (48_000.0 * 60.0)) as i64;
+    let mut got: Vec<(f32, u32, u32)> = notes(&session)
+        .iter()
+        .map(|n| (n.velocity, n.tick, n.length))
+        .collect();
+    got.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.total_cmp(&b.0)));
+    assert_eq!(got.len(), 4, "{got:?}");
+    let want = [
+        (0.8, ticks(120)),
+        (0.4, ticks(20)),
+        (0.8, ticks(60)),
+        (0.4, ticks(80)),
+    ];
+    let starts = |i: usize| got[i].1;
+    assert!(starts(0) < starts(1) && starts(1) < starts(2) && starts(2) < starts(3));
+    for (i, (velocity, length)) in want.into_iter().enumerate() {
+        assert_eq!(got[i].0, velocity, "{got:?}");
+        assert!(
+            (i64::from(got[i].2) - length).abs() <= 3,
+            "note {i}: length {} for {length}: {got:?}",
+            got[i].2
+        );
+    }
+    // Each take is one step.
+    assert_eq!(undo_all(&mut session), 2);
+    assert!(notes(&session).is_empty());
 }

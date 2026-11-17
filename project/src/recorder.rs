@@ -2,15 +2,16 @@
 //!
 //! The engine's recording tap ([`RecordEvent`]) gives each live note-on and note-off with the
 //! tick played since Play (`tick`, for lengths) and the loop position heard then (`position`,
-//! where the note goes). A [`Recorder`] pairs them per (channel, key), oldest note-on first,
-//! and closes every note still held at a take's `End`.
+//! where the note goes). A [`Recorder`] pairs a note-off with the held note-on of the same
+//! press (channel, key and [`NoteId`]), so presses of one key held at once each keep their own
+//! length whichever is let go first, and closes every note still held at a take's `End`.
 //!
 //! It can also wait for a barrier ([`RecordEvent::Mark`]) and drop everything before it:
 //! silently after a new engine state (those events belong to the project before), or counting
 //! every refused note while recording switches itself off ([`Recorder::refuse_until_mark`]).
 
 use crate::notes::NewNote;
-use grooviq_engine::RecordEvent;
+use grooviq_engine::{NoteId, RecordEvent};
 use std::collections::{HashMap, VecDeque};
 
 /// A note-on still waiting for its note-off.
@@ -21,6 +22,8 @@ struct Held {
     velocity: f32,
     /// The take of the note-on (see [`RecordEvent::Note`]).
     take: u32,
+    /// The press its note-off names.
+    id: NoteId,
 }
 
 /// What the recorder waits for while it drops events.
@@ -94,7 +97,8 @@ impl Recorder {
 
     /// Takes `events` in order and returns the notes they completed, in the order they ended.
     /// A note starts at its note-on's `position`, lasts `off.tick - on.tick` ticks (at least 1)
-    /// and has the note-on's velocity. A note-off without a note-on is ignored.
+    /// and has the note-on's velocity. A note-off ends the held note-on of its own press (the
+    /// oldest, should one press be held twice); one whose press is not held is ignored.
     pub fn feed(&mut self, events: &[RecordEvent]) -> Vec<NewNote> {
         self.feed_takes(events)
             .into_iter()
@@ -123,6 +127,7 @@ impl Recorder {
                     tick,
                     position,
                     take,
+                    id,
                 } => self
                     .held
                     .entry((channel.0, key))
@@ -132,16 +137,21 @@ impl Recorder {
                         position,
                         velocity,
                         take,
+                        id,
                     }),
                 RecordEvent::Note {
                     channel,
                     key,
                     on: false,
                     tick,
+                    id,
                     ..
                 } => {
                     let held = self.held.get_mut(&(channel.0, key));
-                    if let Some(on) = held.and_then(VecDeque::pop_front) {
+                    if let Some(on) = held.and_then(|q| {
+                        let at = q.iter().position(|h| h.id == id)?;
+                        q.remove(at)
+                    }) {
                         notes.push((on.take, note(channel.0, key, on, tick)));
                     }
                 }
