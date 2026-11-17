@@ -36,10 +36,13 @@ fn exact_frames(ticks: f64, bpm: f64, sample_rate: f64) -> f64 {
 /// latency while changes are rarer (a BPM knob dragged at 60 Hz: about a second).
 pub(crate) const TEMPO_HISTORY: usize = 64;
 
-/// A stretch of play at one tempo and rate, in one pattern length and loop shift, from
-/// `frame` (where `tick` ticks had played).
+/// A stretch of play at one tempo and rate, in one pattern length and loop shift, from frame
+/// `start` on. Its ticks are counted from the playback anchor in force then (`tick` ticks had
+/// played at `frame`), exactly as playback counted them: a resize starts a segment without
+/// moving that origin.
 #[derive(Clone, Copy, Debug, Default)]
 struct Segment {
+    start: u64,
     frame: u64,
     tick: f64,
     bpm: f32,
@@ -70,10 +73,9 @@ pub(crate) struct TransportClock {
     play_frame: u64,
     /// The pattern length (ticks) playing, as the processor last reported it.
     length: u32,
-    /// Where the current segment began (a tempo, rate or length change, or Play) and the tick
-    /// played there. Only recording looks back past it.
+    /// Where the current segment began (a tempo, rate or length change, or Play). Only
+    /// recording looks back past it.
     since: u64,
-    since_tick: f64,
     /// The segments before the current one since Play, newest at `history_next - 1` (a ring:
     /// the oldest is overwritten). Fixed size, so a tempo change never allocates.
     history: [Segment; TEMPO_HISTORY],
@@ -101,7 +103,6 @@ impl TransportClock {
             play_frame: 0,
             length: STEP_TICKS * 16,
             since: 0,
-            since_tick: 0.0,
             history: [Segment::default(); TEMPO_HISTORY],
             history_len: 0,
             history_next: 0,
@@ -126,7 +127,6 @@ impl TransportClock {
         self.anchor_tick = 0.0;
         self.play_frame = at;
         self.since = at;
-        self.since_tick = 0.0;
         self.history_len = 0;
         self.loops = loops;
         self.covered = 0;
@@ -173,7 +173,6 @@ impl TransportClock {
             self.history[self.history_next] = self.segment();
             self.history_next = (self.history_next + 1) % TEMPO_HISTORY;
             self.history_len = (self.history_len + 1).min(TEMPO_HISTORY);
-            self.since_tick = self.played_at(at);
             self.since = at;
         }
     }
@@ -181,8 +180,9 @@ impl TransportClock {
     /// The segment playing now.
     fn segment(&self) -> Segment {
         Segment {
-            frame: self.since,
-            tick: self.since_tick,
+            start: self.since,
+            frame: self.anchor_frame,
+            tick: self.anchor_tick,
             bpm: self.bpm,
             sample_rate: self.sample_rate,
             shift: self.shift,
@@ -258,15 +258,15 @@ impl TransportClock {
         let mut segment = self.segment();
         for back in 1..=self.history_len {
             segment = self.history[(self.history_next + TEMPO_HISTORY - back) % TEMPO_HISTORY];
-            if frame >= segment.frame {
+            if frame >= segment.start {
                 return (segment.played_at(frame), segment);
             }
         }
-        if frame < self.play_frame || segment.frame == self.play_frame {
+        if frame < self.play_frame || segment.start == self.play_frame {
             return (segment.played_at(frame), segment);
         }
-        let span = (segment.frame - self.play_frame) as f64;
-        let tick = segment.tick * ((frame - self.play_frame) as f64 / span);
+        let span = (segment.start - self.play_frame) as f64;
+        let tick = segment.played_at(segment.start) * ((frame - self.play_frame) as f64 / span);
         (tick, segment)
     }
 
@@ -309,7 +309,12 @@ impl TransportClock {
     /// % length` with the shift and pattern length of that frame, exactly the pattern tick the
     /// sequencer played.
     pub(crate) fn record_at(&self, frame: u64, latency: u64) -> (u64, u32) {
-        let heard = frame.saturating_sub(latency).max(self.play_frame);
+        let heard = frame.saturating_sub(latency);
+        if heard <= self.play_frame {
+            // Play's first frame: tick 0 of a loop that starts there (no shift yet), whatever
+            // the history kept.
+            return (0, 0);
+        }
         let (played, segment) = self.played_then(heard);
         // Saturating: never negative.
         let tick = played.floor() as u64;
@@ -438,6 +443,44 @@ mod tests {
         assert_eq!(t.record_tick(now, now - 6_336), 0);
         // Now (10 944): 51.2 + 4 160 / 150.
         assert_eq!(t.record_tick(now, 0), 78);
+    }
+
+    #[test]
+    fn a_note_heard_before_play_is_at_the_loop_start_after_the_history_overflows() {
+        // A 240-tick pattern from frame 6 400 (120 BPM: 25 frames a tick), grown to 480 at
+        // 12 800 (the place in the loop moves it 240 on), then more tempo anchors than the
+        // history keeps: the oldest kept segment has the shift.
+        let mut t = TransportClock::new(48_000.0, 120.0);
+        t.keep_position(0, 240, 240);
+        t.start(6_400, None);
+        t.mark_covered(12_800);
+        t.keep_position(12_800, 240, 480);
+        for i in 1..=66 {
+            t.set_bpm(12_800 + 64 * i, 120.0);
+        }
+        // Heard at 6 100, before Play: the start of the loop that began playing there.
+        assert_eq!(t.record_at(17_100, 11_000), (0, 0));
+    }
+
+    #[test]
+    fn a_resize_alone_never_moves_a_recorded_tick() {
+        // 21 BPM at 48 kHz: 142.857... frames a tick, so frame 10 000 is tick 70 only as the
+        // playback map rounds it from its anchor at Play.
+        let clock = |resize: bool| {
+            let mut t = TransportClock::new(48_000.0, 21.0);
+            t.start(0, None);
+            t.mark_covered(64);
+            if resize {
+                t.keep_position(64, 3_840, 5_760);
+            }
+            t
+        };
+        let (plain, resized) = (clock(false), clock(true));
+        assert_eq!(plain.record_at(10_000, 0), (70, 70));
+        assert_eq!(resized.record_at(10_000, 0), (70, 70));
+        // The playback map does not move either.
+        assert_eq!(plain.tick_at(10_000), resized.tick_at(10_000));
+        assert_eq!(plain.frame_of(70.0), resized.frame_of(70.0));
     }
 
     #[test]

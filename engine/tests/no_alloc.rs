@@ -605,7 +605,7 @@ fn recording_never_allocates() {
     };
     let mut run = |c: &mut grooviq_engine::Controller, callbacks: usize| {
         for _ in 0..callbacks {
-            assert_no_alloc(|| p.process(&mut buf, 2));
+            realtime(|| p.process(&mut buf, 2));
         }
         c.check_health();
     };
