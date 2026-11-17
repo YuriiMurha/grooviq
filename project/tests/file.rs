@@ -264,10 +264,10 @@ fn load_rejects_non_zip_truncated_missing_json_and_newer_versions() {
     ));
     match check(
         "v2.grooviq",
-        &json_zip(r#"{"format":"grooviq-project","version":3,"somethingNew":true}"#),
+        &json_zip(r#"{"format":"grooviq-project","version":4,"somethingNew":true}"#),
     ) {
         Err(LoadError::NewerVersion { found, supported }) => {
-            assert_eq!((found, supported), (3, 2));
+            assert_eq!((found, supported), (4, 3));
         }
         other => panic!("{other:?}"),
     }
@@ -386,7 +386,7 @@ fn a_hand_written_v1_file_loads() {
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["format"], "grooviq-project");
-    assert_eq!(v["version"], 2);
+    assert_eq!(v["version"], VERSION);
     assert_eq!(v["timeSignature"]["beats"], 3);
     assert_eq!(v["currentPattern"], 2);
     assert_eq!(v["nextId"], 3);
@@ -1062,7 +1062,7 @@ fn a_v1_file_opens_and_sounds_the_same() {
     let again = dir.path().join("again.grooviq");
     save(p, &loaded.samples, &again).unwrap();
     let v = saved_json(&again);
-    assert_eq!(v["version"], 2);
+    assert_eq!(v["version"], VERSION);
     assert_eq!(v["channels"][1]["instrument"], "sampler");
     assert_eq!(v["channels"][1]["choke"], 0);
     assert_eq!(v["patterns"][0]["notes"][0]["id"], 1);
@@ -1116,7 +1116,7 @@ fn a_v2_project_survives_save_and_load() {
     save(&p, &samples, &path).unwrap();
 
     let v = saved_json(&path);
-    assert_eq!(v["version"], 2);
+    assert_eq!(v["version"], VERSION);
     assert_eq!(v["key"], serde_json::json!({"root": 9, "scale": "minor"}));
     assert_eq!(v["channels"][1]["instrument"], "synth");
     assert_eq!(v["channels"][1]["preset"], "808 Glide");
@@ -1295,11 +1295,11 @@ fn out_of_range_v2_values_are_clamped_with_warnings() {
 }
 
 #[test]
-fn a_v3_file_is_refused_as_newer() {
-    let json = serde_json::json!({"format": FORMAT, "version": 3, "channels": "whatever"});
-    match migrate(&mut Project::new(), 3) {
+fn a_v4_file_is_refused_as_newer() {
+    let json = serde_json::json!({"format": FORMAT, "version": 4, "channels": "whatever"});
+    match migrate(&mut Project::new(), 4) {
         Err(LoadError::NewerVersion { found, supported }) => {
-            assert_eq!((found, supported), (3, 2));
+            assert_eq!((found, supported), (4, 3));
         }
         other => panic!("{other:?}"),
     }
@@ -1313,8 +1313,8 @@ fn a_v3_file_is_refused_as_newer() {
     assert!(matches!(
         err,
         LoadError::NewerVersion {
-            found: 3,
-            supported: 2
+            found: 4,
+            supported: 3
         }
     ));
     assert!(
