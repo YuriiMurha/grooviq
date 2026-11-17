@@ -211,29 +211,37 @@ test.describe("export (check 13)", () => {
     });
   }
 
-  test("Cancel over an existing file keeps that file", async ({ app, mock }) => {
-    await app.keyboard.press("ControlOrMeta+r");
-    const dialog = app.getByRole("dialog", { name: "Export WAV" });
-    await mock.eval("(m) => m.files.set('/qa/out/beat.wav', { kind: 'sample', seconds: 9 })");
-    await mock.eval("(m) => m.queueDialog('/qa/out/beat.wav')");
-    await dialog.getByRole("button", { name: "Export…" }).click();
-    await expect.poll(async () => Number(await dialog.getByRole("progressbar").getAttribute("aria-valuenow"))).toBeGreaterThan(0);
-    await dialog.getByRole("button", { name: "Cancel export" }).click();
-    await expect(dialog.getByRole("button", { name: "Export…" })).toBeVisible();
-    expect(await mock.eval<number>("(m) => m.files.get('/qa/out/beat.wav')?.seconds")).toBe(9);
-    expect(await mock.eval<string[]>("(m) => [...m.files.keys()].filter((k) => k.endsWith('.part'))")).toEqual([]);
-  });
+  test.describe("held export cancellation", () => {
+    test.use({ seed: { ...kitSeed, holdExport: true } });
 
-  test("Cancel leaves no file behind and goes back to the options", async ({ app, mock }) => {
-    await app.keyboard.press("ControlOrMeta+r");
-    const dialog = app.getByRole("dialog", { name: "Export WAV" });
-    await mock.eval("(m) => m.queueDialog('/qa/out/cancelled.wav')");
-    await dialog.getByRole("button", { name: "Export…" }).click();
-    await expect.poll(async () => Number(await dialog.getByRole("progressbar").getAttribute("aria-valuenow"))).toBeGreaterThan(0);
-    await dialog.getByRole("button", { name: "Cancel export" }).click();
-    await expect(dialog.getByRole("button", { name: "Export…" })).toBeVisible();
-    await expect(dialog.getByRole("alert")).toHaveCount(0);
-    expect(await mock.eval<boolean>("(m) => m.files.has('/qa/out/cancelled.wav')")).toBe(false);
+    test("Cancel over an existing file keeps that file", async ({ app, mock }) => {
+      await app.keyboard.press("ControlOrMeta+r");
+      const dialog = app.getByRole("dialog", { name: "Export WAV" });
+      await mock.eval("(m) => m.files.set('/qa/out/beat.wav', { kind: 'sample', seconds: 9 })");
+      await mock.eval("(m) => m.queueDialog('/qa/out/beat.wav')");
+      await dialog.getByRole("button", { name: "Export…" }).click();
+      await expect.poll(async () => Number(await dialog.getByRole("progressbar").getAttribute("aria-valuenow"))).toBeGreaterThan(0);
+      await dialog.getByRole("button", { name: "Cancel export" }).click();
+      await expect.poll(() => mock.calls("project_export_cancel")).toHaveLength(1);
+      await mock.eval("(m) => m.releaseExport()");
+      await expect(dialog.getByRole("button", { name: "Export…" })).toBeVisible();
+      expect(await mock.eval<number>("(m) => m.files.get('/qa/out/beat.wav')?.seconds")).toBe(9);
+      expect(await mock.eval<string[]>("(m) => [...m.files.keys()].filter((k) => k.endsWith('.part'))")).toEqual([]);
+    });
+
+    test("Cancel leaves no file behind and goes back to the options", async ({ app, mock }) => {
+      await app.keyboard.press("ControlOrMeta+r");
+      const dialog = app.getByRole("dialog", { name: "Export WAV" });
+      await mock.eval("(m) => m.queueDialog('/qa/out/cancelled.wav')");
+      await dialog.getByRole("button", { name: "Export…" }).click();
+      await expect.poll(async () => Number(await dialog.getByRole("progressbar").getAttribute("aria-valuenow"))).toBeGreaterThan(0);
+      await dialog.getByRole("button", { name: "Cancel export" }).click();
+      await expect.poll(() => mock.calls("project_export_cancel")).toHaveLength(1);
+      await mock.eval("(m) => m.releaseExport()");
+      await expect(dialog.getByRole("button", { name: "Export…" })).toBeVisible();
+      await expect(dialog.getByRole("alert")).toHaveCount(0);
+      expect(await mock.eval<boolean>("(m) => m.files.has('/qa/out/cancelled.wav')")).toBe(false);
+    });
   });
 });
 
