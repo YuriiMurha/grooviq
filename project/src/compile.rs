@@ -128,6 +128,8 @@ pub fn engine_state(project: &Project, samples: &HashMap<u32, Arc<SampleBuf>>) -
         bpm: finite_or(project.bpm, BPM.2).clamp(BPM.0, BPM.1),
         channels,
         pattern,
+        // Projects have no time signature yet: the default 4/4.
+        ..EngineState::default()
     }
 }
 

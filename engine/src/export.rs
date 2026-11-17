@@ -115,7 +115,8 @@ impl From<hound::Error> for ExportError {
 /// Renders `state`'s pattern `options.loops` times and writes it to `path` as a stereo WAV.
 ///
 /// An engine of its own at `options.sample_rate` plays the pattern from frame 0
-/// ([`Command::PlayLoops`]) for `ticks_to_frames(loops * length)` frames. The tail follows in
+/// ([`Command::PlayLoops`], the only command it gets: the metronome and recording stay off)
+/// for `ticks_to_frames(loops * length)` frames. The tail follows in
 /// 64-frame blocks until 0.1 s of blocks in a row peak at most 1e-5, or `max_tail_seconds`
 /// have passed; the silent blocks at the end are cut. The file is written to a hidden part
 /// file of its own beside `path` (`.<name>.grooviq-<pid>-<random>.part`, created new and locked

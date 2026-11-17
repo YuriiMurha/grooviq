@@ -25,8 +25,10 @@ out vec2 v_local;
 out vec2 v_cellSize;
 flat out vec3 v_cell;
 void main() {
-  // The shadow pass draws lit cells only: an empty one collapses to a point.
-  float keep = (u_shadow > 0.5 && a_cell.y < 0.0) ? 0.0 : 1.0;
+  // The shadow pass draws lit cells only: an empty one, or a roll preview's note bar (flag 8),
+  // collapses to a point.
+  bool bar = (int(a_cell.z + 0.5) & 8) != 0;
+  float keep = (u_shadow > 0.5 && (a_cell.y < 0.0 || bar)) ? 0.0 : 1.0;
   vec2 local = mix(vec2(-u_margin), a_rect.zw + u_margin, a_corner) * keep;
   vec2 pos = a_rect.xy + u_offset + vec2(${EDGE.toFixed(1)}) + local;
   v_local = local;
@@ -64,14 +66,17 @@ void main() {
   bool focus = (flags & 1) != 0;
   bool playhead = (flags & 2) != 0;
   bool beatB = (flags & 4) != 0;
+  bool bar = (flags & 8) != 0;
 
   vec2 halfSize = v_cellSize * 0.5;
-  float d = roundedBox(v_local - halfSize, halfSize, ${RADIUS.toFixed(1)});
+  float d = roundedBox(v_local - halfSize, halfSize, min(${RADIUS.toFixed(1)}, min(halfSize.x, halfSize.y)));
   float cover = clamp(0.5 - d * u_dpr, 0.0, 1.0);
 
   vec4 c;
   if (u_shadow > 0.5) {
     c = u_inksB[ink];
+  } else if (bar) {
+    c = u_inks[ink];
   } else if (velocity < 0.0) {
     c = beatB ? u_stepB : u_stepA;
     if (playhead) c.rgb = mix(c.rgb, u_playhead.rgb, ${PLAYHEAD_MIX.toFixed(2)});
@@ -83,7 +88,7 @@ void main() {
 
   // A ring just outside the cell: focus, else the playhead around a lit step.
   vec4 ring = vec4(0.0);
-  if (u_shadow < 0.5 && (focus || (playhead && velocity >= 0.0))) {
+  if (u_shadow < 0.5 && !bar && (focus || (playhead && velocity >= 0.0))) {
     vec4 rc = focus ? u_focus : u_playhead;
     float mid = ${(RING_GAP + RING_WIDTH / 2).toFixed(1)};
     float band = abs(d - mid) - ${(RING_WIDTH / 2).toFixed(1)};

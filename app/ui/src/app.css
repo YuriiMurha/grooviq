@@ -247,11 +247,56 @@ input[type="checkbox"] {
   color: var(--faint);
 }
 
-/* ---------------- stage ---------------- */
+/* ---------------- stage: the rack and the piano roll, stacked ---------------- */
 .stage {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel {
+  flex: 1 1 0;
+  min-height: 0;
   overflow: auto;
+}
+
+.panel-rack.split {
+  flex: 0 0 var(--split);
+}
+
+.panel-roll {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.splitter {
+  flex: none;
+  height: 6px;
+  background: var(--panel);
+  border-block: 1px solid var(--line);
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.splitter:hover,
+.splitter:focus-visible {
+  background: var(--raised);
+  outline: none;
+}
+
+.workspace-empty {
+  margin: auto;
+  color: var(--faint);
 }
 
 .visually-hidden {
@@ -353,6 +398,16 @@ input[type="checkbox"] {
   overflow-x: auto;
 }
 
+.step-grid {
+  position: relative;
+}
+
+/* Where the focused cell is, for scrolling it into view. */
+.step-grid-anchor {
+  position: absolute;
+  pointer-events: none;
+}
+
 .step-grid-canvas {
   display: block;
   cursor: pointer;
@@ -409,6 +464,11 @@ input[type="checkbox"] {
   cursor: pointer;
   overflow: hidden;
   white-space: nowrap;
+}
+
+.channel-row.selected .channel-name {
+  border-color: var(--muted);
+  background: var(--raised);
 }
 
 .channel-name:active {
@@ -497,6 +557,33 @@ input[type="checkbox"] {
   gap: 12px;
   padding: 10px 16px 12px;
   color: var(--faint);
+}
+
+.add-anchor {
+  position: relative;
+}
+
+.menu.add-menu,
+.menu.row-menu {
+  position: fixed;
+  top: auto;
+  z-index: var(--z-overlay);
+}
+
+.menu-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.menu-label {
+  display: block;
+  padding: 4px 8px 2px;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .add-channel {
@@ -717,6 +804,44 @@ input[type="checkbox"] {
   box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--accent);
 }
 
+.transport-btn.record {
+  color: var(--muted);
+}
+
+.transport-btn.record[aria-pressed="true"] {
+  background: var(--rec);
+  border-color: var(--rec);
+  color: var(--paper);
+}
+
+.toggle-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 36px;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.toggle-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.toggle-btn:hover {
+  border-color: var(--muted);
+}
+
+.toggle-btn[aria-pressed="true"] {
+  background: var(--raised);
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
 .tempo,
 .position {
   display: flex;
@@ -918,5 +1043,43 @@ label.field {
   .tone,
   .transport-btn {
     transition: none;
+  }
+}
+
+/* ---------------- a narrow window (down to 900 px) ---------------- */
+.tone,
+.chip-latency,
+.field-caption,
+.save-state {
+  white-space: nowrap;
+}
+
+@media (max-width: 1000px) {
+  .toolbar {
+    gap: 10px;
+  }
+
+  .transport {
+    gap: 10px;
+  }
+
+  .transport-buttons {
+    gap: 4px;
+  }
+
+  .transport-btn {
+    width: 34px;
+  }
+
+  .toggle-btn {
+    width: 28px;
+  }
+
+  .toolbar-audio {
+    gap: 8px;
+  }
+
+  .tone {
+    padding: 0 8px;
   }
 }
