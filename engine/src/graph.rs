@@ -1,5 +1,7 @@
 //! The audio graph: a sine test tone, the synth and the channels (in insertion order), mixed
-//! into the master bus. A channel holds a sampler or a synth of its own. After each node, a NaN
+//! into the master bus. A channel holds a sampler or a synth of its own. A removed channel
+//! fades out over 5 ms first: it stays in place, "leaving" (no id lookup finds it and it takes
+//! no new notes), until the processor collects it for the trash queue. After each node, a NaN
 //! guard silences and resets a node whose block holds NaN or infinity, so one bad device cannot
 //! poison the mix. The graph also holds the pattern and the sequencer that plays it into the
 //! channels, so a rebuilt graph replays the pattern from where the transport is.
@@ -20,6 +22,8 @@ use std::sync::Arc;
 
 /// Length of every de-click ramp: tone changes and the synth fade on `AllSoundOff`.
 const RAMP_SECONDS: f32 = 0.005;
+/// Channels fading out after their removal, at most. Past that, a removed channel stops at once.
+const MAX_LEAVING: usize = MAX_CHANNELS;
 /// Note-ons of grouped channels one block chokes with. Past that, the further note-ons of the
 /// block (in channel order, then offset) choke nothing; they still play.
 const MAX_CHOKES: usize = 256;
@@ -32,7 +36,8 @@ pub(crate) struct Graph {
     generation: u64,
     tone: ToneNode,
     synth: SynthNode,
-    /// Created with room for [`MAX_CHANNELS`], so adding and removing never reallocate.
+    /// Created with room for [`MAX_CHANNELS`] plus [`MAX_LEAVING`], so adding and removing
+    /// never reallocate. Leaving channels keep their place until collected.
     #[allow(
         clippy::vec_box,
         reason = "a node arrives and leaves as a Box: moving it in or out never allocates"
@@ -62,7 +67,7 @@ impl Graph {
             generation,
             tone: ToneNode::new(sample_rate, ramp_len),
             synth: SynthNode::new(sample_rate, ramp_len),
-            channels: Vec::with_capacity(MAX_CHANNELS),
+            channels: Vec::with_capacity(MAX_CHANNELS + MAX_LEAVING),
             pattern: Box::new(PatternData::default()),
             sequencer: Sequencer::new(),
             chokes: [(0, 0, ChannelId(0)); MAX_CHOKES],
@@ -84,61 +89,85 @@ impl Graph {
         self.synth.device.set_param(index, value);
     }
 
-    /// Fades the tone, the synth and every channel out over 5 ms; the devices reset once
-    /// silent.
+    /// Fades the tone and the synth out over 5 ms (each resets once silent) and chokes every
+    /// channel: the notes it holds or has queued fade over 3 ms, and later notes play in full.
     pub(crate) fn all_sound_off(&mut self) {
         self.tone.switch_off();
         self.synth.fade_out();
         for channel in &mut self.channels {
-            channel.fade_out();
+            channel.choke_all();
         }
+    }
+
+    /// The channels that are not leaving.
+    fn present(&self) -> impl Iterator<Item = &ChannelNode> {
+        self.channels.iter().filter(|c| !c.leaving()).map(|c| &**c)
     }
 
     fn channel(&mut self, id: ChannelId) -> Option<&mut ChannelNode> {
         self.channels
             .iter_mut()
-            .find(|c| c.id() == id)
+            .find(|c| c.id() == id && !c.leaving())
             .map(|c| &mut **c)
     }
 
-    /// Points every channel's gains at its mix, given which channels are soloed now.
+    /// Points every present channel's gains at its mix, given which channels are soloed now (a
+    /// leaving one counts for nothing and keeps its gains).
     fn retarget(&mut self) {
-        let any_solo = self.channels.iter().any(|c| c.solo());
-        for channel in &mut self.channels {
+        let any_solo = self.present().any(ChannelNode::solo);
+        for channel in self.channels.iter_mut().filter(|c| !c.leaving()) {
             channel.retarget(any_solo);
         }
     }
 
     /// Puts every channel's gains at their targets at once: for a graph being built.
     pub(crate) fn settle(&mut self) {
-        let any_solo = self.channels.iter().any(|c| c.solo());
+        let any_solo = self.present().any(ChannelNode::solo);
         for channel in &mut self.channels {
             channel.settle(any_solo);
         }
     }
 
     /// Appends a channel (mixed after the others). Gives it back if the graph is full or
-    /// already has its id.
+    /// already has its id (a leaving channel's id is free again).
     pub(crate) fn add_channel(&mut self, node: Box<ChannelNode>) -> Option<Box<ChannelNode>> {
-        if self.channels.len() >= MAX_CHANNELS || self.channels.iter().any(|c| c.id() == node.id())
-        {
+        if self.present().count() >= MAX_CHANNELS || self.present().any(|c| c.id() == node.id()) {
             return Some(node);
         }
-        // Within the capacity reserved in `new`: no allocation.
+        // Within the capacity reserved in `new` (at most MAX_CHANNELS present and MAX_LEAVING
+        // leaving): no allocation.
         self.channels.push(node);
         // A soloed newcomer silences the others (it starts at its own gains already).
         self.retarget();
         None
     }
 
-    /// Takes a channel out, keeping the others in order (its pending note-offs go with it);
-    /// the caller frees it elsewhere.
+    /// Removes a channel: it fades out over 5 ms in place (taking no new notes), and
+    /// [`Self::take_departed`] hands it over once silent. Its pending sequenced note-offs are
+    /// dropped. With [`MAX_LEAVING`] channels already fading it is taken out at once and
+    /// returned, for the caller to free elsewhere.
     pub(crate) fn remove_channel(&mut self, id: ChannelId) -> Option<Box<ChannelNode>> {
-        let index = self.channels.iter().position(|c| c.id() == id)?;
-        let node = self.channels.remove(index);
+        let index = self
+            .channels
+            .iter()
+            .position(|c| c.id() == id && !c.leaving())?;
         self.sequencer.forget_channel(id);
+        let leaving = self.channels.iter().filter(|c| c.leaving()).count();
+        let removed = if leaving < MAX_LEAVING {
+            self.channels[index].leave();
+            None
+        } else {
+            Some(self.channels.remove(index))
+        };
         self.retarget();
-        Some(node)
+        removed
+    }
+
+    /// Takes out a removed channel whose fade has ended, if any, keeping the others in order;
+    /// the caller frees it elsewhere.
+    pub(crate) fn take_departed(&mut self) -> Option<Box<ChannelNode>> {
+        let index = self.channels.iter().position(|c| c.departed())?;
+        Some(self.channels.remove(index))
     }
 
     pub(crate) fn set_channel_mix(&mut self, id: ChannelId, mix: ChannelMix) {
@@ -181,18 +210,15 @@ impl Graph {
 
     /// Whether the channel's note buffer for this block is full (false for no such channel).
     pub(crate) fn channel_events_full(&self, id: ChannelId) -> bool {
-        self.channels
-            .iter()
+        self.present()
             .find(|c| c.id() == id)
-            .is_some_and(|c| c.events_full())
+            .is_some_and(ChannelNode::events_full)
     }
 
-    /// Queues a note for the channel's next block; dropped if the buffer is full or there is
-    /// no such channel.
-    pub(crate) fn channel_note(&mut self, id: ChannelId, event: NoteEvent) {
-        if let Some(channel) = self.channel(id) {
-            channel.push_event(event);
-        }
+    /// Queues a note for the channel's next block. False (and dropped) if the buffer is full
+    /// or there is no such channel.
+    pub(crate) fn channel_note(&mut self, id: ChannelId, event: NoteEvent) -> bool {
+        self.channel(id).is_some_and(|c| c.push_event(event))
     }
 
     /// Swaps in a pattern and returns the old one, to be freed elsewhere. Playback goes on at
@@ -222,7 +248,7 @@ impl Graph {
     pub(crate) fn sequence(&mut self, clock: &TransportClock, f0: u64) {
         let channels = &mut self.channels;
         self.sequencer.run(&self.pattern, clock, f0, |id, event| {
-            match channels.iter_mut().find(|c| c.id() == id) {
+            match channels.iter_mut().find(|c| c.id() == id && !c.leaving()) {
                 None => Delivery::NoChannel,
                 Some(channel) => {
                     if channel.push_event(event) {
@@ -240,9 +266,10 @@ impl Graph {
         &self.pattern
     }
 
+    /// The present channels' ids, in order.
     #[cfg(test)]
     pub(crate) fn channel_ids(&self) -> Vec<ChannelId> {
-        self.channels.iter().map(|c| c.id()).collect()
+        self.present().map(ChannelNode::id).collect()
     }
 
     pub(crate) fn tone_on(&self) -> bool {
@@ -287,6 +314,10 @@ impl Graph {
 
         let chokes = collect_chokes(&self.channels, &mut self.chokes);
         for channel in &mut self.channels {
+            // Waiting to be collected: silent for good.
+            if channel.departed() {
+                continue;
+            }
             let splits = splits_for(channel, chokes, &mut self.splits);
             // A silent channel adds nothing.
             if !channel.render(node_l, node_r, splits) {

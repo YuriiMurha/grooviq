@@ -107,6 +107,7 @@ fn groove() -> EngineState {
                 note(15, 1, 0.9),
             ],
         },
+        ..EngineState::default()
     }
 }
 
@@ -294,6 +295,7 @@ fn the_tail_rings_out_and_trailing_silence_is_cut() {
             length: 16 * STEP_TICKS,
             notes: vec![note(15, 1, 1.0)],
         },
+        ..EngineState::default()
     };
     let report = export(&state, &options(WavFormat::Float32, 1), &path).unwrap();
     let pattern = pattern_frames(&state, 1);
@@ -344,6 +346,7 @@ fn a_tenth_of_a_second_of_silence_ends_the_tail() {
                 length: 16 * STEP_TICKS,
                 notes: vec![note(15, 1, 1.0)],
             },
+            ..EngineState::default()
         }
     };
 
@@ -382,6 +385,7 @@ fn the_tail_is_capped() {
             length: 16 * STEP_TICKS,
             notes: vec![note(0, 1, 1.0)],
         },
+        ..EngineState::default()
     };
     let options = ExportOptions {
         max_tail_seconds: 1.0,
@@ -499,6 +503,7 @@ fn held_into_the_tail(sample: &Arc<SampleBuf>, step: u32) -> EngineState {
             length: 16 * STEP_TICKS,
             notes: vec![note(step, 1, 1.0)],
         },
+        ..EngineState::default()
     }
 }
 

@@ -25,6 +25,15 @@ const DEFAULT_BPM: f32 = 140.0;
 const VOLUME: (f32, f32) = (0.0, 2.0);
 /// The highest choke group; group 0 is none.
 pub const MAX_CHOKE_GROUP: u8 = 16;
+/// Beats in a bar, and the note values a beat may be (2: half notes .. 16: sixteenths).
+pub const TIME_SIGNATURE_BEATS: (u8, u8) = (1, 16);
+pub const TIME_SIGNATURE_UNITS: [u8; 4] = [2, 4, 8, 16];
+
+/// Whether `beats / unit` is a time signature the engine takes.
+pub(crate) fn time_signature_ok(beats: u8, unit: u8) -> bool {
+    (TIME_SIGNATURE_BEATS.0..=TIME_SIGNATURE_BEATS.1).contains(&beats)
+        && TIME_SIGNATURE_UNITS.contains(&unit)
+}
 
 /// Names a channel. Stable for the channel's life; never reused while it exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -276,25 +285,30 @@ pub struct EngineState {
     /// In insertion order, which is also the order they are mixed in.
     pub channels: Vec<ChannelSetup>,
     pub pattern: PatternData,
+    /// `(beats, unit)`: beats in a bar, 1..=16, and the note value of a beat, 2, 4, 8 or 16. The
+    /// metronome clicks every `3840 / unit` ticks.
+    pub time_signature: (u8, u8),
 }
 
 impl Default for EngineState {
-    /// 140 BPM, no channels, an empty 16-step pattern.
+    /// 140 BPM in 4/4, no channels, an empty 16-step pattern.
     fn default() -> Self {
         Self {
             bpm: DEFAULT_BPM,
             channels: Vec::new(),
             pattern: PatternData::default(),
+            time_signature: (4, 4),
         }
     }
 }
 
 impl EngineState {
     /// The state with every value clamped (see [`ChannelSetup`] and [`PatternData`]), or why
-    /// it is refused: more than [`MAX_CHANNELS`] channels, two with one id, or a value that is
-    /// not finite.
+    /// it is refused: more than [`MAX_CHANNELS`] channels, two with one id, a value that is
+    /// not finite or a time signature out of range.
     pub(crate) fn checked(self) -> Result<Self, ControlError> {
-        if !self.bpm.is_finite() {
+        let (beats, unit) = self.time_signature;
+        if !self.bpm.is_finite() || !time_signature_ok(beats, unit) {
             return Err(ControlError::Rejected);
         }
         if self.channels.len() > MAX_CHANNELS {
@@ -313,6 +327,7 @@ impl EngineState {
                 .map(ChannelSetup::checked)
                 .collect::<Result<_, _>>()?,
             pattern: self.pattern.checked()?,
+            time_signature: self.time_signature,
         })
     }
 

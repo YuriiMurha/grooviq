@@ -7,6 +7,7 @@ use crate::command::{Command, Msg, Trash, rebuilt_queue};
 use crate::graph::{Graph, ramp_len};
 use crate::live::{LiveShared, LiveSnapshot};
 use crate::processor::AudioProcessor;
+use crate::record::RecordEvent;
 use crate::state::{
     ChannelId, ChannelSetup, EngineState, Instrument, InstrumentKind, MAX_CHANNELS, PatternData,
 };
@@ -92,6 +93,7 @@ fn synth_defaults() -> Vec<f32> {
 pub struct Controller {
     commands: Producer<Msg>,
     trash: Consumer<Trash>,
+    recorded: Consumer<RecordEvent>,
     live: Arc<LiveShared>,
     sample_rate: f32,
     /// The state the queued commands lead to, to rebuild the graph from.
@@ -115,14 +117,14 @@ pub struct Controller {
 impl Controller {
     pub(crate) fn new(
         sample_rate: f32,
-        commands: Producer<Msg>,
-        trash: Consumer<Trash>,
+        (commands, trash, recorded): (Producer<Msg>, Consumer<Trash>, Consumer<RecordEvent>),
         live: Arc<LiveShared>,
         state: EngineState,
     ) -> Self {
         Self {
             commands,
             trash,
+            recorded,
             live,
             sample_rate,
             tone: ToneState::default(),
@@ -144,9 +146,12 @@ impl Controller {
         self.send_at(0, cmd).map_err(|_| cmd)
     }
 
-    /// Queues `cmd` for the block that contains frame `due` (0: the next block). The processor
-    /// holds back everything behind a command that is not due yet, so send in frame order.
-    pub(crate) fn send_at(&mut self, due: u64, cmd: Command) -> Result<(), ControlError> {
+    /// Queues `cmd` for the block that contains frame `due` (0: the next block); a note lands
+    /// on that exact frame. The processor holds back everything behind a command that is not
+    /// due yet, so send in frame order. For tests and the offline renderer: not part of the
+    /// API.
+    #[doc(hidden)]
+    pub fn send_at(&mut self, due: u64, cmd: Command) -> Result<(), ControlError> {
         let mut cmd = cmd.clamped().ok_or(ControlError::Rejected)?;
         if let Some(id) = cmd.channel() {
             let kind = self
@@ -179,6 +184,21 @@ impl Controller {
     /// The state the queued commands and changes lead to.
     pub fn state(&self) -> &EngineState {
         &self.state
+    }
+
+    /// Moves every recorded event waiting into `out` (appended, in the order they happened)
+    /// and returns how many. Never blocks.
+    pub fn take_recorded(&mut self, out: &mut Vec<RecordEvent>) -> usize {
+        let n = self.recorded.slots();
+        out.reserve(n);
+        // Only this side pops: the `n` waiting are there.
+        out.extend(std::iter::from_fn(|| self.recorded.pop().ok()).take(n));
+        n
+    }
+
+    /// Recorded events dropped so far because the queue was full (wraps).
+    pub fn record_dropped(&self) -> u32 {
+        self.live.record_dropped()
     }
 
     /// Adds a channel after the others, at its mix from the first frame (no fade-in). Values
@@ -249,7 +269,8 @@ impl Controller {
         Ok(())
     }
 
-    /// Replaces the whole state: stops the transport, sets the tempo, then swaps in one graph
+    /// Replaces the whole state: stops the transport, sets the tempo and the time signature,
+    /// then swaps in one graph
     /// built from `state` (cutting every note; the test tone and the synth keep their
     /// settings). Checked
     /// like [`Self::add_channel`] and [`Self::set_pattern`], and refused as a whole
@@ -257,7 +278,7 @@ impl Controller {
     /// [`MAX_CHANNELS`], `Rejected` for a value that is not finite).
     pub fn load_state(&mut self, state: EngineState) -> Result<(), ControlError> {
         let state = state.checked()?;
-        if self.commands.slots() < 3 {
+        if self.commands.slots() < 4 {
             return Err(ControlError::Full);
         }
         // The old state (and the samples only it held) is freed here, on this thread.
@@ -268,8 +289,11 @@ impl Controller {
         let tempo = Command::SetTempo {
             bpm: self.state.bpm,
         };
+        let (beats, unit) = self.state.time_signature;
+        let signature = Command::SetTimeSignature { beats, unit };
         let queued = self.commands.push(command(Command::Stop)).is_ok()
             && self.commands.push(command(tempo)).is_ok()
+            && self.commands.push(command(signature)).is_ok()
             && self.push(Msg::ReplaceGraph(graph)).is_ok();
         debug_assert!(queued);
         Ok(())
@@ -439,6 +463,9 @@ impl Controller {
             Command::TestTone { on, hz, gain_db } => self.tone = ToneState { on, hz, gain_db },
             Command::AllSoundOff => self.tone.on = false,
             Command::SetTempo { bpm } => self.state.bpm = bpm,
+            Command::SetTimeSignature { beats, unit } => {
+                self.state.time_signature = (beats, unit);
+            }
             Command::SetSynthParam { index, value } => {
                 if let Some(param) = self.synth.get_mut(index as usize) {
                     *param = value;
