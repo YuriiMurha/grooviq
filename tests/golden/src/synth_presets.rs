@@ -3,7 +3,7 @@
 //! (the `preset_` infix keeps "808 Glide" apart from the older `synth_808_glide` scene).
 
 use grooviq_dsp::synth::preset;
-use grooviq_engine::Command;
+use grooviq_engine::{Command, NoteId};
 
 use crate::Scene;
 
@@ -36,6 +36,7 @@ pub fn synth_preset_scene(preset_name: &str) -> Scene {
         key,
         velocity: 1.0,
         on,
+        id: NoteId(u32::from(key)),
     };
     events.extend([
         (0, note(48, true)),

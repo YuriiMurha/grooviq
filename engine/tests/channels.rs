@@ -3,8 +3,8 @@
 use grooviq_dsp::sampler::SPEC;
 use grooviq_engine::{
     AudioProcessor, ChannelId, ChannelMix, ChannelSetup, Command, ControlError, Controller,
-    EngineConfig, EngineState, HealthEvent, MAX_CHANNELS, PatternData, STEP_TICKS, SampleBuf,
-    SeqNote, engine, engine_with, render_offline_with,
+    EngineConfig, EngineState, HealthEvent, MAX_CHANNELS, NoteId, PatternData, STEP_TICKS,
+    SampleBuf, SeqNote, engine, engine_with, render_offline_with,
 };
 use std::f32::consts::SQRT_2;
 use std::sync::Arc;
@@ -63,6 +63,7 @@ fn note(id: u32, on: bool) -> Command {
         key: 60,
         velocity: 1.0,
         on,
+        id: NoteId(60),
     }
 }
 
@@ -570,6 +571,7 @@ fn busy() -> (EngineState, Vec<(u64, Command)>) {
                 key: 48 + (i % 24) as u8,
                 velocity: 0.5 + 0.01 * i as f32,
                 on: true,
+                id: NoteId(u32::from(48 + (i % 24) as u8)),
             },
         ));
         ev.push((frame + 400, note(id, false)));
@@ -847,6 +849,7 @@ fn synth_note(on: bool) -> Command {
         key: 60,
         velocity: 1.0,
         on,
+        id: NoteId(60),
     }
 }
 

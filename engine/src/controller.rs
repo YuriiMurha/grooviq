@@ -626,6 +626,7 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::NoteId;
     use crate::engine;
 
     fn controller() -> (Controller, AudioProcessor) {
@@ -823,6 +824,7 @@ mod tests {
             key: 60,
             velocity: 1.0,
             on: true,
+            id: NoteId(60),
         };
         assert_eq!(c.send_at(0, note), Err(ControlError::UnknownChannel));
         assert_eq!(

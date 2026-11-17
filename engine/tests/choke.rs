@@ -7,7 +7,7 @@
 use grooviq_dsp::sampler;
 use grooviq_engine::{
     ChannelId, ChannelMix, ChannelSetup, Command, EngineConfig, EngineState, MAX_CHOKE_GROUP,
-    PatternData, SampleBuf, SeqNote, engine_with, render_offline_with,
+    NoteId, PatternData, SampleBuf, SeqNote, engine_with, render_offline_with,
 };
 use std::f32::consts::SQRT_2;
 use std::sync::Arc;
@@ -71,6 +71,7 @@ fn hit(frame: u64, channel: u32) -> (u64, Command) {
             key: 60,
             velocity: 1.0,
             on: true,
+            id: NoteId(60),
         },
     )
 }
@@ -311,6 +312,7 @@ fn only_a_sounding_note_on_chokes() {
                 key: 60,
                 velocity,
                 on,
+                id: NoteId(60),
             },
         );
         left(&render(

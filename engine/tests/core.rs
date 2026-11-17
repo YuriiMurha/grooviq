@@ -2,7 +2,7 @@
 
 #[cfg(feature = "test-hooks")]
 use grooviq_engine::HealthEvent;
-use grooviq_engine::{BPM_RANGE, Command, EngineConfig, engine, render_offline};
+use grooviq_engine::{BPM_RANGE, Command, EngineConfig, NoteId, engine, render_offline};
 
 const SR: f32 = 48_000.0;
 
@@ -43,6 +43,7 @@ fn note_on(key: u8) -> Command {
         key,
         velocity: 1.0,
         on: true,
+        id: NoteId(u32::from(key)),
     }
 }
 
@@ -57,6 +58,7 @@ fn synth_onset_delay() -> usize {
         velocity: 1.0,
         on: true,
         slide: false,
+        id: 60,
     };
     synth.process(&mut l, &mut r, None, &[note]);
     onset(&l).unwrap()
@@ -138,6 +140,7 @@ fn synth_values_beyond_their_range_play_as_the_limit() {
         key: 48,
         velocity,
         on: true,
+        id: NoteId(48),
     };
     assert!(render(&[(0, loud(5.0))]) == render(&[(0, loud(1.0))]));
     let (mut c, _p) = engine(cfg());
@@ -264,6 +267,7 @@ fn output_is_identical_for_any_callback_size() {
                 key: 36,
                 velocity: 0.9,
                 on: true,
+                id: NoteId(36),
             },
         ),
         (
@@ -272,6 +276,7 @@ fn output_is_identical_for_any_callback_size() {
                 key: 36,
                 velocity: 0.0,
                 on: false,
+                id: NoteId(36),
             },
         ),
     ];
@@ -304,6 +309,7 @@ fn notes_start_at_their_frame_and_other_commands_at_their_block() {
         key: 60,
         velocity: 1.0,
         on: true,
+        id: NoteId(60),
     };
     let l = left(&render_offline(cfg(), &[(1_000, note)], 2_000, 37));
     assert!(l[..1_000].iter().all(|x| *x == 0.0));
@@ -353,6 +359,7 @@ fn all_sound_off_is_silent_within_10_ms() {
                 key: 48,
                 velocity: 1.0,
                 on: true,
+                id: NoteId(48),
             },
         ),
         (24_000, Command::AllSoundOff),
@@ -378,6 +385,7 @@ fn all_sound_off_stops_the_transport_and_the_tone_and_later_notes_still_play() {
         key: 60,
         velocity: 1.0,
         on: true,
+        id: NoteId(60),
     };
     c.send(note).unwrap();
     p.process(&mut buf, 2);
@@ -427,6 +435,7 @@ fn more_events_than_the_queue_holds_render_identically_for_any_callback_size() {
                 key: 36 + (i % 48) as u8,
                 velocity: 0.8,
                 on: i % 3 != 2,
+                id: NoteId(u32::from(36 + (i % 48) as u8)),
             };
             (i, note)
         })
@@ -436,6 +445,7 @@ fn more_events_than_the_queue_holds_render_identically_for_any_callback_size() {
             key: 40 + (i % 40) as u8,
             velocity: 0.5,
             on: i % 2 == 0,
+            id: NoteId(u32::from(40 + (i % 40) as u8)),
         };
         (5_000, note)
     }));
@@ -478,6 +488,7 @@ fn the_nan_guard_resets_the_device() {
             key: 48,
             velocity: 1.0,
             on: true,
+            id: NoteId(48),
         };
         c.send(note).unwrap();
         let mut buf = vec![0f32; 1024 * 2];

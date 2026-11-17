@@ -61,6 +61,7 @@ fn note(offset: u32, key: u8, on: bool, slide: bool) -> NoteEvent {
         velocity: 1.0,
         on,
         slide,
+        id: u32::from(key),
     }
 }
 
@@ -705,6 +706,7 @@ fn random_parameter_sweeps_never_produce_nan() {
                             velocity: rng.unit(),
                             on: rng.below(2) == 0,
                             slide: rng.below(4) == 0,
+                            id: u32::from(rng.below(128) as u8),
                         });
                     }
                     ev.sort_by_key(|e| e.offset);

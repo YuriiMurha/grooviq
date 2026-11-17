@@ -23,6 +23,7 @@ fn on(offset: u32, key: u8, slide: bool) -> NoteEvent {
         velocity: 1.0,
         on: true,
         slide,
+        id: u32::from(key),
     }
 }
 
@@ -194,6 +195,22 @@ fn off(offset: u32, key: u8) -> NoteEvent {
         velocity: 0.0,
         on: false,
         slide: false,
+        id: u32::from(key),
+    }
+}
+
+/// A note-on and note-off that name note `id` (the helpers above name each key's one note).
+fn on_n(offset: u32, key: u8, id: u32) -> NoteEvent {
+    NoteEvent {
+        id,
+        ..on(offset, key, false)
+    }
+}
+
+fn off_n(offset: u32, key: u8, id: u32) -> NoteEvent {
+    NoteEvent {
+        id,
+        ..off(offset, key)
     }
 }
 
@@ -250,14 +267,14 @@ fn synth_a_late_note_off_after_a_choke_leaves_the_newer_note_alone() {
     // choked note, so the new one plays on until its own.
     for mode in [0.0, 1.0, 2.0] {
         let mut s = sine_synth_in(mode);
-        render(&mut s, 4_800, &[on(0, 48, false)]);
+        render(&mut s, 4_800, &[on_n(0, 48, 1)]);
         s.choke();
-        let l = render(&mut s, 48_000, &[on(0, 48, false), off(100, 48)]);
+        let l = render(&mut s, 48_000, &[on_n(0, 48, 2), off_n(100, 48, 1)]);
         assert!(
             peak(&l[47_000..]) > 0.1,
             "mode {mode}: the newer note sounds"
         );
-        let l = render(&mut s, 48_000, &[off(0, 48)]);
+        let l = render(&mut s, 48_000, &[off_n(0, 48, 2)]);
         assert!(
             peak(&l[47_000..]) < 1e-4,
             "mode {mode}: its own note-off ends it"
@@ -274,14 +291,14 @@ fn synth_a_re_struck_key_keeps_its_priority() {
     for mode in [1.0, 2.0] {
         let mut s = sine_synth_in(mode);
         let events = [
-            on(0, 48, false),
-            on(4_800, 55, false),
-            on(9_600, 48, false),
-            off(14_400, 48),
-            on(19_200, 60, false),
-            off(24_000, 60),
-            off(28_800, 55),
-            off(33_600, 48),
+            on_n(0, 48, 1),
+            on_n(4_800, 55, 2),
+            on_n(9_600, 48, 3),
+            off_n(14_400, 48, 1),
+            on_n(19_200, 60, 4),
+            off_n(24_000, 60, 4),
+            off_n(28_800, 55, 2),
+            off_n(33_600, 48, 3),
         ];
         let l = render(&mut s, 81_600, &events);
         let track = pitch_track(&l[..33_600]);

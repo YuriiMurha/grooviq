@@ -4,7 +4,8 @@
 use grooviq_dsp::{sampler, synth};
 use grooviq_engine::{
     ChannelId, ChannelMix, ChannelSetup, Command, ControlError, EngineConfig, EngineState,
-    Instrument, InstrumentKind, PatternData, SampleBuf, SeqNote, engine_with, render_offline_with,
+    Instrument, InstrumentKind, NoteId, PatternData, SampleBuf, SeqNote, engine_with,
+    render_offline_with,
 };
 use std::sync::Arc;
 
@@ -70,6 +71,7 @@ fn cnote(channel: u32, key: u8, on: bool) -> Command {
         key,
         velocity: 0.8,
         on,
+        id: NoteId(u32::from(key)),
     }
 }
 
@@ -108,6 +110,7 @@ fn a_synth_channel_plays_notes_like_the_global_synth() {
                     key,
                     velocity: 0.8,
                     on,
+                    id: NoteId(u32::from(key)),
                 },
             )
         }));

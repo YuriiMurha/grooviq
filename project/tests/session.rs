@@ -2039,6 +2039,46 @@ fn start_take(controller: &Mutex<Controller>, processor: &mut AudioProcessor) ->
 }
 
 #[test]
+fn live_releases_of_one_key_end_its_presses_oldest_first() {
+    // A looping sampler (each note sounds until its release) and two presses of one key that
+    // overlap, told apart by velocity: the first release ends the first press, the second the
+    // second.
+    let (mut session, _controller, mut processor) = rig();
+    let now = Instant::now();
+    let kick = add(&mut session, "kick", now);
+    session
+        .apply(
+            Edit::SetInstrumentParam {
+                channel: kick,
+                param: "loop".into(),
+                value: 1.0,
+            },
+            now,
+        )
+        .unwrap();
+    render(&mut processor, 4);
+    session.live_note(kick, 60, 1.0, true).unwrap();
+    render(&mut processor, 40);
+    let loud = render(&mut processor, 10);
+    session.live_note(kick, 60, 0.2, true).unwrap();
+    render(&mut processor, 40);
+    let both = render(&mut processor, 10);
+    assert!((both - 1.2 * loud).abs() < 1e-3 * loud, "{both} vs {loud}");
+    session.live_note(kick, 60, 0.0, false).unwrap();
+    render(&mut processor, 200);
+    let left = render(&mut processor, 10);
+    assert!(
+        (left - 0.2 * loud).abs() < 1e-3 * loud,
+        "the quiet second press sounds on: {left} vs {loud}"
+    );
+    session.live_note(kick, 60, 0.0, false).unwrap();
+    render(&mut processor, 200);
+    assert!(render(&mut processor, 10) < 1e-4, "both ended");
+    // A release with no press left ends nothing and is not an error.
+    session.live_note(kick, 60, 0.0, false).unwrap();
+}
+
+#[test]
 fn recording_stop_sends_end_and_adds_the_notes() {
     let (mut session, controller, mut processor) = rig();
     let synth = add_synth(&mut session, "Init");

@@ -85,6 +85,7 @@ fn random_case(f: &mut Fuzz) -> Case {
                 velocity: vel,
                 on: true,
                 slide,
+                id: u32::from(key),
             },
         ));
         // most notes end, some ring through the whole case
@@ -98,6 +99,7 @@ fn random_case(f: &mut Fuzz) -> Case {
                     velocity: 0.0,
                     on: false,
                     slide: false,
+                    id: u32::from(key),
                 },
             ));
         }
@@ -273,6 +275,7 @@ fn every_preset_matches_the_scalar_reference() {
                         velocity: 0.4 + 0.035 * n as f32,
                         on: true,
                         slide: false,
+                        id: u32::from(key),
                     },
                 ));
                 events.push((
@@ -283,6 +286,7 @@ fn every_preset_matches_the_scalar_reference() {
                         velocity: 0.0,
                         on: false,
                         slide: false,
+                        id: u32::from(key),
                     },
                 ));
             }
@@ -323,6 +327,7 @@ fn chord(n: usize, on: bool) -> Vec<NoteEvent> {
             velocity: 0.8,
             on,
             slide: false,
+            id: u32::from(40 + 3 * i as u8),
         })
         .collect()
 }

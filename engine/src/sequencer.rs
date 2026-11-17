@@ -14,6 +14,7 @@
 //! Real-time: nothing here allocates, frees or locks.
 
 use crate::BLOCK;
+use crate::command::NoteId;
 use crate::state::{ChannelId, PatternData, SeqNote};
 use crate::transport::TransportClock;
 use grooviq_dsp::NoteEvent;
@@ -38,12 +39,15 @@ struct PendingOff {
     frame: u64,
     channel: ChannelId,
     key: u8,
+    /// The id its note-on carried.
+    id: u32,
 }
 
 const NO_OFF: PendingOff = PendingOff {
     frame: 0,
     channel: ChannelId(0),
     key: 0,
+    id: 0,
 };
 
 pub(crate) struct Sequencer {
@@ -56,6 +60,10 @@ pub(crate) struct Sequencer {
     count: usize,
     /// No pending note-off is due before this frame (`u64::MAX` when none waits).
     earliest: u64,
+    /// Numbers the notes played: each note-on and its note-off carry the id it makes, so a
+    /// note-off ends its own note, not another one on its key (a short note inside a long one,
+    /// a live note). Ids have [`NoteId::SEQUENCED`] set, which a live note never has.
+    played: u32,
 }
 
 impl Sequencer {
@@ -67,6 +75,7 @@ impl Sequencer {
             pending: [NO_OFF; PENDING],
             count: 0,
             earliest: u64::MAX,
+            played: 0,
         }
     }
 
@@ -176,12 +185,15 @@ impl Sequencer {
         if self.count == PENDING {
             return;
         }
+        let id = NoteId::SEQUENCED | (self.played & !NoteId::SEQUENCED);
+        self.played = self.played.wrapping_add(1);
         let on = NoteEvent {
             offset: offset as u32,
             key: note.key,
             velocity: note.velocity,
             on: true,
             slide: note.slide,
+            id,
         };
         if sink(note.channel, on) != Delivery::Taken {
             return;
@@ -193,6 +205,7 @@ impl Sequencer {
             frame,
             channel: note.channel,
             key: note.key,
+            id,
         };
         self.count += 1;
         self.earliest = self.earliest.min(frame);
@@ -221,6 +234,7 @@ impl Sequencer {
                     velocity: 0.0,
                     on: false,
                     slide: false,
+                    id: off.id,
                 };
                 if sink(off.channel, event) != Delivery::Full {
                     // Every slot above `i` was already visited, so the one moved in is too.

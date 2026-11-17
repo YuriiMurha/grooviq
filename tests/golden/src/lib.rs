@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use grooviq_dsp::synth::preset;
-use grooviq_engine::{Command, EngineConfig, render_offline};
+use grooviq_engine::{Command, EngineConfig, NoteId, render_offline};
 
 pub mod devices;
 pub mod drums;
@@ -54,6 +54,7 @@ pub fn scenes() -> Vec<Scene> {
         key,
         velocity: 1.0,
         on,
+        id: NoteId(u32::from(key)),
     };
     // Key 39 starts while 36 is held: a legato slide. Then both release.
     events.extend([

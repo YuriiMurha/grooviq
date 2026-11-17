@@ -63,6 +63,7 @@ fn on(offset: u32, key: u8, velocity: f32) -> NoteEvent {
         velocity,
         on: true,
         slide: false,
+        id: u32::from(key),
     }
 }
 
@@ -73,6 +74,22 @@ fn off(offset: u32, key: u8) -> NoteEvent {
         velocity: 0.0,
         on: false,
         slide: false,
+        id: u32::from(key),
+    }
+}
+
+/// A note-on and note-off that name note `id` (the helpers above name each key's one note).
+fn on_n(offset: u32, key: u8, velocity: f32, id: u32) -> NoteEvent {
+    NoteEvent {
+        id,
+        ..on(offset, key, velocity)
+    }
+}
+
+fn off_n(offset: u32, key: u8, id: u32) -> NoteEvent {
+    NoteEvent {
+        id,
+        ..off(offset, key)
     }
 }
 
@@ -324,17 +341,17 @@ fn one_shot_ignores_note_off_and_gate_mode_releases() {
 }
 
 #[test]
-fn a_note_off_releases_only_the_oldest_held_voice_on_its_key() {
-    // Two overlapping notes on one key, told apart by velocity: the first note-off releases
-    // the first note only, the second note-off the second.
+fn a_note_off_releases_only_its_own_note_on_its_key() {
+    // Two overlapping notes on one key, told apart by velocity: the first note's note-off
+    // releases the first note only, the second's the second.
     let mut s = sampler(SR, buf(SR, vec![1.0; SR as usize]));
     s.set_param(p("one_shot"), 0.0);
     s.set_param(p("release"), 40.0);
     let events = [
-        on(0, 60, 0.25),
-        on(1_000, 60, 0.5),
-        off(2_000, 60),
-        off(12_000, 60),
+        on_n(0, 60, 0.25, 1),
+        on_n(1_000, 60, 0.5, 2),
+        off_n(2_000, 60, 1),
+        off_n(12_000, 60, 2),
     ];
     let (l, _) = render(&mut s, 24_000, &events);
     assert!((l[1_900] - 0.75).abs() < 1e-3, "both sound: {}", l[1_900]);
@@ -358,10 +375,10 @@ fn a_late_note_off_of_a_finished_voice_leaves_the_newer_note_alone() {
     s.set_param(p("one_shot"), 0.0);
     s.set_param(p("release"), 1.0);
     let events = [
-        on(0, 60, 1.0),
-        on(4_900, 60, 1.0),
-        off(5_000, 60),
-        off(9_000, 60),
+        on_n(0, 60, 1.0, 1),
+        on_n(4_900, 60, 1.0, 2),
+        off_n(5_000, 60, 1),
+        off_n(9_000, 60, 2),
     ];
     let (l, _) = render(&mut s, 12_000, &events);
     assert_eq!(l[4_850], 0.0, "the first note ended by itself");
@@ -1123,10 +1140,10 @@ fn a_silent_sustain_zero_voice_frees_its_slot() {
         &[1.0; 10 * SR as usize],
         &[("one_shot", 0.0), ("sustain", 0.0), ("decay", 10.0)],
     );
-    render(&mut s, 9_600, &[on(0, 60, 1.0)]);
+    render(&mut s, 9_600, &[on_n(0, 60, 1.0, 1)]);
     assert_eq!(s.active_voices(), 0);
     s.set_param(p("sustain"), 1.0);
-    let (l, _) = render(&mut s, 9_600, &[on(0, 60, 1.0), off(100, 60)]);
+    let (l, _) = render(&mut s, 9_600, &[on_n(0, 60, 1.0, 2), off_n(100, 60, 1)]);
     assert!(
         (l[9_000] - 1.0).abs() < 1e-6,
         "the newer note sounds: {}",
@@ -1485,25 +1502,31 @@ fn a_late_note_off_of_a_slid_note_leaves_the_newer_note_alone() {
     // 48 slides to 52, then a new 48 starts before the first 48's note-off arrives. That
     // note-off belongs to the note that slid away: the new 48 plays on until its own. (A short
     // 52 first, so the slide is 52's second note: the slid voice must take the slide's own
-    // note-off, not one that only matches by count.)
+    // note-off, not the earlier 52's.)
     let mut s = configured(&dc(), &[("one_shot", 0.0), ("release", 1.0)]);
     let events = [
-        on(0, 52, 1.0),
-        off(10, 52),
-        on(20, 48, 1.0),
-        slide(4_800, 52, 1.0),
-        on(9_600, 48, 1.0),
-        off(12_000, 48),
+        on_n(0, 52, 1.0, 1),
+        off_n(10, 52, 1),
+        on_n(20, 48, 1.0, 2),
+        NoteEvent {
+            id: 3,
+            ..slide(4_800, 52, 1.0)
+        },
+        on_n(9_600, 48, 1.0, 4),
+        off_n(12_000, 48, 2),
     ];
     let (l, _) = render(&mut s, 14_400, &events);
     assert!((l[14_399] - 2.0).abs() < 1e-6, "both sound: {}", l[14_399]);
-    let (l, _) = render(&mut s, 4_800, &[off(0, 48)]);
+    // The earlier 52's note-off again: it never ends the slide.
+    let (l, _) = render(&mut s, 4_800, &[off_n(0, 52, 1)]);
+    assert!((l[4_799] - 2.0).abs() < 1e-6, "still both: {}", l[4_799]);
+    let (l, _) = render(&mut s, 4_800, &[off_n(0, 48, 4)]);
     assert!(
         (l[4_799] - 1.0).abs() < 1e-6,
         "its own note-off: {}",
         l[4_799]
     );
-    let (l, _) = render(&mut s, 4_800, &[off(0, 52)]);
+    let (l, _) = render(&mut s, 4_800, &[off_n(0, 52, 3)]);
     assert!(peak(&l[480..]) < 1e-3);
     assert_eq!(s.active_voices(), 0);
 }
@@ -1570,15 +1593,15 @@ fn a_late_note_off_after_a_choke_leaves_the_newer_note_alone() {
             &dc(),
             &[("one_shot", 0.0), ("release", 1.0), ("voice_mode", mode)],
         );
-        render(&mut s, 4_800, &[on(0, 60, 1.0)]);
+        render(&mut s, 4_800, &[on_n(0, 60, 1.0, 1)]);
         s.choke();
-        let (l, _) = render(&mut s, 4_800, &[on(0, 60, 0.5), off(100, 60)]);
+        let (l, _) = render(&mut s, 4_800, &[on_n(0, 60, 0.5, 2), off_n(100, 60, 1)]);
         assert!(
             (l[4_799] - 0.5).abs() < 1e-6,
             "mode {mode}: the newer note sounds: {}",
             l[4_799]
         );
-        let (l, _) = render(&mut s, 4_800, &[off(0, 60)]);
+        let (l, _) = render(&mut s, 4_800, &[off_n(0, 60, 2)]);
         assert!(
             peak(&l[480..]) < 1e-3,
             "mode {mode}: its own note-off ends it"
@@ -1720,15 +1743,15 @@ fn a_full_mono_stack_keeps_every_note_off_owed() {
             &dc(),
             &[("one_shot", 0.0), ("release", 1.0), ("voice_mode", mode)],
         );
-        let mut events: Vec<NoteEvent> = (0..33).map(|i| on(i * 10, 60, 1.0)).collect();
-        events.extend((0..32).map(|i| off(1_000 + i * 10, 60)));
+        let mut events: Vec<NoteEvent> = (0..33).map(|i| on_n(i * 10, 60, 1.0, i)).collect();
+        events.extend((0..32).map(|i| off_n(1_000 + i * 10, 60, i)));
         let (l, _) = render(&mut s, 4_800, &events);
         assert!(
             (l[4_799] - 1.0).abs() < 1e-6,
             "mode {mode}: the 33rd note sounds: {}",
             l[4_799]
         );
-        let (l, _) = render(&mut s, 4_800, &[off(0, 60)]);
+        let (l, _) = render(&mut s, 4_800, &[off_n(0, 60, 32)]);
         assert!(
             peak(&l[480..]) < 1e-3,
             "mode {mode}: its own note-off ends it"
@@ -1746,10 +1769,10 @@ fn a_note_off_finds_its_note_after_the_fade_slots_fill() {
     let mut events: Vec<NoteEvent> = (0..16).map(|i| on(i, 20 + i as u8, 1.0)).collect();
     events.extend((0..32).map(|i| on(960 + i, 40 + i as u8, 1.0)));
     render(&mut s, 4_800, &events);
-    let (l, _) = render(&mut s, 4_800, &[on(0, 20, 0.5), off(100, 20)]);
+    let (l, _) = render(&mut s, 4_800, &[on_n(0, 20, 0.5, 100), off(100, 20)]);
     let level = l[4_799];
-    // Whatever else sounds, the new key-40 note (0.5) is part of it: the late note-off left it.
-    let (l2, _) = render(&mut s, 4_800, &[off(0, 20)]);
+    // Whatever else sounds, the new key-20 note (0.5) is part of it: the late note-off left it.
+    let (l2, _) = render(&mut s, 4_800, &[off_n(0, 20, 100)]);
     assert!(
         (level - l2[4_799] - 0.5).abs() < 1e-6,
         "the new note sounded until its own note-off: {level} then {}",

@@ -4,8 +4,8 @@
 use grooviq_dsp::sampler::SPEC;
 use grooviq_engine::{
     AudioProcessor, ChannelId, ChannelMix, ChannelSetup, Command, ControlError, Controller,
-    EngineConfig, EngineState, ExportOptions, PatternData, RECORD_CAPACITY, RecordEvent, SampleBuf,
-    engine_with, export_wav, render_offline_with,
+    EngineConfig, EngineState, ExportOptions, NoteId, PatternData, RECORD_CAPACITY, RecordEvent,
+    SampleBuf, engine_with, export_wav, render_offline_with,
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -57,6 +57,7 @@ fn note(on: bool) -> Command {
         key: 60,
         velocity: 1.0,
         on,
+        id: NoteId(60),
     }
 }
 
@@ -349,6 +350,36 @@ fn the_metronome_clicks_on_every_beat_with_an_accent_on_the_bar() {
             render_clicks(&events, 3 * beat, callback) == l[..3 * beat],
             "callback {callback}"
         );
+    }
+}
+
+#[test]
+fn the_metronome_follows_a_tempo_change_in_the_middle_of_a_beat() {
+    // Play at frame 6 400 at 120 BPM (a beat is 24 000 frames, 25 frames a tick): beat 0 at
+    // 6 400. At 18 432, 481.28 ticks into beat 0, the tempo halves, so the 478.72 ticks left
+    // take 50 frames each: beat 1 lands at 42 368 and beat 2 at 90 368 (not at 30 400, 54 400
+    // and 78 400 as at 120).
+    let events = [
+        (0, Command::SetMetronome { on: true }),
+        (6_400, Command::Play),
+        (18_432, Command::SetTempo { bpm: 60.0 }),
+    ];
+    let l = render_clicks(&events, 92_000, 64);
+    let peak = |a: usize, b: usize| l[a..b].iter().fold(0f32, |m, x| m.max(x.abs()));
+    assert!(l[..6_400].iter().all(|x| *x == 0.0), "silent before play");
+    for (beat, onset) in [6_400, 42_368, 90_368].into_iter().enumerate() {
+        // Each burst has ended long before the next starts.
+        assert!(
+            l[onset - 1_440..onset].iter().all(|x| *x == 0.0),
+            "silent before beat {beat}"
+        );
+        let first = l[onset..].iter().position(|x| *x != 0.0).unwrap();
+        assert!(first <= 1, "beat {beat} starts at {onset} (+{first})");
+        assert!(peak(onset, onset + 1_440) > 0.2, "beat {beat} at {onset}");
+    }
+    // Where the old tempo would have put the beats: silence or a fading tail.
+    for stale in [30_400, 54_400, 78_400] {
+        assert!(peak(stale, stale + 1_440) < 0.01, "a click at {stale}");
     }
 }
 

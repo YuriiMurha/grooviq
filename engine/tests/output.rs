@@ -2,9 +2,9 @@
 //! here opens, lists or probes a real audio device (the one exception is `#[ignore]`d).
 
 use grooviq_engine::{
-    AudioOutput, AudioProcessor, AudioSlot, Command, Controller, EngineConfig, OutputBackend,
-    OutputChoice, OutputEvent, OutputInfo, OutputKind, OutputMonitor, Transport, classify,
-    cpal_backend, engine,
+    AudioOutput, AudioProcessor, AudioSlot, Command, Controller, EngineConfig, NoteId,
+    OutputBackend, OutputChoice, OutputEvent, OutputInfo, OutputKind, OutputMonitor, Transport,
+    classify, cpal_backend, engine,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Once, OnceLock, PoisonError, Weak, mpsc};
@@ -63,6 +63,7 @@ fn note_on(key: u8) -> Command {
         key,
         velocity: 1.0,
         on: true,
+        id: NoteId(u32::from(key)),
     }
 }
 

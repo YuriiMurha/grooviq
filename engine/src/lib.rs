@@ -45,7 +45,7 @@ mod transport;
 
 use std::sync::Arc;
 
-pub use command::Command;
+pub use command::{Command, NoteId};
 pub use controller::{ControlError, Controller, HealthEvent};
 pub use export::{ExportError, ExportOptions, ExportReport, WavFormat, export_wav};
 #[doc(hidden)]

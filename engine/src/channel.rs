@@ -22,6 +22,7 @@ const NO_EVENT: NoteEvent = NoteEvent {
     velocity: 0.0,
     on: false,
     slide: false,
+    id: 0,
 };
 
 /// The channel's instrument.
@@ -364,6 +365,7 @@ mod tests {
             velocity: 0.9,
             on: true,
             slide: false,
+            id: 60,
         }
     }
 
@@ -376,6 +378,7 @@ mod tests {
             velocity: 0.5,
             on,
             slide: false,
+            id: u32::from(key),
         };
         for e in [
             ev(10, 1, true),
