@@ -97,6 +97,13 @@ const reasons = [];
 const inert = [];
 
 for (const path of changed) {
+  if (path === "scripts/semantic-replay.mjs") {
+    for (const name of withDependents("grooviq-project")) rustCrates.add(name);
+    ui = true;
+    tooling = true;
+    reasons.push(`${path}: real Session and browser replay`);
+    continue;
+  }
   if (RUST_WIDE.includes(path) || CI.some((dir) => path.startsWith(dir))) {
     workspace = true;
     ui = true;
@@ -171,6 +178,8 @@ if (workspace || rustCrates.has("grooviq-project") || changed.some((path) => pat
   step("notes budget runner tests", "node", ["--test", "scripts/notes-edit-budget.test.mjs"]);
   step("notes edit budget", "node", ["scripts/notes-edit-budget.mjs"]);
 }
+if (workspace || rustCrates.has("grooviq-project"))
+  step("real Session replay", "node", ["scripts/semantic-replay.mjs"]);
 if (tooling) {
   step("tooling: check-changed plans", "node", ["scripts/check-changed.mjs", "--plan", "--base", base]);
   if (existsSync(join(root, ".githooks", "pre-commit")))
