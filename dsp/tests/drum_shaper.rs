@@ -162,3 +162,161 @@ fn seeded_stereo_modes_curves_and_controls_are_distinct() {
     });
     assert_eq!(r, [0.0; 128]);
 }
+
+fn process_chunks(d: &mut DrumShaper, l: &mut [f32], r: &mut [f32], block: usize) {
+    for (l, r) in l.chunks_mut(block).zip(r.chunks_mut(block)) {
+        d.process(l, r, None, &[]);
+    }
+}
+fn drum_input(n: usize) -> Vec<f32> {
+    (0..n)
+        .map(|i| {
+            let t = (i % 12000) as f32 / 48000.0;
+            0.5 * libm::expf(-t * 16.0) * libm::sinf(2.0 * std::f32::consts::PI * 73.0 * t + 0.4)
+        })
+        .collect()
+}
+#[test]
+fn steady_tones_keep_sustain_without_retriggering() {
+    for hz in [50.0, 100.0] {
+        for amp in [0.5, libm::powf(10.0, -70.0 / 20.0)] {
+            for (label, params) in [
+                ("kick", vec![(0, 6.0), (1, -3.0), (3, 0.0)]),
+                ("sustain", vec![(1, 12.0)]),
+            ] {
+                let input: Vec<f32> = (0..96000)
+                    .map(|i| amp * libm::sinf(2.0 * std::f32::consts::PI * hz * i as f32 / 48000.0))
+                    .collect();
+                let mut l = input.clone();
+                let mut r = input.clone();
+                let mut d = DrumShaper::new(48000.0);
+                for (i, v) in params {
+                    d.set_param(i, v);
+                }
+                process_chunks(&mut d, &mut l, &mut r, 128);
+                let gains: Vec<f32> = (72000..96000)
+                    .filter(|&i| input[i].abs() > amp * 0.1)
+                    .map(|i| 20.0 * libm::log10f((l[i] / input[i]).abs()))
+                    .collect();
+                let lo = gains.iter().copied().fold(f32::INFINITY, f32::min);
+                let hi = gains.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                println!(
+                    "{hz}Hz amp={amp:e} {label}: gain={lo:.6}..{hi:.6} ripple={:.6}dB",
+                    hi - lo
+                );
+                assert!(hi - lo < 0.02, "{hz}Hz {label}: ripple {}", hi - lo);
+                if label == "sustain" {
+                    assert!(lo > 11.9, "quiet sustain lost: {lo}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn reset_mid_ramp_then_set_matches_fresh() {
+    let input = drum_input(12000);
+    let mut d = DrumShaper::new(48000.0);
+    let mut l = input.clone();
+    let mut r = input.clone();
+    process_chunks(&mut d, &mut l, &mut r, 128);
+    d.set_param(0, 12.0);
+    d.set_param(4, 1.0);
+    process_chunks(&mut d, &mut l[..64], &mut r[..64], 7);
+    d.reset();
+    d.set_param(1, -12.0);
+    let mut fresh = DrumShaper::new(48000.0);
+    for (i, v) in [(0, 12.0), (4, 1.0), (1, -12.0)] {
+        fresh.set_param(i, v);
+    }
+    let mut a = input.clone();
+    let mut b = input.clone();
+    let mut c = input.clone();
+    let mut e = input.clone();
+    process_chunks(&mut d, &mut a, &mut b, 127);
+    process_chunks(&mut fresh, &mut c, &mut e, 7);
+    assert_eq!(a, c);
+    assert_eq!(b, e);
+}
+#[test]
+fn right_only_onset_shapes_quiet_left() {
+    let mut d = DrumShaper::new(48000.0);
+    d.set_param(0, 12.0);
+    let mut l = vec![0.001; 12000];
+    let mut r = vec![0.0; 12000];
+    process_chunks(&mut d, &mut l, &mut r, 128);
+    let mut l = vec![0.001; 2400];
+    let mut r = drum_input(2400);
+    process_chunks(&mut d, &mut l, &mut r, 128);
+    assert!(l.iter().copied().fold(0.0, f32::max) > 0.0025);
+}
+#[test]
+fn automation_is_exact_at_the_same_sample_across_partitions() {
+    let input = drum_input(24000);
+    let render = |block| {
+        let mut d = DrumShaper::new(48000.0);
+        for (i, v) in preset("Kick Punch").unwrap() {
+            d.set_param(i, v);
+        }
+        let mut l = input.clone();
+        let mut r: Vec<f32> = input.iter().map(|v| -v * 0.7).collect();
+        process_chunks(&mut d, &mut l[..4736], &mut r[..4736], block);
+        for (i, v) in [
+            (0, -9.0),
+            (1, 8.0),
+            (2, 2.0),
+            (3, 2.0),
+            (4, 0.7),
+            (5, 0.5),
+            (6, 3.0),
+        ] {
+            d.set_param(i, v);
+        }
+        process_chunks(&mut d, &mut l[4736..], &mut r[4736..], block);
+        (l, r)
+    };
+    let a = render(128);
+    for block in [1, 7, 37, 64, 127] {
+        assert_eq!(a, render(block), "block {block}");
+    }
+}
+#[test]
+fn each_control_step_is_smoothed_on_nonconstant_onsets() {
+    let input = drum_input(8000);
+    for index in 0..7 {
+        let mut worst = 0.0f32;
+        // Sample several rising/falling phases while all detector banks remain active.
+        for at in [31, 91, 173, 347, 701, 1201, 2501] {
+            let init = [12.0, -12.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+            let target = [-12.0, 12.0, 2.0, 2.0, 1.0, 0.0, 12.0];
+            let setup = || {
+                let mut d = DrumShaper::new(48000.0);
+                for (i, v) in init.into_iter().enumerate() {
+                    d.set_param(i as u32, v);
+                }
+                let mut l = input[..at].to_vec();
+                let mut r = l.clone();
+                process_chunks(&mut d, &mut l, &mut r, 128);
+                d
+            };
+            let mut changed = setup();
+            let mut baseline = setup();
+            changed.set_param(index as u32, target[index]);
+            let mut a = [input[at]];
+            let mut b = a;
+            let mut c = a;
+            let mut e = a;
+            changed.process(&mut a, &mut b, None, &[]);
+            baseline.process(&mut c, &mut e, None, &[]);
+            let delta = (a[0] - c[0]).abs() / input[at].abs().max(0.01);
+            worst = worst.max(delta);
+        }
+        println!("control {index}: normalized step residual {worst}");
+        let bound = if index >= 4 { 0.025 } else { 0.001 };
+        assert!(worst < bound, "control {index}: step {worst} >= {bound}");
+        assert!(
+            worst > 1e-7,
+            "control {index}: stimulus never exercised control"
+        );
+    }
+}

@@ -16,6 +16,7 @@ fn presets_live_controls_and_reset_are_realtime_safe() {
             let (mut l, mut r) = ([0.0; 128], [0.0; 128]);
             let mut peak = 0.0_f32;
             let mut finite = true;
+            let mut preset_delta = 0.0_f32;
             super::realtime(|| {
                 for &(index, value) in &params {
                     device.set_param(index, value);
@@ -23,6 +24,14 @@ fn presets_live_controls_and_reset_are_realtime_safe() {
                 l.copy_from_slice(&source_l);
                 r.copy_from_slice(&source_r);
                 device.process(&mut l, &mut r, None, &[]);
+                for ((left, right), (dry_l, dry_r)) in
+                    l.iter().zip(&r).zip(source_l.iter().zip(&source_r))
+                {
+                    finite &= left.is_finite() && right.is_finite();
+                    preset_delta = preset_delta
+                        .max((left - dry_l).abs())
+                        .max((right - dry_r).abs());
+                }
                 for (n, block) in [1, 7, 64, 127, 128]
                     .into_iter()
                     .cycle()
@@ -46,6 +55,10 @@ fn presets_live_controls_and_reset_are_realtime_safe() {
                 device.reset();
             });
             assert!(finite, "{name} at {sr} Hz produced nonfinite output");
+            assert!(
+                preset_delta > 1.0e-3,
+                "{name} at {sr} Hz did not change the source signal"
+            );
             assert!(peak > 0.01, "{name} at {sr} Hz did not process sound");
         }
     }

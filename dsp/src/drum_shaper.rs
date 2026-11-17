@@ -32,6 +32,8 @@ pub fn preset(name: &str) -> Option<Vec<(u32, f32)>> {
 pub struct DrumShaper {
     controls: [Smooth; 7],
     fast: [f32; 3],
+    hold: [u32; 3],
+    hold_samples: u32,
     slow: [f32; 3],
     attack: [f32; 3],
     release: [f32; 3],
@@ -58,6 +60,8 @@ impl DrumShaper {
         Self {
             controls: SPEC.map(|(_, _, v)| Smooth::new(v, 10.0, sr)),
             fast: [0.0; 3],
+            hold: [0; 3],
+            hold_samples: (sr * 0.012) as u32,
             slow: [0.0; 3],
             attack: [coef(0.3), coef(0.1), coef(2.0)],
             release: [coef(40.0), coef(15.0), coef(80.0)],
@@ -90,12 +94,16 @@ impl Device for DrumShaper {
             let level = x[0].abs().max(x[1].abs()).min(16.0);
             let mut weights = [0.0; 3];
             for (m, weight) in weights.iter_mut().enumerate() {
-                let c = if level > self.fast[m] {
-                    self.attack[m]
+                // Bridge bass half-cycles without lookahead. Only falling levels wait;
+                // a new onset still follows the original mode-specific attack.
+                if level >= self.fast[m] {
+                    self.hold[m] = self.hold_samples;
+                    self.fast[m] = flush(level + (self.fast[m] - level) * self.attack[m]);
+                } else if self.hold[m] > 0 {
+                    self.hold[m] -= 1;
                 } else {
-                    self.release[m]
-                };
-                self.fast[m] = flush(level + (self.fast[m] - level) * c);
+                    self.fast[m] = flush(level + (self.fast[m] - level) * self.release[m]);
+                }
                 self.slow[m] = flush(self.fast[m] + (self.slow[m] - self.fast[m]) * self.lag[m]);
                 *weight =
                     ((self.fast[m] - self.slow[m]) / self.fast[m].max(1.0e-6)).clamp(0.0, 1.0);
@@ -103,9 +111,9 @@ impl Device for DrumShaper {
             let p = self.controls.each_mut().map(Smooth::next);
             let t = blend(weights, p[2]);
             let t = blend([libm::sqrtf(t), t, t * t], p[3]);
-            let active = (level * 10000.0).min(1.0);
+            let active = (blend(self.fast, p[2]) * 10000.0).min(1.0);
             let target = (p[0] * t + p[1] * (1.0 - t)) * active;
-            self.gain = target + (self.gain - target) * self.gain_coef;
+            self.gain = flush(target + (self.gain - target) * self.gain_coef);
             let gain = db_to_gain(self.gain);
             let output = db_to_gain(p[6]);
             // Unit small-signal slope; saturation is independent of envelope shaping.
@@ -121,11 +129,48 @@ impl Device for DrumShaper {
     }
     fn reset(&mut self) {
         self.fast = [0.0; 3];
+        self.hold = [0; 3];
         self.slow = [0.0; 3];
         self.gain = 0.0;
         for p in &mut self.controls {
             p.snap();
         }
         self.fresh = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn shaping_gain_flushes_subnormals_and_clears_after_tail() {
+        let mut d = DrumShaper::new(48000.0);
+        // Exercise the private feedback state at the normal/subnormal boundary.
+        d.gain = f32::MIN_POSITIVE * 0.5;
+        let mut l = [0.0; 128];
+        let mut r = l;
+        d.process(&mut l, &mut r, None, &[]);
+        assert_eq!(d.gain, 0.0);
+        d.reset();
+        d.set_param(1, 12.0);
+        l.fill(0.3);
+        r.fill(0.3);
+        for _ in 0..40 {
+            l.fill(0.3);
+            r.fill(0.3);
+            d.process(&mut l, &mut r, None, &[]);
+        }
+        assert!(d.gain > 1.0);
+        for _ in 0..4000 {
+            l.fill(0.0);
+            r.fill(0.0);
+            d.process(&mut l, &mut r, None, &[]);
+            assert!(d.gain == 0.0 || d.gain.is_normal());
+            assert_eq!(l, [0.0; 128]);
+            assert_eq!(r, [0.0; 128]);
+        }
+        // Shared flush arithmetic can leave a tiny normal envelope floor;
+        // it must neither sustain gain audibly nor enter subnormal arithmetic.
+        assert!(d.gain.abs() < 1.0e-15);
     }
 }

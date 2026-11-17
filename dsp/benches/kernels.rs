@@ -1,6 +1,6 @@
-//! Micro-benchmarks of the instruments' inner loops: one 64-frame block (the engine's block)
-//! with 1, 4 or 16 voices sounding. `cargo bench -p grooviq-dsp`; divan also counts the
-//! allocations inside each timed block, which must stay at zero.
+//! Instrument kernels at 64 frames with 1, 4 or 16 voices, and effect kernels at 64/128 frames.
+//! `cargo bench -p grooviq-dsp`; divan also reports allocations inside each timed block,
+//! which must stay at zero (the realtime suite enforces that requirement).
 
 use std::sync::Arc;
 
