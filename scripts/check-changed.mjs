@@ -156,6 +156,8 @@ if (ui) {
   step("ui typecheck", "npm", ["run", "typecheck"], uiDir);
   step("ui tests", "npm", ["test", "--", "--run"], uiDir);
 }
+if (ui || workspace || changed.includes("scripts/grid-budget.mjs"))
+  step("grid CPU budget", "node", ["scripts/grid-budget.mjs"]);
 // The app crate's build script embeds the built UI, so it needs app/ui/dist.
 if (ui || workspace || rustCrates.has("grooviq-app")) step("ui build", "npm", ["run", "build"], uiDir);
 

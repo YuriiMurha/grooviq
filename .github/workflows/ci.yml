@@ -71,6 +71,8 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test -- --run
+      - name: Largest grid CPU budget
+        run: node ../../scripts/grid-budget.mjs
       - run: npm run build
 
   # Not a required check: Playwright against the web build with the mock engine
