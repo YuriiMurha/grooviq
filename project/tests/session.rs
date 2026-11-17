@@ -2562,7 +2562,7 @@ fn channel_requests_from_a_replaced_project_change_nothing() {
     assert!(!session.view().dirty);
     assert_eq!(
         SessionError::ProjectReplaced.to_string(),
-        "Another project was opened before this was done, so nothing was changed."
+        "The project changed before this finished, so it was not applied."
     );
     // B's own go through.
     let b = session.generation();

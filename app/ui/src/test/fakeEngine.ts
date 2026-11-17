@@ -94,7 +94,7 @@ export function createFakeEngine(initial: ProjectView) {
         applyEdit(args?.edit as Edit);
         return touch();
       case "channel_add": {
-        if (args?.generation !== view.generation) throw "Another project was opened before this was done, so nothing was changed.";
+        if (args?.generation !== view.generation) throw "The project changed before this finished, so it was not applied.";
         const path = String(args?.path);
         const refusal = refuse.get(path);
         if (refusal) throw refusal;
@@ -124,7 +124,7 @@ export function createFakeEngine(initial: ProjectView) {
         return touch();
       }
       case "channel_set_sample": {
-        if (args?.generation !== view.generation) throw "Another project was opened before this was done, so nothing was changed.";
+        if (args?.generation !== view.generation) throw "The project changed before this finished, so it was not applied.";
         const path = String(args?.path);
         const name = (path.split("/").pop() ?? path).replace(/\.[^.]+$/, "");
         view.channels = view.channels.map((c) =>

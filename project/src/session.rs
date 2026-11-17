@@ -410,7 +410,7 @@ impl fmt::Display for SessionError {
             Self::Save(e) => write!(f, "{e}"),
             Self::ProjectReplaced => write!(
                 f,
-                "Another project was opened before this was done, so nothing was changed."
+                "The project changed before this finished, so it was not applied."
             ),
         }
     }

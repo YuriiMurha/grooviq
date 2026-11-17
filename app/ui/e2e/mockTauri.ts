@@ -873,7 +873,7 @@ export function installMockTauri(seed: MockSeed): void {
    * `refused_ack`): nothing changes, nothing is announced, the UI fetches the notes. */
   /** session.rs `SessionError::ProjectReplaced`: a channel request made in a replaced project. */
   const sameProject = (generation: unknown) => {
-    if (generation !== s.generation) throw "Another project was opened before this was done, so nothing was changed.";
+    if (generation !== s.generation) throw "The project changed before this finished, so it was not applied.";
   };
   const refusedAck = () => ({ revision: s.notesRevision, addedIds: [], ignoredIds: [], reload: true, view: view() });
   const editNotes = (e: {

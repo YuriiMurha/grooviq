@@ -377,4 +377,34 @@ describe("commit queue", () => {
     await queue.idle();
     expect(queue.unsettled()).toBe(false);
   });
+
+  it("a_flush_says_whether_every_queued_edit_was_applied", async () => {
+    const { engine, queue } = setup([note(1, 0)]);
+    queue.commit({ add: [], update: [note(1, 240)], delete: [] });
+    const ok = queue.flush();
+    await engine.ack({ revision: 5 });
+    expect(await ok).toBe(true);
+    // A refused edit (and the one queued behind it, dropped with it): the flush says so.
+    queue.commit({ add: [note(-1, 480)], update: [], delete: [] });
+    queue.commit({ add: [], update: [note(-1, 960)], delete: [] });
+    const refused = queue.flush();
+    await engine.fail("This pattern has used up its note ids.");
+    expect(await refused).toBe(false);
+    // The next flush starts clean.
+    queue.commit({ add: [], update: [note(1, 480)], delete: [] });
+    const again = queue.flush();
+    await flush();
+    await engine.ack({ revision: 7 });
+    expect(await again).toBe(true);
+  });
+
+  it("an_edit_for_another_project_is_dropped_unshown", async () => {
+    const { store, engine, queue } = setup([note(1, 0)]);
+    queue.setGeneration(4);
+    // A velocity drag that began in project 3 ends after project 4 is shown.
+    queue.commit({ add: [], update: [note(1, 960)], delete: [] }, 3);
+    expect(store.get(1)).toEqual(note(1, 0));
+    expect(engine.sent).toEqual([]);
+    expect(queue.unsettled()).toBe(false);
+  });
 });

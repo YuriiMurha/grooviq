@@ -327,7 +327,7 @@ test.describe("channels added during New or Open (fix round 1)", () => {
       },
       { a, B },
     );
-    const refused = "Another project was opened before this was done, so nothing was changed.";
+    const refused = "The project changed before this finished, so it was not applied.";
     expect(errors).toEqual([`channel_add: ${refused}`, `channel_add_synth: ${refused}`, `channel_set_sample: ${refused}`]);
     expect(await names(mock)).toEqual(["B"]);
     expect(await mock.view().then((v) => v.dirty)).toBe(false);
@@ -372,4 +372,54 @@ test.describe("Save while roll edits are on their way (#191)", () => {
     await expect.poll(() => mock.view().then((v) => v.path)).toBe(B);
     expect(await sessionNotes(mock)).toEqual([]);
   });
+});
+
+test.describe("Save while a queued roll edit is refused (#191)", () => {
+  // A pattern one id from used up: the first drawn note takes the last id, the second is refused.
+  test.use({
+    seed: {
+      project: (() => {
+        const p = twoChannels([]);
+        p.pattern.nextNoteId = 0xfffffffe;
+        return p;
+      })(),
+      files: { [B]: { kind: "project", project: twoChannels([]) } },
+    },
+  });
+
+  for (const titled of [false, true]) {
+    test(`a_refused_edit_stops_the_${titled ? "save" : "save_as"}_and_the_replacement`, async ({ app, mock }) => {
+      if (titled) {
+        // Saved once, empty: the prompt's Save then saves in place.
+        await mock.eval(`(m) => m.queueDialog("/qa/A.grooviq")`);
+        await app.keyboard.press("ControlOrMeta+s");
+        await expect.poll(() => mock.view().then((v) => [v.path, v.dirty])).toEqual(["/qa/A.grooviq", false]);
+      }
+      await openRoll(app);
+      await delayFirstAck(app);
+      for (const tick of [480, 960]) {
+        const p = await at(app, tick, 65);
+        await app.mouse.click(p.x, p.y);
+      }
+      await expect.poll(async () => (await mock.calls("notes_edit")).length).toBe(1);
+      await mock.eval(titled ? `(m) => m.queueDialog("${B}")` : `(m) => m.queueDialog("/qa/A.grooviq", "${B}")`);
+      await app.keyboard.press("ControlOrMeta+o");
+      await app.getByRole("dialog", { name: "Save changes?" }).getByRole("button", { name: "Save", exact: true }).click();
+      await nextFrame(app);
+      await app.evaluate(() => (window as unknown as { releaseAck: () => void }).releaseAck());
+      const messages = app.getByRole("status", { name: "Messages" });
+      await expect(messages).toContainText("This pattern has used up its note ids.");
+      await expect(messages).toContainText("Your latest note edits could not be applied, so the project was not saved.");
+      await nextFrame(app);
+      await nextFrame(app);
+      // Nothing saved, nothing opened: A is still open, unsaved, with the note that was applied.
+      expect(await mock.calls("project_save")).toEqual([]);
+      expect((await mock.calls("project_save_as")).length).toBe(titled ? 1 : 0);
+      expect(await mock.calls("project_open")).toEqual([]);
+      const file = await mock.eval<{ project: { pattern: { notes: unknown[] } } } | null>("(m) => m.file('/qa/A.grooviq')");
+      expect(file?.project.pattern.notes ?? null).toEqual(titled ? [] : null);
+      expect(await mock.view().then((v) => [v.path, v.dirty])).toEqual([titled ? "/qa/A.grooviq" : null, true]);
+      expect(await sessionNotes(mock)).toEqual([[1, 480, 240, 65]]);
+    });
+  }
 });

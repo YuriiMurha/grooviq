@@ -164,23 +164,16 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   }, [queue]);
   // New, Open or Restore: a held gesture is let go unsent, and what the queue holds for this
   // project is dropped (its ids would land on the next project's notes). No gesture starts
-  // while it is on its way, and one held when it ends is let go before the queue reopens.
+  // while it is on its way (see `onPointerDown`).
   useEffect(() => {
-    const letGo = () => {
+    const before = onProjectReplacing(() => {
       abandon(store, gesture.current);
       gesture.current = null;
       dirty.current = true;
-    };
-    const before = onProjectReplacing(() => {
-      letGo();
       queue.replacing();
     });
-    const reopen = () => {
-      letGo();
-      queue.reopened();
-    };
-    const after = onProjectReplaced(reopen);
-    const failed = onProjectReplaceFailed(reopen);
+    const after = onProjectReplaced(() => queue.reopened());
+    const failed = onProjectReplaceFailed(() => queue.reopened());
     return () => {
       before();
       after();
@@ -427,27 +420,21 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     const w = toWorld(view.current, x, y);
     return { x, y, tick: w.tick, key: w.key, button: e.button, shift: e.shiftKey };
   };
-  /** The project the held gesture started in: its edits are that project's. */
-  const gestureProject = useRef(0);
   const take = (step: Step) => {
     // A held stamp shows in the store only; the release sends it.
     if (step.preview) store.apply(step.preview);
-    if (step.edit) queue.commit(step.edit, gestureProject.current);
+    if (step.edit) queue.commit(step.edit);
     if (step.select) store.setSelection(step.select);
     if (step.lastLength !== undefined) lastLength.current = step.lastLength;
     dirty.current = true;
     return step.gesture;
   };
 
-  const letGo = () => {
-    abandon(store, gesture.current);
-    gesture.current = null;
-    dirty.current = true;
-  };
   const onPointerDown = (e: PointerEvent<HTMLCanvasElement>) => {
     const ctx = context();
+    // While a New, Open or Restore is on its way the old project shows, but takes no edits: a
+    // gesture begun now would end in the project that replaces it.
     if (!ctx || gesture.current || isProjectReplacing()) return;
-    gestureProject.current = queue.generationNow();
     e.preventDefault();
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -475,7 +462,11 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     if (ctx && held) take(endGesture(ctx, held, pointer(e)));
     dirty.current = true;
   };
-  const onPointerCancel = letGo;
+  const onPointerCancel = () => {
+    abandon(store, gesture.current);
+    gesture.current = null;
+    dirty.current = true;
+  };
 
   // What the toolbar buttons and the shortcuts do to the notes. Each works on the selected notes
   // of this channel; quantize, strum and humanize take all of its notes when none is selected.

@@ -49,8 +49,8 @@ interface Deps {
   stopIfPlaying: () => Promise<void>;
   /** A change was sent (or queued) and its view is not in yet: the project counts as unsaved. */
   unsettled: () => boolean;
-  /** Resolves once the piano roll's queued edits are in the engine's project. */
-  settle: () => Promise<void>;
+  /** Resolves once the piano roll's queued edits are answered: `false` if any was refused. */
+  settle: () => Promise<boolean>;
 }
 
 /** Every project action (new, open, save, save as, export), the "Save changes?" guard, the
@@ -83,6 +83,14 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
     [adopt, toast],
   );
 
+  /** Waits for the piano roll's queued edits; `false`, with a warning, if any was refused: what
+   * the person drew is not all in the project, so nothing is saved (and nothing replaces it). */
+  const settled = useCallback(async (): Promise<boolean> => {
+    if (await settleRef.current()) return true;
+    toast("Your latest note edits could not be applied, so the project was not saved. Check the notes, then save again.", true);
+    return false;
+  }, [toast]);
+
   /** Saves as a path the person picks; `false` if they cancel or it fails. */
   const saveAs = useCallback(async (): Promise<boolean> => {
     const current = viewRef.current;
@@ -95,14 +103,14 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
       });
       if (!path) return false;
       // The notes the person drew are saved too, even those still on their way.
-      await settleRef.current();
+      if (!(await settled())) return false;
       adopt(await enqueue(() => projectSaveAs(path)));
       return true;
     } catch (e) {
       fail(e);
       return false;
     }
-  }, [adopt, enqueue, fail]);
+  }, [adopt, enqueue, fail, settled]);
 
   /** Saves in place (an untitled project asks for a path); `true` only if it is saved. */
   const save = useCallback(async (): Promise<boolean> => {
@@ -110,7 +118,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
     if (!current) return false;
     if (current.path === null) return saveAs();
     try {
-      await settleRef.current();
+      if (!(await settled())) return false;
       adopt(await enqueue(projectSave));
       return true;
     } catch (e) {
@@ -118,7 +126,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
       fail(e);
       return false;
     }
-  }, [adopt, enqueue, fail, saveAs]);
+  }, [adopt, enqueue, fail, saveAs, settled]);
 
   /** Sends a command that replaces the project (New, Open, Restore), telling what is keyed by
    * the old project's channels before it goes and once it succeeded or failed. */

@@ -27,9 +27,10 @@ export function rollEditsUnsettled(): boolean {
   return unsettledQueues.size > 0;
 }
 
-/** Resolves once every piano-roll edit queued now has been answered: what a save must hold. */
-export function rollEditsSettled(): Promise<void> {
-  return Promise.all([...unsettledQueues].map((q) => q.idle())).then(() => {});
+/** Resolves once every piano-roll edit queued now has been answered: what a save must hold.
+ * `false` if any of them was refused or failed (the project lacks what the person drew). */
+export function rollEditsSettled(): Promise<boolean> {
+  return Promise.all([...unsettledQueues].map((q) => q.flush())).then((all) => all.every(Boolean));
 }
 
 /** What waits in the queue: an edit of the roll's, or a command, each for the project it was
@@ -64,6 +65,8 @@ export class CommitQueue {
   private closed = false;
   /** An edit or command was sent and its reply is not in yet. */
   private sending = false;
+  /** Edits and commands refused or failed so far (see [`flush`]). */
+  private failures = 0;
   /** The open project (`ProjectView.generation`). */
   private generation = 0;
 
@@ -151,6 +154,14 @@ export class CommitQueue {
   notesChanged(revision: number) {
     if (revision > this.announced) this.announced = revision;
     this.pump();
+  }
+
+  /** Resolves once everything queued now has been answered: `true` if all of it was applied,
+   * `false` if any edit or command was refused or failed (and what was built on it dropped). */
+  async flush(): Promise<boolean> {
+    const before = this.failures;
+    await this.idle();
+    return this.failures === before;
   }
 
   /** Resolves once nothing is queued, in flight or being fetched. */
@@ -245,6 +256,7 @@ export class CommitQueue {
       (e: unknown) => {
         if (epoch !== this.epoch) return;
         this.sending = false;
+        this.failures += 1;
         this.hooks.onError(errorText(e));
         // What was built on the failed edit cannot be sent: the engine's notes replace it all.
         this.pending = [];
@@ -273,6 +285,7 @@ export class CommitQueue {
       (e: unknown) => {
         if (epoch !== this.epoch) return;
         this.sending = false;
+        this.failures += 1;
         this.hooks.onError(errorText(e));
         this.done();
       },
