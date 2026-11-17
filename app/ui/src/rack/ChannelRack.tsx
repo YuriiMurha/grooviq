@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type RefObject } from "react";
 import { channelAddSynth, onNotesChanged, patternNotes, type WireNote } from "../api/notes";
-import { channelAdd, channelSetSample, errorText, projectView, type ChannelView } from "../api/project";
+import { channelAdd, errorText, projectView, type ChannelView } from "../api/project";
 import { useSelection } from "../layout/selection";
 import type { LiveFrame } from "../live/decode";
 import { ConfirmDialog } from "../project/ConfirmDialog";
 import { useProject } from "../project/context";
 import { AddChannelMenu } from "./AddChannelMenu";
-import { pickSound, pickSounds } from "./audioFiles";
+import { pickSounds, relinkChannel } from "./audioFiles";
 import { ChannelRow } from "./ChannelRow";
 import { useFileDrop } from "./fileDrop";
 import { CELL, EDGE, GAP } from "./gridModel";
@@ -102,14 +102,7 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, onOpenRoll
       solo: change.solo ?? ch.solo,
     });
 
-  const relink = (ch: ChannelView) => {
-    pickSound(`Find the sample for ${ch.name}`).then(
-      (path) => {
-        if (path !== null) void run(() => channelSetSample(ch.id, path));
-      },
-      (e: unknown) => onError(errorText(e)),
-    );
-  };
+  const relink = (ch: ChannelView) => relinkChannel(ch, run, onError);
 
   const addSamples = () => {
     pickSounds().then(addFiles, (e: unknown) => onError(errorText(e)));

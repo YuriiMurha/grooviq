@@ -798,7 +798,8 @@ export function installMockTauri(seed: MockSeed): void {
     channel_waveform: (a) => {
       const c = s.project.channels[channelIndex(a.channel)];
       if (c.kind === "synth" || c.sample === null || c.embedded === false) throw `${c.name} has no sample to draw.`;
-      const points = a.points as number;
+      // session.rs `waveform_peaks`: 1..=MAX_WAVEFORM_POINTS points.
+      const points = clamp(a.points as number, 1, 16_384);
       const buf = new ArrayBuffer(points * 8);
       const v = new DataView(buf);
       for (let i = 0; i < points; i++) {

@@ -17,9 +17,10 @@ const RES_PX = 160;
 const ENV_OCTAVES = 6;
 
 interface FilterProps {
-  type: number;
-  cutoff: { param: ParamRange; value: number };
-  res: { param: ParamRange; value: number };
+  /** `filterDb`'s type, or `null` for a filter that is off (a flat line). */
+  type: number | null;
+  cutoff: { id: string; param: ParamRange; value: number };
+  res: { id: string; param: ParamRange; value: number };
   drive: number;
   envAmount: number;
   /** A drag of the editor's owner over several parameters. */
@@ -64,11 +65,11 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, group }: Fi
     let alive = true;
     if (c !== d.cutoff) {
       d.cutoff = c;
-      alive = d.gestures.input("filter_cutoff", c);
+      alive = d.gestures.input(cutoff.id, c);
     }
     if (alive && r !== d.res) {
       d.res = r;
-      alive = d.gestures.input("filter_res", r);
+      alive = d.gestures.input(res.id, r);
     }
     // The editor ended it (Escape, focus lost, a preset): let the rest of it go.
     if (!alive) finish(false);
@@ -82,11 +83,12 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, group }: Fi
     else d.gestures.cancel();
   };
 
+  const db = (f: number) => (type === null ? 0 : filterDb(type, f, cutoff.value, res.value, drive));
   const N = Math.max(90, Math.round(w / 2));
   const curve: [number, number][] = [];
-  if (w > 0) for (let i = 0; i <= N; i++) curve.push([(i / N) * w, yd(filterDb(type, xf((i / N) * w), cutoff.value, res.value, drive))]);
+  if (w > 0) for (let i = 0; i <= N; i++) curve.push([(i / N) * w, yd(db(xf((i / N) * w)))]);
   const nx = fx(cutoff.value);
-  const ny = Math.min(bottom, Math.max(top, yd(filterDb(type, cutoff.value, cutoff.value, res.value, drive))));
+  const ny = Math.min(bottom, Math.max(top, yd(db(cutoff.value))));
   const y0 = Math.round(yd(0)) + 0.5;
   const sweep = Math.abs(envAmount) > 0.02 ? fx(Math.min(20000, Math.max(20, cutoff.value * Math.pow(2, envAmount * ENV_OCTAVES)))) : null;
   const ya = Math.min(bottom - 4, Math.max(top + 3, ny - 14));
@@ -95,7 +97,7 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, group }: Fi
   return (
     <div
       ref={host}
-      className={`dwell filter-display${dragging ? " dragging" : ""}`}
+      className={`dwell filter-display${dragging ? " dragging" : ""}${type === null ? " off" : ""}`}
       data-hint="The filter's response. Drag sideways for the cutoff, up or down for the resonance (Shift for fine)."
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}

@@ -189,8 +189,8 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
             <>
               <FilterDisplay
                 type={Math.round(v("filter_type"))}
-                cutoff={{ param: synthParam("filter_cutoff"), value: v("filter_cutoff") }}
-                res={{ param: synthParam("filter_res"), value: v("filter_res") }}
+                cutoff={{ id: "filter_cutoff", param: synthParam("filter_cutoff"), value: v("filter_cutoff") }}
+                res={{ id: "filter_res", param: synthParam("filter_res"), value: v("filter_res") }}
                 drive={v("filter_drive")}
                 envAmount={v("filter_env_amt")}
                 group={params.group}
