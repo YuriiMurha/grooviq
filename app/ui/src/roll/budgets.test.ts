@@ -29,25 +29,36 @@ let work = 0;
 
 // Observe actual data access, rather than trusting a counter increment in the implementation.
 // Bind native methods to their typed array; charge bulk operations by their input size.
+type NoteArray = Float64Array | Float32Array | Uint32Array | Int32Array | Uint8Array;
+const isNoteArray = (value: unknown): value is NoteArray =>
+  value instanceof Float64Array || value instanceof Float32Array || value instanceof Uint32Array
+  || value instanceof Int32Array || value instanceof Uint8Array;
+
+const arrayWork: ProxyHandler<NoteArray> = {
+  get(target, property) {
+    if (typeof property === "string" && /^\d+$/.test(property)) work++;
+    const member = Reflect.get(target, property, target);
+    if (typeof member !== "function") return member;
+    return (...args: unknown[]) => {
+      work += property === "subarray"
+        ? Math.max(0, Number(args[1] ?? target.length) - Number(args[0] ?? 0))
+        : target.length;
+      const result = Reflect.apply(member, target, args);
+      // A draw-order view shares the store's data: its direct reads count too, including
+      // views made from other views. Native methods still receive the raw typed array.
+      if (property !== "subarray") return result;
+      if (!isNoteArray(result)) throw new Error("Expected a typed-array view.");
+      return new Proxy(result, arrayWork);
+    };
+  },
+};
+
 function counted(store: NoteStore): NoteStore {
   if (performanceGate) return store;
   for (const key of Object.keys(store)) {
     const value = Reflect.get(store, key);
-    if (!(value instanceof Float64Array || value instanceof Float32Array || value instanceof Uint32Array
-      || value instanceof Int32Array || value instanceof Uint8Array)) continue;
-    Reflect.set(store, key, new Proxy(value, {
-      get(target, property) {
-        if (typeof property === "string" && /^\d+$/.test(property)) work++;
-        const member = Reflect.get(target, property, target);
-        if (typeof member !== "function") return member;
-        return (...args: unknown[]) => {
-          work += property === "subarray"
-            ? Math.max(0, Number(args[1] ?? target.length) - Number(args[0] ?? 0))
-            : target.length;
-          return Reflect.apply(member, target, args);
-        };
-      },
-    }));
+    if (!isNoteArray(value)) continue;
+    Reflect.set(store, key, new Proxy(value, arrayWork));
   }
   return store;
 }
