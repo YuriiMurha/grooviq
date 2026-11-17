@@ -283,6 +283,100 @@ fn synth_a_late_note_off_after_a_choke_leaves_the_newer_note_alone() {
 }
 
 #[test]
+fn synth_poly_a_re_struck_key_sounds_until_its_last_held_note_ends() {
+    // Poly mode, key 48 struck three times while held (notes 1, 2, 3), at fast and slow
+    // attacks (a new voice, or the voice retriggered in place). Whatever order the notes end
+    // in, the key sounds while any of them is held, and only the last release ends it.
+    for attack in [1.0, 20.0] {
+        for order in [[2, 3, 1], [1, 2, 3], [3, 2, 1]] {
+            let mut s = sine_synth_in(0.0);
+            s.set_param(index(&synth::PARAM_IDS, "amp_attack"), attack);
+            render(
+                &mut s,
+                9_600,
+                &[on_n(0, 48, 1), on_n(2_400, 48, 2), on_n(4_800, 48, 3)],
+            );
+            for (i, &id) in order.iter().enumerate() {
+                let l = render(&mut s, 24_000, &[off_n(0, 48, id)]);
+                let last = i + 1 == order.len();
+                let level = peak(&l[19_200..]);
+                assert_eq!(
+                    level < 1e-4,
+                    last,
+                    "attack {attack}, order {order:?}: after note {id} ended, peak {level}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn synth_poly_ten_nested_notes_keep_the_key_until_the_outermost_ends() {
+    // More nested notes on one key than a voice remembers: the inner ones end first, and the
+    // key sounds until the outermost (note 1) ends. Ended in the order struck, nothing is left
+    // sounding either.
+    for newest_first in [true, false] {
+        let mut s = sine_synth_in(0.0);
+        let ons: Vec<NoteEvent> = (1..=10).map(|id| on_n(id * 100, 48, id)).collect();
+        render(&mut s, 4_800, &ons);
+        let mut order: Vec<u32> = (1..=10).collect();
+        if newest_first {
+            order.reverse();
+        }
+        for (i, &id) in order.iter().enumerate() {
+            let l = render(&mut s, 24_000, &[off_n(0, 48, id)]);
+            let level = peak(&l[19_200..]);
+            if i + 1 == order.len() {
+                assert!(
+                    level < 1e-4,
+                    "newest first {newest_first}: all ended, peak {level}"
+                );
+            } else if newest_first {
+                assert!(
+                    level > 0.01,
+                    "note {id} ended, the outer ones hold: peak {level}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn synth_poly_a_released_voice_struck_again_plays_only_the_new_note() {
+    // Slow attack: 48 struck twice shares one voice (notes 1 and 2). A voice-mode switch
+    // releases it; struck again while it rings (in place), it belongs to the new note alone,
+    // whose release ends it.
+    let mut s = sine_synth_in(0.0);
+    s.set_param(index(&synth::PARAM_IDS, "amp_attack"), 20.0);
+    render(&mut s, 4_800, &[on_n(0, 48, 1), on_n(2_400, 48, 2)]);
+    let mode = index(&synth::PARAM_IDS, "voice_mode");
+    s.set_param(mode, 1.0);
+    s.set_param(mode, 0.0);
+    render(&mut s, 480, &[on_n(0, 48, 3)]);
+    let l = render(&mut s, 24_000, &[off_n(0, 48, 3)]);
+    assert!(peak(&l[19_200..]) < 1e-4, "note 3's release ended it");
+}
+
+#[test]
+fn synth_poly_a_slide_takes_the_voice_away_from_its_old_key() {
+    // 48 struck twice (notes 1 and 2), then a slide to 52 takes the voice: 52's release ends it,
+    // and the 48 notes' releases find nothing.
+    let mut s = sine_synth_in(0.0);
+    render(&mut s, 4_800, &[on_n(0, 48, 1), on_n(2_400, 48, 2)]);
+    let slide = NoteEvent {
+        slide: true,
+        ..on_n(0, 52, 3)
+    };
+    render(&mut s, 9_600, &[slide]);
+    let l = render(&mut s, 24_000, &[off_n(0, 52, 3)]);
+    assert!(
+        peak(&l[19_200..]) < 1e-4,
+        "52's release ended the slid voice"
+    );
+    assert_eq!(voices(&s), 0.0);
+}
+
+#[test]
 fn synth_a_re_struck_key_keeps_its_priority() {
     // Mono and legato: 48, 55, then 48 struck again while the first 48 is still down. The first
     // 48's note-off belongs to that note: the new 48 keeps sounding and keeps its place in the

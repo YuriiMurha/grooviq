@@ -27,15 +27,26 @@ struct Mode {
     inst: Inst,
     /// 0 poly, 1 mono, 2 legato.
     voice: f32,
+    /// Synth: an attack slow enough that a re-struck key retriggers its voice in place.
+    slow: bool,
 }
 
 fn modes() -> Vec<Mode> {
     let mut all = Vec::new();
     for inst in [Inst::Sampler, Inst::Synth] {
         for voice in [0.0, 1.0, 2.0] {
-            all.push(Mode { inst, voice });
+            all.push(Mode {
+                inst,
+                voice,
+                slow: false,
+            });
         }
     }
+    all.push(Mode {
+        inst: Inst::Synth,
+        voice: 0.0,
+        slow: true,
+    });
     all
 }
 
@@ -79,7 +90,7 @@ fn channel(mode: Mode) -> ChannelSetup {
                     ("osc2_level", 0.0),
                     ("filter_cutoff", 20_000.0),
                     ("filter_env_amt", 0.0),
-                    ("amp_attack", 0.5),
+                    ("amp_attack", if mode.slow { 10.0 } else { 0.5 }),
                     ("amp_sustain", 1.0),
                     ("amp_release", 2.0),
                     ("voice_mode", mode.voice),
@@ -174,16 +185,22 @@ fn report(failures: Vec<String>) {
 }
 
 /// What sounds after B's release while A is still held, per mode: the sampler plays both
-/// notes in poly mode and keeps the held A in mono and legato (on the sounding voice, so at
-/// B's level in mono, A's in legato); the synth's re-struck key ends A in poly mode (B's
-/// release then leaves nothing), while mono and legato go back to the held A.
+/// notes in poly mode; everywhere else the key's one voice goes back to the held A and sounds
+/// on, at the level it had (B's after a new attack: synth poly and every mono mode; A's in
+/// legato, where B only took over A's voice).
 fn after_inner_release(mode: Mode) -> Hear {
     match (mode.inst, mode.voice as u8) {
-        (Inst::Sampler, 0) => Hear::Note(1.0),
-        (Inst::Sampler, 1) => Hear::Note(0.2),
-        (Inst::Synth, 0) => Hear::Nothing,
-        (Inst::Synth, 1) => Hear::Note(0.2),
-        (_, _) => Hear::Note(1.0),
+        (Inst::Sampler, 0) | (_, 2) => Hear::Note(1.0),
+        (_, _) => Hear::Note(0.2),
+    }
+}
+
+/// What sounds after A's release while B (struck inside A) is still held: B, at the level of
+/// the voice that plays it (A's in legato, where B took over A's voice).
+fn after_outer_release(mode: Mode) -> Hear {
+    match mode.voice as u8 {
+        2 => Hear::Note(1.0),
+        _ => Hear::Note(0.2),
     }
 }
 
@@ -206,6 +223,31 @@ fn nested_same_key_notes_in_a_pattern_release_their_own_voice() {
             "between the releases",
             &l[20_000..30_000],
             after_inner_release(mode),
+        ));
+        failures.extend(check(mode, "after both", &l[40_000..48_000], Hear::Nothing));
+    }
+    report(failures);
+}
+
+#[test]
+fn a_note_struck_inside_another_on_its_key_outlives_the_outer_release() {
+    let mut failures = Vec::new();
+    for mode in modes() {
+        // A: ticks 0..480 (frames 0..12 000) at velocity 1; B: 240..1440 (6 000..36 000) at 0.2.
+        let notes = vec![seq(0, 480, 1.0), seq(240, 1200, 0.2)];
+        let out = render_offline_with(
+            EngineConfig { sample_rate: SR },
+            state(mode, notes),
+            &[(0, Command::Play)],
+            48_000,
+            64,
+        );
+        let l = left(&out);
+        failures.extend(check(
+            mode,
+            "between the releases",
+            &l[20_000..30_000],
+            after_outer_release(mode),
         ));
         failures.extend(check(mode, "after both", &l[40_000..48_000], Hear::Nothing));
     }

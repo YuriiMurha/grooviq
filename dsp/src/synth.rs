@@ -62,6 +62,10 @@ const VEL_RAMP_MS: f32 = 3.0;
 /// any level. With faster attacks the new note starts from scratch instead, like a note from
 /// silence, while the old one rings out (poly) or fades out over STEAL_FADE_MS (mono, legato).
 const IN_PLACE_ATTACK_MS: f32 = 6.0;
+/// Poly mode: older notes of a key, still held, that a voice also plays for (a key struck
+/// again before its note ended). Past that, the newest of them is forgotten (its note-off finds
+/// nothing), so the outermost notes keep the key sounding.
+const OWNED: usize = 7;
 /// Crossfade / glide time (linear) for knob moves that would otherwise step the sound: filter
 /// type, unison layout, LFO destination and tuning.
 const XFADE_MS: f32 = 5.0;
@@ -987,6 +991,46 @@ struct Ctx {
     vel_ramp: u32,
 }
 
+/// Ids of held notes, oldest first, at most [`OWNED`].
+#[derive(Clone, Copy, Debug, Default)]
+struct Owners {
+    ids: [u32; OWNED],
+    len: u8,
+}
+
+impl Owners {
+    /// Adds `id` as the newest; when full, it is forgotten instead.
+    fn push(&mut self, id: u32) {
+        let len = usize::from(self.len);
+        if len < OWNED {
+            self.ids[len] = id;
+            self.len += 1;
+        }
+    }
+
+    /// Removes `id`; whether it was there.
+    fn remove(&mut self, id: u32) -> bool {
+        let len = usize::from(self.len);
+        let Some(i) = self.ids[..len].iter().position(|&o| o == id) else {
+            return false;
+        };
+        self.ids.copy_within(i + 1..len, i);
+        self.len -= 1;
+        true
+    }
+
+    /// Takes the newest.
+    fn pop(&mut self) -> Option<u32> {
+        let len = self.len.checked_sub(1)?;
+        self.len = len;
+        Some(self.ids[usize::from(len)])
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.ids[..usize::from(self.len)].iter().copied()
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Voice {
     active: bool,
@@ -994,6 +1038,9 @@ struct Voice {
     key: u8,
     /// The id of the note it plays: only that note's note-off ends it.
     id: u32,
+    /// Poly mode: the older notes of its key it also plays for, still held. When `id` ends, the
+    /// newest of them takes over and the voice sounds on; it releases when the last one ends.
+    older: Owners,
     vel_amp: f32,
     vel_flt: f32,
     /// After an in-place retrigger the velocity gains ramp to `vel_to` by `vel_step` per sample
@@ -1048,6 +1095,7 @@ impl Voice {
             gate: false,
             key: 60,
             id: 0,
+            older: Owners::default(),
             vel_amp: 1.0,
             vel_flt: 1.0,
             vel_to: (1.0, 1.0),
@@ -1100,6 +1148,7 @@ impl Voice {
         self.gate = p.gate;
         self.key = p.key;
         self.id = p.id;
+        self.older = Owners::default();
         (self.vel_amp, self.vel_flt) = vel_curves(p.vel);
         self.vel_left = 0;
         self.age = age;
@@ -1629,6 +1678,8 @@ impl Synth {
                 v.glide_to(key as f32, ms, sr);
                 v.key = key;
                 v.id = id;
+                // (the notes of its old key no longer own it: their note-offs find nothing)
+                v.older = Owners::default();
                 v.age = age;
                 self.last_voice = i;
                 return;
@@ -1647,6 +1698,8 @@ impl Synth {
         // they are (as before; the new velocity ramps in). With fast attacks, restarting it in
         // place would jump its level mid-cycle, so the old note rings out (released if still
         // held) and the new one gets a voice of its own, with the same attack as any note.
+        // Either way the key keeps one voice, which also plays for the key's older notes still
+        // held: a short note inside a long one hands the voice back to the long one.
         if !slide
             && self.retrigger_in_place()
             && let Some(i) = (0..NUM_VOICES)
@@ -1657,19 +1710,32 @@ impl Synth {
                 .max_by_key(|&i| self.voices[i].age)
         {
             let cx = self.cx;
-            self.voices[i].retrigger(key, vel, age, &cx);
-            self.voices[i].id = id;
+            let v = &mut self.voices[i];
+            if v.gate {
+                let older = v.id;
+                v.older.push(older);
+            } else {
+                v.older = Owners::default();
+            }
+            v.retrigger(key, vel, age, &cx);
+            v.id = id;
             self.last_voice = i;
             return;
         }
+        let mut older = Owners::default();
         for v in self.voices.iter_mut() {
             if v.active && v.gate && !v.fading && v.key == key {
+                for o in v.older.iter() {
+                    older.push(o);
+                }
+                older.push(v.id);
                 v.release();
             }
         }
         if let Some(i) = (0..NUM_VOICES).find(|&i| !self.voices[i].active) {
             let cx = self.cx;
             self.voices[i].start(pend, &cx, age);
+            self.voices[i].older = older;
             self.last_voice = i;
             return;
         }
@@ -1687,12 +1753,23 @@ impl Synth {
         self.park(i);
         let cx = self.cx;
         self.voices[i].start(pend, &cx, age);
+        self.voices[i].older = older;
     }
 
+    /// Ends note `id` on `key`. A voice that also plays for older held notes of the key sounds
+    /// on for them (no release, no retrigger); it releases when the last of its notes ends.
     fn poly_off(&mut self, key: u8, id: u32) {
         for v in self.voices.iter_mut() {
-            if v.active && v.gate && !v.fading && v.key == key && v.id == id {
-                v.release();
+            if !(v.active && v.gate && !v.fading && v.key == key) {
+                continue;
+            }
+            if v.id == id {
+                match v.older.pop() {
+                    Some(older) => v.id = older,
+                    None => v.release(),
+                }
+            } else {
+                v.older.remove(id);
             }
         }
     }
