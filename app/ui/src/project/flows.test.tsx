@@ -329,26 +329,23 @@ describe("save_on_an_untitled_project_asks_for_a_path", () => {
 describe("a held shortcut", () => {
   it("a held Mod+S (key repeat) saves once", async () => {
     await start();
-    const press = (repeat: boolean) =>
-      act(() => {
+    const press = async (repeat: boolean) => {
+      await act(async () => {
         fireEvent.keyDown(window, { key: "s", ctrlKey: true, repeat });
       });
-    // Each save finishes before the next repeat arrives, as with a real key repeat (~30 ms).
-    const settle = () =>
-      act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      });
-    press(false);
-    await settle();
+    };
+    await press(false);
+    await waitFor(() => expect(called("project_save")).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByText("Unsaved changes")).toBeNull());
+    // Flush each repeat's asynchronous flow after the first save has completed.
+    // Sending every repeat while busy would also pass with the repeat guard removed.
     for (let i = 0; i < 10; i++) {
-      press(true);
-      await settle();
+      await press(true);
+      expect(called("project_save")).toHaveLength(1);
     }
-    expect(called("project_save")).toHaveLength(1);
-    // Released and pressed again: a second save.
-    press(false);
-    await settle();
-    expect(called("project_save")).toHaveLength(2);
+    fireEvent.keyUp(window, { key: "s", ctrlKey: true });
+    await press(false);
+    await waitFor(() => expect(called("project_save")).toHaveLength(2));
   });
 });
 

@@ -502,8 +502,18 @@ pub struct Session {
     /// recording on (or off) by hand sends its own barrier instead; a new project keeps it
     /// (the engine records until it takes the switch).
     owed_disarm: bool,
+    /// Accepted UI presses, kept off the audio thread until release or channel replacement.
+    live_presses: Mutex<Vec<LivePress>>,
     /// The current pattern's note changes, for undo and redo.
     history: NoteHistory,
+}
+
+struct LivePress {
+    channel: u32,
+    key: u8,
+    press: NoteId,
+    instance: u64,
+    releasing: bool,
 }
 
 /// What committing waiting recorded notes did.
@@ -579,6 +589,7 @@ impl Session {
             recording: false,
             pending: Vec::new(),
             owed_disarm: false,
+            live_presses: Mutex::new(Vec::new()),
             history: NoteHistory::default(),
         };
         // A fresh queue always has room for a whole state.
@@ -1393,16 +1404,81 @@ impl Session {
         let key = checked_key(key)?;
         let velocity = finite(velocity, "velocity")?.clamp(0.0, 1.0);
         let press = NoteId::live();
-        self.send(live_note(channel, key, velocity, press))?;
+        let mut controller = lock(&self.controller);
+        let instance = controller
+            .channel_instance(ChannelId(channel))
+            .ok_or(ControlError::UnknownChannel)?;
+        controller.send_at(0, live_note(channel, key, velocity, press))?;
+        let mut presses = self
+            .live_presses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        presses.retain(|p| controller.channel_instance(ChannelId(p.channel)) == Some(p.instance));
+        presses.push(LivePress {
+            channel,
+            key,
+            press,
+            instance,
+            releasing: false,
+        });
         Ok(press)
     }
 
     /// Releases `press` (what [`Self::live_note_on`] returned) of `key` on `channel`. Each
     /// producer names its own press, so a release never ends another one's note on the key.
+    /// A full queue transfers the release to session maintenance; success means it is owned
+    /// here, not necessarily delivered yet. Duplicate releases are harmless.
     pub fn live_note_off(&self, channel: u32, key: u8, press: NoteId) -> Result<(), SessionError> {
         self.channel_index(channel)?;
         let key = checked_key(key)?;
-        self.send(live_release(channel, key, press))
+        let mut controller = lock(&self.controller);
+        let mut presses = self
+            .live_presses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(at) = presses
+            .iter()
+            .position(|p| p.channel == channel && p.key == key && p.press == press)
+        else {
+            return Ok(()); // Duplicate or unaccepted press: nothing is owed.
+        };
+        if controller.channel_instance(ChannelId(channel)) != Some(presses[at].instance) {
+            presses.remove(at);
+            return Ok(());
+        }
+        match controller.send_at(0, live_release(channel, key, press)) {
+            Ok(()) => {
+                presses.remove(at);
+                Ok(())
+            }
+            Err(ControlError::Full) => {
+                presses[at].releasing = true;
+                Ok(())
+            }
+            Err(e) => {
+                presses.remove(at);
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Called even when idle/unarmed. Releases record at engine delivery, not physical key-up.
+    fn retry_live_releases(&self) {
+        let mut controller = lock(&self.controller);
+        let mut presses = self
+            .live_presses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        presses.retain(|p| {
+            if controller.channel_instance(ChannelId(p.channel)) != Some(p.instance) {
+                return false;
+            }
+            !p.releasing
+                || matches!(
+                    controller.send_at(0, live_release(p.channel, p.key, p.press)),
+                    Err(ControlError::Full)
+                )
+        });
     }
 
     /// Sets an instrument parameter in the engine only, while a control moves: the project
@@ -1449,6 +1525,7 @@ impl Session {
     /// dropped. When notes do not fit (the note cap, or used-up ids), the ones that fit go in,
     /// recording is switched off, and [`Recorded::stopped`] says what was lost.
     pub fn collect_recorded(&mut self, events: &[RecordEvent], now: Instant) -> Recorded {
+        self.retry_live_releases();
         if self.owed_disarm {
             self.send_disarm();
         }
@@ -1677,6 +1754,10 @@ impl Session {
             self.recorder.await_mark(mark);
         }
         self.pending.clear();
+        self.live_presses
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         self.history.clear();
         self.project = project;
         self.files = files;
@@ -1806,19 +1887,42 @@ impl Session {
         self.saving = false;
     }
 
+    /// Applies the disk outcome once for both synchronous and desktop saves.
+    pub fn end_save(
+        &mut self,
+        job: &SaveJob,
+        result: Result<(), SessionError>,
+    ) -> Result<bool, SessionError> {
+        match result {
+            Ok(()) => Ok(self.finish_save(job)),
+            Err(e) => {
+                if e.directory_unconfirmed() {
+                    self.save_unconfirmed(job);
+                } else {
+                    self.save_failed();
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// Saves in one go (begin, write, finish). Holds the session the whole time: the app splits
     /// the steps instead.
     pub fn save(&mut self, path: Option<&Path>, backups: &Path) -> Result<PathBuf, SessionError> {
+        self.save_on(path, backups, &mut RealDisk)
+    }
+
+    /// Synchronous save with an injectable disk boundary.
+    #[doc(hidden)]
+    pub fn save_on(
+        &mut self,
+        path: Option<&Path>,
+        backups: &Path,
+        disk: &mut impl Disk,
+    ) -> Result<PathBuf, SessionError> {
         let job = self.begin_save(path)?;
-        if let Err(e) = job.write(backups) {
-            if e.directory_unconfirmed() {
-                self.save_unconfirmed(&job);
-            } else {
-                self.save_failed();
-            }
-            return Err(e);
-        }
-        self.finish_save(&job);
+        let result = job.write_on(backups, disk);
+        self.end_save(&job, result)?;
         Ok(job.path)
     }
 
@@ -1982,5 +2086,119 @@ fn hit(id: u32, channel: u32, tick: u32, velocity: f32) -> Note {
         key: DEFAULT_KEY,
         velocity,
         slide: false,
+    }
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+    use grooviq_engine::{EngineConfig, engine};
+
+    #[test]
+    fn delivered_ui_releases_leave_no_ledger_entries() {
+        let (c, mut processor) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        let c = Arc::new(Mutex::new(c));
+        let mut s = Session::new(c.clone());
+        let ch = s
+            .add_synth_channel("Init", Instant::now())
+            .unwrap()
+            .channels[0]
+            .id;
+
+        let press = s.live_note_on(ch, 60, 0.8).unwrap();
+        assert_eq!(s.live_presses.lock().unwrap().len(), 1);
+        s.live_note_off(ch, 60, press).unwrap();
+        assert!(s.live_presses.lock().unwrap().is_empty());
+
+        let press = s.live_note_on(ch, 60, 0.8).unwrap();
+        while lock(&c).send(Command::SetMetronome { on: false }).is_ok() {}
+        s.live_note_off(ch, 60, press).unwrap();
+        assert_eq!(s.live_presses.lock().unwrap().len(), 1);
+        processor.process(&mut [0.0; 128], 2);
+        s.collect_recorded(&[], Instant::now());
+        assert!(s.live_presses.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ui_release_debt_is_bounded_by_accepted_presses_and_channel_lifetime() {
+        let (c, mut processor) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        let c = Arc::new(Mutex::new(c));
+        let mut s = Session::new(c.clone());
+        let ch = s
+            .add_synth_channel("Init", Instant::now())
+            .unwrap()
+            .channels[0]
+            .id;
+        let press = s.live_note_on(ch, 60, 0.8).unwrap();
+        while lock(&c).send(Command::SetMetronome { on: false }).is_ok() {}
+        assert!(s.live_note_on(ch, 61, 0.8).is_err());
+        s.live_note_off(ch, 61, NoteId::live()).unwrap();
+        s.live_note_off(ch, 60, press).unwrap();
+        s.live_note_off(ch, 60, press).unwrap();
+        assert_eq!(s.live_presses.lock().unwrap().len(), 1);
+        processor.process(&mut [0.0; 128], 2);
+        // Replace the channel while keeping its numeric id, as remove/re-add and load do.
+        let state = lock(&c).state().clone();
+        lock(&c).load_state(state).unwrap();
+        let fresh = s.live_note_on(ch, 60, 0.8).unwrap();
+        // Inject old debt explicitly so the maintenance instance guard is independently tested.
+        let instance = lock(&c).channel_instance(ChannelId(ch)).unwrap();
+        s.live_presses.lock().unwrap().push(LivePress {
+            channel: ch,
+            key: 60,
+            press,
+            instance: instance - 1,
+            releasing: true,
+        });
+        while lock(&c).send(Command::SetMetronome { on: false }).is_ok() {}
+        s.collect_recorded(&[], Instant::now());
+        assert_eq!(s.live_presses.lock().unwrap().len(), 1);
+        assert_eq!(s.live_presses.lock().unwrap()[0].press, fresh);
+        processor.process(&mut [0.0; 128], 2);
+        s.new_project().unwrap();
+        assert!(s.live_presses.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod release_progress_tests {
+    use super::*;
+    use grooviq_engine::{EngineConfig, engine};
+
+    #[test]
+    fn ui_release_maintenance_makes_partial_progress() {
+        let (c, mut p) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        let c = Arc::new(Mutex::new(c));
+        let mut s = Session::new(c.clone());
+        let ch = s
+            .add_synth_channel("Init", Instant::now())
+            .unwrap()
+            .channels[0]
+            .id;
+        let presses = [60, 61, 62].map(|k| s.live_note_on(ch, k, 0.8).unwrap());
+        p.process(&mut [0.0; 128], 2);
+        lock(&c).send(Command::SetMetronome { on: false }).unwrap();
+        while lock(&c)
+            .send_at(4800, Command::SetMetronome { on: false })
+            .is_ok()
+        {}
+        for (key, press) in [60, 61, 62].into_iter().zip(presses) {
+            s.live_note_off(ch, key, press).unwrap();
+        }
+        p.process(&mut [0.0; 128], 2); // Exactly one queue slot is free.
+        s.collect_recorded(&[], Instant::now());
+        assert_eq!(s.live_presses.lock().unwrap().len(), 2);
+        assert_eq!(s.live_presses.lock().unwrap()[0].press, presses[1]);
+        for _ in 0..80 {
+            p.process(&mut [0.0; 128], 2);
+        }
+        s.collect_recorded(&[], Instant::now());
+        assert!(s.live_presses.lock().unwrap().is_empty());
     }
 }

@@ -3223,7 +3223,7 @@ fn directory_failure_keeps_new_bytes_and_reports_uncertainty() {
     assert!(error.to_string().contains("written"));
     assert_eq!(load(&path).unwrap().project.bpm, 137.0);
     assert!(error.directory_unconfirmed());
-    session.save_unconfirmed(&job);
+    assert!(session.end_save(&job, Err(error)).is_err());
     assert!(session.view().dirty);
     assert_eq!(session.path(), Some(path.as_path()));
     let folder = grooviq_project::backup::backup_folder(&path, &backups).unwrap();
@@ -3251,16 +3251,238 @@ fn a_clean_save_as_warning_records_the_new_path_and_keeps_close_protection() {
     let backups = root.path().join("backups");
     let (mut session, _, _processor) = rig();
     session.save(Some(&old), &backups).unwrap();
-    let job = session.begin_save(Some(&new)).unwrap();
     assert!(
-        job.write_on(&backups, &mut Refuse)
+        session
+            .save_on(Some(&new), &backups, &mut Refuse)
             .unwrap_err()
             .directory_unconfirmed()
     );
-    session.save_unconfirmed(&job);
     assert_eq!(session.path(), Some(new.as_path()));
     assert!(session.needs_confirmation());
+    let due = Instant::now() + AUTOSAVE_PERIOD;
+    assert!(session.autosave_due(due));
+    assert!(session.autosave_snapshot(due).is_some());
     assert!(load(&new).is_ok());
     session.save(None, &backups).unwrap();
     assert!(!session.needs_confirmation());
+}
+
+fn saturate_ui_queue(controller: &Arc<Mutex<Controller>>) {
+    let mut c = controller.lock().unwrap();
+    while c.send(Command::SetMetronome { on: false }).is_ok() {}
+}
+
+#[test]
+fn ui_release_retries_without_input_after_queue_drains() {
+    let (mut s, c, mut p) = rig();
+    let ch = add_synth(&mut s, "Init");
+    let press = s.live_note_on(ch, 60, 0.8).unwrap();
+    assert!(render(&mut p, 30) > 0.001);
+    saturate_ui_queue(&c);
+    let _ = s.live_note_off(ch, 60, press);
+    render(&mut p, 30);
+    s.collect_recorded(&[], Instant::now());
+    render(&mut p, 2000);
+    assert_eq!(render(&mut p, 10), 0.0);
+}
+
+#[test]
+fn ui_release_retry_preserves_a_new_same_key_press_in_every_voice_mode() {
+    for sampler in [false, true] {
+        for mode in 0..3 {
+            let (mut s, c, mut p) = rig();
+            let ch = if sampler {
+                let ch = add(&mut s, "loop", Instant::now());
+                s.param_live(ch, "loop", 1.0).unwrap();
+                ch
+            } else {
+                add_synth(&mut s, "Init")
+            };
+            s.param_live(ch, "voice_mode", mode as f32).unwrap();
+            let old = s.live_note_on(ch, 60, 0.8).unwrap();
+            render(&mut p, 30);
+            saturate_ui_queue(&c);
+            let _ = s.live_note_off(ch, 60, old);
+            render(&mut p, 30);
+            let new = s.live_note_on(ch, 60, 0.8).unwrap();
+            s.collect_recorded(&[], Instant::now());
+            assert!(
+                render(&mut p, 100) > 0.001,
+                "sampler={sampler}, mode={mode}"
+            );
+            s.live_note_off(ch, 60, new).unwrap();
+            render(&mut p, 2000);
+            assert_eq!(render(&mut p, 10), 0.0, "sampler={sampler}, mode={mode}");
+        }
+    }
+}
+
+#[test]
+fn ui_release_debt_survives_engine_rebuild_and_duplicate_release() {
+    let (mut s, c, mut p) = rig();
+    let ch = add_synth(&mut s, "Init");
+    let press = s.live_note_on(ch, 60, 0.8).unwrap();
+    saturate_ui_queue(&c);
+    let _ = s.live_note_off(ch, 60, press);
+    let _ = s.live_note_off(ch, 60, press);
+    c.lock()
+        .unwrap()
+        .reconfigure(&mut p, EngineConfig { sample_rate: RATE });
+    render(&mut p, 30);
+    s.collect_recorded(&[], Instant::now());
+    render(&mut p, 2000);
+    assert_eq!(render(&mut p, 10), 0.0);
+}
+
+#[test]
+fn ui_release_retry_records_delivery_and_keeps_take_barriers() {
+    let (mut s, c, mut p) = rig();
+    let ch = add_synth(&mut s, "Init");
+    s.set_recording(true).unwrap();
+    let mut events = start_take(&c, &mut p);
+    let old = s.live_note_on(ch, 60, 0.8).unwrap();
+    render(&mut p, 40);
+    saturate_ui_queue(&c);
+    let _ = s.live_note_off(ch, 60, old);
+    render(&mut p, 40);
+    c.lock().unwrap().take_recorded(&mut events);
+    s.collect_recorded(&events, Instant::now());
+    render(&mut p, 2);
+    events.clear();
+    c.lock().unwrap().take_recorded(&mut events);
+    s.collect_recorded(&events, Instant::now());
+    let notes = &s.project().patterns[0].notes;
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].length > 200,
+        "release records delivery, not physical key-up"
+    );
+    // A release owed by the previous take must not close this take's same-key press.
+    let old = s.live_note_on(ch, 60, 0.8).unwrap();
+    render(&mut p, 2);
+    saturate_ui_queue(&c);
+    let _ = s.live_note_off(ch, 60, old);
+    render(&mut p, 2);
+    s.set_recording(false).unwrap();
+    s.set_recording(true).unwrap();
+    let new = s.live_note_on(ch, 60, 0.8).unwrap();
+    s.collect_recorded(&[], Instant::now());
+    render(&mut p, 40);
+    s.live_note_off(ch, 60, new).unwrap();
+    render(&mut p, 2);
+    events.clear();
+    c.lock().unwrap().take_recorded(&mut events);
+    s.collect_recorded(&events, Instant::now());
+    assert!(
+        s.project().patterns[0]
+            .notes
+            .iter()
+            .any(|n| n.length >= 115 && n.length <= 125)
+    );
+}
+
+#[test]
+fn ui_release_debt_does_not_cross_project_or_channel_replacement() {
+    for open in [false, true] {
+        let (mut s, c, mut p) = rig();
+        let ch = add_synth(&mut s, "Init");
+        let old = s.live_note_on(ch, 60, 0.8).unwrap();
+        saturate_ui_queue(&c);
+        s.live_note_off(ch, 60, old).unwrap();
+        render(&mut p, 10);
+        let ch = if open {
+            let loaded = Loaded {
+                project: s.project().clone(),
+                samples: Default::default(),
+                warnings: vec![],
+            };
+            s.open(
+                Path::new("/generated/replacement.grooviq"),
+                loaded,
+                Default::default(),
+            )
+            .unwrap();
+            ch
+        } else {
+            s.apply(Edit::RemoveChannel { channel: ch }, Instant::now())
+                .unwrap();
+            add_synth(&mut s, "Init")
+        };
+        let new = s.live_note_on(ch, 60, 0.8).unwrap();
+        s.live_note_off(ch, 60, old).unwrap();
+        s.collect_recorded(&[], Instant::now());
+        assert!(render(&mut p, 100) > 0.001);
+        s.live_note_off(ch, 60, new).unwrap();
+        render(&mut p, 2000);
+        assert_eq!(render(&mut p, 10), 0.0);
+    }
+}
+#[test]
+fn stale_uncertain_save_cannot_adopt_path_after_new_or_open() {
+    struct Refuse;
+    impl Disk for Refuse {
+        fn sync_folder(&mut self, _: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::other("directory sync refused"))
+        }
+    }
+    for open in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("old.grooviq");
+        let (mut session, _, _processor) = rig();
+        let job = session.begin_save(Some(&old)).unwrap();
+        let result = job.write_on(&root.path().join("backups"), &mut Refuse);
+        assert!(result.as_ref().unwrap_err().directory_unconfirmed());
+        if open {
+            session
+                .open(
+                    &root.path().join("other.grooviq"),
+                    Loaded {
+                        project: Project::new(),
+                        samples: Default::default(),
+                        warnings: vec![],
+                    },
+                    Default::default(),
+                )
+                .unwrap();
+        } else {
+            session.new_project().unwrap();
+        }
+        let before = session.view();
+        assert!(session.end_save(&job, result).is_err());
+        assert_eq!(session.view(), before);
+        assert_ne!(session.path(), Some(old.as_path()));
+        let old_bytes = std::fs::read(&old).unwrap();
+        let retry = session.save(None, &root.path().join("backups"));
+        if open {
+            retry.unwrap();
+        } else {
+            assert!(matches!(retry, Err(SessionError::NoPath)));
+        }
+        assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+    }
+}
+
+#[test]
+fn pre_rename_save_failure_keeps_the_sessions_written_facts() {
+    struct Refuse;
+    impl Disk for Refuse {
+        fn sync(&mut self, _: &std::fs::File) -> std::io::Result<()> {
+            Err(std::io::Error::other("file sync refused"))
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let backups = root.path().join("backups");
+    let old = root.path().join("old.grooviq");
+    let new = root.path().join("new.grooviq");
+    let (mut session, _, _processor) = rig();
+    session.save(Some(&old), &backups).unwrap();
+    let before = session.view();
+    let error = session
+        .save_on(Some(&new), &backups, &mut Refuse)
+        .unwrap_err();
+    assert!(!error.directory_unconfirmed());
+    assert_eq!(session.view(), before);
+    assert!(!new.exists());
+    session.save(None, &backups).unwrap();
+    assert_eq!(session.path(), Some(old.as_path()));
 }

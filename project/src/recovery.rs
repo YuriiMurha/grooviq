@@ -11,8 +11,9 @@
 //! is written to a new file name, and the rename of `autosave.json` (which names that file) is
 //! the commit. A crash before it leaves the old pair whole, plus the new snapshot's file if it
 //! was complete; a crash after it leaves the new pair whole. A path is never paired with another
-//! project's bytes, and a complete newer snapshot is never thrown away: the next launch offers
-//! the old pair with its path and the newer snapshot untitled, newest first.
+//! project's bytes. During directory-sync uncertainty, retention keeps the newest complete
+//! snapshot, the last confirmed snapshot and the current metadata reference. The next launch
+//! offers the old pair with its path and a newer snapshot untitled, newest first.
 //!
 //! A pending project stays on disk, and is offered on every launch (newest first), until the
 //! person restores it (it becomes `recovered-<n>.grooviq`, of which the newest
@@ -74,6 +75,7 @@ pub struct RecoveryDir {
     lock: File,
     /// The number of the newest autosave file this session wrote.
     written: AtomicU64,
+    confirmed: std::sync::Mutex<Option<String>>,
 }
 
 fn unix_now() -> u64 {
@@ -182,6 +184,7 @@ impl RecoveryDir {
             root: root.to_path_buf(),
             lock,
             written: AtomicU64::new(0),
+            confirmed: std::sync::Mutex::new(None),
         };
 
         if leftover {
@@ -406,7 +409,8 @@ impl RecoveryDir {
         self.write_autosave_on(project, samples, original, between, &mut RealDisk)
     }
 
-    fn write_autosave_on(
+    #[doc(hidden)]
+    pub fn write_autosave_on(
         &self,
         project: &Project,
         samples: &SampleFiles,
@@ -417,7 +421,12 @@ impl RecoveryDir {
         let number = self.written.fetch_add(1, Ordering::AcqRel) + 1;
         let name = format!("{AUTOSAVE}{number}.{EXTENSION}");
         let file = self.root.join(&name);
-        stage_save(project, samples, &file, disk)?.commit(disk)?;
+        if let Err(e) = stage_save(project, samples, &file, disk)?.commit(disk) {
+            if directory_unconfirmed(&e) {
+                self.prune_unconfirmed(&name)?;
+            }
+            return Err(e);
+        }
         let committed = between().and_then(|()| {
             let meta = Meta {
                 original: original.map(Path::to_path_buf),
@@ -428,16 +437,49 @@ impl RecoveryDir {
             write_atomic(&self.root.join(META), &json, disk)
         });
         if let Err(e) = committed {
-            // Metadata may already name this file. Retain both snapshots until a
-            // later confirmed commit makes cleanup safe.
-            if !directory_unconfirmed(&e) {
+            // Metadata may already name this file. Preserve it and the last confirmed
+            // snapshot while bounding superseded unconfirmed copies.
+            if directory_unconfirmed(&e) {
+                self.prune_unconfirmed(&name)?;
+            } else {
                 let _ = fs::remove_file(&file);
             }
             return Err(e);
         }
         // The old autosave is only an older copy now; one that cannot be removed is taken
         // care of at the next launch, or the next autosave.
+        *self.confirmed.lock().unwrap() = Some(name.clone());
         let _ = self.remove_autosave_files(Some(&name));
+        Ok(())
+    }
+
+    // At most three full copies: newest, last confirmed, and the currently referenced
+    // snapshot (which can differ after a metadata warning followed by a snapshot warning).
+    // This bounds visible copies; it does not prove survival of a power loss.
+    fn prune_unconfirmed(&self, newest: &str) -> io::Result<()> {
+        let confirmed = self.confirmed.lock().unwrap();
+        let referenced = read_meta(&self.root.join(META)).and_then(|m| m.file);
+        for (_, file) in self.numbered(AUTOSAVE) {
+            let name = file.file_name().and_then(|n| n.to_str());
+            if name != Some(newest) && name != confirmed.as_deref() && name != referenced.as_deref()
+            {
+                remove(&file)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn write_sequence(&self) -> u64 {
+        self.written.load(Ordering::Acquire)
+    }
+
+    /// Clears only the write this tick made, never a newer project's snapshot.
+    #[doc(hidden)]
+    pub fn clear_autosave_if_current(&self, sequence: u64) -> io::Result<()> {
+        if self.write_sequence() == sequence {
+            self.clear_autosave()?;
+        }
         Ok(())
     }
 
@@ -487,6 +529,64 @@ impl RecoveryDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_warnings_bound_visible_copies_and_preserve_recovery() {
+        struct Refuse {
+            metadata: bool,
+        }
+        impl Disk for Refuse {
+            fn sync_folder(&mut self, path: &Path) -> io::Result<()> {
+                if path.ends_with(META) == self.metadata {
+                    Err(io::Error::other("refused"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        for mode in 0..3 {
+            let root = tempfile::tempdir().unwrap();
+            let (dir, _) = RecoveryDir::start(root.path()).unwrap();
+            dir.write_autosave(&Project::new(), &SampleFiles::new(), None)
+                .unwrap();
+            let confirmed = read_meta(&root.path().join(META)).unwrap().file.unwrap();
+            let initial_size = fs::metadata(root.path().join(&confirmed)).unwrap().len();
+            for index in 0..24 {
+                let metadata = mode == 1 || (mode == 2 && index % 2 == 1);
+                let mut project = Project::new();
+                project.bpm = 100.0 + (index.min(16) as f32);
+                let e = dir
+                    .write_autosave_on(
+                        &project,
+                        &SampleFiles::new(),
+                        None,
+                        || Ok(()),
+                        &mut Refuse { metadata },
+                    )
+                    .unwrap_err();
+                assert!(directory_unconfirmed(&e));
+                assert!(root.path().join(&confirmed).is_file());
+                let referenced = read_meta(&root.path().join(META)).unwrap().file.unwrap();
+                assert!(root.path().join(referenced).is_file());
+                assert!(dir.numbered(AUTOSAVE).len() <= 3);
+                let bytes: u64 = dir
+                    .numbered(AUTOSAVE)
+                    .iter()
+                    .map(|(_, p)| fs::metadata(p).unwrap().len())
+                    .sum();
+                assert!(bytes <= initial_size * 4);
+            }
+            drop(dir);
+            let (dir, found) = RecoveryDir::start(root.path()).unwrap();
+            assert_eq!(
+                crate::file::load(&found[0].file).unwrap().project.bpm,
+                116.0
+            );
+            dir.write_autosave(&Project::new(), &SampleFiles::new(), None)
+                .unwrap();
+            assert_eq!(dir.numbered(AUTOSAVE).len(), 1);
+        }
+    }
 
     #[test]
     fn failures_at_snapshot_and_metadata_boundaries_keep_a_valid_pair() {

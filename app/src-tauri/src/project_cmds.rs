@@ -359,26 +359,13 @@ async fn save_to(audio: &Audio, path: Option<PathBuf>) -> Result<ProjectView, St
     .await;
     let (view, clean) = {
         let mut session = session(audio);
-        let job = match written {
-            Ok((job, result)) => {
-                if let Err(e) = result {
-                    if e.directory_unconfirmed() {
-                        session.save_unconfirmed(&job);
-                    } else {
-                        session.save_failed();
-                    }
-                    return Err(e.to_string());
-                }
-                job
-            }
+        let applied = match written {
+            Ok((job, result)) => session.end_save(&job, result).map_err(|e| e.to_string())?,
             Err(e) => {
                 session.save_failed();
                 return Err(e);
             }
         };
-        // False if another project was opened or started while the file was written: that
-        // file holds the old project, and the open one keeps its own path.
-        let applied = session.finish_save(&job);
         (session.view(), applied && !session.needs_confirmation())
     };
     if clean && let Some(dir) = lock(&audio.recovery).as_ref() {
