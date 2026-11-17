@@ -851,13 +851,12 @@ mod tests {
     fn a_fifo_is_refused_without_blocking() {
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("pipe.wav");
-        if !std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .is_ok_and(|s| s.success())
-        {
-            return; // no mkfifo here
-        }
+        // Not the `mkfifo` program: a child spawned here holds a copy of every open descriptor
+        // between fork and exec, and a `flock` follows the open file description, so another
+        // test's "dead" temp file would look locked for that instant (#129).
+        let name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: `name` is a valid NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(read_sample_file(&fifo).is_err()));
         assert_eq!(

@@ -42,7 +42,9 @@ export function connectLive(
     ws.onmessage = (e: MessageEvent) => {
       if (!(e.data instanceof ArrayBuffer)) return;
       const frame = decodeLive(e.data);
-      if (frame) onFrame(frame);
+      if (!frame) return;
+      frame.receivedAt = performance.now();
+      onFrame(frame);
     };
     ws.onclose = () => {
       if (stopped || socket !== ws) return;
