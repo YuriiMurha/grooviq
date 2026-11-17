@@ -811,3 +811,76 @@ fn absent_channel_entry_is_saveable_control() {
     save(&l.project, &l.samples, &path).unwrap();
     assert_eq!(load(&path).unwrap().project, l.project);
 }
+
+#[test]
+fn reverse_listed_priority_siblings_validate_and_roundtrip() {
+    let mut p = auto_song();
+    let mut right = p.arrangement.clips[0].clone();
+    right.id = p.take_id().unwrap();
+    right.start_tick = 960;
+    if let ClipContent::Automation { offset_tick, .. } = &mut right.content {
+        *offset_tick = 960;
+    }
+    p.arrangement.clips.insert(0, right);
+    p.validate();
+    p.validate_arrangement().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("reversed-siblings.grooviq");
+    save(&p, &SampleFiles::new(), &path).unwrap();
+    assert_eq!(load(&path).unwrap().project.arrangement, p.arrangement);
+}
+
+#[test]
+fn automation_points_are_required_on_disk() {
+    let p = auto_song();
+    let d = tempfile::tempdir().unwrap();
+    let control = d.path().join("with-points.grooviq");
+    zip_json(&control, &disk_json(&p), &[]);
+    assert!(load(&control).is_ok());
+    let mut document: serde_json::Value = serde_json::from_str(&disk_json(&p)).unwrap();
+    assert!(
+        document["arrangement"]["clips"][0]["content"]
+            .as_object_mut()
+            .unwrap()
+            .remove("points")
+            .is_some()
+    );
+    let missing = d.path().join("without-points.grooviq");
+    zip_json(&missing, &serde_json::to_string(&document).unwrap(), &[]);
+    assert!(matches!(load(&missing), Err(LoadError::Corrupt(_))));
+}
+
+#[test]
+fn equal_asset_bytes_in_distinct_arcs_use_one_entry() {
+    let mut p = audio_song();
+    let mut second = p.arrangement.audio_assets[0].clone();
+    second.id = 100;
+    second.sample.path = "second.wav".into();
+    p.arrangement.audio_assets.push(second);
+    p.validate();
+    let mut files = SampleFiles::new();
+    for id in [5, 100] {
+        files.insert(
+            id,
+            SampleFile {
+                name: format!("source-{id}.wav"),
+                bytes: std::sync::Arc::new(vec![9, 8, 7, 6]),
+            },
+        );
+    }
+    assert!(!std::sync::Arc::ptr_eq(
+        &files[&5].bytes,
+        &files[&100].bytes
+    ));
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("equal-bytes.grooviq");
+    save(&p, &files, &path).unwrap();
+    let zip = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+    assert_eq!(zip.len(), 2);
+    let loaded = load(&path).unwrap();
+    assert_eq!(*loaded.samples[&5].bytes, vec![9, 8, 7, 6]);
+    assert!(std::sync::Arc::ptr_eq(
+        &loaded.samples[&5].bytes,
+        &loaded.samples[&100].bytes
+    ));
+}
