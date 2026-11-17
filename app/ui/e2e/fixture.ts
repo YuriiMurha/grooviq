@@ -1,5 +1,6 @@
 import { expect, test as base, type Locator, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import { keepWebglFrames } from "./webglProbe";
 import { installMockTauri, type MockChannel, type MockProject, type MockSeed } from "./mockTauri";
 
 /** The sampler's parameter ids, ranges and defaults, as the engine has them (the fixture the
@@ -86,6 +87,7 @@ export const test = base.extend<{ seed: MockSeed; app: Page; mock: Mock }>({
       if (m.type() === "error" || m.type() === "warning") consoleErrors.push(`${m.type()}: ${m.text()}`);
     });
     page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
+    await page.addInitScript(keepWebglFrames);
     await page.addInitScript(installMockTauri, { samplerParams: SAMPLER_PARAMS, synthParams: SYNTH_PARAMS, synthPresets: SYNTH_PRESETS, ...seed });
     await page.goto("/");
     await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
@@ -123,7 +125,9 @@ export async function clickCell(page: Page, row: number, step: number, button: "
 /** The position readout ("bar.beat.step"). */
 export const position = (page: Page) => page.getByRole("timer", { name: "Position" });
 
-/** RGBA at points (CSS pixels, relative to the element) of what the element shows on screen. */
+/** RGBA at points (CSS pixels, relative to the element) of what the element shows on screen.
+ * WebGL canvases are read through a screenshot; `keepWebglFrames` (see webglProbe.ts) makes that
+ * deterministic on Linux WebKit. */
 export async function pixelsAt(page: Page, el: Locator, points: { x: number; y: number }[]) {
   const png = (await el.screenshot({ scale: "css" })).toString("base64");
   return page.evaluate(
