@@ -133,6 +133,39 @@ impl TransportClock {
         self.shift = 0;
     }
 
+    pub(crate) fn sample_rate(&self) -> f32 {
+        self.sample_rate
+    }
+
+    /// Maps an exact project-frame horizon through the current musical anchor.
+    pub(crate) fn song_frame_of(&self, project_frame: u64) -> u64 {
+        let anchor = exact_frames(
+            self.anchor_tick,
+            f64::from(self.bpm),
+            f64::from(self.sample_rate),
+        );
+        let offset = (project_frame as f64 - anchor).ceil();
+        if offset >= 0.0 {
+            self.anchor_frame.saturating_add(offset as u64)
+        } else {
+            self.anchor_frame.saturating_sub((-offset) as u64)
+        }
+    }
+
+    pub(crate) fn seek(&mut self, at: u64, tick: u64) {
+        self.anchor_frame = at;
+        self.anchor_tick = tick as f64;
+        self.covered = tick;
+        self.shift = 0;
+        self.history_len = 0;
+        self.since = at;
+    }
+
+    pub(crate) fn finish(&mut self, at: u64, tick: u64) {
+        self.seek(at, tick);
+        self.playing = false;
+    }
+
     /// Stops and rewinds to tick 0.
     pub(crate) fn stop(&mut self) {
         self.playing = false;
@@ -336,7 +369,7 @@ impl TransportClock {
             // Saturating: never negative.
             self.tick_at(frame).floor() as u64
         } else {
-            0
+            self.anchor_tick as u64
         }
     }
 }

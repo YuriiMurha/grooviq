@@ -735,3 +735,55 @@ fn a_waiting_recording_barrier_never_allocates() {
         "{taken:?}"
     );
 }
+
+#[test]
+fn song_swaps_loop_seek_and_full_trash_remain_realtime_safe() {
+    use grooviq_engine::{ArrangementData, PlaybackMode, SongData, SongLoop};
+    let (mut c, mut p) = engine(EngineConfig {
+        sample_rate: 8000.0,
+    });
+    let song = SongData {
+        arrangement: ArrangementData {
+            length: 1,
+            notes: vec![],
+        },
+        end_tick: 1,
+        end_frame: 0,
+        frame_rate: 48000.0,
+    };
+    c.set_song(song.clone()).unwrap();
+    c.send(Command::SetPlaybackMode {
+        mode: PlaybackMode::Song,
+    })
+    .unwrap();
+    c.send(Command::SetSongLoop {
+        region: Some(SongLoop {
+            start_tick: 0,
+            end_tick: 1,
+        }),
+    })
+    .unwrap();
+    c.send(Command::Play).unwrap();
+    let mut out = [0.0; 128];
+    for _ in 0..200 {
+        c.set_song(song.clone()).unwrap();
+        realtime(|| p.process(&mut out, 2));
+    }
+    for _ in 0..1200 {
+        let _ = c.set_song(song.clone());
+    }
+    for _ in 0..32 {
+        realtime(|| p.process(&mut out, 2));
+    }
+    let _ = c.check_health();
+    for _ in 0..32 {
+        realtime(|| p.process(&mut out, 2));
+        let _ = c.check_health();
+    }
+    c.send(Command::Seek { tick: 0 }).unwrap();
+    c.send(Command::SetPlaybackMode {
+        mode: PlaybackMode::Pattern,
+    })
+    .unwrap();
+    realtime(|| p.process(&mut out, 2));
+}

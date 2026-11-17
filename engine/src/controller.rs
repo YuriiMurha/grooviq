@@ -181,6 +181,31 @@ impl Controller {
     #[doc(hidden)]
     pub fn send_at(&mut self, due: u64, cmd: Command) -> Result<(), ControlError> {
         let mut cmd = cmd.clamped().ok_or(ControlError::Rejected)?;
+        if let Command::Seek { tick } = &mut cmd
+            && let Some(r) = self.state.song_loop
+        {
+            *tick = (*tick).clamp(r.start_tick, r.end_tick - 1);
+        }
+        match cmd {
+            Command::Seek { tick }
+                if self.state.playback_mode != crate::PlaybackMode::Song
+                    || tick > self.state.song.end_tick =>
+            {
+                return Err(ControlError::Rejected);
+            }
+            Command::SetSongLoop { region } if !self.state.song.valid_loop(region) => {
+                return Err(ControlError::Rejected);
+            }
+            Command::SetRecording { on: true }
+                if self.state.playback_mode == crate::PlaybackMode::Song =>
+            {
+                return Err(ControlError::Rejected);
+            }
+            Command::PlayLoops { .. } if self.state.playback_mode == crate::PlaybackMode::Song => {
+                return Err(ControlError::Rejected);
+            }
+            _ => {}
+        }
         if let Some(id) = cmd.channel() {
             let kind = self
                 .state
@@ -262,6 +287,16 @@ impl Controller {
     /// Removes a channel, cutting its notes. The processor hands it back to be freed here.
     pub fn remove_channel(&mut self, id: ChannelId) -> Result<(), ControlError> {
         let index = self.channel_index(id)?;
+        if self
+            .state
+            .song
+            .arrangement
+            .notes
+            .iter()
+            .any(|n| n.channel == id)
+        {
+            return Err(ControlError::Rejected);
+        }
         self.push(Msg::RemoveChannel(id))?;
         self.state.channels.remove(index);
         self.instances.remove(&id);
@@ -293,6 +328,17 @@ impl Controller {
     /// Replaces the pattern. Velocities are clamped and notes sorted by tick, then channel;
     /// a length outside 1 tick..=256 steps, a key above 127 or a velocity that is not a number
     /// is `Rejected`.
+    pub fn set_song(&mut self, song: crate::SongData) -> Result<(), ControlError> {
+        let ids: Vec<_> = self.state.channels.iter().map(|c| c.id).collect();
+        let song = song.checked(&ids)?;
+        if !song.valid_loop(self.state.song_loop) {
+            return Err(ControlError::Rejected);
+        }
+        self.push(Msg::SetSong(Box::new(song.clone())))?;
+        self.state.song = song;
+        Ok(())
+    }
+
     pub fn set_pattern(&mut self, pattern: PatternData) -> Result<(), ControlError> {
         let pattern = pattern.checked()?;
         self.push(Msg::SetPattern(Box::new(pattern.clone())))?;
@@ -520,9 +566,13 @@ impl Controller {
             return graph;
         }
         self.state.channels.clear();
+        self.state.song.arrangement.notes.clear();
         self.instances.clear();
         let mut graph = Box::new(Graph::new(self.sample_rate, self.generation));
         graph.set_pattern(Box::new(self.state.pattern.clone()));
+        graph.set_song(Box::new(self.state.song.clone()));
+        graph.playback_mode = self.state.playback_mode;
+        graph.song_loop = self.state.song_loop;
         graph
     }
 
@@ -551,6 +601,9 @@ impl Controller {
             debug_assert!(refused.is_none(), "the state holds valid channels only");
         }
         graph.set_pattern(Box::new(self.state.pattern.clone()));
+        graph.set_song(Box::new(self.state.song.clone()));
+        graph.playback_mode = self.state.playback_mode;
+        graph.song_loop = self.state.song_loop;
         // Every channel starts at its mix: nothing ramps in a fresh graph.
         graph.settle();
         graph
@@ -558,6 +611,8 @@ impl Controller {
 
     fn mirror(&mut self, cmd: Command) {
         match cmd {
+            Command::SetPlaybackMode { mode } => self.state.playback_mode = mode,
+            Command::SetSongLoop { region } => self.state.song_loop = region,
             Command::TestTone { on, hz, gain_db } => self.tone = ToneState { on, hz, gain_db },
             Command::AllSoundOff => self.tone.on = false,
             Command::SetTempo { bpm } => self.state.bpm = bpm,

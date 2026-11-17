@@ -227,6 +227,7 @@ mod drums_4ch {
             sample_rate: SAMPLE_RATE,
             format: WavFormat::Float32,
             loops: LOOPS,
+            song_region: None,
             max_tail_seconds: 10.0,
         };
         let report = export_wav(state, &options, &wav, &mut |_| {}, &AtomicBool::new(false))
@@ -379,6 +380,7 @@ mod notes_m2 {
             sample_rate: SAMPLE_RATE,
             format: WavFormat::Float32,
             loops: LOOPS,
+            song_region: None,
             max_tail_seconds: 10.0,
         };
         let report = export_wav(state, &options, &wav, &mut |_| {}, &AtomicBool::new(false))
@@ -509,6 +511,7 @@ mod nested_notes {
             sample_rate: SAMPLE_RATE,
             format: WavFormat::Float32,
             loops: LOOPS,
+            song_region: None,
             max_tail_seconds: 1.0,
         };
         let report = export_wav(state, &options, &wav, &mut |_| {}, &AtomicBool::new(false))

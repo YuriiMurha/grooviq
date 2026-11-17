@@ -213,7 +213,7 @@ impl Sequencer {
 
     /// Sends every pending note-off due at or before frame `through` (late ones at offset 0).
     /// One whose channel is full waits for the next block.
-    fn flush(
+    pub(crate) fn flush(
         &mut self,
         f0: u64,
         through: u64,
