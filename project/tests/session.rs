@@ -2444,6 +2444,7 @@ fn whole_notes(channel: u32, n: u32) -> Vec<RecordEvent> {
                 on,
                 tick,
                 position: tick as u32,
+                take: 0,
             };
             [
                 note(true, u64::from(i) * 10),
@@ -2756,6 +2757,7 @@ fn a_note_held_when_recording_stops_itself_is_refused_and_counted() {
         on,
         tick: 50,
         position: 50,
+        take: 0,
     };
     events.push(held(true));
     let got = session.collect_recorded(&events, Instant::now());

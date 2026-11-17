@@ -431,6 +431,8 @@ pub fn run() {
             project_cmds::app_exit,
             notes_cmds::pattern_notes,
             notes_cmds::notes_edit,
+            notes_cmds::notes_undo,
+            notes_cmds::notes_redo,
             notes_cmds::channel_add_synth,
             notes_cmds::channel_note,
             notes_cmds::channel_param_live,

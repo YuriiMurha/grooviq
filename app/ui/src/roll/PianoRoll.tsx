@@ -3,6 +3,7 @@ import { onNotesChanged, notesEdit, patternNotes, type WireNote } from "../api/n
 import type { ProjectKey } from "../api/project";
 import type { LiveFrame } from "../live/decode";
 import { useProject } from "../project/context";
+import { setRollHistory } from "../project/noteHistory";
 import { isMac, isTypingTarget, modalIsOpen } from "../project/shortcuts";
 import { displayTicks } from "../transport/position";
 import { createCanvasRoll } from "./canvasRoll";
@@ -96,6 +97,8 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
       return held.length ? { add: held, update: [], delete: [] } : null;
     });
   }, [queue]);
+  // Undo and redo wait their turn behind this roll's edits; the queue fetches the notes after.
+  useEffect(() => setRollHistory({ run: (command) => queue.run(command) }), [queue]);
   const pointerTick = useRef<number | null>(null);
   const humanizeSeed = useRef(1);
 

@@ -6,6 +6,7 @@
 
 use crate::model::{DEFAULT_VELOCITY, MAX_NOTES_PER_PATTERN, MAX_STEPS, MAX_TICKS, Note, Pattern};
 use crate::session::{ProjectView, SessionError};
+use crate::undo::Growth;
 use grooviq_engine::STEP_TICKS;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -92,6 +93,8 @@ pub(crate) struct Applied {
     pub added_ids: Vec<u32>,
     pub ignored_ids: Vec<u32>,
     pub clamped: bool,
+    /// What the edit's notes did to the length (see [`growth`]), if it updated or added any.
+    pub growth: Option<Growth>,
 }
 
 /// Clamps `n` into the ranges `validate` keeps (a start past the last step is moved onto it);
@@ -183,7 +186,22 @@ pub(crate) fn apply(
     }
 
     grow_to(p, latest_end, bar_ticks);
+    out.growth = growth(latest_end, bar_ticks);
     Ok(out)
+}
+
+/// The growth [`grow_to`] applies for notes ending at `end` with bars `bar_ticks` long, for
+/// the undo history's length log: `None` if it never grows anything.
+fn growth(end: u32, bar_ticks: u32) -> Option<Growth> {
+    if end == 0 || bar_ticks == 0 {
+        return None;
+    }
+    let bars = end.div_ceil(bar_ticks);
+    Some(Growth {
+        end,
+        to: (bars * bar_ticks / STEP_TICKS).min(MAX_STEPS),
+        bar: bar_ticks,
+    })
 }
 
 /// Lengthens `p` to the end of the bar holding tick `end` if `end` is past its end: never

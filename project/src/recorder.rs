@@ -19,6 +19,8 @@ struct Held {
     tick: u64,
     position: u32,
     velocity: f32,
+    /// The take of the note-on (see [`RecordEvent::Note`]).
+    take: u32,
 }
 
 /// What the recorder waits for while it drops events.
@@ -94,6 +96,14 @@ impl Recorder {
     /// A note starts at its note-on's `position`, lasts `off.tick - on.tick` ticks (at least 1)
     /// and has the note-on's velocity. A note-off without a note-on is ignored.
     pub fn feed(&mut self, events: &[RecordEvent]) -> Vec<NewNote> {
+        self.feed_takes(events)
+            .into_iter()
+            .map(|(_, note)| note)
+            .collect()
+    }
+
+    /// [`Self::feed`], each note with the take it was played in (its note-on's).
+    pub fn feed_takes(&mut self, events: &[RecordEvent]) -> Vec<(u32, NewNote)> {
         let mut notes = Vec::new();
         for event in events {
             if let Some(wait) = self.awaiting {
@@ -112,6 +122,7 @@ impl Recorder {
                     on: true,
                     tick,
                     position,
+                    take,
                 } => self
                     .held
                     .entry((channel.0, key))
@@ -120,6 +131,7 @@ impl Recorder {
                         tick,
                         position,
                         velocity,
+                        take,
                     }),
                 RecordEvent::Note {
                     channel,
@@ -130,7 +142,7 @@ impl Recorder {
                 } => {
                     let held = self.held.get_mut(&(channel.0, key));
                     if let Some(on) = held.and_then(VecDeque::pop_front) {
-                        notes.push(note(channel.0, key, on, tick));
+                        notes.push((on.take, note(channel.0, key, on, tick)));
                     }
                 }
                 // Another state's barrier, already passed.
@@ -146,7 +158,7 @@ impl Recorder {
                     notes.extend(
                         ended
                             .into_iter()
-                            .map(|((channel, key), on)| note(channel, key, on, tick)),
+                            .map(|((channel, key), on)| (on.take, note(channel, key, on, tick))),
                     );
                 }
             }

@@ -57,6 +57,8 @@ const VIEW: ProjectView = {
   key: null,
   notesRevision: 1,
   recording: false,
+  canUndo: false,
+  canRedo: false,
 };
 const CLEAN: ProjectView = { ...VIEW, dirty: false };
 const UNTITLED: ProjectView = { ...VIEW, name: "Untitled", path: null };

@@ -29,10 +29,11 @@ import { Meter } from "./meter/Meter";
 import { OutputChip } from "./output/OutputChip";
 import { OutputPopover } from "./output/OutputPopover";
 import { ProjectContext } from "./project/context";
-import { metronomeSet, onRecordingStopped, recordSet } from "./api/notes";
+import { metronomeSet, notesRedo, notesUndo, onRecordingStopped, recordSet } from "./api/notes";
 import { Workspace } from "./layout/Workspace";
 import { ProjectMenu } from "./project/ProjectMenu";
 import { SaveState } from "./project/SaveState";
+import { stepNotesHistory, trackDrags } from "./project/noteHistory";
 import { isTypingTarget, modalIsOpen, shortcutFor } from "./project/shortcuts";
 import { useProjectFlows } from "./project/useProjectFlows";
 import { useSession } from "./project/useSession";
@@ -164,6 +165,20 @@ export function App() {
       listening.then((stop) => stop());
     };
   }, [runCommand, toast]);
+  // Undo and redo of note changes: in the project's queue (behind step edits) and, with the
+  // piano roll open, in its queue too (behind note edits). Ignored during a drag.
+  const { enqueue, adopt } = session;
+  const stepHistory = useCallback(
+    (redo: boolean) => {
+      stepNotesHistory(
+        () => enqueue(redo ? notesRedo : notesUndo),
+        (ack) => adopt(ack.view),
+        (e: unknown) => toast(errorText(e), true),
+      );
+    },
+    [enqueue, adopt, toast],
+  );
+  useEffect(() => trackDrags(window), []);
   const toggleMetronome = () => {
     const on = !metronome;
     metronomeSet(on).then(() => setMetronome(on), (e: unknown) => toast(errorText(e), true));
@@ -184,6 +199,7 @@ export function App() {
       if (e.repeat) return;
       if (action === "playStop") (playingRef.current ? stop : play)();
       else if (action === "record") toggleRecord();
+      else if (action === "undo" || action === "redo") stepHistory(action === "redo");
       else perform(action);
     };
     // A focused button presses itself when Space is released: play/stop took that key.
@@ -198,7 +214,7 @@ export function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [perform, play, stop, toggleRecord]);
+  }, [perform, play, stop, toggleRecord, stepHistory]);
 
   const loadSettings = useCallback(() => {
     audioSettings().then(

@@ -26,6 +26,10 @@ pub enum RecordEvent {
         on: bool,
         tick: u64,
         position: u32,
+        /// The take it was played in: every note of one take has the same number, and the
+        /// next take's is one more (wrapping). It moves on when the take ends, even if the
+        /// queue had no room for the [`RecordEvent::End`], so it tells takes apart for sure.
+        take: u32,
     },
     /// The take ended (recording switched off, or the transport stopped or restarted): a note
     /// still held ends here.
@@ -43,6 +47,8 @@ pub(crate) struct Recorder {
     on: bool,
     /// A mark that did not fit in the queue yet.
     pending_mark: Option<u32>,
+    /// The running (or next) take's number (see [`RecordEvent::Note`]).
+    take: u32,
 }
 
 impl Recorder {
@@ -51,6 +57,7 @@ impl Recorder {
             tx,
             on: false,
             pending_mark: None,
+            take: 0,
         }
     }
 
@@ -76,9 +83,13 @@ impl Recorder {
         self.on && transport.playing()
     }
 
-    /// Switches recording at frame `at`, ending a running take when it goes off.
+    /// Switches recording at frame `at`, ending a running take when it goes off. Every
+    /// switch on starts a new take number, even if recording was on already (a switch-off the
+    /// engine never got was cancelled).
     pub(crate) fn set(&mut self, on: bool, transport: &TransportClock, at: u64, live: &LiveShared) {
-        if !on {
+        if on {
+            self.take = self.take.wrapping_add(1);
+        } else {
             self.end(transport, at, live);
         }
         self.on = on;
@@ -89,6 +100,8 @@ impl Recorder {
         if self.taking(transport) {
             let (tick, position) = transport.record_at(at, live.output_latency_frames());
             self.push(RecordEvent::End { tick, position }, live);
+            // Whether or not the End fit: the next take's notes carry the next number.
+            self.take = self.take.wrapping_add(1);
         }
     }
 
@@ -112,6 +125,7 @@ impl Recorder {
             on,
             tick,
             position,
+            take: self.take,
         };
         self.push(event, live);
     }
@@ -140,6 +154,7 @@ mod tests {
             on: true,
             tick: 0,
             position: 0,
+            take: 0,
         }
     }
 

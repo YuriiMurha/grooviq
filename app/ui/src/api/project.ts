@@ -65,6 +65,10 @@ export interface ProjectView {
   notesRevision: number;
   /** Live notes are being recorded into the pattern. */
   recording: boolean;
+  /** A note change can be undone (`notesUndo`). */
+  canUndo: boolean;
+  /** An undone note change can be made again (`notesRedo`). */
+  canRedo: boolean;
 }
 
 /** The project's key: a root (0..11, 0 = C) and a scale id ("minor", "dorian", ...). */

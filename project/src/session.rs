@@ -23,6 +23,7 @@ use crate::model::{
 };
 use crate::notes::{self, NewNote, NotesAck, NotesEdit, encode_notes};
 use crate::recorder::Recorder;
+use crate::undo::{Growth, NoteChange, NoteHistory};
 use grooviq_dsp::sampler::{self, PARAM_IDS, SPEC, SampleBuf};
 use grooviq_dsp::synth;
 use grooviq_engine::{
@@ -165,6 +166,10 @@ pub struct ProjectView {
     pub notes_revision: u32,
     /// Live notes are recorded into the pattern while the transport plays.
     pub recording: bool,
+    /// A note change can be undone ([`Session::undo_notes`]).
+    pub can_undo: bool,
+    /// An undone note change can be made again ([`Session::redo_notes`]).
+    pub can_redo: bool,
 }
 
 /// A channel's instrument, as the UI names it: `"sampler"` or `"synth"`.
@@ -475,14 +480,25 @@ pub struct Session {
     /// Recording is switched on (it takes notes while the transport plays).
     recording: bool,
     /// Recorded notes completed but not in the pattern yet: the engine did not take the
-    /// pattern (its queue was full). Retried on the next collect.
-    pending: Vec<NewNote>,
+    /// pattern (its queue was full). Retried on the next collect. Each with its take (see
+    /// `grooviq_engine::RecordEvent::Note`).
+    pending: Vec<(u32, NewNote)>,
     /// Recording switched itself off (the pattern was full) but the engine's queue refused the
     /// switch: it is sent again, with its barrier, on every collect until the queue takes it.
     /// The recorder refuses notes from the decision until that barrier is read. Turning
     /// recording on (or off) by hand sends its own barrier instead; a new project keeps it
     /// (the engine records until it takes the switch).
     owed_disarm: bool,
+    /// The current pattern's note changes, for undo and redo.
+    history: NoteHistory,
+}
+
+/// What committing waiting recorded notes did.
+enum Commit {
+    /// Added (the pattern's new revision, if any note was).
+    Done(Option<u32>),
+    /// The engine's queue was full: the notes wait for the next collect.
+    Busy,
 }
 
 fn lock(controller: &Mutex<Controller>) -> MutexGuard<'_, Controller> {
@@ -520,6 +536,7 @@ impl Session {
             recording: false,
             pending: Vec::new(),
             owed_disarm: false,
+            history: NoteHistory::default(),
         };
         // A fresh queue always has room for a whole state.
         let synced = session.sync_engine();
@@ -611,6 +628,8 @@ impl Session {
             key: self.project.key.clone(),
             notes_revision: pattern.revision,
             recording: self.recording,
+            can_undo: self.history.can_undo(),
+            can_redo: self.history.can_redo(),
         }
     }
 
@@ -657,6 +676,13 @@ impl Session {
             choke: c.choke,
             roll,
         }
+    }
+
+    /// Entries in the undo history's length log: a test hook for its bound. Not part of the
+    /// API.
+    #[doc(hidden)]
+    pub fn history_log_len(&self) -> usize {
+        self.history.log_len()
     }
 
     /// The current pattern's revision (see [`ProjectView::notes_revision`]).
@@ -801,10 +827,13 @@ impl Session {
             }
             Edit::SetPatternLength { steps } => {
                 let steps = steps.clamp(1, MAX_STEPS);
-                self.edit_pattern(|p| {
+                let changed = self.edit_pattern(|p| {
                     p.steps = steps;
                     Ok(())
-                })
+                })?;
+                // Set by hand, even to the length it has: undo never takes it back.
+                self.history.set_length(steps);
+                Ok(changed)
             }
             Edit::SetSwing { swing } => {
                 let swing = finite(swing, "swing")?.clamp(0.0, 1.0);
@@ -932,22 +961,98 @@ impl Session {
 
     /// Changes a copy of the current pattern, sends it to the engine, then keeps it, with its
     /// revision bumped if its notes changed. A change that fails leaves the pattern as it was.
+    /// A note change goes into the undo history, as one step.
     fn edit_pattern(
         &mut self,
         change: impl FnOnce(&mut Pattern) -> Result<(), SessionError>,
     ) -> Result<bool, SessionError> {
+        self.edit_pattern_as(None, |p| change(p).map(|()| None))
+    }
+
+    /// [`Self::edit_pattern`]; with `take`, the note change is a commit of that recorded take
+    /// and joins the take's undo step while it is open (see [`NoteHistory::record`]).
+    /// `change` says what its notes did to the length (see [`Growth`]).
+    fn edit_pattern_as(
+        &mut self,
+        take: Option<u32>,
+        change: impl FnOnce(&mut Pattern) -> Result<Option<Growth>, SessionError>,
+    ) -> Result<bool, SessionError> {
+        let steps = self.current().steps;
         let mut pattern = self.current().clone();
-        change(&mut pattern)?;
+        let growth = change(&mut pattern)?;
         if pattern == *self.current() {
             return Ok(false);
         }
+        let notes = NoteChange::between(self.current(), &pattern);
         if pattern.notes != self.current().notes {
             pattern.revision = pattern.revision.wrapping_add(1);
         }
+        self.keep_pattern(pattern)?;
+        match (notes, take) {
+            (Some(notes), Some(take)) => self.history.record(notes, take, steps, growth),
+            (Some(notes), None) => self.history.push(notes, steps, growth),
+            // Notes resubmitted as they were, growing a pattern shortened by hand: a step
+            // that holds only that growth, so undo and redo play the length it gave.
+            (None, _) if growth.is_some() && self.current().steps != steps => {
+                self.history.push(NoteChange::none(), steps, growth);
+            }
+            (None, _) => {}
+        }
+        Ok(true)
+    }
+
+    /// Sends `pattern` to the engine (which goes on playing), then makes it the current one.
+    fn keep_pattern(&mut self, pattern: Pattern) -> Result<(), SessionError> {
         let compiled = compile_pattern(&self.project, &pattern);
         lock(&self.controller).set_pattern(compiled)?;
         *self.current_mut() = pattern;
-        Ok(true)
+        Ok(())
+    }
+
+    /// Takes back the last note change (a note edit, a step edit or a recorded take), or
+    /// `None` if there is none. The notes (under their own ids) and the length go back to what
+    /// they were; the engine takes the pattern without stopping. Its revision moves on and the
+    /// project counts as changed; the ack asks the UI to fetch the notes again. A refused undo
+    /// (the engine's queue full) changes nothing and stays next in line. Recording is left as
+    /// it is.
+    pub fn undo_notes(&mut self, now: Instant) -> Result<Option<NotesAck>, SessionError> {
+        self.step_history(true, now)
+    }
+
+    /// Makes the last undone note change again, or `None` if there is none (see
+    /// [`Self::undo_notes`]). Any new note change clears what redo could make.
+    pub fn redo_notes(&mut self, now: Instant) -> Result<Option<NotesAck>, SessionError> {
+        self.step_history(false, now)
+    }
+
+    fn step_history(&mut self, undo: bool, now: Instant) -> Result<Option<NotesAck>, SessionError> {
+        let next = if undo {
+            self.history.next_undo()
+        } else {
+            self.history.next_redo()
+        };
+        let Some(change) = next else {
+            return Ok(None);
+        };
+        let mut pattern = self.current().clone();
+        change.apply(&mut pattern, undo)?;
+        pattern.steps = self.history.length_after(undo);
+        let steps = self.current().steps;
+        pattern.revision = pattern.revision.wrapping_add(1);
+        self.keep_pattern(pattern)?;
+        if undo {
+            self.history.undone();
+        } else {
+            self.history.redone();
+        }
+        self.changed(self.current().steps != steps, now);
+        Ok(Some(NotesAck {
+            revision: self.current().revision,
+            added_ids: Vec::new(),
+            ignored_ids: Vec::new(),
+            reload: true,
+            view: self.view(),
+        }))
     }
 
     fn send(&self, cmd: Command) -> Result<(), SessionError> {
@@ -983,6 +1088,8 @@ impl Session {
         self.project.patterns = patterns;
         self.files.remove(&channel);
         self.decoded.remove(&channel);
+        // Undo cannot bring a channel back (structural undo is M6), nor its notes.
+        self.history.clear();
         Ok(())
     }
 
@@ -1085,7 +1192,7 @@ impl Session {
     /// nothing (only unknown ids) leaves the revision and the dirty state alone.
     pub fn edit_notes(&mut self, edit: NotesEdit, now: Instant) -> Result<NotesAck, SessionError> {
         let stale = edit.base_revision != self.current().revision;
-        let applied = self.apply_notes(&edit, now)?;
+        let applied = self.apply_notes(&edit, None, now)?;
         Ok(NotesAck {
             revision: self.current().revision,
             added_ids: applied.added_ids,
@@ -1095,9 +1202,11 @@ impl Session {
         })
     }
 
+    /// Applies `edit` (with `take`, as a recorded take's commit: see [`Self::edit_pattern_as`]).
     fn apply_notes(
         &mut self,
         edit: &NotesEdit,
+        take: Option<u32>,
         now: Instant,
     ) -> Result<notes::Applied, SessionError> {
         let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
@@ -1105,9 +1214,11 @@ impl Session {
         let bar = u32::from(sig.beats) * 3840 / u32::from(sig.unit.max(1));
         let steps = self.current().steps;
         let mut applied = None;
-        let changed = self.edit_pattern(|p| {
-            applied = Some(notes::apply(p, edit, &channels, bar)?);
-            Ok(())
+        let changed = self.edit_pattern_as(take, |p| {
+            let done = notes::apply(p, edit, &channels, bar)?;
+            let growth = done.growth;
+            applied = Some(done);
+            Ok(growth)
         })?;
         if changed {
             // A longer pattern changes the project's shape.
@@ -1196,10 +1307,10 @@ impl Session {
         if self.owed_disarm {
             self.send_disarm();
         }
-        let fed = self.recorder.feed(events);
+        let fed = self.recorder.feed_takes(events);
         self.pending.extend(fed);
         let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
-        self.pending.retain(|n| channels.contains(&n.channel));
+        self.pending.retain(|(_, n)| channels.contains(&n.channel));
         // What fits: the note cap, and the ids left (the used-up mark is never handed out).
         let pattern = self.current();
         let room = MAX_NOTES_PER_PATTERN.saturating_sub(pattern.notes.len());
@@ -1216,7 +1327,8 @@ impl Session {
         let mut error = None;
         match self.commit_pending(now) {
             Ok(revision) => out.revision = revision,
-            Err((e, lost)) => {
+            Err((e, lost, revision)) => {
+                out.revision = revision;
                 dropped += lost;
                 reason = "error";
                 error = Some(e);
@@ -1283,24 +1395,47 @@ impl Session {
         }
     }
 
-    /// Adds the waiting recorded notes as one edit. A full engine queue keeps them for the next
-    /// collect (`Ok(None)`); any other refusal loses them and says how many.
-    fn commit_pending(&mut self, now: Instant) -> Result<Option<u32>, (SessionError, usize)> {
-        if self.pending.is_empty() {
-            return Ok(None);
+    /// Adds the waiting recorded notes, take by take in the order they were played: each
+    /// run of one take is a commit of that take (one undo step per take, however many commits
+    /// it takes). A full engine queue keeps what is not in yet for the next collect; any other
+    /// refusal loses it and says how many (with the revision of what did go in).
+    fn commit_pending(
+        &mut self,
+        now: Instant,
+    ) -> Result<Option<u32>, (SessionError, usize, Option<u32>)> {
+        let mut revision = None;
+        while let Some(&(take, _)) = self.pending.first() {
+            let run = self.pending.iter().take_while(|(t, _)| *t == take).count();
+            match self.commit_first(run, take, now) {
+                Ok(Commit::Done(r)) => revision = r.or(revision),
+                Ok(Commit::Busy) => break,
+                Err((e, lost)) => return Err((e, lost, revision)),
+            }
         }
+        Ok(revision)
+    }
+
+    /// Adds the first `n` waiting recorded notes, all of `take`, as one edit.
+    fn commit_first(
+        &mut self,
+        n: usize,
+        take: u32,
+        now: Instant,
+    ) -> Result<Commit, (SessionError, usize)> {
         let edit = NotesEdit {
             base_revision: self.current().revision,
-            add: self.pending.clone(),
+            add: self.pending[..n].iter().map(|(_, note)| *note).collect(),
             update: Vec::new(),
             delete: Vec::new(),
         };
-        match self.apply_notes(&edit, now) {
+        match self.apply_notes(&edit, Some(take), now) {
             Ok(applied) => {
-                self.pending.clear();
-                Ok((!applied.added_ids.is_empty()).then(|| self.current().revision))
+                self.pending.drain(..n);
+                Ok(Commit::Done(
+                    (!applied.added_ids.is_empty()).then(|| self.current().revision),
+                ))
             }
-            Err(SessionError::Engine(_)) => Ok(None),
+            Err(SessionError::Engine(_)) => Ok(Commit::Busy),
             Err(e) => {
                 let lost = self.pending.len();
                 self.pending.clear();
@@ -1397,6 +1532,7 @@ impl Session {
             self.recorder.await_mark(mark);
         }
         self.pending.clear();
+        self.history.clear();
         self.project = project;
         self.files = files;
         self.decoded = decoded;

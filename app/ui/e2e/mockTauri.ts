@@ -57,6 +57,27 @@ export interface MockNote {
   slide?: boolean;
 }
 
+/** One step of the undo history (undo.rs `NoteChange` and `Step`): the changed notes before
+ * and after, by id, its id in the length log, and the recorded take it is open to (or null). */
+interface NoteChange {
+  before: MockNote[];
+  after: MockNote[];
+  id?: number;
+  take?: number | null;
+}
+
+/** undo.rs `Growth`: a commit's latest note end, the length it grows the pattern to, and the
+ * bar (ticks) that length was rounded to. */
+interface Growth {
+  end: number;
+  to: number;
+  bar: number;
+}
+
+/** undo.rs `Length`: a commit's growth owned by a step (null: a step that left the history), or
+ * a length set by hand. */
+type LengthEntry = { owner: number | null; growth: Growth } | { set: number };
+
 export interface MockSeed {
   /** Paths the mock's file system holds. */
   files?: Record<string, MockFile>;
@@ -99,6 +120,9 @@ export function installMockTauri(seed: MockSeed): void {
   ];
   const MAX_CHOKE = 16;
   const MAX_NOTES = 100_000;
+  /** undo.rs `MAX_UNDO` and `MAX_UNDO_NOTES`. */
+  const MAX_UNDO = 200;
+  const MAX_UNDO_NOTES = 2_000_000;
   const NOTES_MAGIC = 0x314e5147;
   const SILENT_OUTPUT = {
     id: "null",
@@ -179,12 +203,16 @@ export function installMockTauri(seed: MockSeed): void {
     /** Live notes sounding now, "channel:key" -> velocity (`channel_note`). */
     live: new Map<string, number>(),
     /** Notes being recorded: "channel:key" -> where and how hard they started. */
-    recordOpen: new Map<string, { tick: number; velocity: number }>(),
+    recordOpen: new Map<string, { tick: number; velocity: number; take: number }>(),
+    /** The running take's number (engine/src/record.rs): one more after every take ends. */
+    take: 0,
     /** Live frames are held back (a stalled stream), as `pauseLive` sets. */
     livePaused: false,
     /** `channel_param_live` calls, last value per "channel:param". */
     liveParams: new Map<string, number>(),
     dialogCalls: [] as { kind: string; options: unknown }[],
+    /** Note changes for undo and redo (undo.rs): the notes and length before and after each. */
+    history: { undo: [] as NoteChange[], redo: [] as NoteChange[], notes: 0, base: 0, log: [] as LengthEntry[], nextId: 0 },
   };
 
   // --- Events (the event plugin, as @tauri-apps/api/mocks implements it). ---
@@ -271,6 +299,8 @@ export function installMockTauri(seed: MockSeed): void {
       key: p.key ?? null,
       notesRevision: s.notesRevision,
       recording: s.recording,
+      canUndo: s.history.undo.length > 0,
+      canRedo: s.history.redo.length > 0,
     };
   };
   const finite = (x: unknown, what: string): number => {
@@ -296,16 +326,196 @@ export function installMockTauri(seed: MockSeed): void {
     s.notesRevision += 1;
     emit("notes-changed", s.notesRevision);
   };
-  /** Changes the pattern; `true` if anything changed. A note change bumps the notes revision. */
-  const editPattern = (change: (p: Project["pattern"]) => void) => {
+  /** Changes the pattern; `true` if anything changed. A note change bumps the notes revision
+   * and is one step of the undo history (undo.rs). With `take`, it is a note recorded in that
+   * take: it joins the take's open step. */
+  const editPattern = (change: (p: Project["pattern"]) => void, take: number | null = null) => {
     const before = JSON.stringify(s.project.pattern);
     const notesBefore = JSON.stringify(s.project.pattern.notes);
-    const next = clone(s.project.pattern);
+    const prev = s.project.pattern;
+    const next = clone(prev);
+    lastGrowth = null;
     change(next);
+    const growth = lastGrowth as Growth | null;
     if (JSON.stringify(next) === before) return false;
     s.project.pattern = next;
-    if (JSON.stringify(next.notes) !== notesBefore) notesChanged();
+    if (JSON.stringify(next.notes) !== notesBefore) {
+      const step = noteChange(prev, next);
+      if (take === null) pushHistory(step, prev.steps, growth);
+      else recordHistory(step, take, prev.steps, growth);
+      notesChanged();
+    } else if (growth && next.steps !== prev.steps) {
+      // session.rs: notes resubmitted as they were, growing a pattern shortened by hand, are
+      // a step holding only that growth.
+      pushHistory({ before: [], after: [] }, prev.steps, growth);
+    }
     return true;
+  };
+  /** The growth the last `growToNotes` worked out, for the length log. */
+  let lastGrowth: Growth | null = null;
+  const sameNote = (a: MockNote, b: MockNote) =>
+    a.channel === b.channel && a.tick === b.tick && a.length === b.length && a.key === b.key &&
+    a.velocity === b.velocity && Boolean(a.slide) === Boolean(b.slide);
+  /** undo.rs `NoteChange::between`. */
+  const noteChange = (old: Project["pattern"], next: Project["pattern"]): NoteChange => {
+    const was = new Map(old.notes.map((n) => [n.id, n]));
+    const before: MockNote[] = [];
+    const after: MockNote[] = [];
+    for (const n of next.notes) {
+      const o = was.get(n.id);
+      was.delete(n.id);
+      if (!o) after.push(clone(n));
+      else if (!sameNote(o, n)) {
+        before.push(clone(o));
+        after.push(clone(n));
+      }
+    }
+    for (const o of was.values()) before.push(clone(o));
+    return { before, after };
+  };
+  const sizeOf = (c: NoteChange) => c.before.length + c.after.length;
+  /** undo.rs `play`: the log from `base`, with the growth of the steps `live` holds. */
+  const playLength = (base: number, log: LengthEntry[], live: (id: number) => boolean) =>
+    log.reduce((steps, l) => {
+      if ("set" in l) return l.set;
+      if (l.owner !== null && !live(l.owner)) return steps;
+      return l.growth.end > steps * STEP_TICKS ? Math.max(steps, l.growth.to) : steps;
+    }, base);
+  /** undo.rs `NoteHistory::trim`: the oldest steps go past the step count or the note budget;
+   * their growth stays for good, folded into the log's start. */
+  const trimHistory = () => {
+    const h = s.history;
+    const dropped = new Set<number>();
+    while (h.undo.length > MAX_UNDO || (h.notes > MAX_UNDO_NOTES && h.undo.length > 1)) {
+      const old = h.undo.shift()!;
+      h.notes -= sizeOf(old);
+      dropped.add(old.id!);
+    }
+    if (!dropped.size) return;
+    for (const l of h.log) if ("owner" in l && l.owner !== null && dropped.has(l.owner)) l.owner = null;
+    compactLog();
+  };
+  /** undo.rs `append`: a length set by hand replaces one set right before it; a step's growth
+   * after its own growth with the same bar keeps the one reaching further. */
+  const appendLength = (log: LengthEntry[], entry: LengthEntry) => {
+    const last = log[log.length - 1];
+    if (last && "set" in last && "set" in entry) last.set = entry.set;
+    else if (last && "owner" in last && "owner" in entry && last.owner === entry.owner && last.growth.bar === entry.growth.bar) {
+      if (entry.growth.end > last.growth.end) last.growth = entry.growth;
+    } else log.push(entry);
+  };
+  /** undo.rs `NoteHistory::fold`: leading entries no step can take back play into the start. */
+  const foldLog = () => {
+    const h = s.history;
+    let fixed = 0;
+    while (fixed < h.log.length) {
+      const l = h.log[fixed];
+      if ("owner" in l && l.owner !== null) break;
+      fixed++;
+    }
+    if (!fixed) return;
+    h.base = playLength(h.base, h.log.slice(0, fixed), () => true);
+    h.log.splice(0, fixed);
+  };
+  /** undo.rs `NoteHistory::compact`. */
+  const compactLog = () => {
+    const log: LengthEntry[] = [];
+    for (const l of s.history.log) appendLength(log, l);
+    s.history.log = log;
+    foldLog();
+  };
+  const historyEmpty = () => !s.history.undo.length && !s.history.redo.length;
+  /** undo.rs `NoteHistory::close`: every open take step closes. */
+  const closeTakes = () => {
+    for (const c of s.history.undo) c.take = null;
+  };
+  /** undo.rs `NoteHistory::add`: a note change clears redo (and its growth leaves the log); the
+   * first step starts the log at `steps`. */
+  const addHistory = (c: NoteChange, take: number | null, steps: number) => {
+    const h = s.history;
+    if (historyEmpty()) {
+      h.base = steps;
+      h.log = [];
+    }
+    const gone = new Set(h.redo.map((r) => r.id));
+    for (const r of h.redo) h.notes -= sizeOf(r);
+    h.redo = [];
+    if (gone.size) {
+      h.log = h.log.filter((l) => !("owner" in l) || l.owner === null || !gone.has(l.owner));
+      compactLog();
+    }
+    c.take = take;
+    c.id = h.nextId++;
+    h.notes += sizeOf(c);
+    h.undo.push(c);
+    trimHistory();
+    return c.id;
+  };
+  const logGrowth = (owner: number, growth: Growth | null) => {
+    if (growth) appendLength(s.history.log, { owner, growth: { ...growth } });
+  };
+  /** undo.rs `NoteHistory::push`. */
+  const pushHistory = (c: NoteChange, steps: number, growth: Growth | null) => {
+    closeTakes();
+    logGrowth(addHistory(c, null, steps), growth);
+  };
+  /** undo.rs `NoteHistory::record`: a take's notes join its open step, wherever it sits. */
+  const recordHistory = (c: NoteChange, take: number, steps: number, growth: Growth | null) => {
+    const h = s.history;
+    const open = [...h.undo].reverse().find((step) => step.take === take);
+    if (open && c.before.length === 0) {
+      let newest = -1;
+      for (const n of open.before) newest = Math.max(newest, n.id ?? 0);
+      for (const n of open.after) newest = Math.max(newest, n.id ?? 0);
+      if (c.after.every((n) => (n.id ?? 0) > newest)) {
+        open.after.push(...c.after);
+        h.notes += sizeOf(c);
+        logGrowth(open.id!, growth);
+        trimHistory();
+        return;
+      }
+    }
+    logGrowth(addHistory(c, take, steps), growth);
+  };
+  /** undo.rs `NoteHistory::set_length`: undo never takes a length set by hand back. */
+  const setLengthByHand = (steps: number) => {
+    if (historyEmpty()) return;
+    appendLength(s.history.log, { set: steps });
+    foldLog();
+  };
+  /** undo.rs `NoteHistory::length_after`. */
+  const lengthAfter = (undo: boolean) => {
+    const h = s.history;
+    const live = new Set(h.undo.map((c) => c.id!));
+    if (undo) live.delete(h.undo[h.undo.length - 1]?.id ?? -1);
+    else if (h.redo.length) live.add(h.redo[h.redo.length - 1].id!);
+    return playLength(h.base, h.log, (id) => live.has(id));
+  };
+  /** Undo or redo (session.rs `undo_notes`): the notes go back by id, the length is the log
+   * played with the steps in effect; the project is changed and the UI fetches the notes. */
+  const stepHistory = (undo: boolean) => {
+    const h = s.history;
+    if (!(undo ? h.undo : h.redo).length) return null;
+    const steps = lengthAfter(undo);
+    const change = (undo ? h.undo : h.redo).pop()!;
+    const pat = s.project.pattern;
+    const [out, put] = undo ? [change.after, change.before] : [change.before, change.after];
+    const ids = new Set([...out, ...put].map((n) => n.id));
+    pat.notes = [...pat.notes.filter((n) => !ids.has(n.id)), ...clone(put)].sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+    pat.steps = steps;
+    closeTakes();
+    change.take = null;
+    (undo ? h.redo : h.undo).push(change);
+    notesChanged();
+    changed();
+    return { revision: s.notesRevision, addedIds: [], ignoredIds: [], reload: true, view: view() };
+  };
+  const clearHistory = () => {
+    s.history.undo = [];
+    s.history.redo = [];
+    s.history.notes = 0;
+    s.history.base = 0;
+    s.history.log = [];
   };
   const nextNoteId = () => Math.max(0, ...s.project.pattern.notes.map((n) => n.id ?? 0)) + 1;
   const noteBase = (channel: number, tick: number, velocity: number): MockNote => ({
@@ -323,10 +533,13 @@ export function installMockTauri(seed: MockSeed): void {
   const growToNotes = (pat: Project["pattern"], touched: MockNote[]) => {
     const { beats, unit } = s.project.timeSignature;
     const barTicks = (beats * 3840) / unit;
-    const end = Math.max(0, ...touched.map((n) => n.tick + (n.length ?? STEP_TICKS)));
+    let end = 0;
+    for (const n of touched) end = Math.max(end, n.tick + (n.length ?? STEP_TICKS));
+    const to = Math.min(MAX_STEPS, Math.ceil(end / barTicks) * (barTicks / STEP_TICKS));
+    // notes.rs `growth`: every commit's growth goes into the history's length log.
+    if (end > 0) lastGrowth = { end, to, bar: barTicks };
     if (end <= pat.steps * STEP_TICKS) return;
-    const steps = Math.ceil(end / barTicks) * (barTicks / STEP_TICKS);
-    pat.steps = Math.min(MAX_STEPS, Math.max(pat.steps, steps));
+    pat.steps = Math.max(pat.steps, to);
   };
   /** Clamps a note's values as `validate` does; `true` if any changed. */
   const clampNote = (n: MockNote) => {
@@ -354,6 +567,7 @@ export function installMockTauri(seed: MockSeed): void {
           pat.notes = pat.notes.filter((n) => n.channel !== e.channel);
         });
         p.channels.splice(i, 1);
+        clearHistory();
         // The engine drops the channel's live notes with it (Task 5).
         for (const k of [...s.live.keys()]) if (k.startsWith(`${String(e.channel)}:`)) s.live.delete(k);
         return true;
@@ -443,6 +657,8 @@ export function installMockTauri(seed: MockSeed): void {
         const done = editPattern((pat) => {
           pat.steps = steps;
         });
+        // Set by hand, even to the length it has: undo never takes it back.
+        setLengthByHand(steps);
         if (done && s.transport.playing) keepPlaceInLoop(before, steps);
         return done;
       }
@@ -497,6 +713,7 @@ export function installMockTauri(seed: MockSeed): void {
   const openProject = (p: Project, path: string | null, unsaved: boolean) => {
     stopTransport();
     s.project = normalise(clone(p));
+    clearHistory();
     notesChanged();
     s.path = path;
     markClean();
@@ -538,6 +755,8 @@ export function installMockTauri(seed: MockSeed): void {
     const end = ticksNow();
     for (const key of [...s.recordOpen.keys()]) closeRecorded(key, end);
     s.recordOpen.clear();
+    // The take ends with the transport: the next one has the next number.
+    if (s.recording && s.transport.playing) s.take += 1;
     s.transport = { playing: false, startMs: 0, startTicks: 0, held: null };
   };
 
@@ -668,6 +887,7 @@ export function installMockTauri(seed: MockSeed): void {
     if (!s.project.channels.some((c) => c.id === channel)) return;
     // At the note cap the note is not added: recording switches off and says so (session.rs).
     if (s.project.pattern.notes.length >= MAX_NOTES) {
+      if (s.recording && s.transport.playing) s.take += 1;
       s.recording = false;
       emit("recording-stopped", {
         reason: "noteCap",
@@ -689,7 +909,7 @@ export function installMockTauri(seed: MockSeed): void {
       };
       pat.notes.push(n);
       growToNotes(pat, [n]);
-    });
+    }, open.take);
     changed();
   };
 
@@ -756,6 +976,8 @@ export function installMockTauri(seed: MockSeed): void {
     },
     pattern_notes: () => encodeNotes(),
     notes_edit: (a) => editNotes(a.edit as Parameters<typeof editNotes>[0]),
+    notes_undo: () => stepHistory(true),
+    notes_redo: () => stepHistory(false),
     channel_add_synth: (a) => {
       const preset = String(a.preset);
       if (!PRESETS.includes(preset)) throw `There is no synth preset called "${preset}".`;
@@ -788,7 +1010,7 @@ export function installMockTauri(seed: MockSeed): void {
       const key = `${c.id}:${String(a.key)}`;
       if (a.on) {
         s.live.set(key, a.velocity as number);
-        if (s.recording && s.transport.playing) s.recordOpen.set(key, { tick: ticksNow(), velocity: a.velocity as number });
+        if (s.recording && s.transport.playing) s.recordOpen.set(key, { tick: ticksNow(), velocity: a.velocity as number, take: s.take });
       } else {
         s.live.delete(key);
         closeRecorded(key, ticksNow());
@@ -823,6 +1045,8 @@ export function installMockTauri(seed: MockSeed): void {
     record_set: (a) => {
       const on = Boolean(a.on);
       if (!on) for (const key of [...s.recordOpen.keys()]) closeRecorded(key, ticksNow());
+      // Switching recording off ends a running take; every switch on starts a new one.
+      if (on || (s.recording && s.transport.playing)) s.take += 1;
       s.recording = on;
       return view();
     },
