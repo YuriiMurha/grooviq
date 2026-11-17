@@ -303,12 +303,14 @@ export function installMockTauri(seed: MockSeed): void {
     velocity,
     slide: false,
   });
-  /** Grows the pattern to the end of the bar holding the last note's end (never shrinks, at
-   * most 256 steps). */
-  const growToNotes = (pat: Project["pattern"]) => {
+  /** Grows the pattern to the end of the bar holding the latest end of `touched` (the notes an
+   * edit added or moved; never shrinks, at most 256 steps). Notes left past a shortened end do
+   * not grow it back (project/src/notes.rs). */
+  const growToNotes = (pat: Project["pattern"], touched: MockNote[]) => {
     const { beats, unit } = s.project.timeSignature;
     const barTicks = (beats * 3840) / unit;
-    const end = Math.max(0, ...pat.notes.map((n) => n.tick + (n.length ?? STEP_TICKS)));
+    const end = Math.max(0, ...touched.map((n) => n.tick + (n.length ?? STEP_TICKS)));
+    if (end <= pat.steps * STEP_TICKS) return;
     const steps = Math.ceil(end / barTicks) * (barTicks / STEP_TICKS);
     pat.steps = Math.min(MAX_STEPS, Math.max(pat.steps, steps));
   };
@@ -606,6 +608,7 @@ export function installMockTauri(seed: MockSeed): void {
     const ignored: number[] = [];
     const added: number[] = [];
     let clamped = false;
+    const touched: MockNote[] = [];
     const done = editPattern((pat) => {
       const has = (id: number) => pat.notes.some((n) => n.id === id);
       for (const id of e.delete) {
@@ -624,6 +627,7 @@ export function installMockTauri(seed: MockSeed): void {
         clamped = clampNote(n) || clamped;
         channelIndex(n.channel);
         pat.notes[i] = n;
+        touched.push(n);
       }
       let id = Math.max(0, ...pat.notes.map((n) => n.id ?? 0)) + 1;
       for (const a of e.add) {
@@ -632,9 +636,10 @@ export function installMockTauri(seed: MockSeed): void {
         const n: MockNote = { ...a, id: id++ };
         clamped = clampNote(n) || clamped;
         pat.notes.push(n);
+        touched.push(n);
         added.push(n.id!);
       }
-      growToNotes(pat);
+      growToNotes(pat, touched);
     });
     if (done) changed();
     return { revision: s.notesRevision, addedIds: added, ignoredIds: ignored, reload: stale || clamped, view: view() };
@@ -649,7 +654,7 @@ export function installMockTauri(seed: MockSeed): void {
     if (!s.project.channels.some((c) => c.id === channel)) return;
     const loop = s.project.pattern.steps * STEP_TICKS;
     editPattern((pat) => {
-      pat.notes.push({
+      const n: MockNote = {
         id: nextNoteId(),
         channel,
         tick: open.tick % loop,
@@ -657,8 +662,9 @@ export function installMockTauri(seed: MockSeed): void {
         key: note,
         velocity: open.velocity,
         slide: false,
-      });
-      growToNotes(pat);
+      };
+      pat.notes.push(n);
+      growToNotes(pat, [n]);
     });
     changed();
   };

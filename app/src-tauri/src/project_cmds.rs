@@ -4,8 +4,10 @@
 //! blocking thread and never under the session's lock: the lock is taken only to snapshot
 //! before and to apply the result after. Lock order: session, then controller (inside the
 //! session's own calls); nothing takes the session's lock while holding the controller's.
+//! Every command that changes the notes emits `notes-changed` (see `notes_cmds`).
 
 use crate::autosave_notice::AutosaveStatus;
+use crate::notes_cmds::notes_changed;
 use crate::{Audio, lock};
 use grooviq_engine::{
     Command, ExportOptions, MAX_SAMPLE_SECONDS, SampleBuf, WavFormat, decode_sample, export_wav,
@@ -169,15 +171,39 @@ pub async fn project_view(audio: State<'_, Audio>) -> Result<ProjectView, String
     Ok(session(&audio).view())
 }
 
-/// Applies one edit.
+/// Applies one edit (`notes-changed` if it changed notes: a step, or a removed channel's).
 #[tauri::command]
 pub async fn project_edit(
+    app: AppHandle,
     audio: State<'_, Audio>,
     edit: grooviq_project::session::Edit,
 ) -> Result<ProjectView, String> {
-    session(&audio)
-        .apply(edit, Instant::now())
-        .map_err(|e| e.to_string())
+    let (view, before) = {
+        let mut session = session(&audio);
+        let before = session.notes_revision();
+        let view = session
+            .apply(edit, Instant::now())
+            .map_err(|e| e.to_string())?;
+        (view, before)
+    };
+    notes_changed(&app, before, view.notes_revision);
+    Ok(view)
+}
+
+/// Runs `replace` (new, open, restore) on the session and tells the UI the notes changed.
+fn replaced<T>(
+    app: &AppHandle,
+    audio: &Audio,
+    replace: impl FnOnce(&mut Session) -> Result<T, String>,
+) -> Result<T, String> {
+    let (result, before, after) = {
+        let mut session = session(audio);
+        let before = session.notes_revision();
+        let result = replace(&mut session)?;
+        (result, before, session.notes_revision())
+    };
+    notes_changed(app, before, after);
+    Ok(result)
 }
 
 /// Adds a channel playing the sample file at `path`.
@@ -258,15 +284,19 @@ fn forget_autosave(audio: &Audio) {
 
 /// Starts an empty, untitled project. The UI asks about unsaved changes first.
 #[tauri::command]
-pub async fn project_new(audio: State<'_, Audio>) -> Result<ProjectView, String> {
-    let view = session(&audio).new_project().map_err(|e| e.to_string())?;
+pub async fn project_new(app: AppHandle, audio: State<'_, Audio>) -> Result<ProjectView, String> {
+    let view = replaced(&app, &audio, |s| s.new_project().map_err(|e| e.to_string()))?;
     forget_autosave(&audio);
     Ok(view)
 }
 
 /// Opens the project at `path`. The UI asks about unsaved changes first.
 #[tauri::command]
-pub async fn project_open(audio: State<'_, Audio>, path: String) -> Result<OpenResult, String> {
+pub async fn project_open(
+    app: AppHandle,
+    audio: State<'_, Audio>,
+    path: String,
+) -> Result<OpenResult, String> {
     let path = PathBuf::from(path);
     let (loaded, decoded) = blocking({
         let path = path.clone();
@@ -277,9 +307,9 @@ pub async fn project_open(audio: State<'_, Audio>, path: String) -> Result<OpenR
         }
     })
     .await?;
-    let report = session(&audio)
-        .open(&path, loaded, decoded)
-        .map_err(|e| e.to_string())?;
+    let report = replaced(&app, &audio, |s| {
+        s.open(&path, loaded, decoded).map_err(|e| e.to_string())
+    })?;
     forget_autosave(&audio);
     Ok(report)
 }
@@ -397,7 +427,10 @@ pub async fn recovery_status(audio: State<'_, Audio>) -> Result<Option<RecoveryV
 
 /// Opens the recovered project at its original path, unsaved.
 #[tauri::command]
-pub async fn recovery_restore(audio: State<'_, Audio>) -> Result<OpenResult, String> {
+pub async fn recovery_restore(
+    app: AppHandle,
+    audio: State<'_, Audio>,
+) -> Result<OpenResult, String> {
     let recovery = lock(&audio.pending_recovery)
         .clone()
         .ok_or("There is no project to recover.")?;
@@ -410,14 +443,15 @@ pub async fn recovery_restore(audio: State<'_, Audio>) -> Result<OpenResult, Str
         }
     })
     .await?;
-    let report = session(&audio)
-        .open_recovered(
+    let report = replaced(&app, &audio, |s| {
+        s.open_recovered(
             recovery.original.as_deref(),
             loaded,
             decoded,
             Instant::now(),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+    })?;
     forget_autosave(&audio);
     lock(&audio.pending_recovery).take();
     // No longer offered. If the folder refuses, it is offered again next launch: not worth

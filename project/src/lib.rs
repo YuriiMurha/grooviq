@@ -6,6 +6,8 @@
 //!   bytes), atomic save, load with migrations.
 //! * [`compile`]: swing, sorting and the engine's [`EngineState`](grooviq_engine::EngineState).
 //! * [`backup`]: rolling copies of a file before it is overwritten.
+//! * [`notes`]: the notes wire format for the UI and note edits by id.
+//! * [`recorder`]: recorded live events paired into notes.
 //! * [`session`]: the open project, its edits kept in step with the engine, dirty state and
 //!   when to autosave.
 //! * [`recovery`]: the autosave file and crash recovery on the next launch.
@@ -19,8 +21,10 @@ pub mod backup;
 pub mod compile;
 pub mod file;
 pub mod model;
+pub mod notes;
 mod outline;
 mod reading;
+pub mod recorder;
 pub mod recovery;
 pub mod session;
 

@@ -13,19 +13,25 @@
 //! [`Session::finish_save`].
 
 use crate::backup::backup_before_save;
+use crate::compile::synth_values;
 use crate::compile::{compile_pattern, engine_state, sampler_values};
 use crate::file::{Loaded, SampleFiles, stage_save_faulty};
 use crate::model::{
     BPM, Channel, DEFAULT_KEY, DEFAULT_VELOCITY, EXTENSION, MAX_NOTES_PER_PATTERN, MAX_STEPS, Note,
-    Pattern, Project, SampleRef, TimeSignature, VOLUME,
+    Pattern, Project, ProjectKey, SCALES, SampleRef, TimeSignature, VOLUME, is_plain_step,
+    roll_channels,
 };
-use grooviq_dsp::sampler::{PARAM_IDS, SPEC, SampleBuf};
+use crate::notes::{self, NotesAck, NotesEdit, encode_notes};
+use crate::recorder::Recorder;
+use grooviq_dsp::sampler::{self, PARAM_IDS, SPEC, SampleBuf};
+use grooviq_dsp::synth;
 use grooviq_engine::{
     ChannelId, ChannelMix, ChannelSetup, Command, ControlError, Controller, EngineState,
-    InstrumentKind, MAX_CHANNELS, MAX_SAMPLE_SECONDS, STEP_TICKS, decode_sample,
+    InstrumentKind, MAX_CHANNELS, MAX_CHOKE_GROUP, MAX_SAMPLE_SECONDS, RecordEvent, STEP_TICKS,
+    decode_sample,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -43,6 +49,10 @@ pub const MAX_BACKUPS: usize = 10;
 const INKS: u8 = 6;
 /// The length of a hit added with a click: one step.
 const HIT_TICKS: u32 = STEP_TICKS;
+/// The most points [`Session::waveform`] draws (a wide screen's pixels, twice over).
+pub const MAX_WAVEFORM_POINTS: u32 = 16_384;
+/// The synth preset a new synth channel starts from when none is named, and the default patch.
+const INIT_PRESET: &str = "Init";
 
 /// One change the UI asks for. JSON: `{"kind": "toggleStep", "channel": 1, "step": 4}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -100,6 +110,28 @@ pub enum Edit {
         beats: u8,
         unit: u8,
     },
+    /// `param` is a parameter id of the channel's instrument (`grooviq_dsp::sampler::PARAM_IDS`
+    /// or `grooviq_dsp::synth::PARAM_IDS`); the value is clamped to its range.
+    SetInstrumentParam {
+        channel: u32,
+        param: String,
+        value: f32,
+    },
+    /// Sets all of a synth channel's parameters from a factory preset ("Init" or one of
+    /// `grooviq_dsp::synth::PRESETS`) and remembers its name.
+    LoadSynthPreset {
+        channel: u32,
+        preset: String,
+    },
+    /// Clamped to 0..=16 (0: no group).
+    SetChoke {
+        channel: u32,
+        group: u8,
+    },
+    /// The key the piano roll highlights; `null` for none.
+    SetProjectKey {
+        key: Option<ProjectKey>,
+    },
 }
 
 impl Edit {
@@ -127,6 +159,20 @@ pub struct ProjectView {
     pub pattern: PatternView,
     /// When the last autosave was written, in unix seconds.
     pub autosaved_at: Option<u64>,
+    pub key: Option<ProjectKey>,
+    /// The current pattern's revision: bumped by every note change, and the number
+    /// [`Session::notes`] carries.
+    pub notes_revision: u32,
+    /// Live notes are recorded into the pattern while the transport plays.
+    pub recording: bool,
+}
+
+/// A channel's instrument, as the UI names it: `"sampler"` or `"synth"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChannelKind {
+    Sampler,
+    Synth,
 }
 
 /// One channel of the rack.
@@ -146,8 +192,18 @@ pub struct ChannelView {
     pub pan: f32,
     pub mute: bool,
     pub solo: bool,
-    /// Every sampler parameter by id, with its value or default.
+    /// Every sampler parameter by id, with its value or default (empty for a synth).
     pub sampler: BTreeMap<String, f32>,
+    pub kind: ChannelKind,
+    /// Every synth parameter by id, with its value or default (empty for a sampler).
+    pub synth: BTreeMap<String, f32>,
+    /// The synth preset last loaded.
+    pub preset: Option<String>,
+    /// Choke group, 0..=16 (0: none).
+    pub choke: u8,
+    /// The channel has notes that are not plain steps: the rack only previews them, and the
+    /// step grid refuses to edit it.
+    pub roll: bool,
 }
 
 /// The current pattern as a grid.
@@ -158,8 +214,8 @@ pub struct PatternView {
     pub name: String,
     pub steps: u32,
     pub swing: f32,
-    /// Per channel id: one entry per step, the velocity of the hit that starts exactly on it or
-    /// `null`.
+    /// Per channel id: one entry per step, the velocity of the plain step hit there (see
+    /// [`is_plain_step`]) or `null`.
     pub cells: BTreeMap<u32, Vec<Option<f32>>>,
 }
 
@@ -246,7 +302,15 @@ pub enum SessionError {
         step: u32,
         steps: u32,
     },
-    UnknownParam(String),
+    /// The channel's instrument (`device`: "sampler" or "synth") has no such parameter.
+    UnknownParam {
+        device: &'static str,
+        param: String,
+    },
+    /// A step edit on a channel that holds piano-roll notes (see [`roll_channels`]).
+    RollChannel {
+        name: String,
+    },
     /// A value that is not a number, or a time signature that does not exist.
     InvalidValue(String),
     TooManyChannels,
@@ -275,7 +339,13 @@ impl fmt::Display for SessionError {
                 "Step {} is past the end of the pattern ({steps} steps).",
                 step.saturating_add(1)
             ),
-            Self::UnknownParam(p) => write!(f, "The sampler has no setting called \"{p}\"."),
+            Self::UnknownParam { device, param } => {
+                write!(f, "The {device} has no setting called \"{param}\".")
+            }
+            Self::RollChannel { name } => write!(
+                f,
+                "{name} has piano-roll notes. Edit them in the piano roll (F7)."
+            ),
             Self::InvalidValue(what) => write!(f, "{what}"),
             Self::TooManyChannels => write!(
                 f,
@@ -373,6 +443,10 @@ pub struct Session {
     /// The first structural change since the last autosave (or save).
     structural_since: Option<Instant>,
     autosaved_at: Option<u64>,
+    /// Pairs recorded live notes into notes.
+    recorder: Recorder,
+    /// Recording is switched on (it takes notes while the transport plays).
+    recording: bool,
 }
 
 fn lock(controller: &Mutex<Controller>) -> MutexGuard<'_, Controller> {
@@ -406,6 +480,8 @@ impl Session {
             pending_since: None,
             structural_since: None,
             autosaved_at: None,
+            recorder: Recorder::new(),
+            recording: false,
         };
         // A fresh queue always has room for a whole state.
         let synced = session.sync_engine();
@@ -459,7 +535,7 @@ impl Session {
             .collect();
         for note in &pattern.notes {
             let step = note.tick / STEP_TICKS;
-            if note.tick % STEP_TICKS == 0
+            if is_plain_step(note)
                 && step < pattern.steps
                 && let Some(row) = cells.get_mut(&note.channel)
             {
@@ -470,6 +546,7 @@ impl Session {
             || self.project.name.clone(),
             |s| s.to_string_lossy().into_owned(),
         );
+        let roll = roll_channels(pattern);
         ProjectView {
             name,
             path: self.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
@@ -480,7 +557,7 @@ impl Session {
                 .project
                 .channels
                 .iter()
-                .map(|c| self.channel_view(c))
+                .map(|c| self.channel_view(c, roll.contains(&c.id)))
                 .collect(),
             pattern: PatternView {
                 id: pattern.id,
@@ -490,17 +567,37 @@ impl Session {
                 cells,
             },
             autosaved_at: self.autosaved_at,
+            key: self.project.key.clone(),
+            notes_revision: pattern.revision,
+            recording: self.recording,
         }
     }
 
-    fn channel_view(&self, c: &Channel) -> ChannelView {
+    fn channel_view(&self, c: &Channel, roll: bool) -> ChannelView {
         let sample_name = self.files.get(&c.id).map(|f| f.name.clone()).or_else(|| {
             c.sample
                 .as_ref()
                 .and_then(|s| s.path.file_name())
                 .map(|n| n.to_string_lossy().into_owned())
         });
-        let values = sampler_values(c);
+        let by_id = |ids: &[&str], values: Vec<f32>| -> BTreeMap<String, f32> {
+            ids.iter()
+                .zip(values)
+                .map(|(id, v)| ((*id).to_owned(), v))
+                .collect()
+        };
+        let (kind, sampler, synth) = match c.instrument {
+            InstrumentKind::Sampler => (
+                ChannelKind::Sampler,
+                by_id(&PARAM_IDS, sampler_values(c)),
+                BTreeMap::new(),
+            ),
+            InstrumentKind::Synth => (
+                ChannelKind::Synth,
+                BTreeMap::new(),
+                by_id(&synth::PARAM_IDS, synth_values(c)),
+            ),
+        };
         ChannelView {
             id: c.id,
             name: c.name.clone(),
@@ -511,12 +608,23 @@ impl Session {
             pan: c.pan,
             mute: c.mute,
             solo: c.solo,
-            sampler: PARAM_IDS
-                .iter()
-                .zip(values)
-                .map(|(id, v)| ((*id).to_owned(), v))
-                .collect(),
+            sampler,
+            kind,
+            synth,
+            preset: c.preset.clone(),
+            choke: c.choke,
+            roll,
         }
+    }
+
+    /// The current pattern's revision (see [`ProjectView::notes_revision`]).
+    pub fn notes_revision(&self) -> u32 {
+        self.current().revision
+    }
+
+    /// The current pattern's notes in the wire format (see [`encode_notes`]).
+    pub fn notes(&self) -> Vec<u8> {
+        encode_notes(self.current())
     }
 
     fn channel_index(&self, id: u32) -> Result<usize, SessionError> {
@@ -584,7 +692,10 @@ impl Session {
             } => {
                 let index = self.channel_index(channel)?;
                 let Some(at) = PARAM_IDS.iter().position(|p| *p == param) else {
-                    return Err(SessionError::UnknownParam(param));
+                    return Err(SessionError::UnknownParam {
+                        device: "sampler",
+                        param,
+                    });
                 };
                 let (min, max, _) = SPEC[at];
                 let value = finite(value, "sampler value")?.clamp(min, max);
@@ -673,16 +784,97 @@ impl Session {
                 if self.project.time_signature == signature {
                     return Ok(false);
                 }
-                // The engine plays steps; the signature only draws the bars.
+                // The metronome counts the beats; the bars are drawn by the UI.
+                self.send(Command::SetTimeSignature { beats, unit })?;
                 self.project.time_signature = signature;
+                Ok(true)
+            }
+            Edit::SetInstrumentParam {
+                channel,
+                param,
+                value,
+            } => {
+                let index = self.channel_index(channel)?;
+                let kind = self.project.channels[index].instrument;
+                let at = param_index(kind, &param)?;
+                let (min, max, _) = kind.spec()[at];
+                let value = finite(value, &format!("{} value", device(kind)))?.clamp(min, max);
+                let c = &self.project.channels[index];
+                let values = match kind {
+                    InstrumentKind::Sampler => &c.sampler,
+                    InstrumentKind::Synth => &c.synth,
+                };
+                if values.get(&param) == Some(&value) {
+                    return Ok(false);
+                }
+                self.send(Command::SetChannelParam {
+                    channel: ChannelId(channel),
+                    index: at as u32,
+                    value,
+                })?;
+                let c = &mut self.project.channels[index];
+                match kind {
+                    InstrumentKind::Sampler => c.sampler.insert(param, value),
+                    InstrumentKind::Synth => c.synth.insert(param, value),
+                };
+                Ok(true)
+            }
+            Edit::LoadSynthPreset { channel, preset } => {
+                let index = self.channel_index(channel)?;
+                let c = &self.project.channels[index];
+                if c.instrument != InstrumentKind::Synth {
+                    return Err(SessionError::InvalidValue(format!(
+                        "{} is not a synth channel.",
+                        c.name
+                    )));
+                }
+                let values = synth_preset(&preset)?;
+                lock(&self.controller).set_channel_params(ChannelId(channel), &values)?;
+                let c = &mut self.project.channels[index];
+                c.synth = by_param_id(&values);
+                c.preset = Some(preset);
+                Ok(true)
+            }
+            Edit::SetChoke { channel, group } => {
+                let index = self.channel_index(channel)?;
+                let group = group.min(MAX_CHOKE_GROUP);
+                if self.project.channels[index].choke == group {
+                    return Ok(false);
+                }
+                self.send(Command::SetChoke {
+                    channel: ChannelId(channel),
+                    group,
+                })?;
+                self.project.channels[index].choke = group;
+                Ok(true)
+            }
+            Edit::SetProjectKey { key } => {
+                if let Some(k) = &key
+                    && (k.root > 11 || !SCALES.iter().any(|(id, _)| *id == k.scale))
+                {
+                    return Err(SessionError::InvalidValue(format!(
+                        "{} on {} is not a key Grooviq knows.",
+                        k.scale, k.root
+                    )));
+                }
+                if self.project.key == key {
+                    return Ok(false);
+                }
+                self.project.key = key;
                 Ok(true)
             }
         }
     }
 
     /// The tick of `step` on `channel`, checking both exist.
+    /// Refused on a channel with piano-roll notes: the step grid would delete or change them.
     fn step_tick(&self, channel: u32, step: u32) -> Result<u32, SessionError> {
-        self.channel_index(channel)?;
+        let index = self.channel_index(channel)?;
+        if roll_channels(self.current()).contains(&channel) {
+            return Err(SessionError::RollChannel {
+                name: self.project.channels[index].name.clone(),
+            });
+        }
         let steps = self.current().steps;
         if step >= steps {
             return Err(SessionError::StepOutOfRange { step, steps });
@@ -690,8 +882,8 @@ impl Session {
         Ok(step * STEP_TICKS)
     }
 
-    /// Changes a copy of the current pattern, sends it to the engine, then keeps it. A change
-    /// that fails leaves the pattern as it was.
+    /// Changes a copy of the current pattern, sends it to the engine, then keeps it, with its
+    /// revision bumped if its notes changed. A change that fails leaves the pattern as it was.
     fn edit_pattern(
         &mut self,
         change: impl FnOnce(&mut Pattern) -> Result<(), SessionError>,
@@ -700,6 +892,9 @@ impl Session {
         change(&mut pattern)?;
         if pattern == *self.current() {
             return Ok(false);
+        }
+        if pattern.notes != self.current().notes {
+            pattern.revision = pattern.revision.wrapping_add(1);
         }
         let compiled = compile_pattern(&self.project, &pattern);
         lock(&self.controller).set_pattern(compiled)?;
@@ -717,7 +912,11 @@ impl Session {
         let index = self.channel_index(channel)?;
         let mut patterns = self.project.patterns.clone();
         for p in &mut patterns {
+            let before = p.notes.len();
             p.notes.retain(|n| n.channel != channel);
+            if p.notes.len() != before {
+                p.revision = p.revision.wrapping_add(1);
+            }
         }
         {
             let mut controller = lock(&self.controller);
@@ -755,15 +954,10 @@ impl Session {
         let name = path
             .file_stem()
             .map_or_else(|| "Sample".into(), |s| s.to_string_lossy().into_owned());
-        let color = self
-            .project
-            .channels
-            .last()
-            .map_or(0, |c| (c.color.wrapping_add(1)) % INKS);
         let channel = Channel {
             id,
             name,
-            color,
+            color: self.next_color(),
             sample: Some(SampleRef {
                 path: path.to_path_buf(),
                 file: None,
@@ -790,6 +984,181 @@ impl Session {
         self.decoded.insert(id, sample);
         self.changed(true, now);
         Ok(self.view())
+    }
+
+    /// The ink after the last channel's.
+    fn next_color(&self) -> u8 {
+        self.project
+            .channels
+            .last()
+            .map_or(0, |c| (c.color.wrapping_add(1)) % INKS)
+    }
+
+    /// Adds a synth channel after the others, named after `preset` ("Init" or one of
+    /// `grooviq_dsp::synth::PRESETS`) and holding all its values.
+    pub fn add_synth_channel(
+        &mut self,
+        preset: &str,
+        now: Instant,
+    ) -> Result<ProjectView, SessionError> {
+        if self.project.channels.len() >= MAX_CHANNELS {
+            return Err(SessionError::TooManyChannels);
+        }
+        let values = synth_preset(preset)?;
+        let id = self.project.next_id;
+        let channel = Channel {
+            id,
+            name: preset.to_owned(),
+            color: self.next_color(),
+            sample: None,
+            instrument: InstrumentKind::Synth,
+            sampler: BTreeMap::new(),
+            synth: by_param_id(&values),
+            preset: Some(preset.to_owned()),
+            volume: 1.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            choke: 0,
+        };
+        lock(&self.controller).add_channel(ChannelSetup::synth(
+            ChannelId(id),
+            synth_values(&channel),
+            ChannelMix::default(),
+        ))?;
+        self.project.channels.push(channel);
+        self.project.next_id = id.saturating_add(1);
+        self.changed(true, now);
+        Ok(self.view())
+    }
+
+    /// Applies a note edit to the current pattern (see [`NotesEdit`] and [`notes`]): all of it,
+    /// or nothing for an unknown channel, the note cap or used-up ids. An edit that changes
+    /// nothing (only unknown ids) leaves the revision and the dirty state alone.
+    pub fn edit_notes(&mut self, edit: NotesEdit, now: Instant) -> Result<NotesAck, SessionError> {
+        let stale = edit.base_revision != self.current().revision;
+        let applied = self.apply_notes(&edit, now)?;
+        Ok(NotesAck {
+            revision: self.current().revision,
+            added_ids: applied.added_ids,
+            ignored_ids: applied.ignored_ids,
+            reload: stale || applied.clamped,
+            view: self.view(),
+        })
+    }
+
+    fn apply_notes(
+        &mut self,
+        edit: &NotesEdit,
+        now: Instant,
+    ) -> Result<notes::Applied, SessionError> {
+        let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
+        let sig = self.project.time_signature;
+        let bar = u32::from(sig.beats) * 3840 / u32::from(sig.unit.max(1));
+        let steps = self.current().steps;
+        let mut applied = None;
+        let changed = self.edit_pattern(|p| {
+            applied = Some(notes::apply(p, edit, &channels, bar)?);
+            Ok(())
+        })?;
+        if changed {
+            // A longer pattern changes the project's shape.
+            self.changed(self.current().steps != steps, now);
+        }
+        Ok(applied.unwrap_or_default())
+    }
+
+    fn param_target(
+        &self,
+        channel: u32,
+        param: &str,
+    ) -> Result<(InstrumentKind, usize), SessionError> {
+        let kind = self.project.channels[self.channel_index(channel)?].instrument;
+        Ok((kind, param_index(kind, param)?))
+    }
+
+    /// Starts (`on`) or releases `key` on `channel` now: the typing keyboard and previews. Only
+    /// on the person's key or click.
+    pub fn live_note(
+        &self,
+        channel: u32,
+        key: u8,
+        velocity: f32,
+        on: bool,
+    ) -> Result<(), SessionError> {
+        self.channel_index(channel)?;
+        if key > 127 {
+            return Err(SessionError::InvalidValue(format!(
+                "Key {key} is outside 0 to 127."
+            )));
+        }
+        let velocity = finite(velocity, "velocity")?.clamp(0.0, 1.0);
+        self.send(Command::ChannelNote {
+            channel: ChannelId(channel),
+            key,
+            velocity,
+            on,
+        })
+    }
+
+    /// Sets an instrument parameter in the engine only, while a control moves: the project
+    /// changes when the UI commits the value with [`Edit::SetInstrumentParam`].
+    pub fn param_live(&self, channel: u32, param: &str, value: f32) -> Result<(), SessionError> {
+        let (kind, at) = self.param_target(channel, param)?;
+        let (min, max, _) = kind.spec()[at];
+        let value = finite(value, &format!("{} value", device(kind)))?.clamp(min, max);
+        self.send(Command::SetChannelParam {
+            channel: ChannelId(channel),
+            index: at as u32,
+            value,
+        })
+    }
+
+    /// Switches recording: while it is on and the transport plays, live notes are recorded
+    /// into the pattern (see [`Self::collect_recorded`]). Switching off ends the take.
+    pub fn set_recording(&mut self, on: bool) -> Result<(), SessionError> {
+        self.send(Command::SetRecording { on })?;
+        self.recording = on;
+        Ok(())
+    }
+
+    /// Switches the metronome (it clicks only while the transport plays; never in an export).
+    pub fn set_metronome(&self, on: bool) -> Result<(), SessionError> {
+        self.send(Command::SetMetronome { on })
+    }
+
+    /// Takes the engine's recorded events (from `Controller::take_recorded`, in order) and adds
+    /// the notes they complete to the current pattern as one edit (overdub). Notes of channels
+    /// the project no longer has are dropped, as are notes past the note cap. Returns the new
+    /// revision if notes were added.
+    pub fn collect_recorded(&mut self, events: &[RecordEvent], now: Instant) -> Option<u32> {
+        let mut add = self.recorder.feed(events);
+        let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
+        add.retain(|n| channels.contains(&n.channel));
+        add.truncate(MAX_NOTES_PER_PATTERN.saturating_sub(self.current().notes.len()));
+        if add.is_empty() {
+            return None;
+        }
+        let edit = NotesEdit {
+            base_revision: self.current().revision,
+            add,
+            update: Vec::new(),
+            delete: Vec::new(),
+        };
+        let applied = self.apply_notes(&edit, now).ok()?;
+        (!applied.added_ids.is_empty()).then(|| self.current().revision)
+    }
+
+    /// The decoded sample of a sampler channel, if it has one.
+    pub fn sample(&self, channel: u32) -> Option<Arc<SampleBuf>> {
+        self.decoded.get(&channel).cloned()
+    }
+
+    /// `points` (min, max) pairs of the channel's sample (see [`waveform_peaks`]), or `None`
+    /// without a loaded sample. Slow for a long sample: the app takes [`Self::sample`] and
+    /// computes the peaks without the session's lock.
+    pub fn waveform(&self, channel: u32, points: u32) -> Option<Vec<u8>> {
+        self.sample(channel).map(|s| waveform_peaks(&s, points))
     }
 
     /// Gives `channel` a new sample (relinking a missing one, or replacing it). Its name stays.
@@ -840,8 +1209,23 @@ impl Session {
         decoded: HashMap<u32, Arc<SampleBuf>>,
     ) -> Result<(), SessionError> {
         let state = engine_state(&project, &decoded);
-        // `load_state` stops the transport, then swaps the graph: opening never plays.
-        lock(&self.controller).load_state(state)?;
+        let taking = {
+            let mut controller = lock(&self.controller);
+            let taking = self.recording && controller.live().playing;
+            // `load_state` stops the transport, then swaps the graph: opening never plays.
+            controller.load_state(state)?;
+            taking
+        };
+        // The new notes get a revision above the old ones, so an edit made against the old
+        // project reads as stale.
+        let revision = self.current().revision.wrapping_add(1);
+        let mut project = project;
+        for p in &mut project.patterns {
+            p.revision = revision;
+        }
+        // A take of the old project still running is not recorded into this one: its events
+        // up to the `End` the stop queues are dropped.
+        self.recorder.reset(taking);
         self.project = project;
         self.files = files;
         self.decoded = decoded;
@@ -1034,6 +1418,78 @@ impl Session {
             self.pending_since.get_or_insert(now);
         }
     }
+}
+
+/// The peaks of `sample`'s mono mix (`(l + r) / 2`) as `points` (clamped to
+/// 1..=[`MAX_WAVEFORM_POINTS`]) pairs of little-endian `(min f32, max f32)`: point `i` covers
+/// frames `i * len / points` up to the next point's first frame (at least one frame). Empty
+/// for an empty sample.
+pub fn waveform_peaks(sample: &SampleBuf, points: u32) -> Vec<u8> {
+    let len = sample.l.len().min(sample.r.len());
+    if len == 0 {
+        return Vec::new();
+    }
+    let points = points.clamp(1, MAX_WAVEFORM_POINTS) as usize;
+    let mut out = Vec::with_capacity(points * 8);
+    for i in 0..points {
+        let start = (i * len / points).min(len - 1);
+        let end = ((i + 1) * len / points).max(start + 1).min(len);
+        let (mut min, mut max) = (f32::INFINITY, f32::NEG_INFINITY);
+        for (l, r) in sample.l[start..end].iter().zip(&sample.r[start..end]) {
+            let v = (l + r) * 0.5;
+            min = min.min(v);
+            max = max.max(v);
+        }
+        out.extend_from_slice(&min.to_le_bytes());
+        out.extend_from_slice(&max.to_le_bytes());
+    }
+    out
+}
+
+/// `"sampler"` or `"synth"`, for messages.
+fn device(kind: InstrumentKind) -> &'static str {
+    match kind {
+        InstrumentKind::Sampler => "sampler",
+        InstrumentKind::Synth => "synth",
+    }
+}
+
+/// The index of `param` among the parameters of `kind`.
+fn param_index(kind: InstrumentKind, param: &str) -> Result<usize, SessionError> {
+    let ids: &[&str] = match kind {
+        InstrumentKind::Sampler => &sampler::PARAM_IDS,
+        InstrumentKind::Synth => &synth::PARAM_IDS,
+    };
+    ids.iter()
+        .position(|p| *p == param)
+        .ok_or_else(|| SessionError::UnknownParam {
+            device: device(kind),
+            param: param.to_owned(),
+        })
+}
+
+/// All values of a factory synth preset, `(index, value)` in `SPEC` order.
+fn synth_preset(name: &str) -> Result<Vec<(u32, f32)>, SessionError> {
+    if name != INIT_PRESET && !synth::PRESETS.contains(&name) {
+        return Err(SessionError::InvalidValue(format!(
+            "There is no synth preset called \"{name}\"."
+        )));
+    }
+    synth::preset(name).ok_or_else(|| {
+        SessionError::InvalidValue(format!("There is no synth preset called \"{name}\"."))
+    })
+}
+
+/// `(index, value)` pairs as a synth parameter map by id.
+fn by_param_id(values: &[(u32, f32)]) -> BTreeMap<String, f32> {
+    values
+        .iter()
+        .filter_map(|&(i, v)| {
+            synth::PARAM_IDS
+                .get(i as usize)
+                .map(|id| ((*id).to_owned(), v))
+        })
+        .collect()
 }
 
 /// Adds a one-step hit with a fresh id, or refuses: at [`MAX_NOTES_PER_PATTERN`] (a file keeps

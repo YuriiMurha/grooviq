@@ -2,7 +2,8 @@
 //! applied, and the whole [`EngineState`].
 
 use crate::model::{
-    BPM, Channel, DEFAULT_STEPS, DEFAULT_VELOCITY, MAX_STEPS, Pattern, Project, VOLUME,
+    BPM, Channel, DEFAULT_STEPS, DEFAULT_VELOCITY, MAX_STEPS, Pattern, Project, TimeSignature,
+    VOLUME,
 };
 use grooviq_dsp::sampler::{self, SampleBuf};
 use grooviq_dsp::synth;
@@ -128,8 +129,17 @@ pub fn engine_state(project: &Project, samples: &HashMap<u32, Arc<SampleBuf>>) -
         bpm: finite_or(project.bpm, BPM.2).clamp(BPM.0, BPM.1),
         channels,
         pattern,
-        // Projects have no time signature yet: the default 4/4.
-        ..EngineState::default()
+        time_signature: time_signature(project),
+    }
+}
+
+/// The project's time signature, or 4/4 if it is not one the engine takes.
+fn time_signature(project: &Project) -> (u8, u8) {
+    let TimeSignature { beats, unit } = project.time_signature;
+    if (1..=16).contains(&beats) && matches!(unit, 2 | 4 | 8 | 16) {
+        (beats, unit)
+    } else {
+        (4, 4)
     }
 }
 
