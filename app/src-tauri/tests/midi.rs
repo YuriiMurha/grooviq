@@ -1486,6 +1486,36 @@ mod voices {
         assert_eq!(failures, Vec::<String>::new());
     }
 
+    /// A refused re-press owes nothing: once the queue drains, the next accepted hold is not cut
+    /// by a release invented for the press the engine never took.
+    #[test]
+    fn a_refused_re_press_owes_no_release_that_cuts_the_next_hold() {
+        let mut failures = Vec::new();
+        for (kind, mode) in modes() {
+            let mut rig = rig(kind, mode);
+            rig.key(true);
+            rig.render(4);
+            rig.fill(usize::MAX);
+            rig.key(false);
+            rig.key(true);
+            rig.key(false);
+            rig.render(4);
+            rig.key(true);
+            check(
+                &mut failures,
+                rig.listen(1.5) > AUDIBLE,
+                format!("{kind:?} {mode}: the next hold was cut"),
+            );
+            rig.key(false);
+            check(
+                &mut failures,
+                rig.listen(3.0) < SILENT,
+                format!("{kind:?} {mode}: a note rings for ever"),
+            );
+        }
+        assert_eq!(failures, Vec::<String>::new());
+    }
+
     /// There is room for the re-press but not for the release the debt needs: both releases
     /// are owed, and both arrive.
     #[test]
