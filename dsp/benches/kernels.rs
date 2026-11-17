@@ -22,6 +22,54 @@ fn main() {
     divan::main();
 }
 
+/// Continuous device state, fresh deterministic input on every timed block. The small input
+/// copies are included in the timing; construction, preset allocation and warmup are not.
+fn drum_shaper_block(bencher: Bencher, block: usize, name: &str) {
+    use grooviq_dsp::drum_shaper::{DrumShaper, preset};
+
+    let mut device = DrumShaper::new(SR);
+    for (index, value) in preset(name).expect("a factory preset") {
+        device.set_param(index, value);
+    }
+    let source_l: [f32; 128] = std::array::from_fn(|i| {
+        let envelope = if i < 12 { 0.8 } else { 0.15 };
+        libm::sinf(i as f32 * 0.31) * envelope
+    });
+    let source_r: [f32; 128] = std::array::from_fn(|i| source_l[127 - i] * 0.5);
+    let (mut l, mut r) = ([0.0; 128], [0.0; 128]);
+    for _ in 0..SETTLE_BLOCKS {
+        l.copy_from_slice(&source_l);
+        r.copy_from_slice(&source_r);
+        device.process(&mut l[..block], &mut r[..block], None, &[]);
+    }
+    bencher.bench_local(|| {
+        l[..block].copy_from_slice(&source_l[..block]);
+        r[..block].copy_from_slice(&source_r[..block]);
+        device.process(
+            black_box(&mut l[..block]),
+            black_box(&mut r[..block]),
+            None,
+            &[],
+        );
+        black_box((&l[..block], &r[..block]));
+    });
+}
+
+#[divan::bench(args = [64, 128])]
+fn drum_shaper_kick_block(bencher: Bencher, block: usize) {
+    drum_shaper_block(bencher, block, "Kick Punch");
+}
+
+#[divan::bench(args = [64, 128])]
+fn drum_shaper_snare_block(bencher: Bencher, block: usize) {
+    drum_shaper_block(bencher, block, "Snare Body");
+}
+
+#[divan::bench(args = [64, 128])]
+fn drum_shaper_bus_block(bencher: Bencher, block: usize) {
+    drum_shaper_block(bencher, block, "Bus Softening");
+}
+
 /// Note-ons at the block start on `voices` different keys from `first`.
 fn chord(first: u8, voices: usize) -> Vec<NoteEvent> {
     (0..voices)
