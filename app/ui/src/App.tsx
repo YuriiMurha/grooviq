@@ -34,6 +34,7 @@ import { Workspace } from "./layout/Workspace";
 import { ProjectMenu } from "./project/ProjectMenu";
 import { SaveState } from "./project/SaveState";
 import { stepNotesHistory, trackDrags } from "./project/noteHistory";
+import { rollEditsUnsettled } from "./roll/commitQueue";
 import { isTypingTarget, modalIsOpen, shortcutFor } from "./project/shortcuts";
 import { useProjectFlows } from "./project/useProjectFlows";
 import { useSession } from "./project/useSession";
@@ -103,6 +104,7 @@ export function App() {
     enqueue: session.enqueue,
     toast,
     stopIfPlaying,
+    unsettled: () => session.unsettled() || rollEditsUnsettled(),
   });
   const { perform, modalOpen } = flows;
 
@@ -168,15 +170,19 @@ export function App() {
   // Undo and redo of note changes: in the project's queue (behind step edits) and, with the
   // piano roll open, in its queue too (behind note edits). Ignored during a drag.
   const { enqueue, adopt } = session;
+  const shown = session.latest;
   const stepHistory = useCallback(
     (redo: boolean) => {
+      // For the project shown now: if another replaced it before the command's turn, the engine
+      // refuses it.
+      const generation = shown.current.view?.generation ?? 0;
       stepNotesHistory(
-        () => enqueue(redo ? notesRedo : notesUndo),
+        () => enqueue(() => (redo ? notesRedo : notesUndo)(generation)),
         (ack) => adopt(ack.view),
         (e: unknown) => toast(errorText(e), true),
       );
     },
-    [enqueue, adopt, toast],
+    [enqueue, adopt, shown, toast],
   );
   useEffect(() => trackDrags(window), []);
   const toggleMetronome = () => {

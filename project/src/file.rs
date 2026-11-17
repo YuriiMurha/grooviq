@@ -4,6 +4,8 @@
 //!
 //! * Saving is atomic: the zip is written to `<path>.tmp`, synced, then renamed over the target,
 //!   so a crash or a full disk leaves the previous file untouched.
+//! * `save` writes only what `load` reads back: `project.json` is compact and held to the same
+//!   size budget, so a project too big to reopen is refused instead of saved.
 //! * The bytes are a function of the project and the samples: entry order, names and timestamps
 //!   are fixed, so saving twice gives the same file.
 //! * Loading never trusts the file: sizes are capped, and a missing sample is a warning instead of
@@ -43,11 +45,14 @@ pub(crate) struct Limits {
     pub(crate) sample: u64,
     /// The most all distinct samples of a project may hold together.
     pub(crate) total: u64,
+    /// The most `project.json` may hold.
+    pub(crate) json: u64,
 }
 
 const LIMITS: Limits = Limits {
     sample: MAX_SAMPLE_BYTES,
     total: MAX_TOTAL_BYTES,
+    json: MAX_JSON_BYTES,
 };
 
 /// A size for a message: whole megabytes, or bytes when smaller.
@@ -139,6 +144,52 @@ struct Document<'a> {
     project: &'a Project,
 }
 
+/// Collects JSON text, failing once it would pass `limit` bytes: an oversized project is
+/// refused without its whole text in memory.
+struct Capped {
+    bytes: Vec<u8>,
+    limit: u64,
+    over: bool,
+}
+
+impl Write for Capped {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if (self.bytes.len() + buf.len()) as u64 > self.limit {
+            self.over = true;
+            return Err(io::Error::other("over the limit"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `project.json`'s bytes: compact (pretty printing tripled a note-heavy project), and at most
+/// `limit`, the most `load` reads.
+fn project_json_bytes(project: &Project, limit: u64) -> io::Result<Vec<u8>> {
+    let mut out = Capped {
+        bytes: Vec::new(),
+        limit,
+        over: false,
+    };
+    let document = Document {
+        format: FORMAT,
+        version: VERSION,
+        project,
+    };
+    match serde_json::to_writer(&mut out, &document) {
+        Ok(()) => Ok(out.bytes),
+        Err(_) if out.over => Err(too_big(format!(
+            "The project is too big to save: its notes and settings would take more than the {} a project file can hold. Remove some notes, then save again.",
+            human(limit)
+        ))),
+        Err(e) => Err(io::Error::other(e)),
+    }
+}
+
 /// One sample stored in the zip.
 struct Entry {
     name: String,
@@ -185,6 +236,31 @@ fn read_limited(path: &Path, limit: u64) -> io::Result<SampleFile> {
     })
 }
 
+/// The file operations that make a save durable, in the order a save makes them: the zip is
+/// written into the temp file, the temp file is synced, then renamed over the target. The test
+/// seam for that order and for each step failing. Not part of the API.
+#[doc(hidden)]
+pub trait Disk {
+    /// Runs once the zip is written and flushed into the temp file, before it is synced.
+    fn written(&mut self, _file: &mut File) -> io::Result<()> {
+        Ok(())
+    }
+    /// Syncs the temp file's bytes to the disk.
+    fn sync(&mut self, file: &File) -> io::Result<()> {
+        file.sync_all()
+    }
+    /// Puts the temp file in place (on Windows `rename` replaces an existing file too).
+    fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
+        fs::rename(from, to)
+    }
+}
+
+/// The real disk.
+#[doc(hidden)]
+pub struct RealDisk;
+
+impl Disk for RealDisk {}
+
 /// Saves the project and its samples to `path`, atomically (see the module docs). `samples`
 /// holds each channel's file by channel id; a channel without one is saved without a copy.
 pub fn save(project: &Project, samples: &SampleFiles, path: &Path) -> io::Result<()> {
@@ -210,29 +286,26 @@ pub(crate) fn save_with_limits(
     fail_after_temp: bool,
     limits: Limits,
 ) -> io::Result<()> {
-    let staged = stage_save_with_limits(project, samples, path, limits)?;
+    let staged = stage_save_with_limits(project, samples, path, limits, &mut RealDisk)?;
     if fail_after_temp {
         // Dropping the staged file removes the temp file.
         return Err(io::Error::other(
             "injected failure after the temp file was written",
         ));
     }
-    staged.commit()
+    staged.commit(&mut RealDisk)
 }
 
 /// Writes `project` to a temp file beside `path` without touching `path`: a save that is
 /// refused or fails stops here, before anything (a backup, the file itself) changes.
-/// [`Staged::commit`] puts it in place.
-///
-/// `fault` runs on the temp file once the zip is written into it and before
-/// it is synced: the test seam for "the disk fails while a save is staged". Not part of the API.
-pub(crate) fn stage_save_faulty(
+/// [`Staged::commit`] puts it in place. `disk` makes the file operations (see [`Disk`]).
+pub(crate) fn stage_save(
     project: &Project,
     samples: &SampleFiles,
     path: &Path,
-    fault: impl FnOnce(&mut File) -> io::Result<()>,
+    disk: &mut impl Disk,
 ) -> io::Result<Staged> {
-    stage_save_with_limits_and_fault(project, samples, path, LIMITS, fault)
+    stage_save_with_limits(project, samples, path, LIMITS, disk)
 }
 
 fn stage_save_with_limits(
@@ -240,25 +313,14 @@ fn stage_save_with_limits(
     samples: &SampleFiles,
     path: &Path,
     limits: Limits,
-) -> io::Result<Staged> {
-    stage_save_with_limits_and_fault(project, samples, path, limits, |_| Ok(()))
-}
-
-fn stage_save_with_limits_and_fault(
-    project: &Project,
-    samples: &SampleFiles,
-    path: &Path,
-    limits: Limits,
-    fault: impl FnOnce(&mut File) -> io::Result<()>,
+    disk: &mut impl Disk,
 ) -> io::Result<Staged> {
     // Temp files of saves that died (and only those: see `leftover`); best effort.
     let _ = grooviq_engine::remove_stale_owned(path, ".tmp");
     // Everything that can be refused is refused before the first byte is written.
     let (project, entries) = plan(project, samples, limits)?;
-    stage(path, |file| {
-        write_zip(file, &project, &entries)?;
-        fault(file)
-    })
+    let json = project_json_bytes(&project, limits.json)?;
+    stage(path, disk, |file| write_zip(file, &json, &entries))
 }
 
 /// Which samples go in the zip, and the project with each channel's `SampleRef.file` set.
@@ -268,7 +330,8 @@ fn stage_save_with_limits_and_fault(
 /// together pass `limits.total` (a file `load` would then not fully open), or a channel still
 /// names a zip entry whose bytes are not here (a sample `load` skipped): saving would drop its
 /// only copy. Fails too when a pattern holds more than [`MAX_NOTES_PER_PATTERN`] notes: `load`
-/// would drop the rest.
+/// would drop the rest. (`project.json` over `limits.json` is refused once it is written: see
+/// [`project_json_bytes`].)
 fn plan(
     project: &Project,
     samples: &SampleFiles,
@@ -359,7 +422,7 @@ fn entry_name(n: usize, original: &str) -> String {
 
 /// Writes the zip: `project.json` deflated, then the samples stored as they are. Every entry
 /// gets the same timestamp (1980-01-01, the zip epoch) and permissions.
-fn write_zip(file: &mut File, project: &Project, entries: &[Entry]) -> io::Result<()> {
+fn write_zip(file: &mut File, json: &[u8], entries: &[Entry]) -> io::Result<()> {
     let epoch = DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0)
         .map_err(|_| io::Error::other("the zip epoch is not a valid timestamp"))?;
     let options = SimpleFileOptions::default()
@@ -368,19 +431,12 @@ fn write_zip(file: &mut File, project: &Project, entries: &[Entry]) -> io::Resul
         .system(zip::System::Unix)
         .unix_permissions(0o644);
 
-    let json = serde_json::to_vec_pretty(&Document {
-        format: FORMAT,
-        version: VERSION,
-        project,
-    })
-    .map_err(io::Error::other)?;
-
     let mut zip = ZipWriter::new(BufWriter::new(file));
     zip.start_file(
         PROJECT_JSON,
         options.compression_method(CompressionMethod::Deflated),
     )?;
-    zip.write_all(&json)?;
+    zip.write_all(json)?;
     for entry in entries {
         // Samples are already compressed audio, or PCM the person may want to read back as is.
         zip.start_file(
@@ -407,10 +463,9 @@ pub(crate) struct Staged {
 }
 
 impl Staged {
-    /// Renames the temp file over the final one (on Windows `rename` replaces an existing
-    /// file too), then syncs the folder.
-    pub(crate) fn commit(mut self) -> io::Result<()> {
-        fs::rename(&self.tmp, &self.path)?;
+    /// Renames the temp file over the final one with `disk`, then syncs the folder.
+    pub(crate) fn commit(mut self, disk: &mut impl Disk) -> io::Result<()> {
+        disk.rename(&self.tmp, &self.path)?;
         self.done = true;
         sync_folder(&self.path);
         Ok(())
@@ -428,7 +483,11 @@ impl Drop for Staged {
 /// Writes the temp file for `path` with `write`, flushed and synced. The temp file has a name
 /// of its own (`.<name>.grooviq-<pid>-<random>.tmp`), so it can never be a file of the
 /// person's or another save's.
-fn stage(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<Staged> {
+fn stage(
+    path: &Path,
+    disk: &mut impl Disk,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<Staged> {
     let grooviq_engine::OwnedTemp { file, path: tmp } =
         grooviq_engine::create_owned_temp(path, ".tmp")?;
     // Made first, so a failure below removes the partial temp file.
@@ -440,7 +499,9 @@ fn stage(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Re
     };
     write(&mut staged._lock)?;
     staged._lock.flush()?;
-    staged._lock.sync_all()?;
+    disk.written(&mut staged._lock)?;
+    // Before the rename: a power cut after it must find the new bytes, not an empty file.
+    disk.sync(&staged._lock)?;
     Ok(staged)
 }
 
@@ -510,7 +571,7 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
         }
         _ => json_error(e),
     };
-    let outline = outline::read(project_json(&mut zip)?)
+    let outline = outline::read(project_json(&mut zip, limits.json)?)
         .map_err(does_not_fit)?
         .ok_or(LoadError::NotAProject)?;
     if outline.format.as_deref() != Some(FORMAT) {
@@ -518,7 +579,7 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
     }
     let version = checked_version(outline.version)?;
     let (project, drops) = reading::with_context(version, outline.channels, || {
-        serde_json::from_reader::<_, reading::Named<Project>>(project_json(&mut zip)?)
+        serde_json::from_reader::<_, reading::Named<Project>>(project_json(&mut zip, limits.json)?)
             .map(|named| named.0)
             .map_err(does_not_fit)
     });
@@ -605,20 +666,23 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
     })
 }
 
-/// `project.json` from the zip, streamed and buffered, never more than [`MAX_JSON_BYTES`].
-fn project_json<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<impl Read + '_, LoadError> {
+/// `project.json` from the zip, streamed and buffered, never more than `limit` bytes.
+fn project_json<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    limit: u64,
+) -> Result<impl Read + '_, LoadError> {
     let entry = match zip.by_name(PROJECT_JSON) {
         Ok(entry) => entry,
         Err(ZipError::FileNotFound) => return Err(LoadError::NotAProject),
         Err(e) => return Err(zip_error(e)),
     };
-    if entry.size() > MAX_JSON_BYTES {
+    if entry.size() > limit {
         return Err(LoadError::Corrupt(format!(
-            "{PROJECT_JSON} is larger than {} MB",
-            MAX_JSON_BYTES >> 20
+            "{PROJECT_JSON} is larger than {}",
+            human(limit)
         )));
     }
-    Ok(BufReader::new(entry.take(MAX_JSON_BYTES)))
+    Ok(BufReader::new(entry.take(limit)))
 }
 
 /// A broken or unreadable `project.json` (a zip checksum mismatch is an I/O error).
@@ -912,6 +976,7 @@ mod tests {
         let limits = Limits {
             sample: 10,
             total: 100,
+            json: MAX_JSON_BYTES,
         };
         let err = save_with_limits(&p, &samples, &path, false, limits).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
@@ -943,6 +1008,7 @@ mod tests {
         let refuse = Limits {
             sample: 5,
             total: 100,
+            json: MAX_JSON_BYTES,
         };
         // The person's files, named like temp files, a day old.
         let theirs = ["a.grooviq.tmp", "b.grooviq.tmp"];
@@ -970,6 +1036,7 @@ mod tests {
         let refuse = Limits {
             sample: 5,
             total: 100,
+            json: MAX_JSON_BYTES,
         };
         let owned = |old: bool| {
             let temp = grooviq_engine::create_owned_temp(&path, ".tmp").unwrap();
@@ -1005,6 +1072,7 @@ mod tests {
         let limits = Limits {
             sample: 10,
             total: 13,
+            json: MAX_JSON_BYTES,
         };
         let err = save_with_limits(&p, &samples, &path, false, limits).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
@@ -1041,6 +1109,7 @@ mod tests {
             Limits {
                 sample: 5,
                 total: 100,
+                json: MAX_JSON_BYTES,
             },
         )
         .unwrap();
@@ -1060,6 +1129,7 @@ mod tests {
             Limits {
                 sample: 100,
                 total: 8,
+                json: MAX_JSON_BYTES,
             },
         )
         .unwrap();
@@ -1071,6 +1141,50 @@ mod tests {
             ]
         );
         assert_eq!(kept(&loaded, 1).as_deref(), Some("samples/2-2.wav"));
+    }
+
+    #[test]
+    fn save_and_load_hold_project_json_to_one_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let (p, samples) = project_of(2);
+        save(&p, &samples, &path).unwrap();
+        let old = fs::read(&path).unwrap();
+        let planned = plan(&p, &samples, LIMITS).unwrap().0;
+        let size = project_json_bytes(&planned, u64::MAX).unwrap().len() as u64;
+        let budget = |json| Limits { json, ..LIMITS };
+
+        // One byte over: refused before anything is written, the old file kept.
+        let err = save_with_limits(&p, &samples, &path, false, budget(size - 1)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "The project is too big to save: its notes and settings would take more than the {} bytes a project file can hold. Remove some notes, then save again.",
+                size - 1
+            )
+        );
+        assert_eq!(fs::read(&path).unwrap(), old, "the old file is intact");
+        assert_eq!(leftovers(dir.path()), vec!["a.grooviq"], "nothing written");
+        // Exactly at the budget: saved, and the reader with the same budget opens it.
+        save_with_limits(&p, &samples, &path, false, budget(size)).unwrap();
+        let loaded = load_with_limits(&path, budget(size)).unwrap();
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert_eq!(loaded.project.channels, planned.channels);
+        assert_eq!(loaded.samples.len(), 2);
+        // And the reader refuses it a byte tighter: the two budgets are the same number.
+        assert!(matches!(
+            load_with_limits(&path, budget(size - 1)),
+            Err(LoadError::Corrupt(_))
+        ));
+        // Written compact: no pretty printing.
+        let mut zip = ZipArchive::new(File::open(&path).unwrap()).unwrap();
+        let mut json = String::new();
+        zip.by_name(PROJECT_JSON)
+            .unwrap()
+            .read_to_string(&mut json)
+            .unwrap();
+        assert!(!json.contains('\n') && !json.contains(": "), "{json}");
     }
 
     #[test]
@@ -1086,6 +1200,7 @@ mod tests {
             Limits {
                 sample: 5,
                 total: 100,
+                json: MAX_JSON_BYTES,
             },
         )
         .unwrap();

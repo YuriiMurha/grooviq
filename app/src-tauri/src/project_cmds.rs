@@ -172,18 +172,20 @@ pub async fn project_view(audio: State<'_, Audio>) -> Result<ProjectView, String
     Ok(session(&audio).view())
 }
 
-/// Applies one edit (`notes-changed` if it changed notes: a step, or a removed channel's).
+/// Applies one edit made in the project of `generation` (`notes-changed` if it changed notes: a
+/// step, or a removed channel's). An edit for a project replaced since changes nothing.
 #[tauri::command]
 pub async fn project_edit(
     app: AppHandle,
     audio: State<'_, Audio>,
     edit: grooviq_project::session::Edit,
+    generation: u64,
 ) -> Result<ProjectView, String> {
     let (view, before) = {
         let mut session = session(&audio);
         let before = session.notes_revision();
         let view = session
-            .apply(edit, Instant::now())
+            .apply_in(generation, edit, Instant::now())
             .map_err(|e| e.to_string())?;
         (view, before)
     };

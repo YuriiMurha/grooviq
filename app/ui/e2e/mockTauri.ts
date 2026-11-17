@@ -203,6 +203,8 @@ export function installMockTauri(seed: MockSeed): void {
     dialogs: [] as unknown[],
     /** Bumped by every note change (Pattern.revision, starts at 1 on load). */
     notesRevision: 1,
+    /** Counts projects (Session::generation): New, Open and Restore move it on. */
+    generation: 0,
     recording: false,
     metronome: false,
     /** The channel MIDI plays (`channel_select`). */
@@ -323,6 +325,7 @@ export function installMockTauri(seed: MockSeed): void {
       recording: s.recording,
       canUndo: s.history.undo.length > 0,
       canRedo: s.history.redo.length > 0,
+      generation: s.generation,
     };
   };
   const finite = (x: unknown, what: string): number => {
@@ -741,6 +744,7 @@ export function installMockTauri(seed: MockSeed): void {
   };
   const openProject = (p: Project, path: string | null, unsaved: boolean) => {
     stopTransport();
+    s.generation += 1;
     s.project = normalise(clone(p));
     clearHistory();
     notesChanged();
@@ -865,7 +869,17 @@ export function installMockTauri(seed: MockSeed): void {
     return buf;
   };
   type WireNote = Required<MockNote>;
-  const editNotes = (e: { baseRevision: number; add: Omit<WireNote, "id">[]; update: WireNote[]; delete: number[] }) => {
+  /** The ack of a note request made for a project that was replaced since (session.rs
+   * `refused_ack`): nothing changes, nothing is announced, the UI fetches the notes. */
+  const refusedAck = () => ({ revision: s.notesRevision, addedIds: [], ignoredIds: [], reload: true, view: view() });
+  const editNotes = (e: {
+    generation: number;
+    baseRevision: number;
+    add: Omit<WireNote, "id">[];
+    update: WireNote[];
+    delete: number[];
+  }) => {
+    if (e.generation !== s.generation) return refusedAck();
     const stale = e.baseRevision !== s.notesRevision;
     const ignored: number[] = [];
     const added: number[] = [];
@@ -985,6 +999,8 @@ export function installMockTauri(seed: MockSeed): void {
     // project_cmds.rs
     project_view: () => view(),
     project_edit: (a) => {
+      // session.rs `apply_in`: an edit made for a replaced project changes nothing.
+      if (a.generation !== s.generation) return view();
       if (applyEdit(a.edit as Edit)) changed();
       return view();
     },
@@ -1025,8 +1041,8 @@ export function installMockTauri(seed: MockSeed): void {
     },
     pattern_notes: () => encodeNotes(),
     notes_edit: (a) => editNotes(a.edit as Parameters<typeof editNotes>[0]),
-    notes_undo: () => stepHistory(true),
-    notes_redo: () => stepHistory(false),
+    notes_undo: (a) => (a.generation !== s.generation ? refusedAck() : stepHistory(true)),
+    notes_redo: (a) => (a.generation !== s.generation ? refusedAck() : stepHistory(false)),
     channel_add_synth: (a) => {
       const preset = String(a.preset);
       if (!PRESETS.includes(preset)) throw `There is no synth preset called "${preset}".`;
@@ -1297,6 +1313,7 @@ export function installMockTauri(seed: MockSeed): void {
   };
   const newNote = fields({ channel: u32, tick: u32, length: u32, key: u8, velocity: f32, slide: bool });
   const notesEditArg: Check = fields({
+    generation: u64,
     baseRevision: u32,
     add: list(newNote),
     update: list(fields({ id: u32, channel: u32, tick: u32, length: u32, key: u8, velocity: f32, slide: bool })),
@@ -1317,11 +1334,13 @@ export function installMockTauri(seed: MockSeed): void {
     audio_set_guard: { on: bool },
     test_tone: { on: bool },
     synth_note: { key: u8, on: bool },
-    project_edit: { edit },
+    project_edit: { edit, generation: u64 },
     channel_add: { path: str },
     channel_set_sample: { channel: u32, path: str },
     channel_preview: { channel: u32, on: bool, press: optional(u64) },
     notes_edit: { edit: notesEditArg },
+    notes_undo: { generation: u64 },
+    notes_redo: { generation: u64 },
     channel_add_synth: { preset: str },
     channel_note: { channel: u32, key: u8, velocity: f32, on: bool, press: optional(u64) },
     channel_param_live: { channel: u32, param: str, value: f32 },

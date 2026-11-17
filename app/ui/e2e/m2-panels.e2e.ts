@@ -716,17 +716,18 @@ test.describe("the mock follows Task 7 (fix round 1)", () => {
     const revision = () => mock.view().then((v) => v.notesRevision);
     const expected: number[] = [];
     // A step edit.
-    await call(app, "project_edit", { edit: { kind: "toggleStep", channel: 1, step: 3 } });
+    const generation = (await mock.view()).generation;
+    await call(app, "project_edit", { edit: { kind: "toggleStep", channel: 1, step: 3 }, generation });
     expected.push(await revision());
     // A notes edit.
     await call(app, "notes_edit", {
-      edit: { baseRevision: await revision(), add: [{ channel: 2, tick: 120, length: 600, key: 64, velocity: 0.5, slide: false }], update: [], delete: [] },
+      edit: { generation, baseRevision: await revision(), add: [{ channel: 2, tick: 120, length: 600, key: 64, velocity: 0.5, slide: false }], update: [], delete: [] },
     });
     expected.push(await revision());
     // A mix change is not a note change.
-    await call(app, "project_edit", { edit: { kind: "setChannelMix", channel: 1, volume: 0.5, pan: 0, mute: false, solo: false } });
+    await call(app, "project_edit", { edit: { kind: "setChannelMix", channel: 1, volume: 0.5, pan: 0, mute: false, solo: false }, generation });
     // Removing a channel with notes.
-    await call(app, "project_edit", { edit: { kind: "removeChannel", channel: 2 } });
+    await call(app, "project_edit", { edit: { kind: "removeChannel", channel: 2 }, generation });
     expected.push(await revision());
     // Replacing the project.
     await call(app, "project_new");
@@ -740,11 +741,11 @@ test.describe("the mock follows Task 7 (fix round 1)", () => {
     await call(app, "channel_add_synth", { preset: "808 Glide" });
     expect((await synthOf(4)).synth).toEqual(presetValues("808 Glide"));
     expect((await synthOf(4)).synth.filter_cutoff).toBe(650);
-    await call(app, "project_edit", { edit: { kind: "setInstrumentParam", channel: 4, param: "filter_cutoff", value: 123 } });
+    await call(app, "project_edit", { edit: { kind: "setInstrumentParam", channel: 4, param: "filter_cutoff", value: 123 }, generation: (await mock.view()).generation });
     expect((await synthOf(4)).synth.filter_cutoff).toBe(123);
-    await call(app, "project_edit", { edit: { kind: "loadSynthPreset", channel: 4, preset: "808 Glide" } });
+    await call(app, "project_edit", { edit: { kind: "loadSynthPreset", channel: 4, preset: "808 Glide" }, generation: (await mock.view()).generation });
     expect((await synthOf(4)).synth).toEqual(presetValues("808 Glide"));
-    await call(app, "project_edit", { edit: { kind: "loadSynthPreset", channel: 4, preset: "Reese" } });
+    await call(app, "project_edit", { edit: { kind: "loadSynthPreset", channel: 4, preset: "Reese" }, generation: (await mock.view()).generation });
     expect(await synthOf(4)).toMatchObject({ synth: presetValues("Reese"), preset: "Reese" });
     await call(app, "channel_add_synth", { preset: "Init" });
     expect((await synthOf(5)).synth).toEqual(presetValues("Init"));

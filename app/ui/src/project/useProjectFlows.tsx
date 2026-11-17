@@ -47,21 +47,25 @@ interface Deps {
   toast: (message: string, warn: boolean) => void;
   /** Stops the transport if it plays (a project that is replaced must not keep playing). */
   stopIfPlaying: () => Promise<void>;
+  /** A change was sent (or queued) and its view is not in yet: the project counts as unsaved. */
+  unsettled: () => boolean;
 }
 
 /** Every project action (new, open, save, save as, export), the "Save changes?" guard, the
  * close request, crash recovery and the autosave clock. It returns the dialogs to render. */
-export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: Deps) {
+export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, unsettled }: Deps) {
   const [pending, setPending] = useState<Pending | null>(null);
   const [recovery, setRecovery] = useState<RecoveryStatus | null>(null);
   const [exporting, setExporting] = useState(false);
   const [autosavedAt, setAutosavedAt] = useState<number | null>(null);
   const viewRef = useRef(view);
   const busy = useRef(false);
+  const unsettledRef = useRef(unsettled);
 
   useEffect(() => {
     viewRef.current = view;
-  }, [view]);
+    unsettledRef.current = unsettled;
+  }, [view, unsettled]);
 
   const fail = useCallback((e: unknown) => toast(errorText(e), true), [toast]);
 
@@ -142,7 +146,8 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying }: 
   /** Runs `proceed` now if nothing is unsaved, else after the "Save changes?" prompt. */
   const guarded = useCallback((why: Why, proceed: () => Promise<void>) => {
     const current = viewRef.current;
-    if (current?.dirty === false) {
+    // An edit still on its way may make it dirty: ask, rather than drop it unasked.
+    if (current?.dirty === false && !unsettledRef.current()) {
       proceed().catch(fail);
     } else {
       setPending({ why, name: current?.name ?? "this project", proceed });

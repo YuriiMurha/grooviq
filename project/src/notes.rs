@@ -62,6 +62,9 @@ pub struct NewNote {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotesEdit {
+    /// The project the edit was made in ([`ProjectView::generation`]): an edit for a project
+    /// that was replaced since is refused whole, however its ids and revision look.
+    pub generation: u64,
     pub base_revision: u32,
     #[serde(default)]
     pub add: Vec<NewNote>,
@@ -81,8 +84,9 @@ pub struct NotesAck {
     pub added_ids: Vec<u32>,
     /// Ids of `delete` and `update` the pattern did not have (in that order).
     pub ignored_ids: Vec<u32>,
-    /// The edit was made against an older revision, or had values clamped: the UI's copy of
-    /// the notes differs from the pattern, so it fetches them again.
+    /// The edit was made against an older revision, made for a project that was replaced
+    /// since (and refused), or had values clamped: the UI's copy of the notes differs from the
+    /// pattern, so it fetches them again.
     pub reload: bool,
     pub view: ProjectView,
 }

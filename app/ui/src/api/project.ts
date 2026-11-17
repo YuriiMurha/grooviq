@@ -69,6 +69,9 @@ export interface ProjectView {
   canUndo: boolean;
   /** An undone note change can be made again (`notesRedo`). */
   canRedo: boolean;
+  /** Counts projects: moves on with every New, Open and Restore. Edits carry the one they were
+   * made in, and the engine refuses one made for a project that was replaced since. */
+  generation: number;
 }
 
 /** The project's key: a root (0..11, 0 = C) and a scale id ("minor", "dorian", ...). */
@@ -143,7 +146,9 @@ export const BPM_MIN = 20;
 export const BPM_MAX = 400;
 
 export const projectView = () => invoke<ProjectView>("project_view");
-export const projectEdit = (edit: Edit) => invoke<ProjectView>("project_edit", { edit });
+/** Applies `edit`, made in the project of `generation`. */
+export const projectEdit = (edit: Edit, generation: number) =>
+  invoke<ProjectView>("project_edit", { edit, generation });
 export const channelAdd = (path: string) => invoke<ProjectView>("channel_add", { path });
 /** Points a channel at another sample (relinking a missing one). */
 export const channelSetSample = (channel: number, path: string) =>

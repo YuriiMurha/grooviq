@@ -70,6 +70,7 @@ export interface Mock {
     bpm: number;
     recording: boolean;
     notesRevision: number;
+    generation: number;
     canUndo: boolean;
     canRedo: boolean;
     pattern: { steps: number; swing: number; cells: Record<string, (number | null)[]> };

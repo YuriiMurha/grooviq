@@ -8,6 +8,7 @@ let generation = 0;
 let replacingNow = false;
 const replacing = new Set<() => void>();
 const replaced = new Set<() => void>();
+const failed = new Set<() => void>();
 
 /** Runs `fn` just before a replacing command is sent (still the old project). */
 export function onProjectReplacing(fn: () => void): () => void {
@@ -19,6 +20,12 @@ export function onProjectReplacing(fn: () => void): () => void {
 export function onProjectReplaced(fn: () => void): () => void {
   replaced.add(fn);
   return () => replaced.delete(fn);
+}
+
+/** Runs `fn` once a replacing command failed (the old project goes on). */
+export function onProjectReplaceFailed(fn: () => void): () => void {
+  failed.add(fn);
+  return () => failed.delete(fn);
 }
 
 /** Bumped by every successful New, Open or Restore. */
@@ -48,4 +55,5 @@ export function projectReplaced() {
 /** Call when New, Open or Restore failed: the old project goes on, and so do its editors. */
 export function projectReplaceFailed() {
   replacingNow = false;
+  for (const fn of [...failed]) fn();
 }

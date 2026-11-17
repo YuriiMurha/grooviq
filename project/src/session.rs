@@ -15,7 +15,7 @@
 use crate::backup::backup_before_save;
 use crate::compile::synth_values;
 use crate::compile::{compile_pattern, engine_state, sampler_values};
-use crate::file::{Loaded, SampleFiles, stage_save_faulty};
+use crate::file::{Disk, Loaded, RealDisk, SampleFiles, stage_save};
 use crate::model::{
     BPM, Channel, DEFAULT_KEY, DEFAULT_VELOCITY, EXTENSION, MAX_NOTES_PER_PATTERN, MAX_STEPS, Note,
     Pattern, Project, ProjectKey, SCALES, SampleRef, TimeSignature, VOLUME, is_plain_step,
@@ -170,6 +170,9 @@ pub struct ProjectView {
     pub can_undo: bool,
     /// An undone note change can be made again ([`Session::redo_notes`]).
     pub can_redo: bool,
+    /// Counts projects ([`Session::generation`]): requests that edit the project carry it, so
+    /// one made for a project that was replaced since is refused.
+    pub generation: u64,
 }
 
 /// A channel's instrument, as the UI names it: `"sampler"` or `"synth"`.
@@ -435,22 +438,18 @@ impl SaveJob {
     /// refused or fails before that point makes no backup, so it never rotates an older one
     /// out. Run it without the session's lock.
     pub fn write(&self, backups: &Path) -> Result<(), SessionError> {
-        self.write_faulty(backups, |_| Ok(()))
+        self.write_on(backups, &mut RealDisk)
     }
 
-    /// [`Self::write`], with `fault` run on the temp file after the zip is written into it: the
-    /// test hook for "the disk fails while the save is staged". Not part of the API.
+    /// [`Self::write`] making its file operations with `disk`: the test hook for their order
+    /// and for each one failing. Not part of the API.
     #[doc(hidden)]
-    pub fn write_faulty(
-        &self,
-        backups: &Path,
-        fault: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
-    ) -> Result<(), SessionError> {
-        let staged = stage_save_faulty(&self.project, &self.samples, &self.path, fault)
+    pub fn write_on(&self, backups: &Path, disk: &mut impl Disk) -> Result<(), SessionError> {
+        let staged = stage_save(&self.project, &self.samples, &self.path, disk)
             .map_err(SessionError::Save)?;
         // On an error here the staged file is dropped, and the old file stays as it was.
         backup_before_save(&self.path, backups, MAX_BACKUPS).map_err(SessionError::Backup)?;
-        staged.commit().map_err(SessionError::Save)
+        staged.commit(disk).map_err(SessionError::Save)
     }
 }
 
@@ -660,6 +659,7 @@ impl Session {
             recording: self.recording,
             can_undo: self.history.can_undo(),
             can_redo: self.history.can_redo(),
+            generation: self.generation,
         }
     }
 
@@ -746,6 +746,22 @@ impl Session {
         if structural {
             self.structural_since.get_or_insert(now);
         }
+    }
+
+    /// [`Self::apply`] for a request made in the project of `generation` (the UI's): if another
+    /// project was opened, started or restored since, nothing is applied, and the view of the
+    /// open one comes back for the UI to draw. A step edit or a channel removal made in one
+    /// project must never land on the same ids in the next.
+    pub fn apply_in(
+        &mut self,
+        generation: u64,
+        edit: Edit,
+        now: Instant,
+    ) -> Result<ProjectView, SessionError> {
+        if generation != self.generation {
+            return Ok(self.view());
+        }
+        self.apply(edit, now)
     }
 
     /// Applies `edit` to the model and the engine. A refused edit (an unknown channel, step or
@@ -1049,6 +1065,33 @@ impl Session {
         self.step_history(true, now)
     }
 
+    /// [`Self::undo_notes`] (`undo`) or [`Self::redo_notes`] for a request made in the project
+    /// of `generation` (the UI's): if another project was opened, started or restored since,
+    /// nothing changes and the ack asks the UI to fetch the open project's notes.
+    pub fn step_history_in(
+        &mut self,
+        generation: u64,
+        undo: bool,
+        now: Instant,
+    ) -> Result<Option<NotesAck>, SessionError> {
+        if generation != self.generation {
+            return Ok(Some(self.refused_ack()));
+        }
+        self.step_history(undo, now)
+    }
+
+    /// The ack of a note request refused because it was made for a replaced project: nothing
+    /// changed, and the UI fetches the notes of the open one.
+    fn refused_ack(&self) -> NotesAck {
+        NotesAck {
+            revision: self.current().revision,
+            added_ids: Vec::new(),
+            ignored_ids: Vec::new(),
+            reload: true,
+            view: self.view(),
+        }
+    }
+
     /// Makes the last undone note change again, or `None` if there is none (see
     /// [`Self::undo_notes`]). Any new note change clears what redo could make.
     pub fn redo_notes(&mut self, now: Instant) -> Result<Option<NotesAck>, SessionError> {
@@ -1220,7 +1263,14 @@ impl Session {
     /// Applies a note edit to the current pattern (see [`NotesEdit`] and [`notes`]): all of it,
     /// or nothing for an unknown channel, the note cap or used-up ids. An edit that changes
     /// nothing (only unknown ids) leaves the revision and the dirty state alone.
+    ///
+    /// An edit made for another project (`edit.generation`: one replaced since) is refused
+    /// before anything is applied: its ids name that project's notes. An older revision of this
+    /// project (recording added notes meanwhile) is applied, and asks for a reload.
     pub fn edit_notes(&mut self, edit: NotesEdit, now: Instant) -> Result<NotesAck, SessionError> {
+        if edit.generation != self.generation {
+            return Ok(self.refused_ack());
+        }
         let stale = edit.base_revision != self.current().revision;
         let applied = self.apply_notes(&edit, None, now)?;
         Ok(NotesAck {
@@ -1453,6 +1503,7 @@ impl Session {
         now: Instant,
     ) -> Result<Commit, (SessionError, usize)> {
         let edit = NotesEdit {
+            generation: self.generation,
             base_revision: self.current().revision,
             add: self.pending[..n].iter().map(|(_, note)| *note).collect(),
             update: Vec::new(),

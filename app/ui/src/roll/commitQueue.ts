@@ -18,14 +18,29 @@ export interface QueueHooks {
 /** A command that changes the notes without an edit of the roll's own (undo, redo). */
 export type NotesCommand = () => Promise<NotesAck | null>;
 
-/** What waits in the queue: an edit of the roll's, or a command. */
-type Queued = { edit: LocalEdit } | { command: NotesCommand };
+/** The queues with an edit queued or unanswered, the roll that made them open or not. */
+const unsettledQueues = new Set<CommitQueue>();
+
+/** A piano-roll edit is queued or waits for its reply: the project may hold changes its view
+ * does not show as unsaved yet. */
+export function rollEditsUnsettled(): boolean {
+  return unsettledQueues.size > 0;
+}
+
+/** What waits in the queue: an edit of the roll's, or a command, each for the project it was
+ * made in (its generation). */
+type Queued = ({ edit: LocalEdit } | { command: NotesCommand }) & { generation: number };
 
 /** Sends the piano roll's edits to the engine one at a time, in order. Each edit shows in the
  * store at once; added notes keep temporary negative ids until the engine's reply names them,
  * and later edits are translated before they go out. A reply asking for a reload, a failure, or
  * a newer notes revision announced by the engine refetches the notes once nothing is in flight.
- * Undo and redo take their turn in the same line ([`run`]), so they never overtake an edit. */
+ * Undo and redo take their turn in the same line ([`run`]), so they never overtake an edit.
+ *
+ * Everything belongs to one project: each edit carries the generation it was made in, and a New,
+ * Open or Restore ([`replacing`]) drops what is queued, ignores replies still out and sends
+ * nothing until it is over ([`reopened`]). A newer revision of the same project (recording added
+ * notes) is only stale: the edit still goes, and the notes are fetched again. */
 export class CommitQueue {
   private pending: Queued[] = [];
   private busy = false;
@@ -38,6 +53,14 @@ export class CommitQueue {
   private waiters: (() => void)[] = [];
   /** The notes a gesture holds that were never sent (a stamp or a paint stroke being held). */
   private held: () => LocalEdit | null = () => null;
+  /** Moves on with every replacement: a reply to anything sent before it is ignored. */
+  private epoch = 0;
+  /** A replacement is on its way: nothing is queued or sent. */
+  private closed = false;
+  /** An edit or command was sent and its reply is not in yet. */
+  private sending = false;
+  /** The open project (`ProjectView.generation`). */
+  private generation = 0;
 
   constructor(
     private store: NoteStore,
@@ -46,6 +69,11 @@ export class CommitQueue {
   ) {
     this.seen = store.revision;
     this.announced = store.revision;
+  }
+
+  /** The project shown now: edits made from here on are its. */
+  setGeneration(generation: number) {
+    this.generation = generation;
   }
 
   /** Where failures and returned views go (the piano roll sets them once mounted). */
@@ -60,8 +88,9 @@ export class CommitQueue {
   }
 
   commit(edit: LocalEdit) {
+    if (this.closed) return;
     this.store.apply(edit);
-    this.pending.push({ edit });
+    this.pending.push({ edit, generation: this.generation });
     this.pump();
   }
 
@@ -69,8 +98,41 @@ export class CommitQueue {
    * wait for it. Its ack's view is kept and the notes are fetched again afterwards; `null`
    * (nothing to do) changes nothing. */
   run(command: NotesCommand) {
-    this.pending.push({ command });
+    if (this.closed) return;
+    this.pending.push({ command, generation: this.generation });
     this.pump();
+  }
+
+  /** A New, Open or Restore is about to be sent: what is queued for this project is dropped, a
+   * reply still out is ignored when it comes, and nothing goes out until [`reopened`]. */
+  replacing() {
+    this.closed = true;
+    this.epoch += 1;
+    this.pending = [];
+    this.real.clear();
+    this.reload = true;
+    // A reply or fetch still out is ignored: the queue is free for the project that comes next.
+    this.sending = false;
+    this.busy = false;
+    this.track();
+  }
+
+  /** The replacement finished or failed: edits go out again, and the notes are fetched. */
+  reopened() {
+    this.closed = false;
+    this.reload = true;
+    this.pump();
+  }
+
+  /** An edit is queued or waits for its reply: the engine's project may not have it yet. */
+  unsettled(): boolean {
+    return this.sending || this.pending.length > 0;
+  }
+
+  /** Keeps [`rollEditsUnsettled`] up to date. */
+  private track() {
+    if (this.unsettled()) unsettledQueues.add(this);
+    else unsettledQueues.delete(this);
   }
 
   /** The engine announced a notes revision (`notes-changed`). */
@@ -90,12 +152,17 @@ export class CommitQueue {
   }
 
   private pump() {
-    if (this.busy) return;
+    this.track();
+    if (this.busy || this.closed) return;
+    // Made in a project that is not the open one: never sent (the engine would refuse it too).
+    while (this.pending.length && this.pending[0].generation !== this.generation) this.pending.shift();
     const next = this.pending.shift();
     if (next && "command" in next) {
       this.runNow(next.command);
+      this.track();
     } else if (next) {
-      this.send(next.edit);
+      this.send(next.edit, next.generation);
+      this.track();
     } else if (this.needsFetch()) {
       this.fetch();
     } else {
@@ -132,8 +199,10 @@ export class CommitQueue {
     return { add: edit.add, update, delete: del };
   }
 
-  private send(local: LocalEdit) {
+  private send(local: LocalEdit, generation: number) {
     this.busy = true;
+    this.sending = true;
+    const epoch = this.epoch;
     const t = this.translate(local);
     const add: NewNote[] = t.add.map((n) => ({
       channel: n.channel,
@@ -143,9 +212,12 @@ export class CommitQueue {
       velocity: n.velocity,
       slide: n.slide,
     }));
-    const edit: NotesEdit = { baseRevision: this.store.revision, add, update: t.update, delete: t.delete };
+    const edit: NotesEdit = { generation, baseRevision: this.store.revision, add, update: t.update, delete: t.delete };
     this.api.notesEdit(edit).then(
       (ack) => {
+        // Sent for a project that was replaced since: its ids and view are that project's.
+        if (epoch !== this.epoch) return;
+        this.sending = false;
         local.add.forEach((n, i) => {
           const id = ack.addedIds[i];
           if (id === undefined) return;
@@ -159,6 +231,8 @@ export class CommitQueue {
         this.done();
       },
       (e: unknown) => {
+        if (epoch !== this.epoch) return;
+        this.sending = false;
         this.hooks.onError(errorText(e));
         // What was built on the failed edit cannot be sent: the engine's notes replace it all.
         this.pending = [];
@@ -170,8 +244,12 @@ export class CommitQueue {
 
   private runNow(command: NotesCommand) {
     this.busy = true;
+    this.sending = true;
+    const epoch = this.epoch;
     command().then(
       (ack) => {
+        if (epoch !== this.epoch) return;
+        this.sending = false;
         if (ack) {
           // The store's notes are the ones before the command: edits that go out before the
           // fetch keep the store's older revision, so the engine sees them as stale too.
@@ -181,6 +259,8 @@ export class CommitQueue {
         this.done();
       },
       (e: unknown) => {
+        if (epoch !== this.epoch) return;
+        this.sending = false;
         this.hooks.onError(errorText(e));
         this.done();
       },
@@ -190,8 +270,11 @@ export class CommitQueue {
   private fetch() {
     this.busy = true;
     this.reload = false;
+    const epoch = this.epoch;
     this.api.patternNotes().then(
       ({ revision, notes }) => {
+        // Fetched before a replacement: the queue fetches again once it is over.
+        if (epoch !== this.epoch) return;
         const selected = this.store.selectedIds();
         this.store.load(revision, notes);
         // Edits made while the fetch ran are not in it yet: show them again on top, with the
@@ -208,6 +291,7 @@ export class CommitQueue {
         this.done();
       },
       (e: unknown) => {
+        if (epoch !== this.epoch) return;
         this.hooks.onError(errorText(e));
         this.announced = this.seen;
         this.done();

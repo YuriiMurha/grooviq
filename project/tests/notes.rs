@@ -3,7 +3,7 @@
 use grooviq_engine::{Controller, EngineConfig, engine};
 use grooviq_project::notes::{NewNote, NotesEdit, encode_notes};
 use grooviq_project::session::{Edit, Session, SessionError};
-use grooviq_project::{Note, Pattern};
+use grooviq_project::{Loaded, Note, Pattern, SampleFiles, decode_samples};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -37,6 +37,7 @@ fn new_note(channel: u32, tick: u32, key: u8) -> NewNote {
 
 fn edit(session: &Session) -> NotesEdit {
     NotesEdit {
+        generation: session.generation(),
         base_revision: session.view().notes_revision,
         add: Vec::new(),
         update: Vec::new(),
@@ -411,13 +412,16 @@ fn additions_stop_at_the_note_cap() {
 #[test]
 fn edits_have_the_json_shapes_the_ui_sends_and_reads() {
     let e: NotesEdit = serde_json::from_str(
-        r#"{"baseRevision":3,
+        r#"{"generation":2,"baseRevision":3,
             "add":[{"channel":1,"tick":0,"length":240,"key":60,"velocity":0.8,"slide":false}],
             "update":[{"id":4,"channel":1,"tick":480,"length":960,"key":63,"velocity":1,"slide":true}],
             "delete":[7]}"#,
     )
     .unwrap();
+    assert_eq!(e.generation, 2);
     assert_eq!(e.base_revision, 3);
+    // Without the project it was made in, an edit is not taken at all.
+    assert!(serde_json::from_str::<NotesEdit>(r#"{"baseRevision":3}"#).is_err());
     assert_eq!(e.add, vec![new_note(1, 0, 60)]);
     assert_eq!(e.update[0].id, 4);
     assert!(e.update[0].slide);
@@ -431,7 +435,7 @@ fn edits_have_the_json_shapes_the_ui_sends_and_reads() {
     for key in ["revision", "addedIds", "ignoredIds", "reload", "view"] {
         assert!(json.get(key).is_some(), "{key} in {json}");
     }
-    for key in ["key", "notesRevision", "recording"] {
+    for key in ["key", "notesRevision", "recording", "generation"] {
         assert!(json["view"].get(key).is_some(), "{key} in view");
     }
     let channel = &json["view"]["channels"][0];
@@ -504,4 +508,142 @@ fn simultaneous_notes_go_out_by_channel_then_id() {
         .map(|n| u32::from_le_bytes([n[0], n[1], n[2], n[3]]))
         .collect();
     assert_eq!(ids, vec![1, 2, 7]);
+}
+
+/// Opens `project` in `session` as another file: what New, Open and Restore do to edits.
+fn open_other(session: &mut Session, project: grooviq_project::Project) {
+    let loaded = Loaded {
+        project,
+        samples: SampleFiles::new(),
+        warnings: vec![],
+    };
+    let decoded = decode_samples(&loaded);
+    session
+        .open(Path::new("/nowhere/b.grooviq"), loaded, decoded)
+        .unwrap();
+}
+
+#[test]
+fn a_late_edit_from_the_previous_project_changes_nothing_in_the_open_one() {
+    // A: channel 1 with note 1. B, opened over it: the same ids, another key.
+    let (mut session, _, ch) = with_synth();
+    let mut e = edit(&session);
+    e.add = vec![new_note(ch, 0, 60)];
+    session.edit_notes(e, Instant::now()).unwrap();
+    let mut b = session.project().clone();
+    b.patterns[0].notes[0].key = 72;
+    // Edits made in A, delivered only after B is open.
+    let mut delete = edit(&session);
+    delete.delete = vec![1];
+    let mut update = edit(&session);
+    update.update = vec![Note {
+        key: 40,
+        ..session.project().patterns[0].notes[0]
+    }];
+    let mut add = edit(&session);
+    add.add = vec![new_note(ch, 480, 50)];
+    open_other(&mut session, b);
+    let before = notes(&session);
+    let revision = session.notes_revision();
+
+    for late in [delete, update, add] {
+        let ack = session.edit_notes(late, Instant::now()).unwrap();
+        assert!(ack.reload, "the UI fetches B's notes");
+        assert!(ack.added_ids.is_empty());
+        assert_eq!(notes(&session), before, "B's notes changed");
+        assert_eq!(session.notes_revision(), revision, "nothing to announce");
+        assert!(!session.view().dirty, "B became dirty");
+        assert!(!session.view().can_undo);
+    }
+}
+
+#[test]
+fn late_step_edits_and_history_from_the_previous_project_change_nothing() {
+    let (mut session, _, ch) = with_synth();
+    let a = session.generation();
+    // B has a step hit on channel 1, an undoable edit and a redoable one.
+    session
+        .apply(
+            Edit::ToggleStep {
+                channel: ch,
+                step: 0,
+            },
+            Instant::now(),
+        )
+        .unwrap();
+    let mut b = session.project().clone();
+    b.patterns[0].notes[0].velocity = 0.5;
+    open_other(&mut session, b);
+    let mut e = edit(&session);
+    e.add = vec![new_note(ch, 480, 50), new_note(ch, 960, 52)];
+    session.edit_notes(e, Instant::now()).unwrap();
+    session.undo_notes(Instant::now()).unwrap();
+    let mut e = edit(&session);
+    e.add = vec![new_note(ch, 1440, 55)];
+    session.edit_notes(e, Instant::now()).unwrap();
+    let view = session.view();
+    let before = notes(&session);
+    let revision = session.notes_revision();
+    assert!(view.can_undo);
+    assert_ne!(view.generation, a);
+
+    let late = [
+        Edit::ToggleStep {
+            channel: ch,
+            step: 0,
+        },
+        Edit::SetStepVelocity {
+            channel: ch,
+            step: 0,
+            velocity: 1.0,
+        },
+        Edit::ClearStep {
+            channel: ch,
+            step: 0,
+        },
+        Edit::RemoveChannel { channel: ch },
+    ];
+    for edit in late {
+        let got = session.apply_in(a, edit.clone(), Instant::now()).unwrap();
+        assert_eq!(got, view, "{edit:?} changed B");
+        assert_eq!(notes(&session), before, "{edit:?}");
+    }
+    for undo in [true, false] {
+        let ack = session
+            .step_history_in(a, undo, Instant::now())
+            .unwrap()
+            .expect("an ack that asks for a reload");
+        assert!(ack.reload);
+        assert_eq!(ack.revision, revision);
+        assert_eq!(ack.view, view, "undo {undo} changed B");
+        assert_eq!(notes(&session), before);
+    }
+
+    // The open project's own requests go through.
+    let b_gen = view.generation;
+    let got = session
+        .apply_in(b_gen, Edit::SetSwing { swing: 0.5 }, Instant::now())
+        .unwrap();
+    assert_eq!(got.pattern.swing, 0.5);
+    let ack = session
+        .step_history_in(b_gen, true, Instant::now())
+        .unwrap()
+        .unwrap();
+    assert_ne!(ack.revision, revision);
+}
+
+#[test]
+fn an_older_revision_of_the_same_project_still_applies() {
+    // Recording added a note after the UI's copy: its edit is stale, not foreign.
+    let (mut session, _, ch) = with_synth();
+    let mut e = edit(&session);
+    e.add = vec![new_note(ch, 0, 60)];
+    let ui = edit(&session);
+    session.edit_notes(e, Instant::now()).unwrap();
+    let mut late = ui;
+    late.add = vec![new_note(ch, 480, 62)];
+    let ack = session.edit_notes(late, Instant::now()).unwrap();
+    assert!(ack.reload);
+    assert_eq!(ack.added_ids.len(), 1);
+    assert_eq!(notes(&session).len(), 2);
 }

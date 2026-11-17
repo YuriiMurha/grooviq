@@ -26,8 +26,10 @@ export interface NewNote {
   slide: boolean;
 }
 
-/** One edit to the notes: deletes, then updates, then adds. Made against `baseRevision`. */
+/** One edit to the notes: deletes, then updates, then adds. Made in the project of `generation`
+ * (`ProjectView.generation`), against `baseRevision`. */
 export interface NotesEdit {
+  generation: number;
   baseRevision: number;
   add: NewNote[];
   update: WireNote[];
@@ -40,7 +42,8 @@ export interface NotesAck {
   addedIds: number[];
   /** Ids of `update` and `delete` the pattern no longer had. */
   ignoredIds: number[];
-  /** The edit was made against an old revision or had values clamped: fetch the notes again. */
+  /** The edit was made against an old revision, was refused as one made for a replaced project,
+   * or had values clamped: fetch the notes again. */
   reload: boolean;
   view: ProjectView;
 }
@@ -116,11 +119,12 @@ export const TYPING_VELOCITY = 0.8;
 
 export const patternNotes = async () => decodeNotes(await invoke<ArrayBuffer>("pattern_notes"));
 export const notesEdit = (edit: NotesEdit) => invoke<NotesAck>("notes_edit", { edit });
-/** Takes back the last note change (a note edit, a step edit or a recorded take); `null` when
- * there is none. The ack always asks for a reload. */
-export const notesUndo = () => invoke<NotesAck | null>("notes_undo");
-/** Makes the last undone note change again; `null` when there is none. */
-export const notesRedo = () => invoke<NotesAck | null>("notes_redo");
+/** Takes back the last note change (a note edit, a step edit or a recorded take) of the project of
+ * `generation`; `null` when there is none. The ack always asks for a reload. */
+export const notesUndo = (generation: number) => invoke<NotesAck | null>("notes_undo", { generation });
+/** Makes the last undone note change of the project of `generation` again; `null` when there is
+ * none. */
+export const notesRedo = (generation: number) => invoke<NotesAck | null>("notes_redo", { generation });
 /** Adds a synth channel named after the preset. */
 export const channelAddSynth = (preset: string) => invoke<ProjectView>("channel_add_synth", { preset });
 /** Starts a note on a channel now (typing keyboard, roll keys, a synth row's preview): the press,

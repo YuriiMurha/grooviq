@@ -16,9 +16,13 @@ export function useSession(onError: (message: string) => void) {
   const [state, setState] = useState<Session>(() => ({ view: null, cleanSince: Date.now() }));
   const latest = useRef(state);
   const queue = useRef<Promise<unknown>>(Promise.resolve());
+  /** Commands that change the project, sent or queued, whose view is not in yet. */
+  const unanswered = useRef(0);
 
   const adopt = useCallback((view: ProjectView) => {
     const prev = latest.current;
+    // A late reply about a project that was replaced since: the open one is drawn, not it.
+    if (prev.view && view.generation < prev.view.generation) return;
     const becameClean =
       !view.dirty && (prev.view === null || prev.view.dirty || prev.view.path !== view.path);
     latest.current = { view, cleanSince: becameClean ? Date.now() : prev.cleanSince };
@@ -37,21 +41,30 @@ export function useSession(onError: (message: string) => void) {
 
   const run = useCallback(
     async (command: () => Promise<ProjectView>) => {
+      unanswered.current += 1;
       try {
         adopt(await enqueue(command));
         return true;
       } catch (e) {
         if (e !== STALE) onError(errorText(e));
         return false;
+      } finally {
+        unanswered.current -= 1;
       }
     },
     [adopt, enqueue, onError],
   );
+  /** Sends `edit` for the project shown now: if another replaced it before the edit's turn, the
+   * engine refuses it. */
   const apply = useCallback(
-    (edit: Edit, still?: () => boolean) =>
-      run(() => (still && !still() ? Promise.reject(STALE) : projectEdit(edit))),
+    (edit: Edit, still?: () => boolean) => {
+      const generation = latest.current.view?.generation ?? 0;
+      return run(() => (still && !still() ? Promise.reject(STALE) : projectEdit(edit, generation)));
+    },
     [run],
   );
+  /** A change was sent and its view is not in yet: the project may be dirtier than it shows. */
+  const unsettled = useCallback(() => unanswered.current > 0, []);
 
   // The project the engine holds at start.
   useEffect(() => {
@@ -59,5 +72,5 @@ export function useSession(onError: (message: string) => void) {
   }, [adopt, enqueue, onError]);
 
   const context: ProjectContextValue = { view: state.view, apply, run, setView: adopt };
-  return { view: state.view, cleanSince: state.cleanSince, latest, adopt, enqueue, apply, context };
+  return { view: state.view, cleanSince: state.cleanSince, latest, adopt, enqueue, apply, unsettled, context };
 }
