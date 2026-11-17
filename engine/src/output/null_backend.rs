@@ -87,12 +87,40 @@ impl Drop for NullBackend {
 #[doc(hidden)]
 pub fn run_silent(slot: &AudioSlot, quit: &AtomicBool, rate: u32) {
     let mut buffer = [0f32; CALLBACK_FRAMES * CHANNELS];
-    let mut pacer = Pacer::new(Instant::now(), rate);
-    while !quit.load(Ordering::Acquire) {
+    pace(&mut SystemClock, rate, || {
+        if quit.load(Ordering::Acquire) {
+            return false;
+        }
         slot.process(&mut buffer, CHANNELS);
-        let wait = pacer.block_rendered(Instant::now());
+        true
+    });
+}
+
+/// Time as the pacing loop sees it: tests drive the very same loop on a synthetic one.
+trait Clock {
+    fn now(&mut self) -> Instant;
+    fn sleep(&mut self, wait: Duration);
+}
+
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&mut self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&mut self, wait: Duration) {
+        thread::sleep(wait);
+    }
+}
+
+/// Calls `render` once per callback, until it returns false, waiting out each block's time.
+fn pace(clock: &mut impl Clock, rate: u32, mut render: impl FnMut() -> bool) {
+    let mut pacer = Pacer::new(clock.now(), rate);
+    while render() {
+        let wait = pacer.block_rendered(clock.now());
         if !wait.is_zero() {
-            thread::sleep(wait);
+            clock.sleep(wait);
         }
     }
 }
@@ -152,6 +180,8 @@ impl Pacer {
 mod tests {
     use super::*;
     use crate::{EngineConfig, LiveShared, engine};
+    use std::cell::Cell;
+    use std::rc::Rc;
     use std::time::Instant;
 
     /// A slot that keeps its processor whatever the backend does, so any callback after
@@ -186,19 +216,35 @@ mod tests {
         Duration::from_nanos(n * CALLBACK_FRAMES as u64 * 1_000_000_000 / 48_000)
     }
 
-    /// When each of `blocks` callbacks renders, as offsets from the start, when a `Pacer` runs
-    /// them on a synthetic clock and `late(n)` is how long past its wait the thread wakes for
-    /// block n (a stall, a slow wake-up). No real time passes.
+    /// A clock that only moves when the loop sleeps or the test says the thread was late.
+    struct FakeClock(Rc<Cell<Instant>>);
+
+    impl Clock for FakeClock {
+        fn now(&mut self) -> Instant {
+            self.0.get()
+        }
+
+        fn sleep(&mut self, wait: Duration) {
+            self.0.set(self.0.get() + wait);
+        }
+    }
+
+    /// When each of `blocks` callbacks renders, as offsets from the start, when the production
+    /// pacing loop runs them on a synthetic clock and `late(n)` is how long past its wait the
+    /// thread wakes for block n (a stall, a slow wake-up). No real time passes.
     fn render_times(blocks: usize, mut late: impl FnMut(usize) -> Duration) -> Vec<Duration> {
         let base = Instant::now();
-        let mut pacer = Pacer::new(base, 48_000);
-        let mut now = base;
+        let now = Rc::new(Cell::new(base));
         let mut times = Vec::with_capacity(blocks);
-        for n in 0..blocks {
-            now += late(n);
-            times.push(now - base);
-            now += pacer.block_rendered(now);
-        }
+        pace(&mut FakeClock(Rc::clone(&now)), 48_000, || {
+            let n = times.len();
+            if n == blocks {
+                return false;
+            }
+            now.set(now.get() + late(n));
+            times.push(now.get() - base);
+            true
+        });
         times
     }
 
@@ -266,6 +312,58 @@ mod tests {
                 *t <= on_time + Duration::from_millis(1),
                 "block {n} at {t:?}, schedule says {on_time:?}"
             );
+        }
+    }
+
+    #[test]
+    fn on_time_wake_ups_land_exactly_on_the_schedule_and_never_wait_longer() {
+        // 12 s, past the seconds rollover: block n renders at exactly n x one block, so a
+        // minimum sleep, or a wait of more than the schedule asks, shows at once.
+        let times = render_times(2_250, |_| Duration::ZERO);
+        for (n, t) in times.iter().enumerate() {
+            assert_eq!(*t, ideal(n as u64), "block {n}");
+        }
+    }
+
+    #[test]
+    fn a_run_of_days_stays_on_the_schedule() {
+        // 5 days of callbacks, 81 million: the frame count in nanoseconds would overflow a u64
+        // after about 4.4 days if whole seconds were not moved out of it.
+        const BLOCKS: u128 = 81_000_000;
+        let base = Instant::now();
+        let now = Rc::new(Cell::new(base));
+        let mut rendered = 0u128;
+        pace(&mut FakeClock(Rc::clone(&now)), 48_000, || {
+            rendered += 1;
+            rendered <= BLOCKS
+        });
+        let on_time = BLOCKS * CALLBACK_FRAMES as u128 * 1_000_000_000 / 48_000;
+        assert_eq!((now.get() - base).as_nanos(), on_time);
+    }
+
+    #[test]
+    fn a_dropped_stall_waits_one_block_and_the_new_schedule_runs_to_the_next() {
+        // Stalls well over a block, alone, back to back, and one 300 blocks on (so the
+        // schedule restarted by the stall rolls over a second before the next).
+        let stalls = [(100, 40), (130, 12), (131, 90), (132, 7), (440, 25)];
+        let times = render_times(700, |n| {
+            Duration::from_millis(stalls.iter().find(|s| s.0 == n).map_or(0, |s| s.1))
+        });
+        for pair in stalls.windows(2) {
+            let (from, to) = (pair[0].0, pair[1].0);
+            for n in from..to {
+                // Exactly the restarted schedule: one block's wait after the stall, then the
+                // absolute pace. Waiting 100 blocks after a stall would fail the first step.
+                assert_eq!(
+                    times[n] - times[from],
+                    ideal((n - from) as u64),
+                    "block {n} after the stall at {from}"
+                );
+            }
+        }
+        // And after the last stall, to the end: more than a second of it.
+        for n in 440..700 {
+            assert_eq!(times[n] - times[440], ideal((n - 440) as u64), "block {n}");
         }
     }
 
