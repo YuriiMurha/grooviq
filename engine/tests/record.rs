@@ -60,6 +60,11 @@ fn note(on: bool) -> Command {
     }
 }
 
+/// Ticks in the default 16-step pattern.
+const LOOP: u64 = 3_840;
+
+/// A note recorded at `tick`, in the default pattern (no resize: its position is the tick in
+/// the loop).
 fn recorded(key_on: bool, tick: u64) -> RecordEvent {
     RecordEvent::Note {
         channel: ChannelId(1),
@@ -67,6 +72,14 @@ fn recorded(key_on: bool, tick: u64) -> RecordEvent {
         velocity: 1.0,
         on: key_on,
         tick,
+        position: (tick % LOOP) as u32,
+    }
+}
+
+fn end(tick: u64) -> RecordEvent {
+    RecordEvent::End {
+        tick,
+        position: (tick % LOOP) as u32,
     }
 }
 
@@ -181,9 +194,9 @@ fn stop_and_record_off_push_an_end_marker() {
         r.take(),
         [
             recorded(true, 1_200),
-            RecordEvent::End { tick: 1_600 },
+            end(1_600),
             recorded(false, 2_000),
-            RecordEvent::End { tick: 2_560 },
+            end(2_560),
         ]
     );
 }
@@ -404,7 +417,7 @@ fn the_time_signature_is_mirrored_and_outlives_a_new_state_and_a_rate_change() {
     p.process(&mut out[..128], 2);
     let mut taken = Vec::new();
     c.take_recorded(&mut taken);
-    assert_eq!(taken, [RecordEvent::End { tick: 6_722 }], "recording too");
+    assert_eq!(taken, [end(6_722)], "recording too");
 }
 
 /// The tick each note-on at the given frames was recorded at.
@@ -412,9 +425,26 @@ fn ticks(events: &[RecordEvent]) -> Vec<u64> {
     events
         .iter()
         .map(|e| match e {
-            RecordEvent::Note { tick, .. } | RecordEvent::End { tick } => *tick,
+            RecordEvent::Note { tick, .. } | RecordEvent::End { tick, .. } => *tick,
         })
         .collect()
+}
+
+/// Where in the loop each event was heard.
+fn positions(events: &[RecordEvent]) -> Vec<u32> {
+    events
+        .iter()
+        .map(|e| match e {
+            RecordEvent::Note { position, .. } | RecordEvent::End { position, .. } => *position,
+        })
+        .collect()
+}
+
+fn resize(length: u32) -> PatternData {
+    PatternData {
+        length,
+        notes: Vec::new(),
+    }
 }
 
 #[test]
@@ -486,10 +516,6 @@ fn a_note_heard_before_play_started_records_at_tick_0() {
 
 #[test]
 fn held_notes_keep_their_length_across_pattern_resizes() {
-    let resize = |length| PatternData {
-        length,
-        notes: Vec::new(),
-    };
     let mut r = Rig::new();
     r.c.send(Command::SetRecording { on: true }).unwrap();
     r.c.send(Command::Play).unwrap();
@@ -507,8 +533,80 @@ fn held_notes_keep_their_length_across_pattern_resizes() {
     r.c.set_pattern(resize(1_920)).unwrap();
     r.at(141_000, note(false));
     r.run_to(142_000);
-    let t = ticks(&r.take());
-    assert_eq!(t, [3_800, 3_880, 4_760, 4_800, 5_560, 5_640]);
+    let got = r.take();
+    assert_eq!(ticks(&got), [3_800, 3_880, 4_760, 4_800, 5_560, 5_640]);
+    // Where they were heard: the growth kept the place in the loop (shift 3 840), the shrink
+    // wrapped it into 1 920 ticks.
+    assert_eq!(positions(&got), [3_800, 40, 920, 960, 1_720, 1_800]);
+}
+
+#[test]
+fn positions_wrap_at_the_loop_end_and_follow_a_resize() {
+    // The #142 case: 16 -> 32 steps at played tick 4 800 (frame 120 000); playback keeps its
+    // place (960 into the loop), so a note 240 ticks later was heard at 1 200.
+    let mut r = Rig::new();
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    r.at(96_250, note(true));
+    r.at(119_000, note(true));
+    r.run_to(120_000);
+    r.c.set_pattern(resize(7_680)).unwrap();
+    r.at(126_000, note(true));
+    r.run_to(127_000);
+    let got = r.take();
+    assert_eq!(ticks(&got), [3_850, 4_760, 5_040]);
+    assert_eq!(positions(&got), [10, 920, 1_200]);
+
+    // 16 -> 24 steps at the same place: the shift is 1 920. A note at played tick 10 000 is
+    // past the new loop's end: (10 000 + 1 920) % 5 760.
+    let mut r = Rig::new();
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    r.run_to(120_000);
+    r.c.set_pattern(resize(5_760)).unwrap();
+    r.at(126_000, note(true));
+    r.at(250_000, note(true));
+    r.run_to(251_000);
+    let got = r.take();
+    assert_eq!(ticks(&got), [5_040, 10_000]);
+    assert_eq!(positions(&got), [1_200, 400]);
+}
+
+#[test]
+fn shrinking_while_playing_moves_later_positions_into_the_shorter_loop() {
+    // 3 840 -> 1 920 ticks at frame 75 008 (played tick 3 000.32, past the new end).
+    let mut r = Rig::new();
+    r.c.send(Command::SetRecording { on: true }).unwrap();
+    r.c.send(Command::Play).unwrap();
+    r.at(74_000, note(true));
+    r.run_to(75_008);
+    r.c.set_pattern(resize(1_920)).unwrap();
+    r.at(76_000, note(true));
+    r.run_to(77_000);
+    let got = r.take();
+    assert_eq!(ticks(&got), [2_960, 3_040]);
+    assert_eq!(positions(&got), [2_960, 1_120]);
+}
+
+#[test]
+fn a_resize_inside_the_latency_window_keeps_the_old_loop_for_notes_heard_before_it() {
+    // A resize at frame 96 256, 11 ticks into the second loop. With 2 400 frames of latency, a
+    // note landing at 96 300 was heard at 93 900 (tick 3 756), still in the first loop of the
+    // old pattern; one landing at 99 000 was heard at 96 600 (tick 3 864), after the resize.
+    for (length, after) in [(1_920, 24), (7_680, 24)] {
+        let mut r = Rig::new();
+        r.c.live_shared().set_output_latency_frames(2_400);
+        r.c.send(Command::SetRecording { on: true }).unwrap();
+        r.c.send(Command::Play).unwrap();
+        r.run_to(96_256);
+        r.c.set_pattern(resize(length)).unwrap();
+        r.at(96_300, note(true));
+        r.at(99_000, note(true));
+        r.run_to(100_000);
+        let got = r.take();
+        assert_eq!(ticks(&got), [3_756, 3_864], "{length}");
+        assert_eq!(positions(&got), [3_756, after], "{length}");
+    }
 }
 
 #[test]

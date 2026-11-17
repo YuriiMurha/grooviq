@@ -13,7 +13,7 @@
 //! [`TransportClock::keep_position`]). The shift is an integer kept apart from the anchor, so
 //! a note lands on exactly the frame it would have had without the swap.
 
-use crate::state::PPQ;
+use crate::state::{PPQ, STEP_TICKS};
 
 /// The first frame at or after `ticks` ticks from frame 0 at `bpm`:
 /// `ceil(ticks * sample_rate * 60 / (bpm * PPQ))`, evaluated left to right in f64.
@@ -30,19 +30,22 @@ fn exact_frames(ticks: f64, bpm: f64, sample_rate: f64) -> f64 {
     ticks * sample_rate * 60.0 / (bpm * f64::from(PPQ))
 }
 
-/// Tempo and rate segments kept for recording: a note heard up to this many tempo or rate
-/// changes ago is placed at the tempo it was heard at. At most one change lands per 64-frame
+/// Segments kept for recording: a note heard up to this many tempo, rate or pattern-length
+/// changes ago is placed at the tempo it was heard at, in the loop that was playing. At most one change lands per 64-frame
 /// block, so this covers at least 4 096 frames even when every block changes tempo, and any
 /// latency while changes are rarer (a BPM knob dragged at 60 Hz: about a second).
 pub(crate) const TEMPO_HISTORY: usize = 64;
 
-/// A stretch of play at one tempo and rate, from `frame` (where `tick` ticks had played).
+/// A stretch of play at one tempo and rate, in one pattern length and loop shift, from
+/// `frame` (where `tick` ticks had played).
 #[derive(Clone, Copy, Debug, Default)]
 struct Segment {
     frame: u64,
     tick: f64,
     bpm: f32,
     sample_rate: f32,
+    shift: u64,
+    length: u32,
 }
 
 impl Segment {
@@ -65,6 +68,12 @@ pub(crate) struct TransportClock {
     anchor_tick: f64,
     /// The frame play started on: a recorded note is never placed before it.
     play_frame: u64,
+    /// The pattern length (ticks) playing, as the processor last reported it.
+    length: u32,
+    /// Where the current segment began (a tempo, rate or length change, or Play) and the tick
+    /// played there. Only recording looks back past it.
+    since: u64,
+    since_tick: f64,
     /// The segments before the current one since Play, newest at `history_next - 1` (a ring:
     /// the oldest is overwritten). Fixed size, so a tempo change never allocates.
     history: [Segment; TEMPO_HISTORY],
@@ -90,6 +99,9 @@ impl TransportClock {
             anchor_frame: 0,
             anchor_tick: 0.0,
             play_frame: 0,
+            length: STEP_TICKS * 16,
+            since: 0,
+            since_tick: 0.0,
             history: [Segment::default(); TEMPO_HISTORY],
             history_len: 0,
             history_next: 0,
@@ -113,6 +125,8 @@ impl TransportClock {
         self.anchor_frame = at;
         self.anchor_tick = 0.0;
         self.play_frame = at;
+        self.since = at;
+        self.since_tick = 0.0;
         self.history_len = 0;
         self.loops = loops;
         self.covered = 0;
@@ -145,24 +159,34 @@ impl TransportClock {
 
     fn reanchor(&mut self, at: u64) {
         if self.playing {
-            // A segment that lasted no frame (two changes in one block) is not worth keeping.
-            if at != self.anchor_frame {
-                self.history[self.history_next] = self.segment();
-                self.history_next = (self.history_next + 1) % TEMPO_HISTORY;
-                self.history_len = (self.history_len + 1).min(TEMPO_HISTORY);
-            }
+            self.new_segment(at);
             self.anchor_tick = self.played_at(at);
             self.anchor_frame = at;
+        }
+    }
+
+    /// Keeps the segment playing until frame `at` (a block start) for recording; what changes
+    /// there starts the next. Call it before changing anything.
+    fn new_segment(&mut self, at: u64) {
+        // A segment that lasted no frame (two changes in one block) is not worth keeping.
+        if at != self.since {
+            self.history[self.history_next] = self.segment();
+            self.history_next = (self.history_next + 1) % TEMPO_HISTORY;
+            self.history_len = (self.history_len + 1).min(TEMPO_HISTORY);
+            self.since_tick = self.played_at(at);
+            self.since = at;
         }
     }
 
     /// The segment playing now.
     fn segment(&self) -> Segment {
         Segment {
-            frame: self.anchor_frame,
-            tick: self.anchor_tick,
+            frame: self.since,
+            tick: self.since_tick,
             bpm: self.bpm,
             sample_rate: self.sample_rate,
+            shift: self.shift,
+            length: self.length,
         }
     }
 
@@ -170,8 +194,18 @@ impl TransportClock {
     /// pattern position moves forward (by less than `new_len`) to the place in the loop the
     /// old pattern had reached, or, when that is past the new end, to where it wraps. The
     /// frames already booked do not move. Integer maths only; real-time safe.
-    pub(crate) fn keep_position(&mut self, old_len: u32, new_len: u32) {
-        if !self.playing || old_len == new_len || old_len == 0 || new_len == 0 {
+    ///
+    /// `at` is the frame (a block start) the new pattern plays from: recording keeps the old
+    /// length and shift for notes heard before it. Stopped, only the length is noted.
+    pub(crate) fn keep_position(&mut self, at: u64, old_len: u32, new_len: u32) {
+        if new_len == 0 {
+            return;
+        }
+        if self.playing && new_len != self.length {
+            self.new_segment(at);
+        }
+        self.length = new_len;
+        if !self.playing || old_len == new_len || old_len == 0 {
             return;
         }
         let (old, new) = (u64::from(old_len), u64::from(new_len));
@@ -214,19 +248,26 @@ impl TransportClock {
     /// `play_frame`), at the tempo and rate that played there. A frame older than the kept
     /// history falls between play start (tick 0) and the oldest segment kept: it is placed on
     /// the straight line between them (their average tempo), exact at both ends.
-    fn played_then(&self, frame: u64) -> f64 {
+    /// Returns that tick with the segment that played there (its loop shift and length; past
+    /// the kept history, the oldest kept one's).
+    fn played_then(&self, frame: u64) -> (f64, Segment) {
+        if frame >= self.since {
+            // The playback map itself, so a note heard now lands as the sequencer counts.
+            return (self.played_at(frame), self.segment());
+        }
         let mut segment = self.segment();
         for back in 1..=self.history_len {
-            if frame >= segment.frame {
-                return segment.played_at(frame);
-            }
             segment = self.history[(self.history_next + TEMPO_HISTORY - back) % TEMPO_HISTORY];
+            if frame >= segment.frame {
+                return (segment.played_at(frame), segment);
+            }
         }
-        if frame >= segment.frame || frame < self.play_frame || segment.frame == self.play_frame {
-            return segment.played_at(frame);
+        if frame < self.play_frame || segment.frame == self.play_frame {
+            return (segment.played_at(frame), segment);
         }
         let span = (segment.frame - self.play_frame) as f64;
-        segment.tick * ((frame - self.play_frame) as f64 / span)
+        let tick = segment.tick * ((frame - self.play_frame) as f64 / span);
+        (tick, segment)
     }
 
     /// The first tick not covered yet (0 before the first block of a play).
@@ -263,10 +304,24 @@ impl TransportClock {
     /// the frame play started on, at the tempo and rate of that frame. Ticks count straight
     /// on from Play: a pattern of a new length (the sequencer's `shift`) does not move them, so
     /// a held note keeps its length.
-    pub(crate) fn record_tick(&self, frame: u64, latency: u64) -> u64 {
+    ///
+    /// Returns that tick and its position in the loop that was playing there: `(tick + shift)
+    /// % length` with the shift and pattern length of that frame, exactly the pattern tick the
+    /// sequencer played.
+    pub(crate) fn record_at(&self, frame: u64, latency: u64) -> (u64, u32) {
         let heard = frame.saturating_sub(latency).max(self.play_frame);
+        let (played, segment) = self.played_then(heard);
         // Saturating: never negative.
-        self.played_then(heard).floor() as u64
+        let tick = played.floor() as u64;
+        // Below `length`, a u32.
+        let position = (tick + segment.shift) % u64::from(segment.length.max(1));
+        (tick, position as u32)
+    }
+
+    /// [`Self::record_at`]'s tick alone.
+    #[cfg(test)]
+    pub(crate) fn record_tick(&self, frame: u64, latency: u64) -> u64 {
+        self.record_at(frame, latency).0
     }
 
     /// The whole pattern tick at `frame` (ticks since play started, plus any shift), 0 while
@@ -354,7 +409,7 @@ mod tests {
         let (c, position) = (t.covered(), t.position_ticks(now));
         // From an old length of c - 1 (one tick into its loop) to 7 or 5: a shift forward.
         let new = if c % 7 == 1 { 5 } else { 7 };
-        t.keep_position(c as u32 - 1, new);
+        t.keep_position(now, c as u32 - 1, new);
         assert!(t.position_ticks(now) > position, "playback shifted");
         assert_eq!(t.record_tick(now, 0), before);
         // A new play forgets the history.
@@ -397,7 +452,7 @@ mod tests {
         assert_eq!(covered / step, 20);
         let step_21 = t.frame_of((21 * step) as f64);
         // 16 -> 32 steps: the place stays step 4 (plus the same part of a step).
-        t.keep_position(16 * 240, 32 * 240);
+        t.keep_position(at, 16 * 240, 32 * 240);
         assert_eq!(t.covered() % (32 * step), covered % (16 * step));
         assert_eq!(
             t.position_ticks(at) % (32 * step),
@@ -408,15 +463,15 @@ mod tests {
         assert_eq!(t.frame_of(next as f64), step_21);
         // 32 -> 3 steps from step 4 of 32: past the new end, so it wraps (step 1 of 3).
         let before = t.covered();
-        t.keep_position(32 * 240, 3 * 240);
+        t.keep_position(at, 32 * 240, 3 * 240);
         assert_eq!(t.covered() % (3 * step), before % (32 * step) % (3 * step));
         assert!(t.covered() >= before && t.covered() - before < 3 * step);
         // The same length, or a stopped transport, changes nothing.
         let before = t.covered();
-        t.keep_position(3 * 240, 3 * 240);
+        t.keep_position(at, 3 * 240, 3 * 240);
         assert_eq!(t.covered(), before);
         t.stop();
-        t.keep_position(16 * 240, 17 * 240);
+        t.keep_position(at, 16 * 240, 17 * 240);
         assert_eq!(t.covered(), 0);
         // Play starts from tick 0 with no shift left over.
         t.start(0, None);

@@ -107,6 +107,9 @@ impl AudioProcessor {
         (commands, trash, recorded): (Consumer<Msg>, Producer<Trash>, Producer<RecordEvent>),
         live: Arc<LiveShared>,
     ) -> Self {
+        let mut transport = TransportClock::new(sample_rate, bpm);
+        let length = graph.pattern_length();
+        transport.keep_position(0, length, length);
         Self {
             commands,
             trash,
@@ -120,7 +123,7 @@ impl AudioProcessor {
             served: BLOCK,
             events: [NO_EVENT; MAX_EVENTS],
             clock: 0,
-            transport: TransportClock::new(sample_rate, bpm),
+            transport,
             recorder: Recorder::new(recorded),
             metronome: Metronome::new(sample_rate, time_signature),
             faults: 0,
@@ -167,8 +170,11 @@ impl AudioProcessor {
         self.metronome.set_sample_rate(sample_rate);
         // A pattern of a new length can arrive with the fresh graph (its swap was still queued,
         // or a faulted graph refused it): the place in the loop holds, as in `replace_graph`.
-        self.transport
-            .keep_position(self.graph.pattern_length(), graph.pattern_length());
+        self.transport.keep_position(
+            self.clock,
+            self.graph.pattern_length(),
+            graph.pattern_length(),
+        );
         self.generation = graph.generation();
         self.graph = graph;
         self.unsent = None;
@@ -285,7 +291,7 @@ impl AudioProcessor {
                 offset
             };
             match msg {
-                Msg::ReplaceGraph(graph) => self.replace_graph(graph),
+                Msg::ReplaceGraph(graph) => self.replace_graph(graph, start),
                 Msg::AddChannel(node) => {
                     let refused = if self.faulted {
                         Some(node)
@@ -321,7 +327,7 @@ impl AudioProcessor {
                         let new_len = pattern.length;
                         let leaving = self.graph.set_pattern(pattern);
                         // A new length keeps the place in the loop (no jump, no lost notes).
-                        self.transport.keep_position(leaving.length, new_len);
+                        self.transport.keep_position(start, leaving.length, new_len);
                         leaving
                     };
                     self.discard(Trash::Pattern(leaving));
@@ -465,14 +471,14 @@ impl AudioProcessor {
     /// Swaps in a fresh graph, unless it is from an earlier generation: a restart queued
     /// before `reconfigure` arrives after the fresh graph it made, and must not replace it
     /// (cutting held voices, or bringing back the old rate).
-    fn replace_graph(&mut self, graph: Box<Graph>) {
+    fn replace_graph(&mut self, graph: Box<Graph>, at: u64) {
         let leaving = if graph.generation() == self.generation {
             self.faulted = false;
             let new_len = graph.pattern_length();
             let leaving = std::mem::replace(&mut self.graph, graph);
             // A pattern swap a faulted graph refused arrives with the fresh graph.
             self.transport
-                .keep_position(leaving.pattern_length(), new_len);
+                .keep_position(at, leaving.pattern_length(), new_len);
             leaving
         } else {
             graph

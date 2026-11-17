@@ -631,6 +631,14 @@ fn recording_never_allocates() {
         })
         .unwrap();
         c.send(note(2, i % 2 == 0)).unwrap();
+        // Pattern resizes while recording are segments of the history too.
+        if i % 3 == 0 {
+            c.set_pattern(PatternData {
+                length: 240 * (1 + i % 32),
+                notes: Vec::new(),
+            })
+            .unwrap();
+        }
         run(&mut c, 1);
     }
     c.send(Command::SetTimeSignature { beats: 3, unit: 4 })
