@@ -117,7 +117,7 @@ fn answers_404_for_another_path() {
 #[test]
 fn produces_fresh_frames_while_the_calling_thread_is_blocked() {
     let live = Arc::new(LiveShared::default());
-    let server = start_stream(Arc::clone(&live), 60).unwrap();
+    let server = start_stream(Arc::clone(&live), 10).unwrap();
     let address = server.local_addr();
     let url = url(&server);
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -144,17 +144,26 @@ fn produces_fresh_frames_while_the_calling_thread_is_blocked() {
             }
         }
         assert_eq!(fresh, 12, "stream stopped progressing");
-        done_tx.send(()).unwrap();
+        done_tx.send(Instant::now()).unwrap();
     });
     ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
     // A buffered handshake frame cannot satisfy this: publish only after client readiness.
+    let published = Instant::now();
     live.set_output_latency_frames(7_680);
     go_tx.send(()).unwrap();
     // No caller-side pumping or polling: production must proceed independently.
     let result = done_rx.recv_timeout(Duration::from_secs(5));
     drop(server); // bounded cancellation also releases the client on failure
     client.join().unwrap();
-    result.expect("no independent multi-frame progress while caller blocked");
+    let finished = result.expect("no independent multi-frame progress while caller blocked");
+    // Twelve fresh frames at 10 Hz span eleven periods. Allow the scheduler's 250 ms
+    // catch-up window; measure from publication, never a delayed client's first read.
+    // Load can only lengthen this interval, so it cannot cause a false "too fast" failure.
+    let elapsed = finished.duration_since(published);
+    assert!(
+        elapsed >= Duration::from_millis(850),
+        "12 fresh frames arrived too fast at 10 Hz: {elapsed:?}"
+    );
 }
 
 #[test]
