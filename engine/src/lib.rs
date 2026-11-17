@@ -1,12 +1,12 @@
 //! The real-time engine.
 //!
 //! [`engine`] returns two halves joined by lock-free queues. The [`AudioProcessor`] lives on the
-//! audio thread: it renders the graph (a test tone, the synth and the sampler channels into the
-//! master bus) in fixed [`BLOCK`]-frame blocks and serves them to callbacks of any size. The
-//! [`Controller`] lives on a control thread: it validates and clamps each [`Command`], adds and
-//! removes channels, mirrors the state the commands set (an [`EngineState`]), frees what the
-//! processor hands back and rebuilds the graph after a panic. [`engine_with`] starts from a
-//! given state.
+//! audio thread: it renders the graph (a test tone, the synth and the channels, each a sampler
+//! or a synth, into the master bus) in fixed [`BLOCK`]-frame blocks and serves them to
+//! callbacks of any size. The [`Controller`] lives on a control thread: it validates and clamps
+//! each [`Command`], adds and removes channels, mirrors the state the commands set (an
+//! [`EngineState`]), frees what the processor hands back and rebuilds the graph after a panic.
+//! [`engine_with`] starts from a given state.
 //! [`LiveShared`] carries meters and counters from the audio thread to any reader, and
 //! [`render_offline`] drives the same engine faster than real time, and [`export_wav`] writes
 //! a pattern to a WAV file with an engine of its own. [`AudioOutput`] plays the
@@ -52,16 +52,17 @@ pub use leftover::{OwnedTemp, STALE_AFTER, create_owned_temp, remove_stale_owned
 pub use live::{LIVE_LEN, LIVE_VERSION, LiveShared, LiveSnapshot, decode_live, encode_live};
 pub use offline::{render_offline, render_offline_with};
 pub use output::{
-    AudioOutput, AudioSlot, OutputBackend, OutputChoice, OutputEvent, OutputInfo, OutputKind,
-    OutputMonitor, Transport, classify, cpal_backend,
+    AudioOutput, AudioSlot, NULL_OUTPUT_ID, OutputBackend, OutputChoice, OutputEvent, OutputInfo,
+    OutputKind, OutputMonitor, Transport, classify, cpal_backend, cpal_backends_created,
+    null_backend, run_silent,
 };
 pub use processor::{AudioProcessor, in_audio_callback};
 pub use sample_file::{
     MAX_SAMPLE_SECONDS, SampleError, decode_sample, load_sample, load_sample_with_limit,
 };
 pub use state::{
-    BPM_RANGE, ChannelId, ChannelMix, ChannelSetup, EngineState, MAX_CHANNELS, PPQ, PatternData,
-    STEP_TICKS, SeqNote,
+    BPM_RANGE, ChannelId, ChannelMix, ChannelSetup, EngineState, Instrument, InstrumentKind,
+    MAX_CHANNELS, MAX_CHOKE_GROUP, PPQ, PatternData, STEP_TICKS, SeqNote,
 };
 pub use stream::{StreamServer, start_stream};
 pub use transport::ticks_to_frames;

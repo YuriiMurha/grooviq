@@ -1,8 +1,8 @@
-//! The audio graph: a sine test tone, the synth and the sampler channels (in insertion order),
-//! mixed into the master bus. After each node, a NaN guard silences and resets a node whose
-//! block holds NaN or infinity, so one bad device cannot poison the mix. The graph also holds
-//! the pattern and the sequencer that plays it into the channels, so a rebuilt graph replays
-//! the pattern from where the transport is.
+//! The audio graph: a sine test tone, the synth and the channels (in insertion order), mixed
+//! into the master bus. A channel holds a sampler or a synth of its own. After each node, a NaN
+//! guard silences and resets a node whose block holds NaN or infinity, so one bad device cannot
+//! poison the mix. The graph also holds the pattern and the sequencer that plays it into the
+//! channels, so a rebuilt graph replays the pattern from where the transport is.
 //!
 //! The controller builds a graph on its own thread: `Graph::new`, then the setters to replay
 //! its state. Once the graph is handed to the processor, everything here runs on the audio
@@ -20,6 +20,12 @@ use std::sync::Arc;
 
 /// Length of every de-click ramp: tone changes and the synth fade on `AllSoundOff`.
 const RAMP_SECONDS: f32 = 0.005;
+/// Note-ons of grouped channels one block chokes with. Past that, the further note-ons of the
+/// block (in channel order, then offset) choke nothing; they still play.
+const MAX_CHOKES: usize = 256;
+
+/// A note-on that chokes its group: `(group, offset, channel)`.
+type Choke = (u8, u32, ChannelId);
 
 pub(crate) struct Graph {
     /// The controller's `reconfigure` count when the graph was built.
@@ -34,6 +40,9 @@ pub(crate) struct Graph {
     channels: Vec<Box<ChannelNode>>,
     pattern: Box<PatternData>,
     sequencer: Sequencer,
+    /// The grouped note-ons of the block being rendered, and one channel's split offsets.
+    chokes: [Choke; MAX_CHOKES],
+    splits: [u32; MAX_CHOKES],
     /// The block of the node being rendered, checked by the guard before it joins the master.
     node_l: [f32; BLOCK],
     node_r: [f32; BLOCK],
@@ -56,6 +65,8 @@ impl Graph {
             channels: Vec::with_capacity(MAX_CHANNELS),
             pattern: Box::new(PatternData::default()),
             sequencer: Sequencer::new(),
+            chokes: [(0, 0, ChannelId(0)); MAX_CHOKES],
+            splits: [0; MAX_CHOKES],
             node_l: [0.0; BLOCK],
             node_r: [0.0; BLOCK],
         }
@@ -139,12 +150,24 @@ impl Graph {
 
     pub(crate) fn set_sampler_param(&mut self, id: ChannelId, index: u32, value: f32) {
         if let Some(channel) = self.channel(id) {
+            channel.set_sampler_param(index, value);
+        }
+    }
+
+    pub(crate) fn set_channel_param(&mut self, id: ChannelId, index: u32, value: f32) {
+        if let Some(channel) = self.channel(id) {
             channel.set_param(index, value);
         }
     }
 
+    pub(crate) fn set_choke(&mut self, id: ChannelId, group: u8) {
+        if let Some(channel) = self.channel(id) {
+            channel.set_choke_group(group);
+        }
+    }
+
     /// Gives the channel `sample` and returns the buffer to free elsewhere: its old sample,
-    /// or `sample` itself if there is no such channel.
+    /// or `sample` itself if there is no such channel or it holds a synth.
     pub(crate) fn set_channel_sample(
         &mut self,
         id: ChannelId,
@@ -262,9 +285,11 @@ impl Graph {
         }
         mix_in(l, r, node_l, node_r);
 
+        let chokes = collect_chokes(&self.channels, &mut self.chokes);
         for channel in &mut self.channels {
+            let splits = splits_for(channel, chokes, &mut self.splits);
             // A silent channel adds nothing.
-            if !channel.render(node_l, node_r) {
+            if !channel.render(node_l, node_r, splits) {
                 continue;
             }
             if guard(node_l, node_r) {
@@ -276,6 +301,59 @@ impl Graph {
         }
         silenced
     }
+}
+
+/// Fills `chokes` with the queued note-ons of every grouped channel, in channel order (at most
+/// [`MAX_CHOKES`]), and returns them.
+fn collect_chokes<'a>(
+    channels: &[Box<ChannelNode>],
+    chokes: &'a mut [Choke; MAX_CHOKES],
+) -> &'a [Choke] {
+    let mut n = 0;
+    for channel in channels {
+        let group = channel.choke_group();
+        if group == 0 {
+            continue;
+        }
+        for offset in channel.note_on_offsets() {
+            if n == MAX_CHOKES {
+                return chokes;
+            }
+            chokes[n] = (group, offset, channel.id());
+            n += 1;
+        }
+    }
+    &chokes[..n]
+}
+
+/// The offsets, sorted and distinct, at which other channels of `channel`'s group start notes.
+fn splits_for<'a>(
+    channel: &ChannelNode,
+    chokes: &[Choke],
+    splits: &'a mut [u32; MAX_CHOKES],
+) -> &'a [u32] {
+    let group = channel.choke_group();
+    if group == 0 || chokes.is_empty() {
+        return &[];
+    }
+    let mut n = 0;
+    for &(g, offset, id) in chokes {
+        if g == group && id != channel.id() {
+            splits[n] = offset;
+            n += 1;
+        }
+    }
+    let splits = &mut splits[..n];
+    // In place: no allocation.
+    splits.sort_unstable();
+    let mut distinct = 0;
+    for i in 0..n {
+        if i == 0 || splits[i] != splits[distinct - 1] {
+            splits[distinct] = splits[i];
+            distinct += 1;
+        }
+    }
+    &splits[..distinct]
 }
 
 /// Adds a node's block to the master bus.

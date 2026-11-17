@@ -62,7 +62,7 @@ pub struct AudioSlot {
 }
 
 impl AudioSlot {
-    fn new(live: Arc<LiveShared>) -> Self {
+    pub(super) fn new(live: Arc<LiveShared>) -> Self {
         Self {
             processor: Mutex::new(None),
             live,
@@ -104,7 +104,7 @@ impl AudioSlot {
         }
     }
 
-    fn put(&self, processor: AudioProcessor) {
+    pub(super) fn put(&self, processor: AudioProcessor) {
         *lock(&self.processor) = Some(processor);
     }
 

@@ -2,7 +2,7 @@
 
 use crate::channel::ChannelNode;
 use crate::graph::Graph;
-use crate::state::{BPM_RANGE, ChannelId, ChannelMix, PatternData};
+use crate::state::{BPM_RANGE, ChannelId, ChannelMix, MAX_CHOKE_GROUP, PatternData};
 use grooviq_dsp::sampler::SampleBuf;
 use std::sync::Arc;
 
@@ -43,13 +43,23 @@ pub enum Command {
     /// Sets a channel's mix: `volume` clamped to 0..=2, `pan` to -1..=1. The gains ramp over
     /// 5 ms.
     SetChannelMix { channel: ChannelId, mix: ChannelMix },
-    /// Sets a channel's sampler parameter by its index in `grooviq_dsp::sampler::SPEC`,
-    /// clamped to its range.
+    /// Sets a sampler channel's parameter by its index in `grooviq_dsp::sampler::SPEC`,
+    /// clamped to its range. Refused for a synth channel.
     SetSamplerParam {
         channel: ChannelId,
         index: u32,
         value: f32,
     },
+    /// Sets a channel's instrument parameter by its index in that instrument's `SPEC`
+    /// ([`crate::InstrumentKind::spec`]), clamped to its range.
+    SetChannelParam {
+        channel: ChannelId,
+        index: u32,
+        value: f32,
+    },
+    /// Puts a channel in a choke group, 0..=[`MAX_CHOKE_GROUP`] (0: none; more is refused).
+    /// Applies at the start of its block.
+    SetChoke { channel: ChannelId, group: u8 },
     /// Starts or releases a note on a channel (a preview): `key` 0..=127, `velocity` clamped to
     /// 0..=1. Lands on its exact frame, like [`Command::Note`].
     ChannelNote {
@@ -114,6 +124,9 @@ impl Command {
                     value: value.clamp(min, max),
                 })
             }
+            // The range depends on the channel's instrument: the controller clamps it.
+            Self::SetChannelParam { value, .. } => value.is_finite().then_some(self),
+            Self::SetChoke { group, .. } => (group <= MAX_CHOKE_GROUP).then_some(self),
             Self::ChannelNote {
                 channel,
                 key,
@@ -134,6 +147,8 @@ impl Command {
         match self {
             Self::SetChannelMix { channel, .. }
             | Self::SetSamplerParam { channel, .. }
+            | Self::SetChannelParam { channel, .. }
+            | Self::SetChoke { channel, .. }
             | Self::ChannelNote { channel, .. } => Some(channel),
             _ => None,
         }
@@ -173,9 +188,9 @@ impl Msg {
 /// graph ends up as if every message had reached the old one:
 ///
 /// * Dropped: what only changes the graph, since the rebuilt one already has it (a graph, a
-///   channel added or removed, a sample, a pattern, the tone, a synth, mix or sampler
-///   parameter), and a note-on that a later message would have cut (a new graph or
-///   `AllSoundOff` for any note; a removal or a new sample for a note on that channel).
+///   channel added or removed, a sample, a pattern, the tone, a synth, mix, sampler or channel
+///   parameter, a choke group), and a note-on that a later message would have cut (a new graph
+///   or `AllSoundOff` for any note; a removal or a new sample for a note on that channel).
 /// * Kept: the transport commands (the transport outlives the graph; `AllSoundOff` keeps only
 ///   its `Stop`, its fade and tone-off being in the rebuilt graph), the other notes (note-offs
 ///   always: one that finds no note does nothing), and the test hooks.
@@ -202,7 +217,9 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
             Command::TestTone { .. }
             | Command::SetSynthParam { .. }
             | Command::SetChannelMix { .. }
-            | Command::SetSamplerParam { .. } => continue,
+            | Command::SetSamplerParam { .. }
+            | Command::SetChannelParam { .. }
+            | Command::SetChoke { .. } => continue,
             Command::AllSoundOff => {
                 all_cut = true;
                 Command::Stop
@@ -384,5 +401,39 @@ mod tests {
         assert_eq!(cnote(60, -1.0), cnote_ok(60, 0.0));
         assert_eq!(cnote(128, 0.5), None);
         assert_eq!(cnote(60, f32::NAN), None);
+
+        let choke = |group| Command::SetChoke { channel: id, group }.clamped();
+        assert_eq!(
+            choke(0),
+            Some(Command::SetChoke {
+                channel: id,
+                group: 0
+            })
+        );
+        assert_eq!(
+            choke(MAX_CHOKE_GROUP),
+            Some(Command::SetChoke {
+                channel: id,
+                group: MAX_CHOKE_GROUP
+            })
+        );
+        assert_eq!(choke(MAX_CHOKE_GROUP + 1), None);
+        let cparam = |value| {
+            Command::SetChannelParam {
+                channel: id,
+                index: 3,
+                value,
+            }
+            .clamped()
+        };
+        assert_eq!(
+            cparam(1e9),
+            Some(Command::SetChannelParam {
+                channel: id,
+                index: 3,
+                value: 1e9
+            })
+        );
+        assert_eq!(cparam(f32::NAN), None);
     }
 }

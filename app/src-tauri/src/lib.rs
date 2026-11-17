@@ -4,14 +4,17 @@
 //! until the UI asks), starts the live-state stream for the meters and two threads: one
 //! forwards output events, one checks the engine's health every 250 ms. Both log what happened
 //! and emit it to the UI as `audio-event`. The UI talks back through the async commands in
-//! [`commands`].
+//! [`commands`]. Started with `GROOVIQ_AUDIO=null` it opens no audio device at all (see
+//! [`output_mode`]): the silent mode for QA runs.
 
 mod audio_log;
 mod autosave_notice;
 mod commands;
+mod display;
 mod events;
 mod exit;
 mod menu;
+mod output_mode;
 pub mod panic_hook;
 mod project_cmds;
 mod settings;
@@ -20,8 +23,8 @@ use audio_log::{AudioLog, Level};
 use autosave_notice::{AutosaveStatus, FAILED_EVENT, disabled_notice};
 use events::AudioEvent;
 use grooviq_engine::{
-    AudioOutput, Controller, EngineConfig, OutputChoice, OutputEvent, StreamServer, cpal_backend,
-    engine, start_stream,
+    AudioOutput, Controller, EngineConfig, OutputChoice, OutputEvent, StreamServer, engine,
+    start_stream,
 };
 use grooviq_project::autosave::{AutosaveTick, autosave_tick};
 use grooviq_project::recovery::{Recovery, RecoveryDir};
@@ -148,9 +151,14 @@ fn start_audio(app: &AppHandle) -> Audio {
         .output
         .clone()
         .map_or(OutputChoice::SystemDefault, OutputChoice::Device);
+    let (mode, note) =
+        output_mode::output_mode(std::env::var_os(output_mode::AUDIO_ENV).as_deref());
+    if let Some((level, message)) = note {
+        lock(&log).push(level, message);
+    }
     // Not holding the controller's lock: `start` takes it itself.
     let output = Arc::new(AudioOutput::start(
-        cpal_backend(),
+        output_mode::backend(mode),
         Arc::clone(&controller),
         processor,
         choice,
@@ -322,6 +330,19 @@ fn watch_health(controller: &Mutex<Controller>, log: &Mutex<AudioLog>, app: &App
     }
 }
 
+/// View > High Refresh Rate: flips the setting, saves it, ticks the item and applies it.
+#[cfg(target_os = "macos")]
+fn toggle_high_refresh(app: &AppHandle) {
+    let Some(audio) = app.try_state::<Audio>() else {
+        return;
+    };
+    let on = !lock(&audio.settings).high_refresh;
+    commands::apply_and_save(&audio, || {}, |s| s.high_refresh = on);
+    menu::set_high_refresh_checked(app, on);
+    // After the settings lock is released: it logs.
+    display::apply(app, on);
+}
+
 /// Runs the app.
 pub fn run() {
     panic_hook::install();
@@ -329,16 +350,24 @@ pub fn run() {
     // Cmd+Q through our own Quit item, so it asks about unsaved changes (see `menu`).
     #[cfg(target_os = "macos")]
     let builder = builder.menu(menu::build).on_menu_event(|app, event| {
-        if menu::is_quit(event.id().as_ref()) {
+        let id = event.id().as_ref();
+        if menu::is_quit(id) {
             // Raises a preventable `ExitRequested`, held below like a window close.
             app.exit(0);
+        } else if menu::is_high_refresh(id) {
+            toggle_high_refresh(app);
         }
     });
     let app = builder
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let audio = start_audio(app.handle());
+            let high_refresh = lock(&audio.settings).high_refresh;
             app.manage(audio);
+            if high_refresh {
+                menu::set_high_refresh_checked(app.handle(), true);
+                display::apply(app.handle(), true);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

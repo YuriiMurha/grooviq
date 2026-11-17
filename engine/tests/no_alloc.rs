@@ -1,18 +1,95 @@
-//! The audio thread never allocates or frees: every `process` call runs inside
-//! `assert_no_alloc`, which aborts this test binary on any allocator call.
+//! The audio thread never allocates, frees, locks or does I/O: every `process` call runs inside
+//! [`realtime`].
+//!
+//! Every platform: `assert_no_alloc` aborts this test binary on any Rust allocator call.
+//! macOS and Linux with `RTSAN_ENABLE=1` set while building (the `rtsan` CI job):
+//! RealtimeSanitizer also stops it on any lock, sleep, file or network access, other blocking
+//! system call, or C allocation, with a stack trace. That build leaves allocations to it too, so
+//! the sanitizer itself must catch them.
 
-#[global_allocator]
-static A: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
+use std::alloc::{GlobalAlloc, Layout, System};
 
-use assert_no_alloc::assert_no_alloc;
+use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use grooviq_engine::{
     AudioOutput, AudioSlot, ChannelId, ChannelMix, ChannelSetup, Command, EngineConfig,
     EngineState, OutputBackend, OutputChoice, OutputInfo, OutputKind, PatternData, SampleBuf,
-    SeqNote, engine, engine_with,
+    SeqNote, engine, engine_with, run_silent,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const SR: f32 = 48_000.0;
+
+/// Built with `RTSAN_ENABLE` set: RealtimeSanitizer is linked in and checks [`realtime`].
+const RTSAN: bool = option_env!("RTSAN_ENABLE").is_some();
+
+/// `assert_no_alloc`'s checking allocator, except under RealtimeSanitizer, which sees every
+/// allocation itself (Rust's and C's): two checkers would leave it nothing to prove.
+struct Checked;
+
+// SAFETY: forwards every call unchanged to one of two sound allocators, the same one for a
+// block's whole life (`RTSAN` is a constant).
+unsafe impl GlobalAlloc for Checked {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller's contract, passed on.
+        unsafe {
+            if RTSAN {
+                System.alloc(layout)
+            } else {
+                AllocDisabler.alloc(layout)
+            }
+        }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: as above.
+        unsafe {
+            if RTSAN {
+                System.alloc_zeroed(layout)
+            } else {
+                AllocDisabler.alloc_zeroed(layout)
+            }
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: as above.
+        unsafe {
+            if RTSAN {
+                System.dealloc(ptr, layout)
+            } else {
+                AllocDisabler.dealloc(ptr, layout)
+            }
+        }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: as above.
+        unsafe {
+            if RTSAN {
+                System.realloc(ptr, layout, new_size)
+            } else {
+                AllocDisabler.realloc(ptr, layout, new_size)
+            }
+        }
+    }
+}
+
+#[global_allocator]
+static A: Checked = Checked;
+
+/// Runs `f` as the audio thread does: no allocation, and under RealtimeSanitizer no blocking
+/// call of any kind.
+fn realtime<T>(f: impl FnOnce() -> T) -> T {
+    assert_no_alloc(|| {
+        rtsan_standalone::realtime_enter();
+        let out = f();
+        rtsan_standalone::realtime_exit();
+        out
+    })
+}
 
 /// One fake output that keeps the slot it is opened with.
 struct OneDevice(Arc<Mutex<Option<Arc<AudioSlot>>>>);
@@ -62,15 +139,66 @@ fn the_device_callback_path_is_allocation_free() {
     // What the cpal callback runs: with the processor in the slot, then (below) emptied.
     let mut buf = vec![0f32; 441 * 2];
     for _ in 0..100 {
-        assert_no_alloc(|| {
+        realtime(|| {
             slot.set_output_latency_frames(256);
             slot.process(&mut buf, 2);
         });
     }
     assert!(c.lock().unwrap().live().peak[0] > 0.1, "it rendered sound");
     drop(out);
-    assert_no_alloc(|| slot.process(&mut buf, 2));
+    realtime(|| slot.process(&mut buf, 2));
     assert!(buf.iter().all(|x| *x == 0.0), "an emptied slot is silent");
+}
+
+#[test]
+fn the_silent_output_loop_is_allocation_free() {
+    let (mut c, p) = engine(EngineConfig { sample_rate: SR });
+    c.send(Command::TestTone {
+        on: true,
+        hz: 440.0,
+        gain_db: -12.0,
+    })
+    .unwrap();
+    let opened = Arc::new(Mutex::new(None));
+    let backend = Box::new(OneDevice(Arc::clone(&opened)));
+    let c = Arc::new(Mutex::new(c));
+    let out = AudioOutput::start(
+        backend,
+        Arc::clone(&c),
+        p,
+        OutputChoice::SystemDefault,
+        true,
+        Box::new(|_| {}),
+    );
+    let slot = opened.lock().unwrap().clone().expect("the device opened");
+    // The loop the silent backend runs on its own thread, here on this one: paced callbacks
+    // until told to quit, once the stopper has seen 8 of them (or after 10 s, so a loop that
+    // renders nothing fails below instead of hanging).
+    let live = c.lock().unwrap().live_shared();
+    let start = live.snapshot().frames;
+    let quit = Arc::new(AtomicBool::new(false));
+    let stopper = thread::spawn({
+        let (quit, live) = (Arc::clone(&quit), Arc::clone(&live));
+        move || {
+            let since = Instant::now();
+            while live.snapshot().frames < start + 8 * 256
+                && since.elapsed() < Duration::from_secs(10)
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+            quit.store(true, Ordering::Release);
+        }
+    });
+    assert_no_alloc(|| run_silent(&slot, &quit, 48_000));
+    stopper.join().unwrap();
+    let live = c.lock().unwrap().live();
+    assert!(
+        live.frames >= start + 8 * 256,
+        "it rendered: {} frames",
+        live.frames - start
+    );
+    assert!(live.peak[0] > 0.1, "it rendered sound");
+    drop(out);
 }
 
 #[test]
@@ -99,7 +227,7 @@ fn process_never_allocates() {
             })
             .unwrap();
         }
-        assert_no_alloc(|| p.process(&mut buf, 2));
+        realtime(|| p.process(&mut buf, 2));
     }
     assert!(c.live().peak[0] > 0.1, "it rendered sound");
 }
@@ -143,7 +271,7 @@ fn every_command_and_channel_layout_is_allocation_free() {
     ] {
         c.send(cmd).unwrap();
         for channels in [1, 2, 6] {
-            assert_no_alloc(|| p.process(&mut buf, channels));
+            realtime(|| p.process(&mut buf, channels));
         }
     }
 }
@@ -161,11 +289,13 @@ fn tone_sample(len: usize) -> Arc<SampleBuf> {
 
 #[test]
 fn channel_messages_never_allocate_on_the_audio_thread() {
-    let setup = |id, sample: &Arc<SampleBuf>| ChannelSetup {
-        id: ChannelId(id),
-        sample: Some(Arc::clone(sample)),
-        sampler: Vec::new(),
-        mix: ChannelMix::default(),
+    let setup = |id, sample: &Arc<SampleBuf>| {
+        ChannelSetup::sampler(
+            ChannelId(id),
+            Some(Arc::clone(sample)),
+            Vec::new(),
+            ChannelMix::default(),
+        )
     };
     let (a, b) = (tone_sample(48_000), tone_sample(4_800));
     let state = EngineState {
@@ -182,7 +312,7 @@ fn channel_messages_never_allocate_on_the_audio_thread() {
     };
     let mut run = |c: &mut grooviq_engine::Controller| {
         for _ in 0..4 {
-            assert_no_alloc(|| p.process(&mut buf, 2));
+            realtime(|| p.process(&mut buf, 2));
         }
         // Frees what the processor handed back, outside the check.
         c.check_health();
@@ -224,6 +354,7 @@ fn channel_messages_never_allocate_on_the_audio_thread() {
             key: 60,
             velocity: 0.8,
             length: 240,
+            slide: false,
         }],
     })
     .unwrap();
@@ -261,11 +392,13 @@ fn sequencing_never_allocates() {
         p[7] = 0.0;
         p
     };
-    let setup = |id, sampler: Vec<f32>| ChannelSetup {
-        id: ChannelId(id),
-        sample: Some(steady(4_800)),
-        sampler,
-        mix: ChannelMix::default(),
+    let setup = |id, sampler: Vec<f32>| {
+        ChannelSetup::sampler(
+            ChannelId(id),
+            Some(steady(4_800)),
+            sampler,
+            ChannelMix::default(),
+        )
     };
     // Dense: every tick of 60 on 2 channels, held across each other.
     let dense = |length: u32, hold: u32| PatternData {
@@ -278,6 +411,7 @@ fn sequencing_never_allocates() {
                     key: (36 + i % 24) as u8,
                     velocity: 0.9,
                     length: hold,
+                    slide: false,
                 })
             })
             .collect(),
@@ -291,7 +425,7 @@ fn sequencing_never_allocates() {
     let mut buf = vec![0f32; 441 * 2];
     let mut run = |c: &mut grooviq_engine::Controller, blocks: usize| {
         for _ in 0..blocks {
-            assert_no_alloc(|| p.process(&mut buf, 2));
+            realtime(|| p.process(&mut buf, 2));
         }
         c.check_health();
     };
@@ -319,11 +453,13 @@ fn sequencing_never_allocates() {
 
 #[test]
 fn messages_queued_before_a_rate_change_never_free_on_the_audio_thread() {
-    let setup = |id, sample: &Arc<SampleBuf>| ChannelSetup {
-        id: ChannelId(id),
-        sample: Some(Arc::clone(sample)),
-        sampler: Vec::new(),
-        mix: ChannelMix::default(),
+    let setup = |id, sample: &Arc<SampleBuf>| {
+        ChannelSetup::sampler(
+            ChannelId(id),
+            Some(Arc::clone(sample)),
+            Vec::new(),
+            ChannelMix::default(),
+        )
     };
     let (a, b) = (tone_sample(4_800), tone_sample(9_000));
     let state = EngineState {
@@ -356,11 +492,83 @@ fn messages_queued_before_a_rate_change_never_free_on_the_audio_thread() {
     );
     let mut buf = vec![0f32; 441 * 2];
     for _ in 0..4 {
-        assert_no_alloc(|| p.process(&mut buf, 2));
+        realtime(|| p.process(&mut buf, 2));
     }
     assert!(buf.iter().any(|x| *x != 0.0), "the note plays");
     c.check_health();
     assert_eq!(Arc::strong_count(&a), 1, "nothing holds the old sample");
     // The test, the state's two channels and the graph's two nodes.
     assert_eq!(Arc::strong_count(&b), 5);
+}
+
+#[test]
+fn choke_never_allocates() {
+    let sample = tone_sample(9_600);
+    let hat = |id, choke| ChannelSetup {
+        choke,
+        ..ChannelSetup::sampler(
+            ChannelId(id),
+            Some(Arc::clone(&sample)),
+            Vec::new(),
+            ChannelMix::default(),
+        )
+    };
+    let synth = ChannelSetup {
+        choke: 1,
+        ..ChannelSetup::synth(ChannelId(4), Vec::new(), ChannelMix::default())
+    };
+    // Every 30 ticks, a note on one of four channels of group 1, some of them slides.
+    let pattern = PatternData {
+        length: 3_840,
+        notes: (0..128)
+            .map(|i| SeqNote {
+                tick: i * 30,
+                channel: ChannelId(1 + i % 4),
+                key: (40 + i % 12) as u8,
+                velocity: 0.9,
+                length: 90,
+                slide: i % 3 == 0,
+            })
+            .collect(),
+    };
+    let state = EngineState {
+        bpm: 400.0,
+        channels: vec![hat(1, 1), hat(2, 1), hat(3, 1), synth],
+        pattern,
+    };
+    let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
+    let mut buf = vec![0f32; 441 * 2];
+    c.send(Command::Play).unwrap();
+    for i in 0..200u32 {
+        if i % 20 == 0 {
+            c.send(Command::SetChoke {
+                channel: ChannelId(1 + i / 20 % 4),
+                group: (i / 20 % 3) as u8,
+            })
+            .unwrap();
+            c.send(Command::SetChannelParam {
+                channel: ChannelId(4),
+                index: 20,
+                value: 300.0 + i as f32,
+            })
+            .unwrap();
+        }
+        if i == 100 {
+            // More grouped note-ons in one block than the graph records.
+            for channel in 1..=3 {
+                for _ in 0..100 {
+                    c.send(Command::ChannelNote {
+                        channel: ChannelId(channel),
+                        key: 60,
+                        velocity: 0.5,
+                        on: true,
+                    })
+                    .unwrap();
+                }
+            }
+        }
+        assert_no_alloc(|| p.process(&mut buf, 2));
+        c.check_health();
+    }
+    assert!(c.live().peak[0] > 0.05, "it sounded");
 }

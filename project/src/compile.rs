@@ -62,6 +62,7 @@ pub fn compile_pattern(project: &Project, pattern: &Pattern) -> PatternData {
                 DEFAULT_VELOCITY
             },
             length: n.length.max(1),
+            slide: false,
         })
         .collect();
     // A stable sort: notes that tie keep the order they have in the project.
@@ -79,16 +80,18 @@ pub fn engine_state(project: &Project, samples: &HashMap<u32, Arc<SampleBuf>>) -
         .iter()
         .filter(|c| seen.insert(c.id))
         .take(MAX_CHANNELS)
-        .map(|c| ChannelSetup {
-            id: ChannelId(c.id),
-            sample: samples.get(&c.id).cloned(),
-            sampler: sampler_values(c),
-            mix: ChannelMix {
-                volume: finite_or(c.volume, 1.0).clamp(VOLUME.0, VOLUME.1),
-                pan: finite_or(c.pan, 0.0).clamp(-1.0, 1.0),
-                mute: c.mute,
-                solo: c.solo,
-            },
+        .map(|c| {
+            ChannelSetup::sampler(
+                ChannelId(c.id),
+                samples.get(&c.id).cloned(),
+                sampler_values(c),
+                ChannelMix {
+                    volume: finite_or(c.volume, 1.0).clamp(VOLUME.0, VOLUME.1),
+                    pan: finite_or(c.pan, 0.0).clamp(-1.0, 1.0),
+                    mute: c.mute,
+                    solo: c.solo,
+                },
+            )
         })
         .collect();
 

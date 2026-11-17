@@ -181,7 +181,7 @@ impl Sequencer {
             key: note.key,
             velocity: note.velocity,
             on: true,
-            slide: false,
+            slide: note.slide,
         };
         if sink(note.channel, on) != Delivery::Taken {
             return;
@@ -269,6 +269,7 @@ mod tests {
             key,
             velocity: 1.0,
             length,
+            slide: false,
         }
     }
 
