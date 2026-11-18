@@ -393,7 +393,8 @@ fn generated_all_clip_song_save_reopen_and_wav_export_preserve_sound_and_origina
                 tick: 0,
                 value: 0.5,
                 mode: SegmentMode::Hold,
-            }],
+            }]
+            .into(),
         },
     });
     project.next_id = 8;

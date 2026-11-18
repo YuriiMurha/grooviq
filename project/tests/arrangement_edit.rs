@@ -48,7 +48,8 @@ fn targeted_channel_removal_preserves_session_engine_and_last_good_file() {
                 tick: 0,
                 value: 0.5,
                 mode: SegmentMode::Hold,
-            }],
+            }]
+            .into(),
         },
     });
     save(&p, &SampleFiles::new(), &path).unwrap();

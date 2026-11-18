@@ -50,3 +50,8 @@ pub use arrangement::*;
 pub use file::validate_save;
 
 pub mod pattern_edit;
+
+pub mod arrangement_edit;
+
+mod arrangement_history;
+pub use arrangement_history::HistoryLimits;

@@ -553,6 +553,10 @@ pub struct Session {
     history: NoteHistory,
     pattern_histories: HashMap<u32, NoteHistory>,
     precommit: Option<PrecommitValidator>,
+    arrangement_history: crate::arrangement_history::ArrangementHistory,
+    history_limits: crate::HistoryLimits,
+    arrangement_revision: u64,
+    pattern_note_floors: HashMap<u32, (u32, u32)>,
     compiled_song: grooviq_engine::SongData,
     song_error: Option<String>,
     song_note_limit: usize,
@@ -693,6 +697,10 @@ impl Session {
             history: NoteHistory::default(),
             pattern_histories: HashMap::new(),
             precommit: None,
+            arrangement_history: Default::default(),
+            history_limits: Default::default(),
+            arrangement_revision: 0,
+            pattern_note_floors: HashMap::new(),
             compiled_song: Default::default(),
             song_error: None,
             song_note_limit: grooviq_engine::MAX_SONG_NOTES,
@@ -784,38 +792,56 @@ impl Session {
         }
     }
 
-    fn trim_histories(&mut self) {
-        loop {
-            let (mut steps, mut notes) = self.history.retained();
-            for h in self.pattern_histories.values() {
-                let (s, n) = h.retained();
-                steps += s;
-                notes += n;
-            }
-            if steps <= crate::undo::MAX_UNDO && notes <= crate::undo::MAX_UNDO_NOTES {
-                break;
-            }
-            let oldest = self
-                .pattern_histories
-                .iter()
-                .filter_map(|(id, h)| h.oldest().map(|o| (*id, o)))
-                .chain(
-                    self.history
-                        .oldest()
-                        .map(|o| (self.project.current_pattern, o)),
-                )
-                .min_by_key(|(_, o)| *o);
-            let Some((id, _)) = oldest else {
-                break;
-            };
-            if id == self.project.current_pattern {
-                self.history.evict_oldest();
-            } else {
-                self.pattern_histories.get_mut(&id).unwrap().evict_oldest();
-            }
+    fn staged_histories(&self) -> crate::arrangement_history::Histories {
+        let mut current = self.history.clone();
+        current.staged = true;
+        let mut patterns = self.pattern_histories.clone();
+        for h in patterns.values_mut() {
+            h.staged = true;
         }
-        self.pattern_histories.retain(|_, h| h.retained().0 != 0);
+        crate::arrangement_history::Histories {
+            current,
+            patterns,
+            arrangement: self.arrangement_history.clone(),
+            floors: self.pattern_note_floors.clone(),
+            protected: Default::default(),
+        }
     }
+    fn install_histories(&mut self, mut h: crate::arrangement_history::Histories) {
+        h.current.staged = false;
+        for p in h.patterns.values_mut() {
+            p.staged = false;
+        }
+        self.history = h.current;
+        self.pattern_histories = h.patterns;
+        self.arrangement_history = h.arrangement;
+        self.pattern_note_floors = h.floors;
+    }
+    fn admit_histories(
+        &self,
+        h: &mut crate::arrangement_history::Histories,
+    ) -> Result<(), SessionError> {
+        h.admit(self.history_limits, self.project.current_pattern)
+            .map_err(SessionError::InvalidValue)
+    }
+    #[doc(hidden)]
+    pub fn set_history_limits(&mut self, limits: crate::HistoryLimits) {
+        self.history_limits = crate::HistoryLimits {
+            steps: limits.steps.min(200),
+            notes: limits.notes.min(2_000_000),
+            bytes: limits.bytes.min(64 * 1024 * 1024),
+        };
+    }
+    #[doc(hidden)]
+    pub fn history_usage(&self) -> (usize, usize, usize) {
+        crate::arrangement_history::Histories::usage_of(
+            &self.history,
+            &self.pattern_histories,
+            &self.arrangement_history,
+            &self.pattern_note_floors,
+        )
+    }
+
     #[doc(hidden)]
     pub fn retained_note_history(&self) -> (usize, usize) {
         self.pattern_histories
@@ -828,6 +854,240 @@ impl Session {
 
     pub fn set_precommit_validator(&mut self, validator: Option<PrecommitValidator>) {
         self.precommit = validator;
+    }
+
+    pub fn arrangement_view(&self) -> crate::arrangement_edit::ArrangementView {
+        crate::arrangement_edit::ArrangementView {
+            generation: self.generation,
+            revision: self.arrangement_revision,
+            arrangement: self.project.arrangement.clone(),
+            next_id: self.project.next_id,
+        }
+    }
+    fn arrangement_stamp(&self, generation: u64, revision: u64) -> Result<(), String> {
+        if generation != self.generation {
+            return Err("Project replaced; reload arrangement".into());
+        }
+        if revision != self.arrangement_revision {
+            return Err("Stale arrangement revision; reload arrangement".into());
+        }
+        if revision >= 9_007_199_254_740_991 {
+            return Err("Arrangement revisions exhausted; reopen project".into());
+        }
+        Ok(())
+    }
+    pub fn edit_arrangement(
+        &mut self,
+        generation: u64,
+        revision: u64,
+        ops: Vec<crate::arrangement_edit::ArrangementEdit>,
+        now: Instant,
+    ) -> Result<crate::arrangement_edit::ArrangementAck, crate::arrangement_edit::ArrangementRefusal>
+    {
+        let result = (|| -> Result<_, String> {
+            self.arrangement_stamp(generation, revision)?;
+            if ops.len() > crate::MAX_CLIPS {
+                return Err("Arrangement operation limit exceeded".into());
+            }
+            let mut candidate = self.project.clone();
+            let ids = crate::arrangement_edit::apply(&mut candidate, ops)?;
+            if candidate == self.project {
+                return Ok((vec![], false));
+            }
+            let change = crate::arrangement_history::Change::between(&self.project, &candidate);
+            let mut histories = self.staged_histories();
+            histories.clear_redo();
+            histories.protected.insert(change.order);
+            histories.arrangement.undo.push(change);
+            self.admit_histories(&mut histories)
+                .map_err(|e| e.to_string())?;
+            self.publish_candidate(&candidate)
+                .map_err(|e| e.to_string())?;
+            let patterns_changed = self.project.patterns != candidate.patterns;
+            self.project = candidate;
+            self.install_histories(histories);
+            if patterns_changed {
+                self.patterns_revision += 1;
+            }
+            self.changed(true, now);
+            Ok((ids, true))
+        })();
+        match result {
+            Ok((created_ids, changed)) => Ok(crate::arrangement_edit::ArrangementAck {
+                state: self.arrangement_view(),
+                created_ids,
+                changed,
+            }),
+            Err(message) => Err(crate::arrangement_edit::ArrangementRefusal {
+                message,
+                reload: true,
+                state: Box::new(self.arrangement_view()),
+            }),
+        }
+    }
+    /// Typed project-wide dispatch; legacy notes_undo remains restricted to selected pattern.
+    pub fn step_project_history(
+        &mut self,
+        generation: u64,
+        revision: u64,
+        undo: bool,
+        now: Instant,
+    ) -> Result<crate::arrangement_edit::HistoryAck, crate::arrangement_edit::ArrangementRefusal>
+    {
+        use crate::arrangement_edit::{ArrangementRefusal, HistoryAck, HistoryEffect};
+        let result = (|| -> Result<HistoryEffect, String> {
+            self.arrangement_stamp(generation, revision)?;
+            let note = std::iter::once((self.project.current_pattern, &self.history))
+                .chain(self.pattern_histories.iter().map(|(id, h)| (*id, h)))
+                .filter_map(|(id, h)| h.next_order(undo).map(|o| (o, Some(id))));
+            let arr = if undo {
+                self.arrangement_history.undo.last()
+            } else {
+                self.arrangement_history.redo.last()
+            };
+            let mut choices: Vec<_> = note.chain(arr.map(|s| (s.order, None))).collect();
+            choices.sort_by_key(|x| x.0);
+            let chosen = if undo {
+                choices.last()
+            } else {
+                choices.first()
+            };
+            let Some((_, target)) = chosen else {
+                return Ok(HistoryEffect::Empty);
+            };
+            if let Some(id) = *target {
+                if id == self.project.current_pattern {
+                    self.step_history(undo, now).map_err(|e| e.to_string())?;
+                } else {
+                    let h = self
+                        .pattern_histories
+                        .get(&id)
+                        .ok_or("Missing pattern history")?;
+                    let mut candidate = self.project.clone();
+                    let p = candidate
+                        .patterns
+                        .iter_mut()
+                        .find(|p| p.id == id)
+                        .ok_or("Pattern removed")?;
+                    let change =
+                        if undo { h.next_undo() } else { h.next_redo() }.ok_or("History empty")?;
+                    change.apply(p, undo).map_err(|e| e.to_string())?;
+                    p.steps = h.length_after(undo);
+                    p.revision = p
+                        .revision
+                        .checked_add(1)
+                        .ok_or("Pattern revision exhausted")?;
+                    let mut histories = self.staged_histories();
+                    let h = histories.patterns.get_mut(&id).unwrap();
+                    if undo {
+                        h.undone()
+                    } else {
+                        h.redone()
+                    };
+                    histories.current.close();
+                    for h in histories.patterns.values_mut() {
+                        h.close();
+                    }
+                    self.admit_histories(&mut histories)
+                        .map_err(|e| e.to_string())?;
+                    self.publish_candidate(&candidate)
+                        .map_err(|e| e.to_string())?;
+                    self.project = candidate;
+                    self.install_histories(histories);
+                    self.changed(true, now);
+                }
+                Ok(HistoryEffect::Notes { pattern: id })
+            } else {
+                let mut histories = self.staged_histories();
+                histories.current.close();
+                for h in histories.patterns.values_mut() {
+                    h.close();
+                }
+                let change = if undo {
+                    histories.arrangement.undo.pop()
+                } else {
+                    histories.arrangement.redo.pop()
+                }
+                .ok_or("History empty")?;
+                let mut candidate = self.project.clone();
+                let mut floors = self.pattern_note_floors.clone();
+                for p in &self.project.patterns {
+                    floors
+                        .entry(p.id)
+                        .and_modify(|n| {
+                            n.0 = n.0.max(p.next_note_id);
+                            n.1 = n.1.max(p.revision);
+                        })
+                        .or_insert((p.next_note_id, p.revision));
+                }
+                change.apply(&mut candidate, undo);
+                for p in &mut candidate.patterns {
+                    if let Some(floor) = floors.get(&p.id) {
+                        p.next_note_id = p.next_note_id.max(floor.0);
+                        if change.patterns.iter().any(|d| {
+                            d.before.as_ref().is_some_and(|(_, old)| old.id == p.id)
+                                || d.after.as_ref().is_some_and(|(_, new)| new.id == p.id)
+                        }) {
+                            p.revision = p
+                                .revision
+                                .max(floor.1)
+                                .checked_add(1)
+                                .ok_or("Pattern revisions exhausted")?;
+                        }
+                    }
+                }
+                if !candidate
+                    .patterns
+                    .iter()
+                    .any(|p| p.id == candidate.current_pattern)
+                {
+                    candidate.current_pattern = candidate.patterns[0].id;
+                }
+                let selection_changed = candidate.current_pattern != self.project.current_pattern;
+                if selection_changed {
+                    let selected = histories
+                        .patterns
+                        .remove(&candidate.current_pattern)
+                        .unwrap_or_default();
+                    let previous = std::mem::replace(&mut histories.current, selected);
+                    if previous.can_undo() || previous.can_redo() {
+                        histories
+                            .patterns
+                            .insert(self.project.current_pattern, previous);
+                    }
+                }
+                let patterns_changed = !change.patterns.is_empty() || selection_changed;
+                // Shared allocators never rewind. A restored pattern's note allocator is
+                // bounded by retained note identities; new pattern IDs never alias old ones.
+                if undo {
+                    histories.arrangement.redo.push(change)
+                } else {
+                    histories.arrangement.undo.push(change)
+                };
+                histories.floors = floors;
+                self.admit_histories(&mut histories)
+                    .map_err(|e| e.to_string())?;
+                self.publish_candidate(&candidate)
+                    .map_err(|e| e.to_string())?;
+                self.project = candidate;
+                self.install_histories(histories);
+                if patterns_changed {
+                    self.patterns_revision += 1;
+                }
+                self.changed(true, now);
+                Ok(HistoryEffect::Arrangement)
+            }
+        })();
+        result
+            .map(|effect| HistoryAck {
+                effect,
+                state: self.arrangement_view(),
+            })
+            .map_err(|message| ArrangementRefusal {
+                message,
+                reload: true,
+                state: Box::new(self.arrangement_view()),
+            })
     }
 
     /// Persistent compilation diagnostic for editable but unplayable loaded songs.
@@ -907,6 +1167,8 @@ impl Session {
     }
 
     fn publish_candidate(&mut self, project: &Project) -> Result<(), SessionError> {
+        self.arrangement_stamp(self.generation, self.arrangement_revision)
+            .map_err(SessionError::InvalidValue)?;
         let song = self.admit(project)?;
         lock(&self.controller).set_timeline(Self::timeline(project, song.clone()))?;
         self.compiled_song = song;
@@ -990,6 +1252,11 @@ impl Session {
             self.settle_recording()?;
             return Ok(self.patterns());
         }
+        let invalidates_arrangement_history = matches!(
+            edit,
+            crate::pattern_edit::PatternEdit::Delete { .. }
+                | crate::pattern_edit::PatternEdit::MakeUnique { .. }
+        );
         let mut candidate = self.project.clone();
         crate::pattern_edit::apply(&mut candidate, edit).map_err(SessionError::Pattern)?;
         if candidate == self.project {
@@ -1027,6 +1294,9 @@ impl Session {
         self.pattern_histories
             .retain(|id, _| candidate.patterns.iter().any(|p| p.id == *id));
         self.project = candidate;
+        if invalidates_arrangement_history {
+            self.arrangement_history.clear();
+        }
         self.patterns_revision += 1;
         self.changed(true, now);
         Ok(self.patterns())
@@ -1199,6 +1469,7 @@ impl Session {
     /// Records a change made at `now`.
     fn changed(&mut self, structural: bool, now: Instant) {
         self.revision += 1;
+        self.arrangement_revision += 1;
         self.pending_since.get_or_insert(now);
         if structural {
             self.structural_since.get_or_insert(now);
@@ -1225,6 +1496,8 @@ impl Session {
     /// parameter, a value that is not a number, or the engine's queue full) changes nothing.
     /// An edit that leaves everything as it was does not make the project dirty.
     pub fn apply(&mut self, edit: Edit, now: Instant) -> Result<ProjectView, SessionError> {
+        self.arrangement_stamp(self.generation, self.arrangement_revision)
+            .map_err(SessionError::InvalidValue)?;
         let structural = edit.structural();
         if self.apply_inner(edit)? {
             self.changed(structural, now);
@@ -1339,13 +1612,17 @@ impl Session {
             }
             Edit::SetPatternLength { steps } => {
                 let steps = steps.clamp(1, MAX_STEPS);
-                let changed = self.edit_pattern(|p| {
+                if self.current().steps == steps {
+                    let mut histories = self.staged_histories();
+                    histories.current.set_length(steps);
+                    self.admit_histories(&mut histories)?;
+                    self.install_histories(histories);
+                    return Ok(false);
+                }
+                self.edit_pattern(|p| {
                     p.steps = steps;
                     Ok(())
-                })?;
-                // Set by hand, even to the length it has: undo never takes it back.
-                self.history.set_length(steps);
-                Ok(changed)
+                })
             }
             Edit::SetSwing { swing } => {
                 let swing = finite(swing, "swing")?.clamp(0.0, 1.0);
@@ -1532,23 +1809,46 @@ impl Session {
         pattern.revision = pattern.revision.checked_add(1).ok_or_else(|| {
             SessionError::InvalidValue("Pattern revisions exhausted. Reopen the project.".into())
         })?;
-        self.keep_pattern(pattern)?;
+        let new_steps = pattern.steps;
+        let mut histories = self.staged_histories();
+        histories.arrangement.redo.clear();
+        for h in histories.patterns.values_mut() {
+            h.clear_redo();
+        }
+        if take.is_none() && (notes.is_some() || growth.is_some()) {
+            histories.current.clear_redo();
+        }
+        let undoable = notes.is_some() || growth.is_some();
+        if growth.is_none() && new_steps != steps {
+            histories.current.set_length(new_steps);
+        }
         match (notes, take) {
-            (Some(notes), Some(take)) => self.history.record(notes, take, steps, growth),
-            (Some(notes), None) => self.history.push(notes, steps, growth),
+            (Some(notes), Some(take)) => histories.current.record(notes, take, steps, growth),
+            (Some(notes), None) => histories.current.push(notes, steps, growth),
             // Notes resubmitted as they were, growing a pattern shortened by hand: a step
             // that holds only that growth, so undo and redo play the length it gave.
-            (None, _) if growth.is_some() && self.current().steps != steps => {
-                self.history.push(NoteChange::none(), steps, growth);
+            (None, _) if growth.is_some() && new_steps != steps => {
+                histories.current.push(NoteChange::none(), steps, growth);
             }
             (None, _) => {}
         }
-        self.trim_histories();
+        if undoable
+            && let Some(order) = take
+                .and_then(|t| histories.current.take_order(t))
+                .or_else(|| histories.current.next_order(true))
+        {
+            histories.protected.insert(order);
+        }
+        self.admit_histories(&mut histories)?;
+        self.keep_pattern(pattern)?;
+        self.install_histories(histories);
         Ok(true)
     }
 
     /// Sends `pattern` to the engine (which goes on playing), then makes it the current one.
     fn keep_pattern(&mut self, mut pattern: Pattern) -> Result<(), SessionError> {
+        self.arrangement_stamp(self.generation, self.arrangement_revision)
+            .map_err(SessionError::InvalidValue)?;
         // A borrowed candidate avoids cloning every other pattern for each note gesture.
         // Drop restores the live model on validation error AND unwinding.
         struct Candidate<'a> {
@@ -1654,12 +1954,18 @@ impl Session {
         pattern.revision = pattern.revision.checked_add(1).ok_or_else(|| {
             SessionError::InvalidValue("Pattern revisions exhausted. Reopen the project.".into())
         })?;
-        self.keep_pattern(pattern)?;
+        let mut histories = self.staged_histories();
         if undo {
-            self.history.undone();
+            histories.current.undone()
         } else {
-            self.history.redone();
+            histories.current.redone()
+        };
+        for h in histories.patterns.values_mut() {
+            h.close();
         }
+        self.admit_histories(&mut histories)?;
+        self.keep_pattern(pattern)?;
+        self.install_histories(histories);
         self.changed(self.current().steps != steps, now);
         Ok(Some(NotesAck {
             revision: self.current().revision,
@@ -1714,6 +2020,7 @@ impl Session {
         // Undo cannot bring a channel back (structural undo is M6), nor its notes.
         self.history.clear();
         self.pattern_histories.clear();
+        self.arrangement_history.clear();
         Ok(())
     }
 
@@ -2269,15 +2576,26 @@ impl Session {
                 None,
             )
         })?;
+        let mut histories = self.staged_histories();
+        // A recording continuation preserves its open take; other domains' redo expires.
+        histories.arrangement.redo.clear();
+        for h in histories.patterns.values_mut() {
+            h.clear_redo();
+        }
+        for (take, steps, change, growth) in staged {
+            histories.current.record(change, take, steps, growth);
+            if let Some(order) = histories.current.take_order(take) {
+                histories.protected.insert(order);
+            }
+        }
+        self.admit_histories(&mut histories)
+            .map_err(|e| (e, 0, None))?;
         match self.keep_pattern(pattern) {
             Err(SessionError::Engine(_)) => return Ok(PendingCommit::Deferred),
             Err(e) => return Err((e, 0, None)),
             Ok(()) => {}
         }
-        for (take, steps, change, growth) in staged {
-            self.history.record(change, take, steps, growth);
-        }
-        self.trim_histories();
+        self.install_histories(histories);
         self.pending.clear();
         self.changed(self.current().steps != old_steps, now);
         Ok(PendingCommit::Applied(self.current().revision))
@@ -2406,6 +2724,7 @@ impl Session {
             .clear();
         self.history.clear();
         self.pattern_histories.clear();
+        self.arrangement_history.clear();
         self.record_settle = None;
         self.project = project;
         self.compiled_song = song;
@@ -2415,6 +2734,8 @@ impl Session {
         self.revision += 1;
         self.saved_revision = self.revision;
         self.generation += 1;
+        self.arrangement_revision = 0;
+        self.pattern_note_floors.clear();
         self.pending_since = None;
         self.structural_since = None;
         self.autosaved_at = None;

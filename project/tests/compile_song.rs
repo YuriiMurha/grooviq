@@ -118,7 +118,8 @@ fn automation_only_song_has_musical_and_frame_horizon() {
             tick: 0,
             value: 0.5,
             mode: SegmentMode::Hold,
-        }],
+        }]
+        .into(),
     };
     p.next_id = 14;
     let s = compile_song(&p, &HashMap::new(), None, 0).unwrap();
