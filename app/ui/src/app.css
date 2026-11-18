@@ -685,15 +685,6 @@ input[type="checkbox"] {
   font-weight: 700;
 }
 
-.relink {
-  padding: 2px 8px;
-  background: var(--raised);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-s);
-  font-size: 11px;
-  cursor: pointer;
-}
-
 .knob {
   position: relative;
   flex: none;

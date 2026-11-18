@@ -326,6 +326,7 @@ impl EngineState {
             return Err(ControlError::ChannelExists);
         }
         let song = self.song.checked(&ids)?;
+        song.automation.validate(&self.channels)?;
         if !song.valid_loop(self.song_loop) {
             return Err(ControlError::Rejected);
         }
