@@ -77,3 +77,7 @@ install-app: ## Copy the built Grooviq.app into /Applications (run build-app fir
 export-budget: ## Optimized 8-second PCM24 export with the original 4-second budget
 	node --test scripts/notes-edit-budget.test.mjs
 	node scripts/export-budget.mjs
+
+.PHONY: optional-rust-policy-test
+optional-rust-policy-test: ## Test optional Rust CI selection and conservative failure fallback
+	node --test scripts/optional-rust-checks.test.cjs
