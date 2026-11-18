@@ -1151,6 +1151,7 @@ export function installMockTauri(seed: MockSeed): void {
       return null;
     },
     transport_play: () => {
+      if (s.transport.playing) return null;
       s.transport = { playing: true, startMs: performance.now(), startTicks: 0, held: null };
       return null;
     },
