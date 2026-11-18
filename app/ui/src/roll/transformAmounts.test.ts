@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { amount, DEFAULT_AMOUNTS } from "./transformAmounts";
+import { amount, AMOUNT_RANGES, DEFAULT_AMOUNTS } from "./transformAmounts";
 import { humanize, strum } from "./transforms";
 const notes = [60, 64, 67].map((key, i) => ({ id: i + 1, channel: 1, tick: 480, key, length: 240, velocity: 0.8, slide: false }));
 it("preserves the incumbent defaults and clamps invalid amounts", () => {
@@ -21,4 +21,16 @@ it("amounts change independent axes and preserve seeded defaults", () => {
   const velocity = humanize(notes, 0, 1, 7);
   expect(velocity.map(n => n.tick)).toEqual([480, 480, 480]);
   expect(velocity.some(n => n.velocity !== 0.8)).toBe(true);
+});
+
+it("tick feel controls use continuous pointer travel but retain integer fine keys", async () => {
+  const { dragValue, keyValue } = await import("../devices/controls/paramDrag");
+  for (const id of ["spread", "timing"] as const) {
+    const p = AMOUNT_RANGES[id];
+    expect(dragValue(p, p.default, 180, false)).toBe(120);
+    expect(dragValue(p, p.default, 180, true)).toBe(p.default + 24);
+    expect(keyValue(p, p.default, "ArrowUp", true)).toBe(p.default + 1);
+  }
+  // Other stepped parameters retain the incumbent enum interaction by default.
+  expect(dragValue({ ...AMOUNT_RANGES.spread, dragPixels: undefined }, 30, 180, false)).toBe(43);
 });

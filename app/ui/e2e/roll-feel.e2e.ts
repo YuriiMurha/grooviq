@@ -24,6 +24,7 @@ test("feel controls apply actual selected notes with whole-operation history", a
   await expect.poll(() => sessionNotes(mock)).toEqual([[1,480,240,60],[1,600,240,64],[1,720,240,67]]);
   await app.keyboard.press("ControlOrMeta+KeyZ");
   await expect.poll(() => sessionNotes(mock)).toEqual(before);
+  await app.getByText("Feel", { exact: true }).click();
   await spread.dblclick();
   await expect(spread).toHaveAttribute("aria-valuenow", "30");
   const timing = app.getByRole("slider", { name: "Humanize timing", exact: true });
@@ -36,6 +37,7 @@ test("feel controls apply actual selected notes with whole-operation history", a
   expect(edited.update.map(n => n.velocity)).toEqual([Math.fround(0.8),Math.fround(0.8),Math.fround(0.8)]);
   await app.keyboard.press("ControlOrMeta+KeyZ");
   await expect.poll(() => sessionNotes(mock)).toEqual(before);
+  await app.getByText("Feel", { exact: true }).click();
   await timing.press("Home"); await velocity.press("End");
   await app.getByRole("button", { name: "Humanize", exact: true }).click();
   const actual = (await mock.calls("notes_edit")).at(-1)!.args.edit as { update: typeof notes };
@@ -50,6 +52,8 @@ test("cancel and reset reuse knob ownership; key cues retain preview release", a
   await app.mouse.move(b.x + b.width/2, b.y + 20); await app.mouse.down();
   await app.mouse.move(b.x + b.width/2, b.y - 40, { steps: 4 });
   await app.keyboard.press("Escape"); await app.mouse.up();
+  await expect(app.getByRole("group", { name: "Transform amounts" })).not.toBeVisible();
+  await app.getByText("Feel", { exact: true }).click();
   await expect(knob).toHaveAttribute("aria-valuenow", "20");
   await knob.press("End"); await knob.dblclick();
   await expect(knob).toHaveAttribute("aria-valuenow", "20");
@@ -62,4 +66,24 @@ test("cancel and reset reuse knob ownership; key cues retain preview release", a
   await app.mouse.up();
   await expect.poll(async () => (await mock.calls("channel_note")).filter(c => c.args.on === false).length).toBe(1);
   await expect(app.locator(".roll-key.held")).toHaveCount(0);
+});
+
+test("tick knob reaches its range with one ordinary drag and keeps integer fine keys", async ({ app }) => {
+  await openRoll(app);
+  await app.getByText("Feel", { exact: true }).click();
+  const knob = app.getByRole("slider", { name: "Strum spread", exact: true });
+  const b = (await knob.boundingBox())!;
+  await app.mouse.move(b.x+b.width/2,b.y+b.height/2); await app.mouse.down();
+  await app.mouse.move(b.x+b.width/2,b.y+b.height/2-180,{steps:12}); await app.mouse.up();
+  await expect(knob).toHaveAttribute("aria-valuenow","120");
+  await knob.dblclick(); await expect(knob).toHaveAttribute("aria-valuenow","30");
+  await knob.press("Shift+ArrowUp"); await expect(knob).toHaveAttribute("aria-valuenow","31");
+});
+test("Feel dismisses with Escape and outside clicks without taking outside focus", async ({ app }) => {
+  await openRoll(app);
+  const trigger=app.getByText("Feel",{exact:true}); const panel=app.getByRole("group",{name:"Transform amounts"});
+  await trigger.click(); await app.getByRole("slider",{name:"Strum spread",exact:true}).focus();
+  await app.keyboard.press("Escape"); await expect(panel).not.toBeVisible(); await expect(trigger).toBeFocused();
+  await trigger.click(); const outside=app.getByRole("textbox",{name:"BPM",exact:true});
+  await outside.click(); await expect(panel).not.toBeVisible(); await expect(outside).toBeFocused();
 });

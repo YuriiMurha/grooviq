@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ParamGestures } from "../devices/paramGestures";
 import { registerGestureCancellation } from "../project/pending";
 import { amount, DEFAULT_AMOUNTS, type TransformAmount } from "./transformAmounts";
@@ -38,5 +38,6 @@ export function useTransformAmounts() {
     begin: () => owner.current!.begin(id),
     set: (value: number) => owner.current?.set(id, amount(id, value)),
   });
-  return { values, control };
+  const cancel = useCallback(() => owner.current?.cancelAll(), []);
+  return { values, control, cancel };
 }

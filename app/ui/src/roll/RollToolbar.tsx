@@ -1,4 +1,5 @@
 import { Knob } from "../devices/controls/Knob";
+import { useEffect, useRef } from "react";
 import { AMOUNT_RANGES, type TransformAmount } from "./transformAmounts";
 import type { useTransformAmounts } from "./useTransformAmounts";
 import type { ProjectKey } from "../api/project";
@@ -39,6 +40,28 @@ interface Props {
 /** The piano roll's controls: tools, snap grid, key and scale, slide, ghosts, velocity lane,
  * chord stamps and the whole-selection operations. */
 export function RollToolbar(p: Props) {
+  const feel = useRef<HTMLDetailsElement>(null);
+  const cancelAmounts = p.amounts.cancel;
+  useEffect(() => {
+    const close = (returnFocus: boolean) => {
+      if (!feel.current?.open) return;
+      cancelAmounts();
+      feel.current.open = false;
+      if (returnFocus) feel.current.querySelector("summary")?.focus();
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && feel.current?.open) { e.preventDefault(); close(true); }
+    };
+    const pointer = (e: PointerEvent) => {
+      if (e.target instanceof Node && !feel.current?.contains(e.target)) close(false);
+    };
+    window.addEventListener("keydown", key);
+    window.addEventListener("pointerdown", pointer, true);
+    return () => {
+      window.removeEventListener("keydown", key);
+      window.removeEventListener("pointerdown", pointer, true);
+    };
+  }, [cancelAmounts]);
   const toggle = (label: string, hint: string, on: boolean, set: (on: boolean) => void, disabled = false) => (
     <button type="button" className="roll-tool" aria-pressed={on} disabled={disabled} data-hint={hint} onClick={() => set(!on)}>
       {label}
@@ -133,7 +156,7 @@ export function RollToolbar(p: Props) {
       </div>
       <div className="roll-group">
         {act("Quantize", "Move the starts of the selected notes (all notes with none selected) onto the snap grid (Alt+Q).", p.onQuantize)}
-        <details className="roll-feel">
+        <details ref={feel} className="roll-feel" onToggle={() => { if (!feel.current?.open) cancelAmounts(); }}>
           <summary className="roll-tool">Feel</summary>
           <div className="roll-feel-panel" role="group" aria-label="Transform amounts">
             {([ ["spread", "Strum spread"], ["timing", "Humanize timing"], ["velocity", "Humanize velocity"] ] as [TransformAmount, string][]).map(([id, label]) => (
