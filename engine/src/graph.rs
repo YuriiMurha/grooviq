@@ -304,7 +304,9 @@ impl Graph {
 
     pub(crate) fn set_song(&mut self, song: Box<crate::SongData>) -> Box<crate::SongData> {
         self.song_sequencer.stop();
-        self.audio.reset();
+        if !crate::audio_clip::AudioRuntime::compatible(&self.song.audio, &song.audio) {
+            self.audio.reset();
+        }
         std::mem::replace(&mut self.song, song)
     }
 

@@ -120,7 +120,13 @@ impl AudioSchedule {
                 return Err(ControlError::Rejected);
             }
             let seconds = (c.source_end - c.source_start) as f64 / f64::from(asset.source_rate);
-            if c.start_tick as f64 + seconds * 6400.0 > MAX_SONG_TICKS as f64 {
+            // The bank has no tempo: refuse only placements impossible even at 20 BPM.
+            // The project compiler admits its actual current-tempo horizon separately.
+            let minimum_ticks = (seconds * 20.0 * 16.0).ceil() as u64;
+            if c.start_tick
+                .checked_add(minimum_ticks)
+                .is_none_or(|end| end > MAX_SONG_TICKS)
+            {
                 return Err(ControlError::Rejected);
             }
 
