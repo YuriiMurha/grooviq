@@ -237,6 +237,18 @@ test.describe("recording when the pattern's note ids run out", () => {
 
 test.describe("MIDI ownership", () => {
   test.use({ seed: { project: twoChannels([]) } });
+  for (const zeroVelocityOn of [false, true]) {
+    test(`note_off_releases_every_repeated_MIDI_press_${zeroVelocityOn}`, async ({ app, mock }) => {
+      await call(app, "channel_select", { channel: 1 });
+      await take(app);
+      await mock.eval("(m) => { m.midiNote(60, 127, true); m.midiNote(60, 64, true); }");
+      await hold(app, 240);
+      await mock.eval(`(m) => m.midiNote(60, 0, ${zeroVelocityOn})`);
+      expect(await mock.eval("(m) => m.live()")).toEqual([]);
+      expect(await recorded(app)).toEqual([[0, 240, 60, 1], [0, 240, 60, 64 / 127]]);
+    });
+  }
+
   test("selection_releases_MIDI_only_and_stale_key_up_leaves_new_producers_alone", async ({ app, mock }) => {
     await call(app, "channel_select", { channel: 1 });
     await take(app);

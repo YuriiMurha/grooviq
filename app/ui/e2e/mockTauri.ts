@@ -1501,7 +1501,7 @@ export function installMockTauri(seed: MockSeed): void {
     },
     /** One logical MIDI producer, independent of typing/preview ownership. Velocity uses
      * decoded MIDI bytes, like Player::handle_in; zero-velocity NoteOn is a release. This
-     * helper models neither port enable/unplug nor pedal/multi-input ownership. */
+     * Port, pedal, multi-input and project/channel-instance invalidation remain #247. */
     midiNote: (key: number, velocity: number, on: boolean) => {
       if (!Number.isInteger(key) || key < 0 || key > 127 || !Number.isInteger(velocity) || velocity < 0 || velocity > 127) {
         throw "MIDI key and velocity must be bytes in 0..127.";
