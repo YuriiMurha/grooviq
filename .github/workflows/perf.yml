@@ -154,13 +154,9 @@ jobs:
           PY
 
   instructions:
-<<<<<<< HEAD
-    if: ${{ !inputs.capture_only }}
-=======
     needs: optional-inputs
     # A failed selector must retain coverage; only an explicit false skips work.
-    if: ${{ always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
->>>>>>> origin/main
+    if: ${{ !inputs.capture_only && always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
     name: instructions (ubuntu-latest)
     runs-on: ubuntu-latest
     timeout-minutes: 30
