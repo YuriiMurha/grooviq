@@ -2,7 +2,7 @@
 
 use grooviq_dsp::{Device, NoteEvent, create, param_spec};
 
-const IDS: [&str; 14] = [
+const IDS: [&str; 15] = [
     "synth",
     "eq",
     "comp",
@@ -13,12 +13,13 @@ const IDS: [&str; 14] = [
     "ott",
     "utility",
     "drum_shaper",
-    "algorithmic_reverb",
+    "character_delay",
     "saturation",
     "fattener",
     "bitcrusher",
+    "algorithmic_reverb",
 ];
-const EFFECTS: [&str; 13] = [
+const EFFECTS: [&str; 14] = [
     "eq",
     "comp",
     "limiter",
@@ -28,10 +29,11 @@ const EFFECTS: [&str; 13] = [
     "ott",
     "utility",
     "drum_shaper",
-    "algorithmic_reverb",
+    "character_delay",
     "saturation",
     "fattener",
     "bitcrusher",
+    "algorithmic_reverb",
 ];
 const RATES: [f32; 5] = [22050.0, 44100.0, 48000.0, 96000.0, 192000.0];
 
@@ -790,6 +792,15 @@ fn interesting(id: &str) -> Vec<(u32, f32)> {
             (5, 12000.),
             (7, 0.7),
         ],
+        "saturation" => vec![
+            (0, 1.),
+            (1, 18.),
+            (2, 0.5),
+            (3, 6.),
+            (4, 100.),
+            (5, 12000.),
+            (7, 0.7),
+        ],
         "bitcrusher" => vec![(0, 5.7), (1, 23.3), (2, 0.6), (3, 0.4), (4, 1.0), (5, 0.8)],
         "eq" => vec![
             (2 * 6 + 3, 9.0),
@@ -806,6 +817,7 @@ fn interesting(id: &str) -> Vec<(u32, f32)> {
         "limiter" => vec![(0, 12.0), (1, -2.0), (2, 30.0)],
         "drive" => vec![(0, 3.0), (1, 18.0), (2, 0.4), (3, 0.8), (5, 2.0)],
         "reverb" => vec![(0, 0.8), (1, 3.0), (2, 35.0), (3, 0.3), (4, 0.7), (7, 0.5)],
+        "character_delay" => vec![(9, 2.0), (10, 0.8), (12, 0.4), (11, 0.5)],
         "delay" => vec![(1, 2.0), (3, 0.6), (4, 1.0), (7, 0.5)],
         "ott" => vec![(0, 0.8), (1, 0.3), (4, 3.0), (6, -2.0)],
         "drum_shaper" => vec![
@@ -837,6 +849,17 @@ fn changes(id: &str) -> Vec<(u32, f32)> {
             (7, 0.3),
             (8, -3.),
         ],
+        "saturation" => vec![
+            (0, 3.),
+            (1, 8.),
+            (2, -0.5),
+            (3, 0.),
+            (4, 300.),
+            (5, 6000.),
+            (6, 0.),
+            (7, 0.3),
+            (8, -3.),
+        ],
         "bitcrusher" => vec![(0, 2.5), (1, 2.5), (2, 1.0), (3, 0.2), (4, 0.7), (5, 0.3)],
         "eq" => vec![
             (2 * 6 + 2, 2000.0),
@@ -849,6 +872,7 @@ fn changes(id: &str) -> Vec<(u32, f32)> {
         "limiter" => vec![(0, 3.0)],
         "drive" => vec![(1, 6.0), (2, -0.5), (3, 0.3)],
         "reverb" => vec![(0, 0.2), (2, 90.0), (5, 400.0), (7, 0.9)],
+        "character_delay" => vec![(9, 1.0), (10, 0.4), (12, 0.7), (11, 0.2), (1, 5.0)],
         "delay" => vec![(1, 5.0), (3, 0.2), (6, 3000.0)],
         "ott" => vec![(7, 300.0), (8, 5000.0), (0, 0.3)],
         "drum_shaper" => vec![

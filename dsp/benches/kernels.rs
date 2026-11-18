@@ -162,59 +162,34 @@ fn synth_trap_lead_uni7_block(bencher: Bencher, voices: usize) {
     bencher.bench_local(|| synth.process(black_box(&mut l), black_box(&mut r), None, &[]));
 }
 
-fn algorithmic_reverb_block(bencher: Bencher, block: usize, model: usize) {
-    use grooviq_dsp::algorithmic_reverb::{AlgorithmicReverb, PRESETS, preset};
-    let mut d = AlgorithmicReverb::new(SR);
-    for (i, v) in preset(PRESETS[model]).unwrap() {
-        d.set_param(i, v);
+#[divan::bench(args = ["Glass Steps", "Soft Spools", "Dusk Circuit"], consts = [64, 128])]
+fn character_delay<const N: usize>(bencher: Bencher, name: &str) {
+    use grooviq_dsp::character_delay::{CharacterDelay, preset};
+    let mut device = CharacterDelay::new(SR);
+    for (i, v) in preset(name).unwrap() {
+        device.set_param(i, v);
     }
-    let bank: Vec<([f32; 128], [f32; 128])> = (0..1024)
-        .map(|b| {
-            let l = std::array::from_fn(|i| libm::sinf((b * 128 + i) as f32 * 0.037) * 0.3);
-            let r = std::array::from_fn(|i| libm::sinf((b * 128 + i) as f32 * 0.053) * 0.2);
+    let inputs: Vec<([f32; N], [f32; N])> = (0..64)
+        .map(|block| {
+            let l = std::array::from_fn(|i| (((block * N + i) % 97) as f32 / 97.0 - 0.5) * 0.5);
+            let r = std::array::from_fn(|i| (((block * N + i) % 73) as f32 / 73.0 - 0.5) * 0.4);
             (l, r)
         })
         .collect();
-    for n in 0..(SR as usize * 4 / block) {
-        let (mut l, mut r) = bank[n % bank.len()];
-        d.process(&mut l[..block], &mut r[..block], None, &[]);
+    let mut next = 0;
+    let (mut l, mut r) = ([0.0; N], [0.0; N]);
+    let mut render = || {
+        l.copy_from_slice(&inputs[next].0);
+        r.copy_from_slice(&inputs[next].1);
+        next = (next + 1) % inputs.len();
+        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
+        black_box((&l, &r));
+    };
+    // Charge the repeat/feedback paths with the measured signal, not a constant DC input.
+    for _ in 0..(SR as usize * 4).div_ceil(N) {
+        render();
     }
-    let mut cursor = 0;
-    bencher
-        .with_inputs(|| {
-            let source = bank[cursor];
-            cursor = (cursor + 1) % bank.len();
-            source
-        })
-        .bench_local_values(|(mut l, mut r)| {
-            d.process(
-                black_box(&mut l[..block]),
-                black_box(&mut r[..block]),
-                None,
-                &[],
-            );
-            black_box((l, r));
-        });
-}
-#[divan::bench(args = [64,128])]
-fn algorithmic_reverb_room(b: Bencher, block: usize) {
-    algorithmic_reverb_block(b, block, 0);
-}
-#[divan::bench(args = [64,128])]
-fn algorithmic_reverb_hall(b: Bencher, block: usize) {
-    algorithmic_reverb_block(b, block, 1);
-}
-#[divan::bench(args = [64,128])]
-fn algorithmic_reverb_plate(b: Bencher, block: usize) {
-    algorithmic_reverb_block(b, block, 2);
-}
-#[divan::bench(args = [64,128])]
-fn algorithmic_reverb_chamber(b: Bencher, block: usize) {
-    algorithmic_reverb_block(b, block, 3);
-}
-#[divan::bench(args = [64,128])]
-fn algorithmic_reverb_nonlinear(b: Bencher, block: usize) {
-    algorithmic_reverb_block(b, block, 4);
+    bencher.bench_local(render);
 }
 
 // Keep the device continuous, but replace the in-place output with fresh stereo input on
@@ -354,4 +329,59 @@ fn saturation_block<const N: usize>(bencher: Bencher, patch: &str) {
     bencher
         .with_inputs(source)
         .bench_local_refs(|(l, r)| d.process(black_box(l), black_box(r), None, &[]));
+}
+
+fn algorithmic_reverb_block(bencher: Bencher, block: usize, model: usize) {
+    use grooviq_dsp::algorithmic_reverb::{AlgorithmicReverb, PRESETS, preset};
+    let mut d = AlgorithmicReverb::new(SR);
+    for (i, v) in preset(PRESETS[model]).unwrap() {
+        d.set_param(i, v);
+    }
+    let bank: Vec<([f32; 128], [f32; 128])> = (0..1024)
+        .map(|b| {
+            let l = std::array::from_fn(|i| libm::sinf((b * 128 + i) as f32 * 0.037) * 0.3);
+            let r = std::array::from_fn(|i| libm::sinf((b * 128 + i) as f32 * 0.053) * 0.2);
+            (l, r)
+        })
+        .collect();
+    for n in 0..(SR as usize * 4 / block) {
+        let (mut l, mut r) = bank[n % bank.len()];
+        d.process(&mut l[..block], &mut r[..block], None, &[]);
+    }
+    let mut cursor = 0;
+    bencher
+        .with_inputs(|| {
+            let source = bank[cursor];
+            cursor = (cursor + 1) % bank.len();
+            source
+        })
+        .bench_local_values(|(mut l, mut r)| {
+            d.process(
+                black_box(&mut l[..block]),
+                black_box(&mut r[..block]),
+                None,
+                &[],
+            );
+            black_box((l, r));
+        });
+}
+#[divan::bench(args = [64,128])]
+fn algorithmic_reverb_room(b: Bencher, block: usize) {
+    algorithmic_reverb_block(b, block, 0);
+}
+#[divan::bench(args = [64,128])]
+fn algorithmic_reverb_hall(b: Bencher, block: usize) {
+    algorithmic_reverb_block(b, block, 1);
+}
+#[divan::bench(args = [64,128])]
+fn algorithmic_reverb_plate(b: Bencher, block: usize) {
+    algorithmic_reverb_block(b, block, 2);
+}
+#[divan::bench(args = [64,128])]
+fn algorithmic_reverb_chamber(b: Bencher, block: usize) {
+    algorithmic_reverb_block(b, block, 3);
+}
+#[divan::bench(args = [64,128])]
+fn algorithmic_reverb_nonlinear(b: Bencher, block: usize) {
+    algorithmic_reverb_block(b, block, 4);
 }
