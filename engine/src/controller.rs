@@ -42,6 +42,8 @@ pub enum ControlError {
     Rejected,
     /// Valid state could not be built; the previous state is preserved.
     BuildFailed,
+    /// Fixed-second audio exceeds the admitted overlap budget.
+    AudioVoiceLimit,
     /// The queue had no room.
     Full,
     /// No channel has that id.
@@ -58,6 +60,7 @@ pub enum ControlError {
 impl std::fmt::Display for ControlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::AudioVoiceLimit => "audio needs more than 256 simultaneous instances at 400 BPM; shorten trims, remove overlaps or lengthen the loop",
             Self::Rejected => "a value is out of range or not a number",
             Self::BuildFailed => "the sound engine could not build the project",
             Self::Full => "the engine's command queue is full",
@@ -210,6 +213,9 @@ impl Controller {
         {
             *tick = (*tick).clamp(r.start_tick, r.end_tick - 1);
         }
+        if let Command::SetSongLoop { region } = cmd {
+            self.state.song.audio.validate_loop(region)?;
+        }
         match cmd {
             Command::Seek { tick }
                 if self.state.playback_mode != crate::PlaybackMode::Song
@@ -355,6 +361,7 @@ impl Controller {
     pub fn set_song(&mut self, song: crate::SongData) -> Result<(), ControlError> {
         let ids: Vec<_> = self.state.channels.iter().map(|c| c.id).collect();
         let song = song.checked(&ids)?;
+        song.audio.validate_loop(self.state.song_loop)?;
         if !song.valid_loop(self.state.song_loop) {
             return Err(ControlError::Rejected);
         }
