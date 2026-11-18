@@ -456,6 +456,18 @@ impl Project {
                 "sampler",
                 fixes,
             );
+            // Labels are display metadata; the stored parameters remain the sound source.
+            if c.instrument == InstrumentKind::Synth
+                && c.preset
+                    .as_deref()
+                    .is_some_and(|label| label != "Init" && !synth::PRESETS.contains(&label))
+            {
+                c.preset = None;
+                fixes.push(format!(
+                    "Channel id {}: unknown synth preset label was cleared; sound values were kept.",
+                    c.id
+                ));
+            }
             // Unknown synth names are dropped; unknown sampler names stay ignored (M1 kept them).
             c.synth
                 .retain(|param, _| synth::PARAM_IDS.contains(&param.as_str()));
