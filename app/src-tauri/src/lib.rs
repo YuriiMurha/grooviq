@@ -22,6 +22,8 @@ mod notes_cmds;
 mod output_mode;
 pub mod panic_hook;
 mod project_cmds;
+#[cfg(all(feature = "qa-driver", target_os = "macos"))]
+mod qa_driver;
 mod settings;
 
 use audio_log::{AudioLog, Level};
@@ -203,10 +205,12 @@ fn start_audio(app: &AppHandle) -> Audio {
         Arc::clone(&selected_channel),
         &settings,
     )));
-    spawn_named("grooviq-midi", {
-        let (midi, log, app) = (Arc::clone(&midi), Arc::clone(&log), app.clone());
-        move || midi_cmds::poll_loop(&midi, &log, &app)
-    });
+    if !qa_automation() {
+        spawn_named("grooviq-midi", {
+            let (midi, log, app) = (Arc::clone(&midi), Arc::clone(&log), app.clone());
+            move || midi_cmds::poll_loop(&midi, &log, &app)
+        });
+    }
     if autosave_on {
         spawn_named("grooviq-autosave", {
             let (session, recovery, log, status, app) = (
@@ -311,6 +315,9 @@ fn end_session(audio: &Audio) {
 
 /// Whether closing must wait for the person; if so, asks the UI.
 fn hold_close(app: &AppHandle) -> bool {
+    if qa_automation() {
+        return false;
+    }
     let Some(audio) = app.try_state::<Audio>() else {
         return false;
     };
@@ -372,9 +379,37 @@ fn toggle_high_refresh(app: &AppHandle) {
     display::apply(app, on);
 }
 
+fn qa_automation() -> bool {
+    #[cfg(all(feature = "qa-driver", target_os = "macos"))]
+    {
+        qa_driver::enabled()
+    }
+    #[cfg(not(all(feature = "qa-driver", target_os = "macos")))]
+    {
+        false
+    }
+}
+
 /// Runs the app.
 pub fn run() {
     panic_hook::install();
+    if std::env::var_os("GROOVIQ_QA_DRIVER").is_some() && !qa_automation() {
+        panic!("automation requires a macOS qa-driver build");
+    }
+    #[allow(unused_mut)]
+    let mut context = tauri::generate_context!();
+    #[cfg(all(feature = "qa-driver", target_os = "macos"))]
+    let qa_dir = if qa_automation() {
+        let dir = qa_driver::validate().expect("unsafe QA launch refused");
+        for window in &mut context.config_mut().app.windows {
+            window.create = false;
+            window.visible = false;
+            window.focus = false;
+        }
+        Some(dir)
+    } else {
+        None
+    };
     let builder = tauri::Builder::default();
     // Cmd+Q through our own Quit item, so it asks about unsaved changes (see `menu`).
     #[cfg(target_os = "macos")]
@@ -389,7 +424,15 @@ pub fn run() {
     });
     let app = builder
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
+        .setup(move |app| {
+            #[cfg(all(feature = "qa-driver", target_os = "macos"))]
+            if let Some(dir) = qa_dir {
+                app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+                for config in &app.config().app.windows {
+                    tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
+                }
+                qa_driver::start(app.handle().clone(), dir)?;
+            }
             let audio = start_audio(app.handle());
             let high_refresh = lock(&audio.settings).high_refresh;
             app.manage(audio);
@@ -440,7 +483,7 @@ pub fn run() {
             midi_cmds::midi_inputs,
             midi_cmds::midi_set_enabled,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("the Tauri app builds");
     app.run(|app, event| match event {
         RunEvent::WindowEvent {

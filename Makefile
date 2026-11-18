@@ -71,3 +71,18 @@ install-app: ## Copy the built Grooviq.app into /Applications (run build-app fir
 	@test -d $(APP_BUNDLE) || { echo "No $(APP_BUNDLE). Run make build-app first."; exit 1; }
 	rm -rf /Applications/Grooviq.app
 	ditto $(APP_BUNDLE) /Applications/Grooviq.app
+
+.PHONY: qa-driver-build qa-driver
+qa-driver-build: ui-install ## Build the optional macOS QA driver app
+	npm --prefix $(UI) run tauri build -- --bundles app --features qa-driver
+
+qa-driver: ## Control QA_HOME's silent automation app; SCRIPT=<trusted JS file>
+	python3 scripts/qa-driver.py --home "$(QA_HOME)" $(if $(SCRIPT),--script "$(SCRIPT)",)
+
+.PHONY: qa-driver-stop
+qa-driver-stop: ## Stop QA_HOME's automation app without a native dialog
+	python3 scripts/qa-driver.py --home "$(QA_HOME)" --shutdown
+
+.PHONY: qa-driver-app
+qa-driver-app: ## Launch the qa-driver build hidden; use QA_HOME=<private temporary directory>
+	$(MAKE) qa-app QA_AUTOMATION=1

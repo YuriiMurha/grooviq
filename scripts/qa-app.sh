@@ -28,6 +28,10 @@ else
 	home=$(mktemp -d "${tmp%/}/grooviq-qa.XXXXXX")
 	owned=1
 fi
+if [ "${QA_AUTOMATION:-0}" = 1 ]; then
+	home=$(cd "$home" && pwd -P)
+	export GROOVIQ_QA_DRIVER=1
+fi
 cleanup() {
 	if [ "$owned" = 1 ]; then
 		rm -rf "$home"
