@@ -22,7 +22,10 @@ export default {
       // An asset-looking path can resolve to executable source such as knob.svg.ts.
       // Exempt data assets only when the module resolver finds no source to inspect.
       const dataAsset = /\.(css|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf)(\?(url|raw|inline|no-inline))?$/i.test(specifier);
-      const resolved = ts.resolveModuleName(specifier, from, options, ts.sys).resolvedModule;
+      if (dataAsset && /\?(raw|url)$/.test(specifier)) return false;
+      // Vite can execute a .css.ts relay even when the import has an asset query.
+      const sourceSpecifier = specifier.split("?", 1)[0];
+      const resolved = ts.resolveModuleName(sourceSpecifier, from, options, ts.sys).resolvedModule;
       if (!resolved) return !dataAsset && (specifier.startsWith(".") || specifier.startsWith("/"));
       const file = canonical(resolved.resolvedFileName);
       if (file === bridge) return false;

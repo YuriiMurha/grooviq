@@ -96,7 +96,7 @@ test("allows data asset imports directly and through a relay", async () => {
   const css = path.join(temp, "editor.css");
   writeFileSync(svg, '<svg xmlns="http://www.w3.org/2000/svg"/>');
   writeFileSync(css, ".knob { color: inherit; }");
-  const assets = `import icon from ${JSON.stringify(svg)}; import url from ${JSON.stringify(svg + "?url")}; import raw from ${JSON.stringify(svg + "?raw")}; import ${JSON.stringify(css)}; export const data = [icon, url, raw];`;
+  const assets = `import icon from ${JSON.stringify(svg)}; import url from ${JSON.stringify(svg + "?url")}; import raw from ${JSON.stringify(svg + "?raw")}; import styles from ${JSON.stringify(css + "?inline")}; import ${JSON.stringify(css)}; export const data = [icon, url, raw, styles];`;
   const [direct] = await eslint.lintText(assets, { filePath: "src/devices/BoundaryProbe.ts" });
   expect(direct.errorCount).toBe(0);
   const assetRelay = path.join(temp, "asset-relay.ts");
@@ -110,6 +110,30 @@ test.each(["svg", "css"])("inspects executable modules resolved through a .%s as
   writeFileSync(specifier + ".ts", `import { useProject } from ${JSON.stringify(context)}; export const useRaw = useProject;`);
   const [result] = await eslint.lintText(`import { useRaw } from ${JSON.stringify(specifier)}; export const useLeak = () => useRaw().apply;`, { filePath: "src/devices/BoundaryProbe.ts" });
   expect(result.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+});
+
+test.each(["inline", "no-inline", "INLINE", "RAW", "URL"])("inspects executable asset queries ?%s directly and through relays", async (query) => {
+  const specifier = path.join(temp, `query-${query}.css`);
+  writeFileSync(specifier + ".ts", `import { useProject } from ${JSON.stringify(context)}; export const useRaw = useProject;`);
+  const queried = `${specifier}?${query}`;
+  const [direct] = await eslint.lintText(`import ${JSON.stringify(queried)}; export const ready = true;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(direct.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+  const relay = path.join(temp, `query-relay-${query}.ts`);
+  writeFileSync(relay, `import ${JSON.stringify(queried)}; export const ready = true;`);
+  const [indirect] = await eslint.lintText(`import { ready } from ${JSON.stringify(relay)}; void ready;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(indirect.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+});
+
+test.each(["raw", "url"])("allows genuine ?%s asset data when the base has source", async (query) => {
+  const specifier = path.join(temp, `data-query-${query}.css`);
+  writeFileSync(specifier + ".ts", `import { useProject } from ${JSON.stringify(context)}; export const useRaw = useProject;`);
+  const queried = `${specifier}?${query}`;
+  const [direct] = await eslint.lintText(`import data from ${JSON.stringify(queried)}; export const content = data;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(direct.errorCount).toBe(0);
+  const relay = path.join(temp, `data-query-relay-${query}.ts`);
+  writeFileSync(relay, `import data from ${JSON.stringify(queried)}; export const content = data;`);
+  const [indirect] = await eslint.lintText(`import { content } from ${JSON.stringify(relay)}; void content;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(indirect.errorCount).toBe(0);
 });
 
 test("raw apply cannot be assigned or passed as a guarded send prop", () => {
