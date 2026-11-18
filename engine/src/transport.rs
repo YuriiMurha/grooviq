@@ -133,6 +133,22 @@ impl TransportClock {
         self.shift = 0;
     }
 
+    // Pending musical releases use this basis so pattern-resize shifts cannot move them.
+    pub(crate) fn release_map(&self) -> (u64, u64, u32, u32) {
+        (
+            self.anchor_frame,
+            self.anchor_tick.to_bits(),
+            self.bpm.to_bits(),
+            self.sample_rate.to_bits(),
+        )
+    }
+    pub(crate) fn played_tick_of(&self, tick: u64) -> u64 {
+        tick - self.shift
+    }
+    pub(crate) fn frame_of_played_tick(&self, tick: u64) -> u64 {
+        self.frame_of((tick + self.shift) as f64)
+    }
+
     pub(crate) fn sample_rate(&self) -> f32 {
         self.sample_rate
     }

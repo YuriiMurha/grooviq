@@ -177,6 +177,9 @@ impl AudioProcessor {
                 self.graph.pattern_length(),
                 graph.pattern_length(),
             );
+        } else {
+            let len = graph.pattern_length();
+            self.transport.keep_position(self.clock, len, len);
         }
         self.generation = graph.generation();
         self.graph = graph;
@@ -356,6 +359,8 @@ impl AudioProcessor {
                         // A new length keeps the place in the loop (no jump, no lost notes).
                         if self.graph.playback_mode == crate::PlaybackMode::Pattern {
                             self.transport.keep_position(start, leaving.length, new_len);
+                        } else {
+                            self.transport.keep_position(start, new_len, new_len);
                         }
                         leaving
                     };
@@ -435,6 +440,8 @@ impl AudioProcessor {
                         if mode != self.graph.playback_mode {
                             self.recorder.set(false, &self.transport, start, &self.live);
                             self.stop(start);
+                            let len = self.graph.pattern_length();
+                            self.transport.keep_position(start, len, len);
                             self.with_graph(|g| g.playback_mode = mode);
                         }
                     }
@@ -557,6 +564,7 @@ impl AudioProcessor {
                 self.transport
                     .keep_position(at, leaving.pattern_length(), new_len);
             } else {
+                self.transport.keep_position(at, new_len, new_len);
                 self.recorder.set(false, &self.transport, at, &self.live);
             }
             leaving

@@ -109,6 +109,7 @@ pub struct Controller {
     generation: u64,
     /// The id of the last recording barrier `load_state` queued (see [`Self::record_mark`]).
     record_mark: u32,
+    recording_armed: bool,
     /// Faults already answered with a restart (queued by `check_health`, or done by
     /// `reconfigure`).
     seen_faults: u32,
@@ -140,6 +141,7 @@ impl Controller {
             next_instance: 0,
             generation: 0,
             record_mark: 0,
+            recording_armed: false,
             seen_faults: 0,
             restart_owed: false,
             seen_guard_hits: 0,
@@ -360,6 +362,9 @@ impl Controller {
         }
         // The old state (and the samples only it held) is freed here, on this thread.
         let _old = std::mem::replace(&mut self.state, state);
+        if self.state.playback_mode == crate::PlaybackMode::Song {
+            self.recording_armed = false;
+        }
         self.renew_instances();
         let graph = self.build_graph();
         // Only this thread pushes, and the queue had room for all five.
@@ -394,6 +399,11 @@ impl Controller {
         let queued = self.push(Msg::RecordMark(id));
         debug_assert!(queued.is_ok());
         Ok(id)
+    }
+
+    /// Accepted queued recording state, including disarm on a mode transition (even stopped).
+    pub fn recording_armed(&self) -> bool {
+        self.recording_armed
     }
 
     /// The id of the last recording barrier queued (by [`Self::load_state`] or
@@ -611,7 +621,13 @@ impl Controller {
 
     fn mirror(&mut self, cmd: Command) {
         match cmd {
-            Command::SetPlaybackMode { mode } => self.state.playback_mode = mode,
+            Command::SetPlaybackMode { mode } => {
+                if mode != self.state.playback_mode {
+                    self.recording_armed = false;
+                }
+                self.state.playback_mode = mode;
+            }
+            Command::SetRecording { on } => self.recording_armed = on,
             Command::SetSongLoop { region } => self.state.song_loop = region,
             Command::TestTone { on, hz, gain_db } => self.tone = ToneState { on, hz, gain_db },
             Command::AllSoundOff => self.tone.on = false,
@@ -965,10 +981,22 @@ mod tests {
         assert_eq!(graph.pattern().length, 7);
 
         // Panicking twice leaves no channels, but keeps the pattern.
+        c.state.song.end_tick = 1;
+        c.state.song.arrangement.length = 1;
+        c.state.song.arrangement.notes = vec![crate::SongNote {
+            tick: 0,
+            length: 1,
+            channel: c.state.channels[0].id,
+            key: 60,
+            velocity: 1.0,
+            slide: false,
+            clip_id: 1,
+        }];
         c.replay_panics.set(2);
         pretend(&c, 2, 0);
         assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 2 }]);
         assert!(c.state.channels.is_empty());
+        assert!(c.state.song.arrangement.notes.is_empty());
         assert!(c.instances.is_empty(), "no channel, no instance");
         assert_eq!(c.state.pattern.length, 7);
         assert!(c.send(tune).is_err());

@@ -271,12 +271,13 @@ impl Graph {
             }
         };
         if self.playback_mode == crate::PlaybackMode::Song {
-            self.sequencer.flush(f0, f0 + BLOCK as u64 - 1, &mut sink);
+            self.sequencer
+                .flush(clock, f0, f0 + BLOCK as u64 - 1, &mut sink);
             self.song_sequencer
                 .run(&self.song, self.song_loop, clock, f0, &mut sink);
         } else {
             self.song_sequencer
-                .flush(f0, f0 + BLOCK as u64 - 1, &mut sink);
+                .flush(clock, f0, f0 + BLOCK as u64 - 1, &mut sink);
             self.sequencer.run(&self.pattern, clock, f0, &mut sink);
         }
     }
