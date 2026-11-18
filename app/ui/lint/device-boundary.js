@@ -33,7 +33,7 @@ export default {
       if (resolved.isExternalLibraryImport || seen.has(file)) return false;
       // Local declarations can hide a different runtime .js dependency graph.
       // Type-only imports are allowed, but value imports need inspectable source.
-      if (/\.d\.(ts|mts|cts)$/i.test(file)) return true;
+      if (resolved.extension.startsWith(".d.")) return true;
       seen.add(file);
       const source = ts.sys.readFile(file);
       if (source === undefined) return true;

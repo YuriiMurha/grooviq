@@ -136,6 +136,21 @@ test.each(["raw", "url"])("allows genuine ?%s asset data when the base has sourc
   expect(indirect.errorCount).toBe(0);
 });
 
+test.each(["css", "svg"])("rejects arbitrary-extension declarations hiding executable .%s query targets", async (extension) => {
+  const stem = path.join(temp, `arbitrary-${extension}`);
+  const specifier = `${stem}.${extension}?inline`;
+  writeFileSync(`${stem}.${extension}.ts`, `import { useProject } from ${JSON.stringify(context)}; export const useRaw = useProject;`);
+  writeFileSync(`${stem}.d.${extension}.ts`, 'declare const data: string; export default data;');
+  const [direct] = await eslint.lintText(`import ${JSON.stringify(specifier)}; export const ready = true;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(direct.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+  const relay = path.join(temp, `arbitrary-relay-${extension}.ts`);
+  writeFileSync(relay, `import ${JSON.stringify(specifier)}; export const ready = true;`);
+  const [indirect] = await eslint.lintText(`import { ready } from ${JSON.stringify(relay)}; void ready;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(indirect.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+  const [types] = await eslint.lintText(`import type Data from ${JSON.stringify(specifier)}; export type Value = typeof Data;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(types.errorCount).toBe(0);
+});
+
 test("raw apply cannot be assigned or passed as a guarded send prop", () => {
   const file = path.join(temp, "capability.ts");
   writeFileSync(file, `import type { GuardedEdit } from ${JSON.stringify(path.join(root, "src/devices/paramSink.ts"))};
