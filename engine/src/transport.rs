@@ -64,6 +64,7 @@ impl Segment {
 /// The play state and the tick-to-frame map.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TransportClock {
+    revision: u64,
     playing: bool,
     bpm: f32,
     sample_rate: f32,
@@ -93,11 +94,49 @@ pub(crate) struct TransportClock {
 }
 
 impl TransportClock {
+    pub(crate) fn host(
+        &self,
+        frame: u64,
+        generation: u64,
+        discontinuity: u64,
+        changed: bool,
+        region: Option<crate::SongLoop>,
+    ) -> grooviq_dsp::HostTransport {
+        let (loop_start, loop_end) =
+            region.map_or((0, u64::from(self.length)), |r| (r.start_tick, r.end_tick));
+        grooviq_dsp::HostTransport {
+            domain: if region.is_some() {
+                grooviq_dsp::HostDomain::Song
+            } else {
+                grooviq_dsp::HostDomain::Pattern
+            },
+            frame,
+            frames: crate::BLOCK as u32,
+            sample_rate: self.sample_rate,
+            bpm: self.bpm,
+            playing: self.playing,
+            anchor_frame: self.anchor_frame,
+            anchor_tick: self.anchor_tick,
+            shift: self.shift,
+            loop_start,
+            loop_end,
+            stream_generation: generation,
+            discontinuity,
+            changed,
+        }
+    }
+    pub(crate) fn shift(&self) -> u64 {
+        self.shift
+    }
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
     pub(crate) fn bpm(&self) -> f32 {
         self.bpm
     }
     pub(crate) fn new(sample_rate: f32, bpm: f32) -> Self {
         Self {
+            revision: 0,
             playing: false,
             bpm,
             sample_rate,
@@ -125,6 +164,7 @@ impl TransportClock {
 
     /// Plays from tick 0 at frame `at` (a block start), for `loops` loops or forever.
     pub(crate) fn start(&mut self, at: u64, loops: Option<u32>) {
+        self.revision = self.revision.wrapping_add(1);
         self.playing = true;
         self.anchor_frame = at;
         self.anchor_tick = 0.0;
@@ -172,6 +212,7 @@ impl TransportClock {
     }
 
     pub(crate) fn seek(&mut self, at: u64, tick: u64) {
+        self.revision = self.revision.wrapping_add(1);
         self.anchor_frame = at;
         self.anchor_tick = tick as f64;
         self.covered = tick;
@@ -187,6 +228,7 @@ impl TransportClock {
 
     /// Stops and rewinds to tick 0.
     pub(crate) fn stop(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         self.playing = false;
         self.anchor_frame = 0;
         self.anchor_tick = 0.0;
@@ -571,5 +613,39 @@ mod tests {
         // Play starts from tick 0 with no shift left over.
         t.start(0, None);
         assert_eq!(t.frame_of(240.0), 6_000);
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+    #[test]
+    fn epoch_seek_repeat_rate_and_tempo_preserve_canonical_positions() {
+        let mut clock = TransportClock::new(48000.0, 120.0);
+        let revision = clock.revision();
+        clock.start(64, None);
+        assert_ne!(revision, clock.revision());
+        let before = clock.tick_at(128);
+        clock.set_bpm(128, 137.0);
+        assert_eq!(before, clock.tick_at(128));
+        let before = clock.tick_at(192);
+        clock.set_sample_rate(192, 44100.0);
+        assert_eq!(before, clock.tick_at(192));
+        let h = clock.host(192, 2, 3, false, None);
+        for i in 0..64 {
+            assert_eq!(
+                h.position_at(i).unwrap().unwrapped_tick,
+                clock.tick_at(192 + u64::from(i))
+            );
+        }
+        let revision = clock.revision();
+        clock.seek(192, 240);
+        assert_ne!(revision, clock.revision());
+        let revision = clock.revision();
+        clock.seek(192, 240);
+        assert_ne!(revision, clock.revision());
+        let revision = clock.revision();
+        clock.stop();
+        assert_ne!(revision, clock.revision());
     }
 }
