@@ -226,6 +226,8 @@ export function installMockTauri(seed: MockSeed): void {
     presses: new Map<number, string>(),
     /** The presses `channel_preview` made, of those. */
     previewPresses: new Set<number>(),
+    /** One logical MIDI input, without sustain: repeated note-ons each owe a release. */
+    midiPresses: new Map<number, { channel: number; presses: number[] }>(),
     nextPress: 1,
     /** Notes being recorded, by press: where and how hard they started (recorder.rs pairs a
      * note-off with its own press's note-on). */
@@ -411,16 +413,17 @@ export function installMockTauri(seed: MockSeed): void {
     const was = new Map(old.notes.map((n) => [n.id, n]));
     const before: MockNote[] = [];
     const after: MockNote[] = [];
+    // Notes contain only scalar fields; copy each snapshot without a JSON round trip.
     for (const n of next.notes) {
       const o = was.get(n.id);
       was.delete(n.id);
-      if (!o) after.push(clone(n));
+      if (!o) after.push({ ...n });
       else if (!sameNote(o, n)) {
-        before.push(clone(o));
-        after.push(clone(n));
+        before.push({ ...o });
+        after.push({ ...n });
       }
     }
-    for (const o of was.values()) before.push(clone(o));
+    for (const o of was.values()) before.push({ ...o });
     return { before, after };
   };
   const sizeOf = (c: NoteChange) => c.before.length + c.after.length;
@@ -1096,6 +1099,8 @@ export function installMockTauri(seed: MockSeed): void {
     return id;
   };
   const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
+    // Native menu state has no platform menu in this headless fixture.
+    edit_history_enabled: () => null,
     // commands.rs
     audio_outputs: () => [SILENT_OUTPUT],
     audio_select: (a) => {
@@ -1210,6 +1215,12 @@ export function installMockTauri(seed: MockSeed): void {
     },
     channel_select: (a) => {
       if (a.channel !== null) channelIndex(a.channel);
+      if (s.selected !== a.channel) {
+        for (const [key, held] of s.midiPresses) {
+          for (const press of held.presses) liveOff(held.channel, key, press);
+        }
+        s.midiPresses.clear();
+      }
       s.selected = a.channel as number | null;
       return null;
     },
@@ -1618,6 +1629,26 @@ export function installMockTauri(seed: MockSeed): void {
     midiUnplug: (name: string) => {
       s.midi.present = s.midi.present.filter((n) => n !== name);
       emit("midi-inputs-changed", null);
+    },
+    /** One logical MIDI producer, independent of typing/preview ownership. Velocity uses
+     * decoded MIDI bytes, like Player::handle_in; zero-velocity NoteOn is a release.
+     * Port, pedal, multi-input and project/channel-instance invalidation remain #247. */
+    midiNote: (key: number, velocity: number, on: boolean) => {
+      if (!Number.isInteger(key) || key < 0 || key > 127 || !Number.isInteger(velocity) || velocity < 0 || velocity > 127) {
+        throw "MIDI key and velocity must be bytes in 0..127.";
+      }
+      if (on && velocity > 0) {
+        if (s.selected === null) return null;
+        const press = liveOn(s.selected, key, velocity / 127);
+        const held = s.midiPresses.get(key) ?? { channel: s.selected, presses: [] };
+        held.presses.push(press);
+        s.midiPresses.set(key, held);
+        return press;
+      }
+      const held = s.midiPresses.get(key);
+      if (held) for (const press of held.presses) liveOff(held.channel, key, press);
+      s.midiPresses.delete(key);
+      return null;
     },
     /** The names of the MIDI inputs switched off. */
     midiDisabled: () => [...s.midi.disabled],
