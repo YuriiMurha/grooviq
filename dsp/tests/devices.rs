@@ -2,7 +2,7 @@
 
 use grooviq_dsp::{Device, NoteEvent, create, param_spec};
 
-const IDS: [&str; 10] = [
+const IDS: [&str; 11] = [
     "synth",
     "eq",
     "comp",
@@ -13,8 +13,9 @@ const IDS: [&str; 10] = [
     "ott",
     "utility",
     "drum_shaper",
+    "algorithmic_reverb",
 ];
-const EFFECTS: [&str; 9] = [
+const EFFECTS: [&str; 10] = [
     "eq",
     "comp",
     "limiter",
@@ -24,6 +25,7 @@ const EFFECTS: [&str; 9] = [
     "ott",
     "utility",
     "drum_shaper",
+    "algorithmic_reverb",
 ];
 const RATES: [f32; 5] = [22050.0, 44100.0, 48000.0, 96000.0, 192000.0];
 
@@ -772,6 +774,7 @@ fn random_parameter_sweeps_never_produce_nan() {
 /// A parameter set per effect that exercises its interesting paths.
 fn interesting(id: &str) -> Vec<(u32, f32)> {
     match id {
+        "algorithmic_reverb" => vec![(0, 1.0), (2, 0.0), (10, 0.7)],
         "eq" => vec![
             (2 * 6 + 3, 9.0),
             (3 * 6 + 5, 1.0),
@@ -805,6 +808,7 @@ fn interesting(id: &str) -> Vec<(u32, f32)> {
 /// Changes applied at sample 4736 (a multiple of both 128 and 37) to test smoothing paths.
 fn changes(id: &str) -> Vec<(u32, f32)> {
     match id {
+        "algorithmic_reverb" => vec![(0, 4.0), (1, 2.0), (4, 0.9), (10, 0.3)],
         "eq" => vec![
             (2 * 6 + 2, 2000.0),
             (2 * 6 + 3, -12.0),

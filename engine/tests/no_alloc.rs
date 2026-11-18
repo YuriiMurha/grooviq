@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 
 const SR: f32 = 48_000.0;
 
+#[path = "realtime/algorithmic_reverb.rs"]
+mod algorithmic_reverb;
 #[path = "realtime/drum_shaper.rs"]
 mod drum_shaper;
 

@@ -14,6 +14,7 @@ mod fft;
 mod util;
 mod wavetable;
 
+pub mod algorithmic_reverb;
 pub mod comp;
 pub mod delay;
 pub mod drive;
@@ -38,6 +39,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
         "drive" => &drive::SPEC,
         "drum_shaper" => &drum_shaper::SPEC,
         "reverb" => &reverb::SPEC,
+        "algorithmic_reverb" => &algorithmic_reverb::SPEC,
         "delay" => &delay::SPEC,
         "ott" => &ott::SPEC,
         "utility" => &utility::SPEC,
@@ -58,6 +60,7 @@ pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
         "drive" => Box::new(drive::Drive::new(sample_rate)),
         "drum_shaper" => Box::new(drum_shaper::DrumShaper::new(sample_rate)),
         "reverb" => Box::new(reverb::Reverb::new(sample_rate)),
+        "algorithmic_reverb" => Box::new(algorithmic_reverb::AlgorithmicReverb::new(sample_rate)),
         "delay" => Box::new(delay::Delay::new(sample_rate)),
         "ott" => Box::new(ott::Ott::new(sample_rate)),
         "utility" => Box::new(utility::Utility::new(sample_rate)),
