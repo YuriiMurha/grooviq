@@ -444,6 +444,7 @@ struct FakeState {
     /// Calls to `outputs`: the looks.
     polls: usize,
     fail_open: bool,
+    last_slot: Option<Arc<AudioSlot>>,
     /// The rate a device really opens at, when it will not switch to the one asked for.
     open_rate: Option<u32>,
     /// How long an open takes.
@@ -537,6 +538,7 @@ impl OutputBackend for Fake {
         state.opened.push(info.id.clone());
         // As a real stream reports it from its callbacks.
         slot.set_output_latency_frames(FAKE_LATENCY);
+        state.last_slot = Some(Arc::clone(&slot));
         state.open = Some((info.id.clone(), slot));
         Ok(state.open_rate.unwrap_or(info.sample_rate))
     }
@@ -1218,4 +1220,75 @@ fn lists_the_real_outputs() {
     for output in cpal_backend().outputs() {
         println!("{output:?}");
     }
+}
+
+#[test]
+fn unsupported_actual_rates_stay_silent_and_retry_without_losing_processor() {
+    for rate in [0, 7_999, 384_001, u32::MAX] {
+        let fake = Fake::new(vec![usb(true)]);
+        fake.state().open_rate = Some(rate);
+        let (c, p) = engine_48k();
+        c.lock().unwrap().send(tone(true)).unwrap();
+        let (out, events) = start(&fake, &c, p, OutputChoice::SystemDefault, true);
+        assert_eq!(out.current(), None, "actual rate {rate}");
+        assert!(fake.open_id().is_none());
+        let rejected_slot = Arc::clone(fake.state().last_slot.as_ref().unwrap());
+        let mut rejected_audio = [1.0; 512];
+        rejected_slot.process(&mut rejected_audio, 2);
+        assert!(rejected_audio.iter().all(|sample| *sample == 0.0));
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [OutputEvent::OpenFailed { .. }]
+        ));
+        let attempts = fake.state().attempts;
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(fake.state().attempts, attempts, "retry must back off");
+        fake.state().open_rate = Some(44_100);
+        assert!(wait_for(Duration::from_secs(4), || out.current().is_some()));
+        assert_eq!(out.current().unwrap().sample_rate, 44_100);
+        let audio = left(&fake.pull_in(44_100, 37));
+        assert!((219..=221).contains(&upward_crossings(&audio[22_050..])));
+        assert!(
+            matches!(events.lock().unwrap().last(), Some(OutputEvent::Opened(info)) if info.sample_rate == 44_100)
+        );
+    }
+}
+
+#[test]
+fn actual_rate_boundaries_are_admitted_without_clamping() {
+    for rate in [8_000, 384_000] {
+        let fake = Fake::new(vec![usb(true)]);
+        fake.state().open_rate = Some(rate);
+        let (c, p) = engine_48k();
+        c.lock().unwrap().send(tone(true)).unwrap();
+        let (out, _) = start(&fake, &c, p, OutputChoice::SystemDefault, true);
+        assert_eq!(out.current().unwrap().sample_rate, rate);
+        let audio = left(&fake.pull_in(rate as usize, 37));
+        assert!((219..=221).contains(&upward_crossings(&audio[rate as usize / 2..])));
+    }
+}
+
+#[test]
+fn an_unsupported_reopen_never_admits_the_old_rate_processor() {
+    let fake = Fake::new(vec![usb(true)]);
+    let (c, p) = engine_48k();
+    c.lock().unwrap().send(tone(true)).unwrap();
+    let (out, events) = start(&fake, &c, p, OutputChoice::SystemDefault, true);
+    assert!(peak(&fake.pull(1024)) > 0.1);
+    let old_slot = fake.slot();
+    fake.state().open_rate = Some(7_999);
+    old_slot.stream_failed();
+    out.poll_now();
+    assert_eq!(out.current(), None);
+    assert!(matches!(
+        events.lock().unwrap().last(),
+        Some(OutputEvent::OpenFailed { .. })
+    ));
+    let mut audio = [1.0; 512];
+    old_slot.process(&mut audio, 2);
+    assert!(audio.iter().all(|sample| *sample == 0.0));
+    fake.state().open_rate = Some(44_100);
+    assert!(wait_for(Duration::from_secs(4), || out.current().is_some()));
+    let audio = left(&fake.pull(44_100));
+    assert!((219..=221).contains(&upward_crossings(&audio[22_050..])));
 }
