@@ -385,3 +385,61 @@ fn algorithmic_reverb_chamber(b: Bencher, block: usize) {
 fn algorithmic_reverb_nonlinear(b: Bencher, block: usize) {
     algorithmic_reverb_block(b, block, 4);
 }
+
+fn lofi_colour_block(bencher: Bencher, block: usize, name: &str) {
+    use grooviq_dsp::lofi_colour::{LofiColour, preset};
+    let mut device = LofiColour::with_seed(SR, 77);
+    for (index, value) in preset(name).expect("a factory preset") {
+        device.set_param(index, value);
+    }
+    let source_l: [f32; 128] = std::array::from_fn(|i| {
+        let envelope = if i < 12 { 0.8 } else { 0.15 };
+        envelope * libm::sinf(i as f32 * 0.31)
+    });
+    let source_r: [f32; 128] = std::array::from_fn(|i| {
+        let envelope = if i < 23 { 0.6 } else { 0.12 };
+        envelope * libm::cosf(i as f32 * 0.19)
+    });
+    let (mut l, mut r) = ([0.0; 128], [0.0; 128]);
+    for _ in 0..SETTLE_BLOCKS {
+        l.copy_from_slice(&source_l);
+        r.copy_from_slice(&source_r);
+        device.process(&mut l[..block], &mut r[..block], None, &[]);
+    }
+    bencher.bench_local(|| {
+        l[..block].copy_from_slice(&source_l[..block]);
+        r[..block].copy_from_slice(&source_r[..block]);
+        device.process(
+            black_box(&mut l[..block]),
+            black_box(&mut r[..block]),
+            None,
+            &[],
+        );
+        black_box((&l[..block], &r[..block]));
+    });
+}
+
+#[divan::bench(args = grooviq_dsp::lofi_colour::PRESETS, consts = [64, 128])]
+fn lofi_colour_presets<const N: usize>(bencher: Bencher, name: &str) {
+    lofi_colour_block(bencher, N, name);
+}
+
+#[divan::bench(args = grooviq_dsp::shimmer_reverb::PRESETS, consts = [64, 128])]
+fn shimmer_reverb_block<const N: usize>(bencher: Bencher, name: &str) {
+    use grooviq_dsp::shimmer_reverb::{ShimmerReverb, preset};
+    let mut device = ShimmerReverb::new(SR);
+    for (index, value) in preset(name).unwrap() {
+        device.set_param(index, value);
+    }
+    let source_l: [f32; N] = std::array::from_fn(|i| libm::sinf(i as f32 * 0.137) * 0.6);
+    let source_r: [f32; N] = std::array::from_fn(|i| libm::cosf(i as f32 * 0.213) * 0.4);
+    for _ in 0..(SR as usize * 4 / N) {
+        let (mut l, mut r) = (source_l, source_r);
+        device.process(&mut l, &mut r, None, &[]);
+    }
+    bencher.bench_local(|| {
+        let (mut l, mut r) = (source_l, source_r);
+        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
+        black_box((l, r));
+    });
+}

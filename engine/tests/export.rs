@@ -116,6 +116,7 @@ fn options(format: WavFormat, loops: u32) -> ExportOptions {
         sample_rate: SR,
         format,
         loops,
+        song_region: None,
         max_tail_seconds: 10.0,
     }
 }
@@ -388,6 +389,7 @@ fn the_tail_is_capped() {
         ..EngineState::default()
     };
     let options = ExportOptions {
+        song_region: None,
         max_tail_seconds: 1.0,
         ..options(WavFormat::Float32, 1)
     };
@@ -556,6 +558,7 @@ fn cancel_during_the_tail_leaves_no_file() {
     // it (the race this test used to have) would let the export finish.
     let state = held_into_the_tail(&dc(60.0), 0);
     let options = ExportOptions {
+        song_region: None,
         max_tail_seconds: 0.1,
         ..options(WavFormat::Float32, 1)
     };
