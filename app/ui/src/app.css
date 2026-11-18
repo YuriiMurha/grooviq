@@ -867,7 +867,7 @@ input[type="checkbox"] {
   flex-direction: column;
   justify-content: center;
   min-width: 0;
-  max-width: 200px;
+  flex: 1 1 0;
 }
 
 .project-anchor {
