@@ -3,7 +3,8 @@
 //! deleted.
 //!
 //! * Saving is atomic: the zip is written to `<path>.tmp`, synced, then renamed over the target,
-//!   so a crash or a full disk leaves the previous file untouched.
+//!   so failures before rename leave the previous file untouched. A directory-sync failure
+//!   after rename reports [`DirectoryUnconfirmed`]: the new file is already visible.
 //! * `save` writes only what `load` reads back: `project.json` is compact and held to the same
 //!   size budget, so a project too big to reopen is refused instead of saved.
 //! * The bytes are a function of the project and the samples: entry order, names and timestamps
@@ -267,6 +268,10 @@ fn read_limited(path: &Path, limit: u64) -> io::Result<SampleFile> {
 /// seam for that order and for each step failing. Not part of the API.
 #[doc(hidden)]
 pub trait Disk {
+    /// Sync the renamed entry's parent directory.
+    fn sync_folder(&mut self, path: &Path) -> io::Result<()> {
+        sync_folder(path)
+    }
     /// Runs once the zip is written and flushed into the temp file, before it is synced.
     fn written(&mut self, _file: &mut File) -> io::Result<()> {
         Ok(())
@@ -522,8 +527,7 @@ impl Staged {
     pub(crate) fn commit(mut self, disk: &mut impl Disk) -> io::Result<()> {
         disk.rename(&self.tmp, &self.path)?;
         self.done = true;
-        sync_folder(&self.path);
-        Ok(())
+        confirm_directory(disk, &self.path)
     }
 }
 
@@ -560,21 +564,48 @@ fn stage(
     Ok(staged)
 }
 
-/// Syncs the folder so the rename itself survives a power cut. Best effort: some file systems
-/// refuse to sync a folder, and the file is already in place.
+/// The target was renamed successfully; its directory durability is unconfirmed.
+/// This is distinct from an error before rename: callers must retain the new target.
+#[derive(Debug)]
+pub struct DirectoryUnconfirmed(pub io::Error);
+impl fmt::Display for DirectoryUnconfirmed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "The file was written, but directory durability could not be confirmed: {}. Keep recovery copies and try saving again.",
+            self.0
+        )
+    }
+}
+impl std::error::Error for DirectoryUnconfirmed {}
+
+/// Whether an I/O error reports a completed rename, rather than an unchanged target.
+pub fn directory_unconfirmed(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|e| e.is::<DirectoryUnconfirmed>())
+}
+
+pub(crate) fn confirm_directory(disk: &mut impl Disk, path: &Path) -> io::Result<()> {
+    disk.sync_folder(path)
+        .map_err(|e| io::Error::other(DirectoryUnconfirmed(e)))
+}
+
 #[cfg(unix)]
-pub(crate) fn sync_folder(path: &Path) {
+fn sync_folder(path: &Path) -> io::Result<()> {
     let folder = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    if let Ok(dir) = File::open(folder) {
-        let _ = dir.sync_all();
-    }
+    File::open(folder)?.sync_all()
 }
 
+// Windows has no Unix directory-fsync contract. Saves retain the platform's rename
+// guarantees; success here does not claim directory durability on unsupported platforms.
 #[cfg(not(unix))]
-pub(crate) fn sync_folder(_path: &Path) {}
+fn sync_folder(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
 
 /// Opens a project: reads `project.json`, migrates it to this version, validates it and finds
 /// each channel's sample bytes (see [`Loaded`]).
@@ -887,6 +918,14 @@ mod tests {
     thread_local! {
         /// Syncs [`sync_file`] made on this thread.
         pub(super) static SYNCED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_open_errors_are_propagated() {
+        let root = tempfile::tempdir().unwrap();
+        let error = sync_folder(&root.path().join("missing").join("song.grooviq")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
