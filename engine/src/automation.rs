@@ -85,6 +85,10 @@ struct Bank {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AutomationSchedule(Arc<Bank>);
 impl AutomationSchedule {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.lanes.is_empty()
+    }
+
     pub fn build(
         mut clips: Vec<AutomationClip>,
         channels: &[ChannelSetup],

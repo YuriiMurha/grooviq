@@ -36,6 +36,7 @@ pub(crate) struct Graph {
     generation: u64,
     pub(crate) host_epoch: u64,
     host: Option<grooviq_dsp::HostTransport>,
+    automation_active: bool,
     tone: ToneNode,
     synth: SynthNode,
     /// Created with room for [`MAX_CHANNELS`] plus [`MAX_LEAVING`], so adding and removing
@@ -76,6 +77,7 @@ impl Graph {
             generation,
             host_epoch: 0,
             host: None,
+            automation_active: false,
             tone: ToneNode::new(sample_rate, ramp_len),
             synth: SynthNode::new(sample_rate, ramp_len),
             channels: Vec::with_capacity(MAX_CHANNELS + MAX_LEAVING),
@@ -377,18 +379,26 @@ impl Graph {
     }
 
     pub(crate) fn automate(&mut self, clock: &TransportClock, start: u64) {
-        let tick =
-            (clock.playing() && self.playback_mode == crate::PlaybackMode::Song).then(|| {
-                let tick = clock.tick_at(start);
-                self.song_loop.map_or(tick, |r| {
-                    if tick >= r.end_tick as f64 {
-                        r.start_tick as f64
-                            + (tick - r.start_tick as f64) % (r.end_tick - r.start_tick) as f64
-                    } else {
-                        tick
-                    }
-                })
-            });
+        let active = clock.playing()
+            && self.playback_mode == crate::PlaybackMode::Song
+            && !self.song.automation.is_empty();
+        // Leaving automation needs one restoration pass; an already-idle graph
+        // must not walk every channel's parameter table on every audio block.
+        if !active && !self.automation_active {
+            return;
+        }
+        self.automation_active = active;
+        let tick = active.then(|| {
+            let tick = clock.tick_at(start);
+            self.song_loop.map_or(tick, |r| {
+                if tick >= r.end_tick as f64 {
+                    r.start_tick as f64
+                        + (tick - r.start_tick as f64) % (r.end_tick - r.start_tick) as f64
+                } else {
+                    tick
+                }
+            })
+        });
         let any_solo = self.present().any(ChannelNode::solo);
         for c in self.channels.iter_mut().filter(|c| !c.leaving()) {
             c.automate(&self.song.automation, tick, any_solo);

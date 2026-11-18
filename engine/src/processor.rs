@@ -1107,4 +1107,117 @@ mod transport_delivery_tests {
         assert_eq!(facts[7].sample_rate, 44100.);
         assert_ne!(facts[6].stream_generation, facts[7].stream_generation);
     }
+    #[test]
+    fn idle_automation_transitions_restore_and_resume_current_targets() {
+        let channel = ChannelSetup::sampler(ChannelId(1), None, vec![], ChannelMix::default());
+        let automated = SongData {
+            end_tick: 9600,
+            automation: AutomationSchedule::build(
+                vec![AutomationClip {
+                    target: AutomationTarget::ChannelVolume(channel.id),
+                    priority: 1,
+                    start_tick: 0,
+                    offset_tick: 0,
+                    length_ticks: 9600,
+                    points: vec![AutomationPoint {
+                        tick: 0,
+                        value: 0.5,
+                        segment: AutomationSegment::Hold,
+                    }],
+                }],
+                std::slice::from_ref(&channel),
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        let (mut control, mut processor) = engine_with(
+            EngineConfig {
+                sample_rate: 48000.0,
+            },
+            EngineState {
+                channels: vec![channel],
+                song: automated.clone(),
+                ..Default::default()
+            },
+        );
+        let mut block = [0.0; BLOCK * 2];
+        // No automation in Pattern, including a manual base edit while idle.
+        control.send(Command::Play).unwrap();
+        control
+            .send(Command::SetChannelMix {
+                channel: ChannelId(1),
+                mix: ChannelMix {
+                    volume: 0.25,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.25);
+        control
+            .send(Command::SetPlaybackMode {
+                mode: PlaybackMode::Song,
+            })
+            .unwrap();
+        control.send(Command::Play).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.5);
+        // Clear a live schedule: restore once, then remain at the updated base.
+        control
+            .set_song(SongData {
+                end_tick: 9600,
+                ..Default::default()
+            })
+            .unwrap();
+        for _ in 0..3 {
+            processor.process(&mut block, 2);
+            assert_eq!(processor.graph.channel_gain_target(), 0.25);
+        }
+        control.set_song(automated).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.5);
+        control
+            .send(Command::SetPlaybackMode {
+                mode: PlaybackMode::Pattern,
+            })
+            .unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.25);
+        control
+            .send(Command::SetChannelMix {
+                channel: ChannelId(1),
+                mix: ChannelMix {
+                    volume: 0.75,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.75);
+        control
+            .send(Command::SetPlaybackMode {
+                mode: PlaybackMode::Song,
+            })
+            .unwrap();
+        control.send(Command::Play).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.5);
+        control.send(Command::Stop).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.75);
+        control.send(Command::Play).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.5);
+        control.reconfigure(
+            &mut processor,
+            EngineConfig {
+                sample_rate: 44100.0,
+            },
+        );
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.5);
+        control.send(Command::Stop).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.75);
+    }
 }
