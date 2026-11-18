@@ -61,6 +61,18 @@ fn character_delay_factory_and_controls_realtime() {
                         finite &= l.iter().chain(&r).all(|x| x.is_finite());
                     }
                 }
+                // Exercise completed fades, active queued targets and reset under the guard.
+                d.set_param(0, 0.0);
+                for block in 0..(sr as usize / 64) {
+                    d.set_param(2, if block % 2 == 0 { 20.0 } else { 20.05 });
+                    let mut l = [0.0; 64];
+                    let mut r = [0.0; 64];
+                    d.process(&mut l, &mut r, None, &[]);
+                    if block == 5 {
+                        d.reset();
+                    }
+                    finite &= l.iter().chain(&r).all(|x| x.is_finite());
+                }
                 d.set_tempo(20.0);
                 d.reset();
                 d.process(&mut [], &mut [], None, &[]);

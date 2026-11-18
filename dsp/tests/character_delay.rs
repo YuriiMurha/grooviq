@@ -317,3 +317,172 @@ fn analogue_noise_channels_are_independent_and_tail_dies() {
     assert!(peak(&l[..22050]) > 0.01);
     assert!(peak(&l[22050 * 3..]) < 1e-8);
 }
+
+#[test]
+fn automated_tails_decay_against_static_energy_windows() {
+    for sr in [22050., 48000., 96000.] {
+        for voice in 0..6 {
+            for tempo in [false, true] {
+                let render = |automate| {
+                    let mut d = patch(sr, (voice % 3) as f32);
+                    if voice >= 3 {
+                        for (i, v) in preset(PRESETS[voice - 3]).unwrap() {
+                            d.set_param(i, v);
+                        }
+                    }
+                    for (i, v) in [
+                        (0, if tempo { 1. } else { 0. }),
+                        (1, 0.),
+                        (2, 20.),
+                        (8, 120.),
+                        (3, 0.95),
+                        (7, 1.),
+                    ] {
+                        d.set_param(i, v);
+                    }
+                    let n = (sr * 4.) as usize;
+                    let mut l: Vec<_> = (0..n)
+                        .map(|i| {
+                            if i < (sr * 0.1) as usize {
+                                0.5 * libm::sinf(i as f32 * std::f32::consts::TAU * 300. / sr)
+                            } else {
+                                0.
+                            }
+                        })
+                        .collect();
+                    let mut r = l.clone();
+                    for start in (0..n).step_by(64) {
+                        if automate {
+                            if tempo {
+                                d.set_tempo(if start % 128 == 0 { 120. } else { 121. });
+                            } else {
+                                d.set_param(2, if start % 128 == 0 { 20. } else { 20.05 });
+                            }
+                        }
+                        let end = (start + 64).min(n);
+                        run(&mut d, &mut l[start..end], &mut r[start..end], 17);
+                    }
+                    let energy = |a: f32, b: f32| {
+                        l[(sr * a) as usize..(sr * b) as usize]
+                            .iter()
+                            .map(|x| (*x as f64) * (*x as f64))
+                            .sum::<f64>()
+                            / (sr * (b - a)) as f64
+                    };
+                    (energy(0.2, 0.7), energy(2.5, 3.))
+                };
+                let static_e = render(false);
+                let moving = render(true);
+                eprintln!(
+                    "decay sr={sr} voice={voice} tempo={tempo} static={static_e:?} moving={moving:?}"
+                );
+                assert!(moving.0 > 1e-8, "nonvacuous early tail");
+                assert!(moving.1 / moving.0 < 0.02);
+                assert!(moving.1 / moving.0 < (static_e.1 / static_e.0) * 10. + 1e-12);
+            }
+        }
+    }
+}
+
+#[test]
+fn live_echo_moves_to_final_time_division_and_tempo() {
+    for sr in [22050., 48000., 192000.] {
+        for (control, value, ms) in [(2, 40., 40.), (1, 1., 125.), (8, 240., 31.25)] {
+            let mut d = patch(sr, 0.);
+            d.set_param(3, 0.);
+            if control != 2 {
+                d.set_param(0, 1.);
+                d.set_param(1, 0.);
+                d.set_tempo(120.);
+            }
+            let mut silence = vec![0.; (sr * 0.1) as usize];
+            let mut r = silence.clone();
+            run(&mut d, &mut silence, &mut r, 17);
+            d.set_param(control, value);
+            run(&mut d, &mut silence, &mut r, 17);
+            let mut l = vec![0.; (sr * 0.3) as usize];
+            let mut r = l.clone();
+            l[0] = 0.5;
+            run(&mut d, &mut l, &mut r, 127);
+            let expected = (sr * ms * 0.001) as usize;
+            let peak = l
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+                .unwrap()
+                .0;
+            assert!(
+                peak.abs_diff(expected) <= 3,
+                "sr={sr} control={control} peak={peak} expected={expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fades_and_mode_switches_have_bounded_steps_and_sample_aligned_partitions() {
+    for sr in [22050., 48000., 192000.] {
+        let render = |block| {
+            let mut d = patch(sr, 0.);
+            for (i, v) in [(2, 20.), (3, 0.8), (10, 1.)] {
+                d.set_param(i, v);
+            }
+            let n = (sr * 0.6) as usize;
+            let mut l: Vec<_> = (0..n)
+                .map(|i| 0.4 * libm::sinf(i as f32 * std::f32::consts::TAU * 100. / sr))
+                .collect();
+            let mut r = l.clone();
+            let events = [
+                (0, 2, 20.),
+                ((sr * 0.1) as usize, 2, 20.05),
+                ((sr * 0.17) as usize, 9, 1.),
+                ((sr * 0.31) as usize, 9, 2.),
+                ((sr * 0.43) as usize, 9, 0.),
+            ];
+            for (k, &(start, index, value)) in events.iter().enumerate() {
+                d.set_param(index, value);
+                let end = events.get(k + 1).map_or(n, |x| x.0);
+                run(&mut d, &mut l[start..end], &mut r[start..end], block);
+            }
+            let step = l
+                .windows(2)
+                .map(|w| (w[1] - w[0]).abs())
+                .fold(0.0f32, f32::max);
+            eprintln!("step sr={sr} block={block}: {step}");
+            assert!(step < 0.05 * 22050. / sr);
+            assert!(l.iter().any(|v| v.abs() > 0.1));
+            (l, r)
+        };
+        let reference = render(1);
+        for block in [17, 64, 127, 128] {
+            assert_eq!(reference, render(block));
+        }
+    }
+}
+
+#[test]
+fn correlated_heads_do_not_raise_wet_gain_during_fade() {
+    for sr in [22050., 48000., 192000.] {
+        let mut d = patch(sr, 0.);
+        d.set_param(3, 0.);
+        d.set_param(2, 20.);
+        let mut l: Vec<_> = (0..(sr * 0.3) as usize)
+            .map(|i| 0.3 * libm::sinf(i as f32 * std::f32::consts::TAU * 300. / sr))
+            .collect();
+        let mut r = l.clone();
+        let event = (sr * 0.15) as usize;
+        run(&mut d, &mut l[..event], &mut r[..event], 127);
+        let before = l[(sr * 0.1) as usize..event]
+            .iter()
+            .fold(0.0f32, |a, b| a.max(b.abs()));
+        d.set_param(2, 20.05);
+        run(&mut d, &mut l[event..], &mut r[event..], 17);
+        let during = l[event..event + (sr * 0.05) as usize]
+            .iter()
+            .fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(
+            before > 0.1 && during <= before * 1.01,
+            "sr={sr} before={before} during={during}"
+        );
+    }
+}

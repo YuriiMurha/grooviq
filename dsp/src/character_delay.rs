@@ -237,6 +237,9 @@ impl Device for CharacterDelay {
                 release
             };
             self.envelope = level + ec * (self.envelope - level);
+            if self.envelope < 1e-15 {
+                self.envelope = 0.0;
+            }
             self.in_m.update(xl.abs().max(xr.abs()), 1, self.sr);
 
             if !self.xfading && self.target != self.ta {
@@ -251,8 +254,8 @@ impl Device for CharacterDelay {
             );
             if self.xfading {
                 self.x = (self.x + self.xf_step).min(1.0);
-                let a = self.x * std::f32::consts::FRAC_PI_2;
-                let (ga, gb) = (libm::cosf(a), libm::sinf(a));
+                // Constant-sum wet/feedback fade: correlated heads must not boost loop gain.
+                let (ga, gb) = (1.0 - self.x, self.x);
                 let bl =
                     self.buf[0].read_frac((self.tb + modulation).clamp(1.0, 6.005 * self.sr) - 1.0);
                 let br =
@@ -267,6 +270,9 @@ impl Device for CharacterDelay {
             let fl = self.st_hi[0].run(&self.c_hi, self.st_lo[0].run(&self.c_lo, dl as f64)) as f32;
             let fr = self.st_hi[1].run(&self.c_hi, self.st_lo[1].run(&self.c_lo, dr as f64)) as f32;
             self.gate = self.gate.max(fl.abs()).max(fr.abs()) * libm::expf(-1.0 / (self.sr * 0.3));
+            if self.gate < 1e-15 {
+                self.gate = 0.0;
+            }
             let mut coloured = [fl, fr];
             let pole = libm::expf(-std::f32::consts::TAU * (12000.0 - 10000.0 * c[1]) / self.sr);
             for (ch, v) in coloured.iter_mut().enumerate() {
@@ -351,4 +357,111 @@ pub fn preset(name: &str) -> Option<Vec<(u32, f32)>> {
         patch[i].1 = v;
     }
     Some(patch)
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    const RATES: [f32; 5] = [22050., 44100., 48000., 96000., 192000.];
+    fn advance(d: &mut CharacterDelay, n: usize) {
+        for _ in 0..n {
+            d.process(&mut [0.0], &mut [0.0], None, &[]);
+        }
+    }
+    #[test]
+    fn physical_fade_duration_coalescing_and_latest_queue() {
+        for sr in RATES {
+            for control in [2, 1, 8] {
+                let mut d = CharacterDelay::new(sr);
+                if control == 2 {
+                    d.set_param(0, 0.);
+                }
+                advance(&mut d, 1);
+                let old = d.ta;
+                for v in if control == 2 {
+                    [30., 40., 50.]
+                } else if control == 1 {
+                    [2., 3., 6.]
+                } else {
+                    [120., 121., 122.]
+                } {
+                    d.set_param(control, v);
+                }
+                let first = d.target;
+                assert_ne!(first, old);
+                advance(&mut d, 1);
+                assert_eq!(d.tb, first);
+                let duration = (sr * 0.05).ceil() as usize;
+                advance(&mut d, duration / 2 - 1);
+                assert!(d.xfading);
+                assert_eq!(d.ta, old);
+                for v in if control == 2 {
+                    [60., 70., 80.]
+                } else if control == 1 {
+                    [1., 7., 8.]
+                } else {
+                    [130., 140., 150.]
+                } {
+                    d.set_param(control, v);
+                }
+                let final_target = d.target;
+                assert_eq!(d.tb, first, "active head must not restart");
+                advance(&mut d, duration - duration / 2 + 2);
+                assert_eq!(d.ta, first, "first fade must finish at 50 ms");
+                advance(&mut d, duration + 2);
+                assert!(!d.xfading);
+                assert_eq!(d.ta, final_target);
+            }
+        }
+    }
+    #[test]
+    fn private_detectors_zero_but_preserve_quiet_audio() {
+        for sr in RATES {
+            for model in [0., 1., 2.] {
+                let mut d = CharacterDelay::new(sr);
+                d.set_param(9, model);
+                d.envelope = f32::from_bits(17);
+                d.gate = f32::from_bits(31);
+                advance(&mut d, 1);
+                assert_eq!((d.envelope, d.gate), (0., 0.));
+                d.process(&mut [1e-6], &mut [1e-6], None, &[]);
+                assert!(d.envelope > 1e-10);
+                advance(&mut d, (sr * 12.) as usize);
+                assert_eq!((d.envelope, d.gate), (0., 0.));
+                for _ in 0..1024 {
+                    let (mut l, mut r) = ([0.], [0.]);
+                    d.process(&mut l, &mut r, None, &[]);
+                    assert!(!l[0].is_subnormal() && !r[0].is_subnormal());
+                }
+            }
+        }
+    }
+    #[test]
+    fn reset_clears_active_fade_and_queue() {
+        for sr in RATES {
+            for model in [0., 1., 2.] {
+                let mut d = CharacterDelay::new(sr);
+                advance(&mut d, 1);
+                d.set_param(2, 70.);
+                d.set_param(0, 0.);
+                advance(&mut d, 100);
+                d.set_param(2, 90.);
+                d.set_param(9, model);
+                assert!(d.xfading);
+                d.reset();
+                assert!(!d.xfading);
+                let mut fresh = CharacterDelay::new(sr);
+                for (i, v) in [(0, 0.), (2, 90.), (9, model)] {
+                    fresh.set_param(i, v);
+                }
+                let mut a = vec![0.3; (sr * 0.2) as usize];
+                let mut b = a.clone();
+                let mut c = a.clone();
+                let mut e = a.clone();
+                d.process(&mut a, &mut b, None, &[]);
+                fresh.process(&mut c, &mut e, None, &[]);
+                assert_eq!((a, b), (c, e));
+            }
+        }
+    }
 }
