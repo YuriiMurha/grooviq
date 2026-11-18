@@ -34,6 +34,8 @@ type Choke = (u8, u32, ChannelId);
 pub(crate) struct Graph {
     /// The controller's `reconfigure` count when the graph was built.
     generation: u64,
+    pub(crate) host_epoch: u64,
+    host: Option<grooviq_dsp::HostTransport>,
     tone: ToneNode,
     synth: SynthNode,
     /// Created with room for [`MAX_CHANNELS`] plus [`MAX_LEAVING`], so adding and removing
@@ -72,6 +74,8 @@ impl Graph {
         let ramp_len = ramp_len(sample_rate);
         Self {
             generation,
+            host_epoch: 0,
+            host: None,
             tone: ToneNode::new(sample_rate, ramp_len),
             synth: SynthNode::new(sample_rate, ramp_len),
             channels: Vec::with_capacity(MAX_CHANNELS + MAX_LEAVING),
@@ -239,6 +243,7 @@ impl Graph {
     /// Swaps in a pattern and returns the old one, to be freed elsewhere. Playback goes on at
     /// the same tick, in the new pattern (notes already sounding end as booked).
     pub(crate) fn set_pattern(&mut self, pattern: Box<PatternData>) -> Box<PatternData> {
+        self.host_epoch = self.host_epoch.wrapping_add(1);
         self.sequencer.reseek();
         self.song_sequencer.reseek();
         std::mem::replace(&mut self.pattern, pattern)
@@ -303,6 +308,7 @@ impl Graph {
     }
 
     pub(crate) fn set_song(&mut self, song: Box<crate::SongData>) -> Box<crate::SongData> {
+        self.host_epoch = self.host_epoch.wrapping_add(1);
         self.song_sequencer.stop();
         if !crate::audio_clip::AudioRuntime::compatible(&self.song.audio, &song.audio) {
             self.audio.reset();
@@ -366,6 +372,29 @@ impl Graph {
         self.synth.panic_next = true;
     }
 
+    pub(crate) fn set_host(&mut self, host: grooviq_dsp::HostTransport) {
+        self.host = Some(host);
+    }
+
+    pub(crate) fn automate(&mut self, clock: &TransportClock, start: u64) {
+        let tick =
+            (clock.playing() && self.playback_mode == crate::PlaybackMode::Song).then(|| {
+                let tick = clock.tick_at(start);
+                self.song_loop.map_or(tick, |r| {
+                    if tick >= r.end_tick as f64 {
+                        r.start_tick as f64
+                            + (tick - r.start_tick as f64) % (r.end_tick - r.start_tick) as f64
+                    } else {
+                        tick
+                    }
+                })
+            });
+        let any_solo = self.present().any(ChannelNode::solo);
+        for c in self.channels.iter_mut().filter(|c| !c.leaving()) {
+            c.automate(&self.song.automation, tick, any_solo);
+        }
+    }
+
     /// Renders one block into the master bus `l`/`r` (overwritten); `events` are sorted by
     /// offset. Returns how many nodes the NaN guard silenced.
     pub(crate) fn render(
@@ -385,6 +414,9 @@ impl Graph {
         *l = *node_l;
         *r = *node_r;
 
+        if let Some(host) = self.host {
+            self.synth.device.set_transport(&host);
+        }
         self.synth.render(node_l, node_r, events);
         if guard(node_l, node_r) {
             self.synth.reset();
@@ -400,6 +432,7 @@ impl Graph {
             }
             let splits = splits_for(channel, chokes, &mut self.splits);
             // A silent channel adds nothing.
+            channel.set_host(self.host);
             if !channel.render(node_l, node_r, splits) {
                 continue;
             }

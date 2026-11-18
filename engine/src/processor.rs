@@ -68,6 +68,8 @@ const NO_EVENT: NoteEvent = NoteEvent {
     id: 0,
 };
 
+type HostSignature = (bool, u64, u64, u64, u64, u64, u64, u64);
+
 /// Renders audio on the audio thread. Created by [`crate::engine`].
 pub struct AudioProcessor {
     commands: Consumer<Msg>,
@@ -89,6 +91,9 @@ pub struct AudioProcessor {
     events: [NoteEvent; MAX_EVENTS],
     /// First frame of the next block: the engine's sample clock.
     clock: u64,
+    stream_generation: u64,
+    host_revision: u64,
+    host_last: Option<HostSignature>,
     /// Play state and tempo. Owned here, not by the graph, so it survives graph swaps, as do
     /// the recording tap and the metronome.
     transport: TransportClock,
@@ -124,6 +129,9 @@ impl AudioProcessor {
             served: BLOCK,
             events: [NO_EVENT; MAX_EVENTS],
             clock: 0,
+            stream_generation: 0,
+            host_revision: 0,
+            host_last: None,
             transport,
             recorder: Recorder::new(recorded),
             metronome: Metronome::new(sample_rate, time_signature),
@@ -167,6 +175,7 @@ impl AudioProcessor {
     /// [`crate::Controller::reconfigure`] calls this, with the audio callback stopped, so the
     /// old graph is freed on its thread. The transport keeps playing from the tick it reached.
     pub(crate) fn restart(&mut self, sample_rate: f32, graph: Box<Graph>) {
+        self.stream_generation = self.stream_generation.wrapping_add(1);
         self.transport.set_sample_rate(self.clock, sample_rate);
         self.metronome.set_sample_rate(sample_rate);
         // A pattern of a new length can arrive with the fresh graph (its swap was still queued,
@@ -208,6 +217,37 @@ impl AudioProcessor {
         let end = start + BLOCK as u64;
         self.retry_trash();
         let count = self.drain(start, end);
+        let region = self.graph.song_loop;
+        let signature = (
+            self.transport.playing(),
+            self.transport.revision(),
+            region.map_or(0, |r| r.start_tick),
+            self.graph.generation(),
+            region.map_or(0, |r| r.end_tick),
+            self.graph.playback_mode as u64,
+            self.transport.shift(),
+            self.graph.host_epoch,
+        );
+        let changed = self.host_last != Some(signature);
+        if changed {
+            self.host_revision = self.host_revision.wrapping_add(1);
+            self.host_last = Some(signature);
+        }
+        let region = if self.graph.playback_mode == crate::PlaybackMode::Song {
+            self.graph.song_loop.or(Some(crate::SongLoop {
+                start_tick: 0,
+                end_tick: 0,
+            }))
+        } else {
+            None
+        };
+        self.graph.set_host(self.transport.host(
+            start,
+            self.stream_generation,
+            self.host_revision,
+            changed,
+            region,
+        ));
         if !self.faulted {
             let Self {
                 graph,
@@ -218,6 +258,7 @@ impl AudioProcessor {
                 ..
             } = self;
             match catch_unwind(AssertUnwindSafe(|| {
+                graph.automate(transport, start);
                 graph.sequence(transport, start);
                 graph.render(block_l, block_r, &events[..count])
             })) {
@@ -562,6 +603,7 @@ impl AudioProcessor {
     /// before `reconfigure` arrives after the fresh graph it made, and must not replace it
     /// (cutting held voices, or bringing back the old rate).
     fn replace_graph(&mut self, mut graph: Box<Graph>, at: u64) {
+        self.host_last = None;
         let leaving = if graph.generation() == self.generation {
             self.faulted = false;
             let new_len = graph.pattern_length();

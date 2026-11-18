@@ -23,7 +23,112 @@ pub struct NoteEvent {
     pub id: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostDomain {
+    Pattern,
+    Song,
+}
+
+/// Canonical host time map. Equality tokens carry no ordering guarantee.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HostTransport {
+    pub domain: HostDomain,
+    pub frame: u64,
+    pub frames: u32,
+    pub sample_rate: f32,
+    pub bpm: f32,
+    pub playing: bool,
+    pub anchor_frame: u64,
+    pub anchor_tick: f64,
+    pub shift: u64,
+    pub loop_start: u64,
+    pub loop_end: u64,
+    pub stream_generation: u64,
+    pub discontinuity: u64,
+    pub changed: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HostPosition {
+    pub unwrapped_tick: f64,
+    pub tick: f64,
+    pub iteration: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostEdge {
+    pub offset: u32,
+    pub iteration: u64,
+    pub discontinuity: u64,
+}
+impl HostTransport {
+    /// Queries sample positions and the exclusive end boundary; no event is consumed.
+    pub fn position_at(&self, offset: u32) -> Option<HostPosition> {
+        if offset > self.frames {
+            return None;
+        }
+        let frames_per_tick = f64::from(self.sample_rate) * 60.0 / (f64::from(self.bpm) * 960.0);
+        let elapsed = if self.playing {
+            (self.frame + u64::from(offset)) as f64 - self.anchor_frame as f64
+        } else {
+            0.0
+        };
+        let unwrapped_tick = self.anchor_tick + elapsed / frames_per_tick + self.shift as f64;
+        let (tick, iteration) =
+            if self.loop_end > self.loop_start && unwrapped_tick >= self.loop_end as f64 {
+                let length = (self.loop_end - self.loop_start) as f64;
+                let iteration = ((unwrapped_tick - self.loop_start as f64) / length).floor() as u64;
+                (
+                    self.loop_start as f64 + (unwrapped_tick - self.loop_start as f64) % length,
+                    iteration,
+                )
+            } else {
+                (unwrapped_tick, 0)
+            };
+        Some(HostPosition {
+            unwrapped_tick,
+            tick,
+            iteration,
+        })
+    }
+    /// Every wrap is observable. At 400 BPM/8 kHz a one-tick loop is 1.25 frames,
+    /// so at most one edge falls on a sample. Iteration changes and the initial
+    /// discontinuity share one marker when coincident. MAX_BLOCK markers suffice.
+    pub fn edges(&self) -> impl Iterator<Item = HostEdge> + '_ {
+        (0..self.frames).filter_map(|offset| {
+            let position = self.position_at(offset)?;
+            let previous = if offset > 0 {
+                self.position_at(offset - 1)?.iteration
+            } else if self.frame > 0 {
+                let mut prior = *self;
+                prior.frame -= 1;
+                prior.position_at(0)?.iteration
+            } else {
+                0
+            };
+            (position.iteration != previous || (offset == 0 && self.changed)).then_some(HostEdge {
+                offset,
+                iteration: position.iteration,
+                discontinuity: self.discontinuity,
+            })
+        })
+    }
+    /// A split preserves the canonical anchor and absolute arithmetic.
+    pub fn span(&self, offset: u32, frames: u32) -> Option<Self> {
+        if offset.checked_add(frames)? > self.frames {
+            return None;
+        }
+        Some(Self {
+            frame: self.frame + u64::from(offset),
+            frames,
+            changed: self.changed && offset == 0,
+            ..*self
+        })
+    }
+}
+
 pub trait Device: Send {
+    /// Facts for the immediately following actual process span; default preserves old kernels.
+    fn set_transport(&mut self, _transport: &HostTransport) {}
+
     /// Sets a parameter by its `index` in the device's `SPEC` table, in real units (min..max).
     fn set_param(&mut self, index: u32, value: f32);
 
