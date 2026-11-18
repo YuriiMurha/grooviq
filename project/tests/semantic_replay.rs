@@ -2,7 +2,7 @@
 use grooviq_engine::{EngineConfig, engine};
 use grooviq_project::{
     notes::NotesEdit,
-    session::{Edit, Session},
+    session::{Edit, PatternStamp, Session},
 };
 use serde_json::{Value, json};
 use std::{
@@ -37,13 +37,28 @@ fn session_matches_shared_semantic_replay() {
         let now = Instant::now();
         let result = match step["command"].as_str().unwrap() {
             "project_view" => Ok(wire(session.view())),
-            "project_edit" => session
-                .apply_in(
-                    generation(),
-                    serde_json::from_value::<Edit>(a["edit"].clone()).unwrap(),
-                    now,
-                )
-                .map(wire),
+            "project_edit" => {
+                let edit = serde_json::from_value::<Edit>(a["edit"].clone()).unwrap();
+                let scoped = matches!(
+                    edit,
+                    Edit::ToggleStep { .. }
+                        | Edit::SetStepVelocity { .. }
+                        | Edit::ClearStep { .. }
+                        | Edit::SetPatternLength { .. }
+                        | Edit::SetSwing { .. }
+                );
+                if generation() != session.generation() || !scoped {
+                    session.apply_in(generation(), edit, now).map(wire)
+                } else {
+                    session
+                        .apply_stamped(
+                            serde_json::from_value::<PatternStamp>(a["stamp"].clone()).unwrap(),
+                            edit,
+                            now,
+                        )
+                        .map(wire)
+                }
+            }
             "channel_add_synth" => session
                 .add_synth_channel_in(generation(), a["preset"].as_str().unwrap(), now)
                 .map(wire),
@@ -54,7 +69,11 @@ fn session_matches_shared_semantic_replay() {
                 )
                 .map(wire),
             "notes_undo" | "notes_redo" => session
-                .step_history_in(generation(), step["command"] == "notes_undo", now)
+                .history_stamped(
+                    serde_json::from_value::<PatternStamp>(a["stamp"].clone()).unwrap(),
+                    step["command"] == "notes_undo",
+                    now,
+                )
                 .map(wire),
             "project_new" => session.new_project().map(wire),
             other => panic!("unhandled replay command {other}"),

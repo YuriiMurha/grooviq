@@ -1,3 +1,4 @@
+import type { PatternStamp } from "../api/patterns";
 import { createContext, useContext } from "react";
 import type { Edit, ProjectView } from "../api/project";
 
@@ -9,7 +10,7 @@ export interface ProjectContextValue {
    * toast; the promise still resolves, to whether the edit was applied. With `still`, the edit is
    * dropped quietly (resolving `false`) if `still()` is false when its turn in the queue comes:
    * an edit made for one project must not land in the one that replaced it. */
-  apply: (edit: Edit, still?: () => boolean) => Promise<boolean>;
+  apply: (edit: Edit, still?: () => boolean, origin?: PatternStamp) => Promise<boolean>;
   /** Runs another command that returns a view (`channelAdd`, `channelSetSample`, ...) in the
    * same queue as the edits and stores its view. A rejection shows as a toast; the promise
    * resolves to whether it succeeded. */

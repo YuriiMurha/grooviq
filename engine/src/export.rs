@@ -43,6 +43,8 @@ pub struct ExportOptions {
     pub format: WavFormat,
     /// How many times the pattern plays (0 counts as 1).
     pub loops: u32,
+    /// Song region to render once; None renders the whole song, ignoring transport looping.
+    pub song_region: Option<crate::SongLoop>,
     /// The longest tail after the last loop, in seconds.
     pub max_tail_seconds: f32,
 }
@@ -54,6 +56,7 @@ impl Default for ExportOptions {
             sample_rate: 48_000,
             format: WavFormat::Pcm24,
             loops: 1,
+            song_region: None,
             max_tail_seconds: 10.0,
         }
     }
@@ -223,13 +226,64 @@ fn write_part(
     };
     // The rate the engine really runs at, which the file must say.
     let rate = config.rate();
+    let mut state = state;
+    let is_song = state.playback_mode == crate::PlaybackMode::Song;
+    let from = if is_song {
+        options.song_region.map_or(0, |r| r.start_tick)
+    } else {
+        0
+    };
+    if is_song {
+        if !state.song.valid_loop(options.song_region) {
+            return Err(io::Error::other("invalid song export region").into());
+        }
+        state.song_loop = None;
+    }
+    let song_end = options
+        .song_region
+        .map_or(state.song.end_tick, |r| r.end_tick);
+    let exact_end = if options.song_region.is_none() {
+        state
+            .song
+            .end_frame_at(rate)
+            .max(state.song.audio.end_frame(state.bpm, rate))
+    } else {
+        0
+    };
+    if is_song && options.song_region.is_some() {
+        state.song.arrangement.notes.retain(|n| n.tick < song_end);
+        for n in &mut state.song.arrangement.notes {
+            n.length = n.length.min(song_end - n.tick);
+        }
+        state.song.arrangement.length = state.song.arrangement.length.min(song_end);
+        state.song.end_tick = song_end;
+        state.song.end_frame = 0;
+    }
     let (mut controller, mut processor) = engine_with(config, state);
     let loops = options.loops.max(1);
+    let command = if is_song {
+        Command::Play
+    } else {
+        Command::PlayLoops { loops }
+    };
     controller
-        .send(Command::PlayLoops { loops })
+        .send(command)
         .map_err(|_| io::Error::other("the engine refused to play"))?;
+    if is_song && from > 0 {
+        controller
+            .send(Command::Seek { tick: from })
+            .map_err(|_| io::Error::other("the engine refused to seek"))?;
+    }
     let (bpm, length) = (controller.state().bpm, controller.state().pattern.length);
-    let pattern_frames = ticks_to_frames(f64::from(loops) * f64::from(length), bpm, rate);
+    let pattern_frames = if is_song {
+        if options.song_region.is_some() {
+            ticks_to_frames((song_end - from) as f64, bpm, rate)
+        } else {
+            ticks_to_frames(song_end as f64, bpm, rate).max(exact_end)
+        }
+    } else {
+        ticks_to_frames(f64::from(loops) * f64::from(length), bpm, rate)
+    };
     let max_tail = f64::from(options.max_tail_seconds);
     let max_tail = if max_tail.is_finite() && max_tail > 0.0 {
         (max_tail * f64::from(rate)).ceil() as u64

@@ -165,6 +165,8 @@ if (ui) {
   step("semantic replay browser", "npx", ["playwright", "install", "chromium"], uiDir);
   step("semantic replay", "npm", ["run", "e2e", "--", "--config", "playwright.replay.config.ts", "--project", "chromium"], uiDir);
 }
+if (ui || workspace || changed.includes("scripts/grid-budget.mjs"))
+  step("grid CPU budget", "node", ["scripts/grid-budget.mjs"]);
 // The app crate's build script embeds the built UI, so it needs app/ui/dist.
 if (ui || workspace || rustCrates.has("grooviq-app")) step("ui build", "npm", ["run", "build"], uiDir);
 
@@ -180,6 +182,10 @@ if (workspace || rustCrates.has("grooviq-project") || changed.some((path) => pat
 }
 if (workspace || rustCrates.has("grooviq-project") || changed.some((path) => path.startsWith("scripts/notes-edit-budget.")))
   step("real Session replay", "node", ["scripts/semantic-replay.mjs"]);
+if (workspace || rustCrates.has("grooviq-engine") || changed.some((path) => path === "scripts/export-budget.mjs" || path.startsWith("scripts/notes-edit-budget."))) {
+  step("export budget runner tests", "node", ["--test", "scripts/notes-edit-budget.test.mjs"]);
+  step("export budget", "node", ["scripts/export-budget.mjs"]);
+}
 if (tooling) {
   step("tooling: check-changed plans", "node", ["scripts/check-changed.mjs", "--plan", "--base", base]);
   if (existsSync(join(root, ".githooks", "pre-commit")))

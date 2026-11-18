@@ -84,6 +84,7 @@ struct Context {
     version: u32,
     channels: HashSet<u32>,
     drops: Vec<NoteDrops>,
+    automation_points: usize,
 }
 
 thread_local! {
@@ -109,6 +110,7 @@ pub(crate) fn with_context<T>(
             version,
             channels,
             drops: Vec::new(),
+            automation_points: 0,
         });
     });
     let _clear = Clear;
@@ -172,6 +174,21 @@ pub(crate) fn notes<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Note>, D::Err
         }
     }
     d.deserialize_seq(Notes)
+}
+
+/// Account before retaining each point, across all clips in a file read.
+pub(crate) fn retain_automation_point() -> bool {
+    CONTEXT.with(|context| {
+        let mut context = context.borrow_mut();
+        let Some(context) = context.as_mut() else {
+            return true;
+        };
+        if context.automation_points == crate::MAX_TOTAL_AUTOMATION_POINTS {
+            return false;
+        }
+        context.automation_points += 1;
+        true
+    })
 }
 
 #[cfg(test)]

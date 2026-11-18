@@ -21,6 +21,7 @@ mod midi_cmds;
 mod notes_cmds;
 mod output_mode;
 pub mod panic_hook;
+mod patterns_cmds;
 mod project_cmds;
 mod settings;
 
@@ -197,11 +198,11 @@ fn start_audio(app: &AppHandle) -> Audio {
         move || notes_cmds::record_loop(&session, &controller, &log, &app)
     });
     let selected_channel: notes_cmds::SelectedChannel = Arc::new(AtomicU32::new(NO_CHANNEL));
-    let midi = Arc::new(Mutex::new(MidiHub::new(
+    let midi = Arc::new(Mutex::new(MidiHub::from_settings(
         Box::new(MidirPorts::new()),
         Arc::new(midi::ControllerSink::new(Arc::clone(&controller))),
         Arc::clone(&selected_channel),
-        settings.midi_disabled.clone(),
+        &settings,
     )));
     spawn_named("grooviq-midi", {
         let (midi, log, app) = (Arc::clone(&midi), Arc::clone(&log), app.clone());
@@ -426,6 +427,8 @@ pub fn run() {
             project_cmds::recovery_restore,
             project_cmds::recovery_discard,
             project_cmds::app_exit,
+            patterns_cmds::pattern_list,
+            patterns_cmds::pattern_edit,
             notes_cmds::pattern_notes,
             notes_cmds::notes_edit,
             notes_cmds::notes_undo,

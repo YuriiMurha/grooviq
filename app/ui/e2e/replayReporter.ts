@@ -10,7 +10,7 @@ export default class ReplayReporter implements Reporter {
   }
 
   onTestEnd(_test: TestCase, result: TestResult) {
-    if (result.status === "passed") this.passed++;
+    if (result.status === "passed" && _test.expectedStatus === "passed" && result.retry === 0) this.passed++;
   }
 
   async onEnd(result: FullResult): Promise<{ status: "failed" } | void> {

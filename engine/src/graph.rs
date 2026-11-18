@@ -45,6 +45,13 @@ pub(crate) struct Graph {
     channels: Vec<Box<ChannelNode>>,
     pattern: Box<PatternData>,
     sequencer: Sequencer,
+    song: Box<crate::SongData>,
+    audio: crate::audio_clip::AudioRuntime,
+    audio_l: [f32; BLOCK],
+    audio_r: [f32; BLOCK],
+    song_sequencer: crate::song::SongSequencer,
+    pub(crate) playback_mode: crate::PlaybackMode,
+    pub(crate) song_loop: Option<crate::SongLoop>,
     /// The grouped note-ons of the block being rendered, and one channel's split offsets.
     chokes: [Choke; MAX_CHOKES],
     splits: [u32; MAX_CHOKES],
@@ -70,6 +77,13 @@ impl Graph {
             channels: Vec::with_capacity(MAX_CHANNELS + MAX_LEAVING),
             pattern: Box::new(PatternData::default()),
             sequencer: Sequencer::new(),
+            song: Box::default(),
+            audio: Default::default(),
+            audio_l: [0.0; BLOCK],
+            audio_r: [0.0; BLOCK],
+            song_sequencer: crate::song::SongSequencer::new(),
+            playback_mode: crate::PlaybackMode::Pattern,
+            song_loop: None,
             chokes: [(0, 0, ChannelId(0)); MAX_CHOKES],
             splits: [0; MAX_CHOKES],
             node_l: [0.0; BLOCK],
@@ -152,6 +166,7 @@ impl Graph {
             .iter()
             .position(|c| c.id() == id && !c.leaving())?;
         self.sequencer.forget_channel(id);
+        self.song_sequencer.forget_channel(id);
         let leaving = self.channels.iter().filter(|c| c.leaving()).count();
         let removed = if leaving < MAX_LEAVING {
             self.channels[index].leave();
@@ -225,6 +240,7 @@ impl Graph {
     /// the same tick, in the new pattern (notes already sounding end as booked).
     pub(crate) fn set_pattern(&mut self, pattern: Box<PatternData>) -> Box<PatternData> {
         self.sequencer.reseek();
+        self.song_sequencer.reseek();
         std::mem::replace(&mut self.pattern, pattern)
     }
 
@@ -235,30 +251,94 @@ impl Graph {
 
     /// The transport started: the sequencer finds its place again.
     pub(crate) fn transport_started(&mut self) {
+        self.audio.reset();
         self.sequencer.reseek();
+        self.song_sequencer.reseek();
     }
 
     /// The transport stopped: every pending note-off goes out at the next block's start.
     pub(crate) fn transport_stopped(&mut self) {
+        self.audio.reset();
         self.sequencer.stop();
+        self.song_sequencer.stop();
     }
 
     /// Queues into the channels the sequenced notes of the block that starts at frame `f0`
     /// (call it before [`Self::render`]).
     pub(crate) fn sequence(&mut self, clock: &TransportClock, f0: u64) {
+        self.audio_l.fill(0.0);
+        self.audio_r.fill(0.0);
+        if self.playback_mode == crate::PlaybackMode::Song {
+            self.audio.render(
+                &self.song.audio,
+                self.song_loop,
+                clock,
+                f0,
+                &mut self.audio_l,
+                &mut self.audio_r,
+            );
+        }
         let channels = &mut self.channels;
-        self.sequencer.run(&self.pattern, clock, f0, |id, event| {
-            match channels.iter_mut().find(|c| c.id() == id && !c.leaving()) {
-                None => Delivery::NoChannel,
-                Some(channel) => {
-                    if channel.push_event(event) {
-                        Delivery::Taken
-                    } else {
-                        Delivery::Full
-                    }
+        let mut sink = |id, event| match channels.iter_mut().find(|c| c.id() == id && !c.leaving())
+        {
+            None => Delivery::NoChannel,
+            Some(channel) => {
+                if channel.push_event(event) {
+                    Delivery::Taken
+                } else {
+                    Delivery::Full
                 }
             }
-        });
+        };
+        if self.playback_mode == crate::PlaybackMode::Song {
+            self.sequencer
+                .flush(clock, f0, f0 + BLOCK as u64 - 1, &mut sink);
+            self.song_sequencer
+                .run(&self.song, self.song_loop, clock, f0, &mut sink);
+        } else {
+            self.song_sequencer
+                .flush(clock, f0, f0 + BLOCK as u64 - 1, &mut sink);
+            self.sequencer.run(&self.pattern, clock, f0, &mut sink);
+        }
+    }
+
+    pub(crate) fn set_song(&mut self, song: Box<crate::SongData>) -> Box<crate::SongData> {
+        self.song_sequencer.stop();
+        if !crate::audio_clip::AudioRuntime::compatible(&self.song.audio, &song.audio) {
+            self.audio.reset();
+        }
+        std::mem::replace(&mut self.song, song)
+    }
+
+    pub(crate) fn reset_audio(&mut self) {
+        self.audio.reset();
+    }
+    pub(crate) fn audio_active(&self) -> bool {
+        self.audio.active()
+    }
+    pub(crate) fn keep_audio(&mut self, old: &Self) {
+        if self.song_loop == old.song_loop
+            && self.playback_mode == old.playback_mode
+            && crate::audio_clip::AudioRuntime::compatible(&self.song.audio, &old.song.audio)
+        {
+            self.audio = old.audio.clone();
+        }
+    }
+    pub(crate) fn song(&self) -> &crate::SongData {
+        &self.song
+    }
+
+    pub(crate) fn position(&self, tick: u64) -> u64 {
+        if self.playback_mode == crate::PlaybackMode::Song {
+            if let Some(r) = self.song_loop
+                && tick >= r.end_tick
+            {
+                return r.start_tick + (tick - r.start_tick) % (r.end_tick - r.start_tick);
+            }
+            tick.min(self.song.end_tick)
+        } else {
+            tick
+        }
     }
 
     #[cfg(test)]
@@ -329,6 +409,12 @@ impl Graph {
                 continue;
             }
             mix_in(l, r, node_l, node_r);
+        }
+        if !self.song.audio.is_empty() && self.playback_mode == crate::PlaybackMode::Song {
+            if guard(&mut self.audio_l, &mut self.audio_r) {
+                silenced += 1;
+            }
+            mix_in(l, r, &self.audio_l, &self.audio_r);
         }
         silenced
     }

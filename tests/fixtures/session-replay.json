@@ -39,6 +39,7 @@
             "steps": 16,
             "swing": 0.0
           },
+          "patternRevision": 0,
           "recording": false,
           "timeSignature": {
             "beats": 4,
@@ -65,6 +66,7 @@
           "steps": 16,
           "swing": 0.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -190,6 +192,7 @@
             "steps": 16,
             "swing": 0.0
           },
+          "patternRevision": 0,
           "recording": false,
           "timeSignature": {
             "beats": 4,
@@ -295,6 +298,7 @@
           "steps": 16,
           "swing": 0.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -420,6 +424,7 @@
             "steps": 16,
             "swing": 0.0
           },
+          "patternRevision": 0,
           "recording": false,
           "timeSignature": {
             "beats": 4,
@@ -525,6 +530,7 @@
           "steps": 16,
           "swing": 0.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -538,7 +544,7 @@
         81,
         78,
         49,
-        1,
+        2,
         0,
         0,
         0,
@@ -622,7 +628,7 @@
           "generation": 0,
           "key": null,
           "name": "Untitled",
-          "notesRevision": 1,
+          "notesRevision": 2,
           "path": null,
           "pattern": {
             "cells": {
@@ -650,6 +656,7 @@
             "steps": 16,
             "swing": 0.5
           },
+          "patternRevision": 0,
           "recording": false,
           "timeSignature": {
             "beats": 4,
@@ -727,7 +734,7 @@
         "generation": 0,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 1,
+        "notesRevision": 2,
         "path": null,
         "pattern": {
           "cells": {
@@ -755,6 +762,7 @@
           "steps": 16,
           "swing": 0.5
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -768,7 +776,7 @@
         81,
         78,
         49,
-        1,
+        3,
         0,
         0,
         0,
@@ -852,7 +860,7 @@
           "generation": 0,
           "key": null,
           "name": "Untitled",
-          "notesRevision": 1,
+          "notesRevision": 3,
           "path": null,
           "pattern": {
             "cells": {
@@ -880,6 +888,7 @@
             "steps": 16,
             "swing": 1.0
           },
+          "patternRevision": 0,
           "recording": false,
           "timeSignature": {
             "beats": 4,
@@ -957,7 +966,7 @@
         "generation": 0,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 1,
+        "notesRevision": 3,
         "path": null,
         "pattern": {
           "cells": {
@@ -985,6 +994,7 @@
           "steps": 16,
           "swing": 1.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -998,7 +1008,7 @@
         81,
         78,
         49,
-        1,
+        4,
         0,
         0,
         0,
@@ -1082,7 +1092,7 @@
           "generation": 0,
           "key": null,
           "name": "Untitled",
-          "notesRevision": 1,
+          "notesRevision": 4,
           "path": null,
           "pattern": {
             "cells": {
@@ -1095,6 +1105,7 @@
             "steps": 1,
             "swing": 1.0
           },
+          "patternRevision": 0,
           "recording": false,
           "timeSignature": {
             "beats": 4,
@@ -1172,7 +1183,7 @@
         "generation": 0,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 1,
+        "notesRevision": 4,
         "path": null,
         "pattern": {
           "cells": {
@@ -1185,6 +1196,7 @@
           "steps": 1,
           "swing": 1.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -1198,7 +1210,7 @@
         81,
         78,
         49,
-        2,
+        5,
         0,
         0,
         0,
@@ -1241,8 +1253,8 @@
             1
           ],
           "ignoredIds": [],
-          "reload": true,
-          "revision": 2,
+          "reload": false,
+          "revision": 5,
           "view": {
             "autosavedAt": null,
             "bpm": 400.0,
@@ -1313,7 +1325,7 @@
             "generation": 0,
             "key": null,
             "name": "Untitled",
-            "notesRevision": 2,
+            "notesRevision": 5,
             "path": null,
             "pattern": {
               "cells": {
@@ -1341,6 +1353,7 @@
               "steps": 16,
               "swing": 1.0
             },
+            "patternRevision": 0,
             "recording": false,
             "timeSignature": {
               "beats": 4,
@@ -1419,7 +1432,7 @@
         "generation": 0,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 2,
+        "notesRevision": 5,
         "path": null,
         "pattern": {
           "cells": {
@@ -1447,6 +1460,7 @@
           "steps": 16,
           "swing": 1.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -1460,7 +1474,7 @@
         81,
         78,
         49,
-        2,
+        5,
         0,
         0,
         0,
@@ -1498,118 +1512,7 @@
         0
       ],
       "reply": {
-        "ok": {
-          "addedIds": [],
-          "ignoredIds": [
-            999
-          ],
-          "reload": true,
-          "revision": 2,
-          "view": {
-            "autosavedAt": null,
-            "bpm": 400.0,
-            "canRedo": false,
-            "canUndo": true,
-            "channels": [
-              {
-                "choke": 0,
-                "color": 0,
-                "id": 1,
-                "kind": "synth",
-                "missing": false,
-                "mute": false,
-                "name": "Init",
-                "pan": 0.0,
-                "preset": "Init",
-                "roll": true,
-                "sampleFrames": null,
-                "sampleName": null,
-                "sampler": {},
-                "solo": false,
-                "synth": {
-                  "amp_attack": 5.0,
-                  "amp_decay": 300.0,
-                  "amp_release": 250.0,
-                  "amp_sustain": 0.7,
-                  "filter_cutoff": 4000.0,
-                  "filter_drive": 0.0,
-                  "filter_env_amt": 0.3,
-                  "filter_keytrack": 0.5,
-                  "filter_res": 0.2,
-                  "filter_type": 0.0,
-                  "flt_attack": 2.0,
-                  "flt_decay": 400.0,
-                  "flt_release": 300.0,
-                  "flt_sustain": 0.2,
-                  "glide": 0.0,
-                  "lfo_amount": 0.0,
-                  "lfo_rate": 2.0,
-                  "lfo_shape": 0.0,
-                  "lfo_target": 0.0,
-                  "master": -6.0,
-                  "noise_level": 0.0,
-                  "osc1_detune": 0.25,
-                  "osc1_fine": 0.0,
-                  "osc1_level": 0.8,
-                  "osc1_octave": 0.0,
-                  "osc1_semi": 0.0,
-                  "osc1_shape": 2.0,
-                  "osc1_spread": 0.6,
-                  "osc1_unison": 1.0,
-                  "osc2_detune": 0.2,
-                  "osc2_fine": 7.0,
-                  "osc2_level": 0.4,
-                  "osc2_octave": -1.0,
-                  "osc2_semi": 0.0,
-                  "osc2_shape": 3.0,
-                  "osc2_spread": 0.5,
-                  "osc2_unison": 1.0,
-                  "sub_level": 0.0,
-                  "sub_shape": 0.0,
-                  "voice_mode": 0.0
-                },
-                "volume": 1.0
-              }
-            ],
-            "dirty": true,
-            "generation": 0,
-            "key": null,
-            "name": "Untitled",
-            "notesRevision": 2,
-            "path": null,
-            "pattern": {
-              "cells": {
-                "1": [
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null
-                ]
-              },
-              "id": 0,
-              "name": "Pattern 1",
-              "steps": 16,
-              "swing": 1.0
-            },
-            "recording": false,
-            "timeSignature": {
-              "beats": 4,
-              "unit": 4
-            }
-          }
-        }
+        "error": "The pattern changed before this note edit arrived. Reload its notes."
       },
       "view": {
         "autosavedAt": null,
@@ -1681,7 +1584,7 @@
         "generation": 0,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 2,
+        "notesRevision": 5,
         "path": null,
         "pattern": {
           "cells": {
@@ -1709,6 +1612,7 @@
           "steps": 16,
           "swing": 1.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -1722,7 +1626,7 @@
         81,
         78,
         49,
-        3,
+        6,
         0,
         0,
         0,
@@ -1764,7 +1668,7 @@
           "addedIds": [],
           "ignoredIds": [],
           "reload": true,
-          "revision": 3,
+          "revision": 6,
           "view": {
             "autosavedAt": null,
             "bpm": 400.0,
@@ -1835,7 +1739,7 @@
             "generation": 0,
             "key": null,
             "name": "Untitled",
-            "notesRevision": 3,
+            "notesRevision": 6,
             "path": null,
             "pattern": {
               "cells": {
@@ -2103,6 +2007,7 @@
               "steps": 256,
               "swing": 1.0
             },
+            "patternRevision": 0,
             "recording": false,
             "timeSignature": {
               "beats": 4,
@@ -2181,7 +2086,7 @@
         "generation": 0,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 3,
+        "notesRevision": 6,
         "path": null,
         "pattern": {
           "cells": {
@@ -2449,6 +2354,7 @@
           "steps": 256,
           "swing": 1.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -2462,7 +2368,7 @@
         81,
         78,
         49,
-        3,
+        6,
         0,
         0,
         0,
@@ -2572,7 +2478,7 @@
         "generation": 0,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 3,
+        "notesRevision": 6,
         "path": null,
         "pattern": {
           "cells": {
@@ -2840,6 +2746,7 @@
           "steps": 256,
           "swing": 1.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -2853,7 +2760,7 @@
         81,
         78,
         49,
-        4,
+        7,
         0,
         0,
         0,
@@ -2895,7 +2802,7 @@
           "addedIds": [],
           "ignoredIds": [],
           "reload": true,
-          "revision": 4,
+          "revision": 7,
           "view": {
             "autosavedAt": null,
             "bpm": 400.0,
@@ -2966,7 +2873,7 @@
             "generation": 0,
             "key": null,
             "name": "Untitled",
-            "notesRevision": 4,
+            "notesRevision": 7,
             "path": null,
             "pattern": {
               "cells": {
@@ -2994,6 +2901,7 @@
               "steps": 16,
               "swing": 1.0
             },
+            "patternRevision": 0,
             "recording": false,
             "timeSignature": {
               "beats": 4,
@@ -3072,7 +2980,7 @@
         "generation": 0,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 4,
+        "notesRevision": 7,
         "path": null,
         "pattern": {
           "cells": {
@@ -3100,6 +3008,7 @@
           "steps": 16,
           "swing": 1.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -3113,7 +3022,7 @@
         81,
         78,
         49,
-        5,
+        8,
         0,
         0,
         0,
@@ -3155,7 +3064,7 @@
           "addedIds": [],
           "ignoredIds": [],
           "reload": true,
-          "revision": 5,
+          "revision": 8,
           "view": {
             "autosavedAt": null,
             "bpm": 400.0,
@@ -3226,7 +3135,7 @@
             "generation": 0,
             "key": null,
             "name": "Untitled",
-            "notesRevision": 5,
+            "notesRevision": 8,
             "path": null,
             "pattern": {
               "cells": {
@@ -3494,6 +3403,7 @@
               "steps": 256,
               "swing": 1.0
             },
+            "patternRevision": 0,
             "recording": false,
             "timeSignature": {
               "beats": 4,
@@ -3572,7 +3482,7 @@
         "generation": 0,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 5,
+        "notesRevision": 8,
         "path": null,
         "pattern": {
           "cells": {
@@ -3840,6 +3750,7 @@
           "steps": 256,
           "swing": 1.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -3853,7 +3764,7 @@
         81,
         78,
         49,
-        5,
+        8,
         0,
         0,
         0,
@@ -3963,7 +3874,7 @@
         "generation": 0,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 5,
+        "notesRevision": 8,
         "path": null,
         "pattern": {
           "cells": {
@@ -4231,6 +4142,7 @@
           "steps": 256,
           "swing": 1.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -4244,7 +4156,751 @@
         81,
         78,
         49,
-        6,
+        8,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        255,
+        239,
+        0,
+        0,
+        0,
+        240,
+        0,
+        0,
+        0,
+        0,
+        0,
+        63,
+        127,
+        0,
+        0,
+        0
+      ],
+      "view": {
+        "autosavedAt": null,
+        "bpm": 400.0,
+        "canRedo": false,
+        "canUndo": true,
+        "channels": [
+          {
+            "choke": 0,
+            "color": 0,
+            "id": 1,
+            "kind": "synth",
+            "missing": false,
+            "mute": false,
+            "name": "Init",
+            "pan": 0.0,
+            "preset": "Init",
+            "roll": true,
+            "sampleFrames": null,
+            "sampleName": null,
+            "sampler": {},
+            "solo": false,
+            "synth": {
+              "amp_attack": 5.0,
+              "amp_decay": 300.0,
+              "amp_release": 250.0,
+              "amp_sustain": 0.7,
+              "filter_cutoff": 4000.0,
+              "filter_drive": 0.0,
+              "filter_env_amt": 0.3,
+              "filter_keytrack": 0.5,
+              "filter_res": 0.2,
+              "filter_type": 0.0,
+              "flt_attack": 2.0,
+              "flt_decay": 400.0,
+              "flt_release": 300.0,
+              "flt_sustain": 0.2,
+              "glide": 0.0,
+              "lfo_amount": 0.0,
+              "lfo_rate": 2.0,
+              "lfo_shape": 0.0,
+              "lfo_target": 0.0,
+              "master": -6.0,
+              "noise_level": 0.0,
+              "osc1_detune": 0.25,
+              "osc1_fine": 0.0,
+              "osc1_level": 0.8,
+              "osc1_octave": 0.0,
+              "osc1_semi": 0.0,
+              "osc1_shape": 2.0,
+              "osc1_spread": 0.6,
+              "osc1_unison": 1.0,
+              "osc2_detune": 0.2,
+              "osc2_fine": 7.0,
+              "osc2_level": 0.4,
+              "osc2_octave": -1.0,
+              "osc2_semi": 0.0,
+              "osc2_shape": 3.0,
+              "osc2_spread": 0.5,
+              "osc2_unison": 1.0,
+              "sub_level": 0.0,
+              "sub_shape": 0.0,
+              "voice_mode": 0.0
+            },
+            "volume": 1.0
+          }
+        ],
+        "dirty": true,
+        "generation": 0,
+        "key": null,
+        "name": "Untitled",
+        "notesRevision": 8,
+        "path": null,
+        "pattern": {
+          "cells": {
+            "1": [
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null
+            ]
+          },
+          "id": 0,
+          "name": "Pattern 1",
+          "steps": 256,
+          "swing": 1.0
+        },
+        "patternRevision": 0,
+        "recording": false,
+        "timeSignature": {
+          "beats": 4,
+          "unit": 4
+        }
+      },
+      "reply": {
+        "ok": {
+          "revision": 8,
+          "addedIds": [],
+          "ignoredIds": [
+            999
+          ],
+          "reload": false,
+          "view": {
+            "autosavedAt": null,
+            "bpm": 400.0,
+            "canRedo": false,
+            "canUndo": true,
+            "channels": [
+              {
+                "choke": 0,
+                "color": 0,
+                "id": 1,
+                "kind": "synth",
+                "missing": false,
+                "mute": false,
+                "name": "Init",
+                "pan": 0.0,
+                "preset": "Init",
+                "roll": true,
+                "sampleFrames": null,
+                "sampleName": null,
+                "sampler": {},
+                "solo": false,
+                "synth": {
+                  "amp_attack": 5.0,
+                  "amp_decay": 300.0,
+                  "amp_release": 250.0,
+                  "amp_sustain": 0.7,
+                  "filter_cutoff": 4000.0,
+                  "filter_drive": 0.0,
+                  "filter_env_amt": 0.3,
+                  "filter_keytrack": 0.5,
+                  "filter_res": 0.2,
+                  "filter_type": 0.0,
+                  "flt_attack": 2.0,
+                  "flt_decay": 400.0,
+                  "flt_release": 300.0,
+                  "flt_sustain": 0.2,
+                  "glide": 0.0,
+                  "lfo_amount": 0.0,
+                  "lfo_rate": 2.0,
+                  "lfo_shape": 0.0,
+                  "lfo_target": 0.0,
+                  "master": -6.0,
+                  "noise_level": 0.0,
+                  "osc1_detune": 0.25,
+                  "osc1_fine": 0.0,
+                  "osc1_level": 0.8,
+                  "osc1_octave": 0.0,
+                  "osc1_semi": 0.0,
+                  "osc1_shape": 2.0,
+                  "osc1_spread": 0.6,
+                  "osc1_unison": 1.0,
+                  "osc2_detune": 0.2,
+                  "osc2_fine": 7.0,
+                  "osc2_level": 0.4,
+                  "osc2_octave": -1.0,
+                  "osc2_semi": 0.0,
+                  "osc2_shape": 3.0,
+                  "osc2_spread": 0.5,
+                  "osc2_unison": 1.0,
+                  "sub_level": 0.0,
+                  "sub_shape": 0.0,
+                  "voice_mode": 0.0
+                },
+                "volume": 1.0
+              }
+            ],
+            "dirty": true,
+            "generation": 0,
+            "key": null,
+            "name": "Untitled",
+            "notesRevision": 8,
+            "path": null,
+            "pattern": {
+              "cells": {
+                "1": [
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null,
+                  null
+                ]
+              },
+              "id": 0,
+              "name": "Pattern 1",
+              "steps": 256,
+              "swing": 1.0
+            },
+            "patternRevision": 0,
+            "recording": false,
+            "timeSignature": {
+              "beats": 4,
+              "unit": 4
+            }
+          }
+        }
+      }
+    },
+    {
+      "notes": [
+        71,
+        81,
+        78,
+        49,
+        9,
         0,
         0,
         0,
@@ -4268,7 +4924,7 @@
           "generation": 1,
           "key": null,
           "name": "Untitled",
-          "notesRevision": 6,
+          "notesRevision": 9,
           "path": null,
           "pattern": {
             "cells": {},
@@ -4277,6 +4933,7 @@
             "steps": 16,
             "swing": 0.0
           },
+          "patternRevision": 0,
           "recording": false,
           "timeSignature": {
             "beats": 4,
@@ -4294,7 +4951,7 @@
         "generation": 1,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 6,
+        "notesRevision": 9,
         "path": null,
         "pattern": {
           "cells": {},
@@ -4303,6 +4960,7 @@
           "steps": 16,
           "swing": 0.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -4316,7 +4974,7 @@
         81,
         78,
         49,
-        6,
+        9,
         0,
         0,
         0,
@@ -4340,7 +4998,7 @@
           "generation": 1,
           "key": null,
           "name": "Untitled",
-          "notesRevision": 6,
+          "notesRevision": 9,
           "path": null,
           "pattern": {
             "cells": {},
@@ -4349,6 +5007,7 @@
             "steps": 16,
             "swing": 0.0
           },
+          "patternRevision": 0,
           "recording": false,
           "timeSignature": {
             "beats": 4,
@@ -4366,7 +5025,7 @@
         "generation": 1,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 6,
+        "notesRevision": 9,
         "path": null,
         "pattern": {
           "cells": {},
@@ -4375,6 +5034,7 @@
           "steps": 16,
           "swing": 0.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -4388,7 +5048,56 @@
         81,
         78,
         49,
-        6,
+        9,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "reply": {
+        "error": "The project changed before this finished, so it was not applied."
+      },
+      "view": {
+        "autosavedAt": null,
+        "bpm": 140.0,
+        "canRedo": false,
+        "canUndo": false,
+        "channels": [],
+        "dirty": false,
+        "generation": 1,
+        "key": null,
+        "name": "Untitled",
+        "notesRevision": 9,
+        "path": null,
+        "pattern": {
+          "cells": {},
+          "id": 0,
+          "name": "Pattern 1",
+          "steps": 16,
+          "swing": 0.0
+        },
+        "patternRevision": 0,
+        "recording": false,
+        "timeSignature": {
+          "beats": 4,
+          "unit": 4
+        }
+      }
+    },
+    {
+      "notes": [
+        71,
+        81,
+        78,
+        49,
+        9,
         0,
         0,
         0,
@@ -4406,7 +5115,7 @@
           "addedIds": [],
           "ignoredIds": [],
           "reload": true,
-          "revision": 6,
+          "revision": 9,
           "view": {
             "autosavedAt": null,
             "bpm": 140.0,
@@ -4417,7 +5126,7 @@
             "generation": 1,
             "key": null,
             "name": "Untitled",
-            "notesRevision": 6,
+            "notesRevision": 9,
             "path": null,
             "pattern": {
               "cells": {},
@@ -4426,6 +5135,7 @@
               "steps": 16,
               "swing": 0.0
             },
+            "patternRevision": 0,
             "recording": false,
             "timeSignature": {
               "beats": 4,
@@ -4444,7 +5154,7 @@
         "generation": 1,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 6,
+        "notesRevision": 9,
         "path": null,
         "pattern": {
           "cells": {},
@@ -4453,6 +5163,7 @@
           "steps": 16,
           "swing": 0.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
@@ -4461,12 +5172,38 @@
       }
     },
     {
+      "view": {
+        "autosavedAt": null,
+        "bpm": 140.0,
+        "canRedo": false,
+        "canUndo": false,
+        "channels": [],
+        "dirty": false,
+        "generation": 1,
+        "key": null,
+        "name": "Untitled",
+        "notesRevision": 9,
+        "path": null,
+        "pattern": {
+          "cells": {},
+          "id": 0,
+          "name": "Pattern 1",
+          "steps": 16,
+          "swing": 0.0
+        },
+        "patternRevision": 0,
+        "recording": false,
+        "timeSignature": {
+          "beats": 4,
+          "unit": 4
+        }
+      },
       "notes": [
         71,
         81,
         78,
         49,
-        6,
+        9,
         0,
         0,
         0,
@@ -4480,38 +5217,10 @@
         0
       ],
       "reply": {
-        "ok": {
-          "addedIds": [],
-          "ignoredIds": [],
-          "reload": true,
-          "revision": 6,
-          "view": {
-            "autosavedAt": null,
-            "bpm": 140.0,
-            "canRedo": false,
-            "canUndo": false,
-            "channels": [],
-            "dirty": false,
-            "generation": 1,
-            "key": null,
-            "name": "Untitled",
-            "notesRevision": 6,
-            "path": null,
-            "pattern": {
-              "cells": {},
-              "id": 0,
-              "name": "Pattern 1",
-              "steps": 16,
-              "swing": 0.0
-            },
-            "recording": false,
-            "timeSignature": {
-              "beats": 4,
-              "unit": 4
-            }
-          }
-        }
-      },
+        "error": "The pattern changed before this gesture finished. Reload its notes."
+      }
+    },
+    {
       "view": {
         "autosavedAt": null,
         "bpm": 140.0,
@@ -4522,7 +5231,7 @@
         "generation": 1,
         "key": null,
         "name": "Untitled",
-        "notesRevision": 6,
+        "notesRevision": 9,
         "path": null,
         "pattern": {
           "cells": {},
@@ -4531,11 +5240,33 @@
           "steps": 16,
           "swing": 0.0
         },
+        "patternRevision": 0,
         "recording": false,
         "timeSignature": {
           "beats": 4,
           "unit": 4
         }
+      },
+      "notes": [
+        71,
+        81,
+        78,
+        49,
+        9,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "reply": {
+        "error": "The pattern changed before this gesture finished. Reload its notes."
       }
     }
   ],
@@ -4567,7 +5298,12 @@
           "kind": "setSwing",
           "swing": 0.5
         },
-        "generation": 0
+        "generation": 0,
+        "stamp": {
+          "generation": 0,
+          "patternId": 0,
+          "revision": 1
+        }
       },
       "command": "project_edit"
     },
@@ -4577,7 +5313,12 @@
           "kind": "setSwing",
           "swing": 1.5
         },
-        "generation": 0
+        "generation": 0,
+        "stamp": {
+          "generation": 0,
+          "patternId": 0,
+          "revision": 2
+        }
       },
       "command": "project_edit"
     },
@@ -4587,7 +5328,12 @@
           "kind": "setPatternLength",
           "steps": 0
         },
-        "generation": 0
+        "generation": 0,
+        "stamp": {
+          "generation": 0,
+          "patternId": 0,
+          "revision": 3
+        }
       },
       "command": "project_edit"
     },
@@ -4604,9 +5350,10 @@
               "velocity": 0.5
             }
           ],
-          "baseRevision": 0,
+          "baseRevision": 4,
           "delete": [],
           "generation": 0,
+          "patternId": 0,
           "update": []
         }
       },
@@ -4621,6 +5368,7 @@
             999
           ],
           "generation": 0,
+          "patternId": 0,
           "update": []
         }
       },
@@ -4630,9 +5378,10 @@
       "args": {
         "edit": {
           "add": [],
-          "baseRevision": 2,
+          "baseRevision": 5,
           "delete": [],
           "generation": 0,
+          "patternId": 0,
           "update": [
             {
               "channel": 1,
@@ -4661,9 +5410,10 @@
               "velocity": 0.5
             }
           ],
-          "baseRevision": 3,
+          "baseRevision": 6,
           "delete": [],
           "generation": 0,
+          "patternId": 0,
           "update": []
         }
       },
@@ -4671,13 +5421,23 @@
     },
     {
       "args": {
-        "generation": 0
+        "generation": 0,
+        "stamp": {
+          "generation": 0,
+          "patternId": 0,
+          "revision": 6
+        }
       },
       "command": "notes_undo"
     },
     {
       "args": {
-        "generation": 0
+        "generation": 0,
+        "stamp": {
+          "generation": 0,
+          "patternId": 0,
+          "revision": 7
+        }
       },
       "command": "notes_redo"
     },
@@ -4691,6 +5451,21 @@
         "generation": 0
       },
       "command": "project_edit"
+    },
+    {
+      "command": "notes_edit",
+      "args": {
+        "edit": {
+          "generation": 0,
+          "patternId": 0,
+          "baseRevision": 8,
+          "add": [],
+          "update": [],
+          "delete": [
+            999
+          ]
+        }
+      }
     },
     {
       "args": {},
@@ -4708,7 +5483,12 @@
     },
     {
       "args": {
-        "generation": 0
+        "generation": 0,
+        "stamp": {
+          "generation": 0,
+          "patternId": 0,
+          "revision": 6
+        }
       },
       "command": "notes_undo"
     },
@@ -4728,10 +5508,41 @@
           "baseRevision": 0,
           "delete": [],
           "generation": 0,
+          "patternId": 0,
           "update": []
         }
       },
       "command": "notes_edit"
+    },
+    {
+      "command": "project_edit",
+      "args": {
+        "generation": 1,
+        "stamp": {
+          "generation": 1,
+          "patternId": 0,
+          "revision": 8
+        },
+        "edit": {
+          "kind": "setSwing",
+          "swing": 0.25
+        }
+      }
+    },
+    {
+      "command": "project_edit",
+      "args": {
+        "generation": 1,
+        "stamp": {
+          "generation": 1,
+          "patternId": 99,
+          "revision": 9
+        },
+        "edit": {
+          "kind": "setSwing",
+          "swing": 0.25
+        }
+      }
     }
   ]
 }
