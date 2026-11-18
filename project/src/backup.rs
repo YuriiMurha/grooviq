@@ -87,7 +87,12 @@ impl PreparedBackup {
 }
 
 fn lock_backup(path: &Path) -> Option<fs::File> {
-    let file = fs::File::open(path).ok()?;
+    // A reused copy is synced too; Windows FlushFileBuffers requires write access.
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .ok()?;
     file.try_lock().ok()?;
     Some(file)
 }
@@ -277,6 +282,41 @@ fn existing(folder: &Path, stem: &str) -> io::Result<Vec<(u64, PathBuf)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reused_backups_keep_a_writable_handle_without_changing_bytes() {
+        use std::io::Write;
+        struct FlushAccess(usize);
+        impl crate::file::Disk for FlushAccess {
+            fn sync(&mut self, file: &fs::File) -> io::Result<()> {
+                if file.metadata()?.is_file() {
+                    self.0 += 1;
+                    // Real access check with no byte changes; read-only handles fail here
+                    // on Unix and cannot satisfy FlushFileBuffers on Windows.
+                    let mut handle = file;
+                    assert_eq!(handle.write(&[])?, 0);
+                }
+                file.sync_all()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("song.grooviq");
+        let backups = dir.path().join("backups");
+        fs::write(&target, b"saved revision").unwrap();
+        let mut disk = FlushAccess(0);
+        let prepared = prepare_backup_on(&target, &backups, 10, &mut disk).unwrap();
+        assert_eq!(disk.0, 1);
+        let copy = prepared.candidate.clone().unwrap();
+        prepared.confirm();
+        for synced in 2..=4 {
+            let prepared = prepare_backup_on(&target, &backups, 10, &mut disk).unwrap();
+            assert_eq!(disk.0, synced);
+            assert!(prepared.candidate.is_none(), "reuse the existing bytes");
+            prepared.confirm();
+            assert_eq!(fs::read(&copy).unwrap(), b"saved revision");
+            assert_eq!(fs::read_dir(copy.parent().unwrap()).unwrap().count(), 1);
+        }
+    }
 
     #[cfg(unix)]
     #[test]

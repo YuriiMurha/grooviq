@@ -3720,6 +3720,54 @@ fn overlapping_failed_save_does_not_spend_retention_history() {
     assert_eq!(backup_tempos(&path, &backups), expected);
 }
 
+#[test]
+fn repeated_saves_and_retained_duplicate_retry_keep_backup_bytes() {
+    struct RefuseDirectory(bool);
+    impl Disk for RefuseDirectory {
+        fn sync_folder(&mut self, path: &Path) -> std::io::Result<()> {
+            if self.0 {
+                Err(std::io::Error::other(
+                    "injected backup confirmation refusal",
+                ))
+            } else {
+                grooviq_project::file::RealDisk.sync_folder(path)
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, backups) = saved_twice(dir.path());
+    for _ in 0..3 {
+        session.save(None, &backups).unwrap();
+    }
+    let folder = grooviq_project::backup_folder(&path, &backups).unwrap();
+    let before: Vec<_> = names(&folder)
+        .into_iter()
+        .map(|name| {
+            let bytes = std::fs::read(folder.join(&name)).unwrap();
+            (name, bytes)
+        })
+        .collect();
+    session
+        .apply(Edit::SetTempo { bpm: 120.0 }, Instant::now())
+        .unwrap();
+    let mut disk = RefuseDirectory(true);
+    for _ in 0..2 {
+        let error = session.save_on(None, &backups, &mut disk).unwrap_err();
+        assert!(matches!(error, SessionError::Backup(_)));
+        assert!(!error.directory_unconfirmed());
+        assert_eq!(load(&path).unwrap().project.bpm, 110.0);
+        assert!(session.view().dirty);
+    }
+    disk.0 = false;
+    session.save_on(None, &backups, &mut disk).unwrap();
+    assert_eq!(load(&path).unwrap().project.bpm, 120.0);
+    assert!(!session.view().dirty);
+    for (name, bytes) in before {
+        assert_eq!(std::fs::read(folder.join(name)).unwrap(), bytes);
+    }
+    assert_eq!(backup_tempos(&path, &backups), [100.0, 110.0]);
+}
+
 #[cfg(unix)]
 #[test]
 fn backup_barriers_fail_before_target_and_retry_duplicate() {
