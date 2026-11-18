@@ -1,3 +1,4 @@
+import { isProjectTransitioning } from "./pending";
 // New, Open and Restore replace the whole project. Channel ids start again in the new one, so
 // anything keyed by a channel id (a device window, a gesture in it) must not carry over: it is
 // told before the replacing command is sent, and again once the new project is in. While the
@@ -35,7 +36,7 @@ export function projectGeneration(): number {
 
 /** A New, Open or Restore is on its way: editors of the current project send nothing. */
 export function isProjectReplacing(): boolean {
-  return replacingNow;
+  return replacingNow || isProjectTransitioning();
 }
 
 /** Call right before sending New, Open or Restore. Listeners run first, while they can still
