@@ -4,6 +4,7 @@
 import type { Page, TestInfo } from "@playwright/test";
 import { brightness, cellPoint, clickCell, colourDistance, expect, grid, pixelsAt, presetValues, project, soundsFor, test, type Mock } from "./fixture";
 import type { MockProject } from "./mockTauri";
+import type { ProjectView } from "../src/api/project";
 
 const KIT = ["Kick", "Snare", "Hat"];
 const kitSeed = { project: project(KIT, { 1: [0, 8], 2: [4] }), files: soundsFor(KIT) };
@@ -714,14 +715,19 @@ test.describe("the mock follows Task 7 (fix round 1)", () => {
     });
     const seen = () => app.evaluate(() => (window as unknown as { seen: number[] }).seen);
     const revision = () => mock.view().then((v) => v.notesRevision);
+    const stamp = async () => {
+      const view = await call(app, "project_view") as ProjectView;
+      return { generation: view.generation, patternId: view.pattern.id, revision: view.notesRevision };
+    };
     const expected: number[] = [];
     // A step edit.
     const generation = (await mock.view()).generation;
-    await call(app, "project_edit", { edit: { kind: "toggleStep", channel: 1, step: 3 }, generation });
+    await call(app, "project_edit", { edit: { kind: "toggleStep", channel: 1, step: 3 }, generation, stamp: await stamp() });
     expected.push(await revision());
     // A notes edit.
+    const noteOrigin = await stamp();
     await call(app, "notes_edit", {
-      edit: { generation, baseRevision: await revision(), add: [{ channel: 2, tick: 120, length: 600, key: 64, velocity: 0.5, slide: false }], update: [], delete: [] },
+      edit: { generation: noteOrigin.generation, patternId: noteOrigin.patternId, baseRevision: noteOrigin.revision, add: [{ channel: 2, tick: 120, length: 600, key: 64, velocity: 0.5, slide: false }], update: [], delete: [] },
     });
     expected.push(await revision());
     // A mix change is not a note change.

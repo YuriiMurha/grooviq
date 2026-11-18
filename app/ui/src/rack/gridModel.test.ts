@@ -114,18 +114,33 @@ describe("buildInstances", () => {
     for (let i = 0; i < 16; i++) expect(record(plain, i).flags & (FLAG_FOCUS | FLAG_PLAYHEAD)).toBe(0);
   });
 
-  it("building_the_largest_grid_is_fast", () => {
+  it("the_largest_grid_reads_each_cell_once", () => {
     const layout: GridLayout = { rows: 256, steps: 256, cell: 28, gap: 6, dpr: 2 };
     const cells = Array.from({ length: 256 }, (_, r) =>
       Array.from({ length: 256 }, (_, s) => ((r + s) % 3 === 0 ? 0.8 : null)),
     );
     const inks = Array.from({ length: 256 }, (_, r) => r % 6);
-    buildInstances(layout, cells, inks, { row: 3, step: 3 }, 7); // warm up
-    const start = performance.now();
-    const data = buildInstances(layout, cells, inks, { row: 3, step: 3 }, 7);
-    const ms = performance.now() - start;
+    let reads = 0;
+    const observed = cells.map((row) => new Proxy(row, {
+      get(target, key, receiver) {
+        if (typeof key === "string" && /^\d+$/.test(key)) reads++;
+        return Reflect.get(target, key, receiver);
+      },
+    }));
+    const data = buildInstances(layout, observed, inks, { row: 3, step: 3 }, 7);
     expect(data.length).toBe(256 * 256 * STRIDE);
-    expect(ms).toBeLessThan(50);
+    expect(reads).toBe(256 * 256);
+    for (let r = 0; r < 256; r++) {
+      for (let step = 0; step < 256; step++) {
+        expect(record(data, r * 256 + step)).toEqual({
+          x: step * 34, y: r * 34, w: 28, h: 28, ink: r % 6,
+          velocity: (r + step) % 3 === 0 ? Math.fround(0.8) : -1,
+          flags: (Math.floor(step / 4) % 2 === 1 ? FLAG_BEAT_B : 0)
+            | (r === 3 && step === 3 ? FLAG_FOCUS : 0)
+            | (step === 7 ? FLAG_PLAYHEAD : 0),
+        });
+      }
+    }
   });
 });
 
