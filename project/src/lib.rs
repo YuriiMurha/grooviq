@@ -41,3 +41,8 @@ pub use model::{
     roll_channels,
 };
 pub use session::{DecodedSamples, decode_samples};
+
+pub mod arrangement;
+pub use arrangement::*;
+
+pub use file::validate_save;
