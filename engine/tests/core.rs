@@ -506,3 +506,47 @@ fn the_nan_guard_resets_the_device() {
     // The reset dropped the voice: no tail after the silenced block.
     assert!(run(true).iter().all(|x| *x == 0.0));
 }
+
+#[test]
+fn stop_play_does_not_panic_reset_new_legacy_notes() {
+    for rate in [8_000.0, 48_000.0, 384_000.0] {
+        for key in [60, 67] {
+            for callback in [1, 37, 256] {
+                for delay in [0, 64, 128, 256] {
+                    let commands = [
+                        (0, note_on(60)),
+                        (512, Command::Stop),
+                        (512 + delay, Command::Play),
+                        (
+                            512 + delay,
+                            Command::Note {
+                                key,
+                                velocity: 1.0,
+                                on: true,
+                                id: NoteId(999),
+                            },
+                        ),
+                    ];
+                    let config = EngineConfig { sample_rate: rate };
+                    let frames = (rate * 0.1) as usize + 1024;
+                    let actual = render_offline(config, &commands, frames, callback);
+                    let reference = render_offline(
+                        config,
+                        &commands[0..1]
+                            .iter()
+                            .copied()
+                            .chain(commands[3..].iter().copied())
+                            .collect::<Vec<_>>(),
+                        frames,
+                        callback,
+                    );
+                    assert_eq!(
+                        actual, reference,
+                        "rate {rate}, key {key}, callback {callback}, delay {delay}"
+                    );
+                    assert!(peak(&actual[actual.len() / 2..]) > 0.01);
+                }
+            }
+        }
+    }
+}
