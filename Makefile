@@ -30,6 +30,7 @@ check: ui-install ## Everything CI runs: fmt, clippy, workspace tests, UI lint/t
 	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 	$(CARGO) test --workspace --all-features
 	$(MAKE) notes-edit-budget
+	$(MAKE) export-budget
 
 .PHONY: notes-edit-budget
 notes-edit-budget: ## Optimized 10,000-note edit budget, including undo bookkeeping
@@ -71,3 +72,8 @@ install-app: ## Copy the built Grooviq.app into /Applications (run build-app fir
 	@test -d $(APP_BUNDLE) || { echo "No $(APP_BUNDLE). Run make build-app first."; exit 1; }
 	rm -rf /Applications/Grooviq.app
 	ditto $(APP_BUNDLE) /Applications/Grooviq.app
+
+.PHONY: export-budget
+export-budget: ## Optimized 8-second PCM24 export with the original 4-second budget
+	node --test scripts/notes-edit-budget.test.mjs
+	node scripts/export-budget.mjs
