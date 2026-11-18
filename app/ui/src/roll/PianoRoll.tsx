@@ -1,3 +1,5 @@
+import { registerGestureCancellation } from "../project/pending";
+import type { PatternStamp } from "../api/patterns";
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent, type RefObject } from "react";
 import { onNotesChanged, notesEdit, patternNotes, type WireNote } from "../api/notes";
 import type { ProjectKey } from "../api/project";
@@ -13,6 +15,7 @@ import { createRollRenderer, readRollPalette, type RollPalette, type RollRendere
 import { KeyColumn } from "./KeyColumn";
 import { copy, duplicate, paste, type Clip } from "./clipboard";
 import { NoteStore, buildInstances } from "./noteStore";
+import { useTransformAmounts } from "./useTransformAmounts";
 import { RollToolbar } from "./RollToolbar";
 import { scaleMask } from "./scales";
 import { DEFAULT_GRID, GRIDS, barTicks, gridTicks, snapTick } from "./snap";
@@ -34,11 +37,6 @@ const EMPTY_HINT = "Click to draw a note, right-click to delete it. F6 goes back
 
 /** What Mod+C copied, kept while the roll is closed and reopened. */
 let clipboard: Clip | null = null;
-/** How far a strum spreads each voice (ticks), and the humanize amounts: about 15 ms, 10 ms and a tenth of the range at 120 BPM. */
-const STRUM_TICKS = 30;
-const HUMANIZE_TICKS = 20;
-const HUMANIZE_VELOCITY = 0.1;
-
 interface Props {
   /** The channel being edited. */
   channel: number | null;
@@ -64,6 +62,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   // project that was replaced since.
   const generation = project?.generation ?? 0;
   useEffect(() => queue.setGeneration(generation), [queue, generation]);
+  const patternId = project?.pattern.id ?? 0;
   const report = useRef(onError);
   useEffect(() => {
     report.current = onError;
@@ -91,13 +90,26 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   /** The key the view was centred on, kept in the middle as the roll is resized until the person scrolls or zooms. */
   const centreKey = useRef<number | null>(null);
   const gesture = useRef<Gesture | null>(null);
+  const gestureOrigin = useRef<PatternStamp | null>(null);
+  useEffect(() => {
+    abandon(store, gesture.current); gesture.current = null; gestureOrigin.current = null;
+    store.setSelection([]);
+    queue.setPatternId(patternId);
+  }, [queue, store, patternId, generation]);
+
   const lastLength = useRef(STEP_TICKS);
   const tempId = useRef(0);
   const dirty = useRef(true);
+  useEffect(() => registerGestureCancellation(() => {
+    if (gestureOrigin.current && queue.accepts(gestureOrigin.current)) abandon(store, gesture.current);
+    gesture.current = null; gestureOrigin.current = null; dirty.current = true;
+  }), [queue, store]);
+
+
   const built = useRef<{ version: number; channel: number | null; renderer: RollRenderer | null; ghosts: string }>({ version: -1, channel: null, renderer: null, ghosts: "" });
   // A refetch of the engine's notes must not erase what a held gesture shows.
   useEffect(() => {
-    queue.setHeld(() => {
+    return queue.setHeld(() => {
       const held = heldNotes(gesture.current);
       return held.length ? { add: held, update: [], delete: [] } : null;
     });
@@ -106,6 +118,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   useEffect(() => setRollHistory({ run: (command) => queue.run(command) }), [queue]);
   const pointerTick = useRef<number | null>(null);
   const humanizeSeed = useRef(1);
+  const amounts = useTransformAmounts();
 
   const sig = project?.timeSignature ?? { beats: 4, unit: 4 };
   const grid = gridTicks(GRIDS[gridIndex], sig);
@@ -422,8 +435,10 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   };
   const take = (step: Step) => {
     // A held stamp shows in the store only; the release sends it.
+    const origin = gestureOrigin.current ?? queue.stamp();
+    if (!queue.accepts(origin)) return null;
     if (step.preview) store.apply(step.preview);
-    if (step.edit) queue.commit(step.edit);
+    if (step.edit) queue.commit(step.edit, origin);
     if (step.select) store.setSelection(step.select);
     if (step.lastLength !== undefined) lastLength.current = step.lastLength;
     dirty.current = true;
@@ -441,6 +456,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     } catch {
       /* no pointer capture here */
     }
+    gestureOrigin.current = queue.stamp();
     gesture.current = take(startGesture(ctx, pointer(e)));
   };
   const onPointerMove = (e: PointerEvent<HTMLCanvasElement>) => {
@@ -459,12 +475,16 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     const ctx = context();
     const held = gesture.current;
     gesture.current = null;
-    if (ctx && held) take(endGesture(ctx, held, pointer(e)));
+    if (ctx && held && gestureOrigin.current) {
+      if (queue.accepts(gestureOrigin.current)) take(endGesture(ctx, held, pointer(e)));
+      else queue.rejectHeld();
+    }
+    gestureOrigin.current = null;
     dirty.current = true;
   };
   const onPointerCancel = () => {
-    abandon(store, gesture.current);
-    gesture.current = null;
+    if (gestureOrigin.current && queue.accepts(gestureOrigin.current)) abandon(store, gesture.current);
+    gesture.current = null; gestureOrigin.current = null;
     dirty.current = true;
   };
 
@@ -492,8 +512,8 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   };
   const actions = {
     quantize: () => transform((ns) => quantize(ns, scene.current.grid)),
-    strum: (direction: "up" | "down") => transform((ns) => strum(ns, STRUM_TICKS, direction)),
-    humanize: () => transform((ns) => humanize(ns, HUMANIZE_TICKS, HUMANIZE_VELOCITY, humanizeSeed.current++)),
+    strum: (direction: "up" | "down") => transform((ns) => strum(ns, amounts.values.spread, direction)),
+    humanize: () => transform((ns) => humanize(ns, amounts.values.timing, amounts.values.velocity, humanizeSeed.current++)),
     selectAll: () => {
       const ch = scene.current.channel;
       if (ch !== null) store.setSelection(store.channelNotes(ch));
@@ -563,6 +583,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   return (
     <div className="roll">
       <RollToolbar
+        amounts={amounts}
         tool={tool}
         onTool={setTool}
         gridIndex={gridIndex}
@@ -586,7 +607,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
         onHumanize={actions.humanize}
       />
       <div className="roll-body">
-        <KeyColumn channel={channel} keyAt={keyAt} strip={strip} onError={reportKey} releaseKeys={releaseKeys} />
+        <KeyColumn projectKey={project?.key ?? null} channel={channel} keyAt={keyAt} strip={strip} onError={reportKey} releaseKeys={releaseKeys} />
         <div className="roll-wrap" ref={wrap}>
           <canvas
             key={use2d ? "2d" : "webgl2"}

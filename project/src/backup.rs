@@ -49,7 +49,7 @@ pub fn backup_before_save(
     backups: &Path,
     keep: usize,
 ) -> io::Result<Option<PathBuf>> {
-    let prepared = prepare_backup(target, backups, keep)?;
+    let prepared = prepare_backup_on(target, backups, keep, &mut crate::file::RealDisk)?;
     let copy = prepared.candidate.clone();
     prepared.confirm();
     Ok(copy)
@@ -87,15 +87,26 @@ impl PreparedBackup {
 }
 
 fn lock_backup(path: &Path) -> Option<fs::File> {
-    let file = fs::File::open(path).ok()?;
+    // A reused copy is synced too; Windows FlushFileBuffers requires write access.
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .ok()?;
     file.try_lock().ok()?;
     Some(file)
 }
 
-pub(crate) fn prepare_backup(
+#[cfg(test)]
+fn prepare_backup(target: &Path, backups: &Path, keep: usize) -> io::Result<PreparedBackup> {
+    prepare_backup_on(target, backups, keep, &mut crate::file::RealDisk)
+}
+
+pub(crate) fn prepare_backup_on(
     target: &Path,
     backups: &Path,
     keep: usize,
+    disk: &mut impl crate::file::Disk,
 ) -> io::Result<PreparedBackup> {
     let mut prepared = PreparedBackup {
         candidate: None,
@@ -149,7 +160,8 @@ pub(crate) fn prepare_backup(
                     }
                 })?;
                 io::copy(&mut fs::File::open(target)?, &mut file)?;
-                crate::file::sync_file(&file)?;
+                disk.flush(&mut file)?;
+                disk.sync(&file)?;
                 fs::hard_link(&partial, &copy)
             })();
             let cleanup = fs::remove_file(&partial);
@@ -170,6 +182,20 @@ pub(crate) fn prepare_backup(
                 Err(e) => return Err(e),
             }
         }
+    }
+    // Reused bytes may belong to a previous unconfirmed preparation. Reconfirm both
+    // the file and namespace before exposing PreparedBackup to commit or pruning.
+    if duplicate {
+        disk.sync(prepared._file.as_ref().unwrap())?;
+    }
+    // Resolve symlinks and relative components before walking actual parent entries.
+    // Confirm all ancestors on retries too: existence cannot prove a prior mkdir durable.
+    let leaf = fs::canonicalize(&folder)?;
+    disk.sync_folder(&leaf.join(".namespace"))?;
+    let mut entry = leaf.as_path();
+    while let Some(parent) = entry.parent() {
+        disk.sync_folder(entry)?;
+        entry = parent;
     }
     // Other saves' active copies may still roll back. Only settled history counts;
     // our own locked copy is counted once, whether newly created or reused.
@@ -256,6 +282,79 @@ fn existing(folder: &Path, stem: &str) -> io::Result<Vec<(u64, PathBuf)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reused_backups_keep_a_writable_handle_without_changing_bytes() {
+        use std::io::Write;
+        struct FlushAccess(usize);
+        impl crate::file::Disk for FlushAccess {
+            fn sync(&mut self, file: &fs::File) -> io::Result<()> {
+                if file.metadata()?.is_file() {
+                    self.0 += 1;
+                    // Real access check with no byte changes; read-only handles fail here
+                    // on Unix and cannot satisfy FlushFileBuffers on Windows.
+                    let mut handle = file;
+                    assert_eq!(handle.write(&[])?, 0);
+                }
+                file.sync_all()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("song.grooviq");
+        let backups = dir.path().join("backups");
+        fs::write(&target, b"saved revision").unwrap();
+        let mut disk = FlushAccess(0);
+        let prepared = prepare_backup_on(&target, &backups, 10, &mut disk).unwrap();
+        assert_eq!(disk.0, 1);
+        let copy = prepared.candidate.clone().unwrap();
+        prepared.confirm();
+        for synced in 2..=4 {
+            let prepared = prepare_backup_on(&target, &backups, 10, &mut disk).unwrap();
+            assert_eq!(disk.0, synced);
+            assert!(prepared.candidate.is_none(), "reuse the existing bytes");
+            prepared.confirm();
+            assert_eq!(fs::read(&copy).unwrap(), b"saved revision");
+            assert_eq!(fs::read_dir(copy.parent().unwrap()).unwrap().count(), 1);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_symlink_backup_confirms_real_ancestors_in_order() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+        struct Audit(Vec<(u64, u64)>);
+        impl crate::file::Disk for Audit {
+            fn sync(&mut self, file: &fs::File) -> io::Result<()> {
+                let m = file.metadata()?;
+                self.0.push((m.dev(), m.ino()));
+                file.sync_all()
+            }
+        }
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        symlink(fs::canonicalize(&real).unwrap(), dir.path().join("alias")).unwrap();
+        let target = dir.path().join("song.grooviq");
+        fs::write(&target, b"saved revision").unwrap();
+        let backups = dir.path().join("alias/new/backups");
+        let mut audit = Audit(vec![]);
+        let prepared = prepare_backup_on(&target, &backups, 1, &mut audit).unwrap();
+        let copy = prepared.candidate.as_ref().unwrap();
+        let identity = |p: &Path| {
+            let m = fs::metadata(p).unwrap();
+            (m.dev(), m.ino())
+        };
+        let mut expected = vec![identity(copy)];
+        let leaf = fs::canonicalize(copy.parent().unwrap()).unwrap();
+        let mut entry = Some(leaf.as_path());
+        while let Some(path) = entry {
+            expected.push(identity(path));
+            entry = path.parent();
+        }
+        assert_eq!(audit.0, expected);
+        assert_eq!(fs::read(copy).unwrap(), b"saved revision");
+        prepared.confirm();
+    }
 
     #[test]
     fn retention_rechecks_a_copy_that_became_active_after_preparation() {

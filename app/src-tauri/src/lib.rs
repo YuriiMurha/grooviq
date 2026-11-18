@@ -21,6 +21,7 @@ mod midi_cmds;
 mod notes_cmds;
 mod output_mode;
 pub mod panic_hook;
+mod patterns_cmds;
 mod project_cmds;
 mod settings;
 
@@ -383,6 +384,8 @@ pub fn run() {
         if menu::is_quit(id) {
             // Raises a preventable `ExitRequested`, held below like a window close.
             app.exit(0);
+        } else if let Some(redo) = menu::history_action(id) {
+            let _ = app.emit("edit-history", redo);
         } else if menu::is_high_refresh(id) {
             toggle_high_refresh(app);
         }
@@ -400,6 +403,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            menu::edit_history_enabled,
             commands::audio_outputs,
             commands::audio_select,
             commands::audio_settings,
@@ -426,6 +430,8 @@ pub fn run() {
             project_cmds::recovery_restore,
             project_cmds::recovery_discard,
             project_cmds::app_exit,
+            patterns_cmds::pattern_list,
+            patterns_cmds::pattern_edit,
             notes_cmds::pattern_notes,
             notes_cmds::notes_edit,
             notes_cmds::notes_undo,

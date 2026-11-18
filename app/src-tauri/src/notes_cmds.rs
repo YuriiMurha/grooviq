@@ -89,9 +89,9 @@ pub async fn notes_edit(
 pub async fn notes_undo(
     app: AppHandle,
     audio: State<'_, Audio>,
-    generation: u64,
+    stamp: grooviq_project::session::PatternStamp,
 ) -> Result<Option<NotesAck>, String> {
-    history(&app, &audio, generation, true)
+    history(&app, &audio, stamp, true)
 }
 
 /// Makes the last undone note change of the project of `generation` again (`null`: nothing to
@@ -100,21 +100,21 @@ pub async fn notes_undo(
 pub async fn notes_redo(
     app: AppHandle,
     audio: State<'_, Audio>,
-    generation: u64,
+    stamp: grooviq_project::session::PatternStamp,
 ) -> Result<Option<NotesAck>, String> {
-    history(&app, &audio, generation, false)
+    history(&app, &audio, stamp, false)
 }
 
 fn history(
     app: &AppHandle,
     audio: &Audio,
-    generation: u64,
+    stamp: grooviq_project::session::PatternStamp,
     undo: bool,
 ) -> Result<Option<NotesAck>, String> {
     let (ack, before) = {
         let mut session = lock(&audio.session);
         let before = session.notes_revision();
-        let ack = session.step_history_in(generation, undo, Instant::now());
+        let ack = session.history_stamped(stamp, undo, Instant::now());
         (ack.map_err(text)?, before)
     };
     if let Some(ack) = &ack {

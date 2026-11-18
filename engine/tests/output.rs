@@ -1223,6 +1223,87 @@ fn lists_the_real_outputs() {
 }
 
 #[test]
+fn returning_to_a_failed_default_reports_a_new_failure_episode() {
+    let fake = Fake::new(vec![airpods(true)]);
+    fake.state().fail_open = true;
+    let (c, p) = engine_48k();
+    let (out, events) = start(&fake, &c, p, OutputChoice::SystemDefault, true);
+    let failed = OutputEvent::OpenFailed {
+        output: airpods(true),
+        error: "the fake device refuses to open".into(),
+    };
+    assert_eq!(*events.lock().unwrap(), std::slice::from_ref(&failed));
+    assert_eq!(out.current(), None);
+    assert_eq!(fake.open_id(), None);
+    fake.state().fail_open = false;
+    fake.set(vec![sony(true)]);
+    out.poll_now();
+    assert_eq!(out.current(), Some(sony(true)));
+    assert_eq!(fake.open_id().as_deref(), Some("sony"));
+    fake.state().fail_open = true;
+    fake.set(vec![airpods(true)]);
+    out.poll_now();
+    assert_eq!(out.current(), None);
+    assert_eq!(fake.open_id(), None);
+    assert_eq!(fake.state().opened, ["sony"]);
+    assert_eq!(
+        *events.lock().unwrap(),
+        [
+            failed.clone(),
+            OutputEvent::Switched {
+                from: airpods(true),
+                to: sony(true)
+            },
+            failed,
+        ]
+    );
+    // Repeated looks in the same failing episode must remain quiet.
+    out.poll_now();
+    out.poll_now();
+    assert_eq!(events.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn a_failed_reopen_before_a_guarded_fallback_is_truthful_and_silent() {
+    let fake = Fake::new(vec![airpods(true)]);
+    let (c, p) = engine_48k();
+    c.lock().unwrap().send(tone(true)).unwrap();
+    let (out, events) = start(&fake, &c, p, OutputChoice::SystemDefault, true);
+    assert!(peak(&fake.pull(4_800)) > 0.2);
+    let slot = fake.slot();
+    fake.state().fail_open = true;
+    slot.stream_failed();
+    out.poll_now();
+    assert_eq!(out.current(), None);
+    assert_eq!(fake.open_id(), None);
+    let mut scratch = [1.0; 512];
+    slot.process(&mut scratch, 2);
+    assert!(scratch.iter().all(|x| *x == 0.0));
+    // Enumeration catches up: now the fallback can actually open.
+    fake.state().fail_open = false;
+    fake.set(vec![speakers(true)]);
+    out.poll_now();
+    assert_eq!(out.current(), Some(speakers(true)));
+    assert_eq!(fake.state().opened, ["airpods", "speakers"]);
+    assert_eq!(
+        *events.lock().unwrap(),
+        [
+            OutputEvent::Opened(airpods(true)),
+            OutputEvent::OpenFailed {
+                output: airpods(true),
+                error: "the fake device refuses to open".into(),
+            },
+            OutputEvent::GuardStopped { to: speakers(true) },
+            OutputEvent::Switched {
+                from: airpods(true),
+                to: speakers(true)
+            },
+        ]
+    );
+    assert!(fake.pull(4_800).iter().all(|x| *x == 0.0));
+}
+
+#[test]
 fn unsupported_actual_rates_stay_silent_and_retry_without_losing_processor() {
     for rate in [0, 7_999, 384_001, u32::MAX] {
         let fake = Fake::new(vec![usb(true)]);
@@ -1289,6 +1370,52 @@ fn an_unsupported_reopen_never_admits_the_old_rate_processor() {
     assert!(audio.iter().all(|sample| *sample == 0.0));
     fake.state().open_rate = Some(44_100);
     assert!(wait_for(Duration::from_secs(4), || out.current().is_some()));
+    let audio = left(&fake.pull(44_100));
+    assert!((219..=221).contains(&upward_crossings(&audio[22_050..])));
+}
+
+#[test]
+fn unsupported_returning_default_reports_a_new_failure_episode() {
+    let fake = Fake::new(vec![airpods(true)]);
+    fake.state().open_rate = Some(7_999);
+    let (c, p) = engine_48k();
+    c.lock().unwrap().send(tone(true)).unwrap();
+    let (out, events) = start(&fake, &c, p, OutputChoice::SystemDefault, true);
+    assert_eq!(out.current(), None);
+    assert!(fake.open_id().is_none());
+
+    fake.state().open_rate = Some(48_000);
+    fake.set(vec![sony(true)]);
+    out.poll_now();
+    assert_eq!(out.current().unwrap().id, "sony");
+    assert!(peak(&fake.pull(4_800)) > 0.1);
+
+    fake.state().open_rate = Some(7_999);
+    fake.set(vec![airpods(true)]);
+    out.poll_now();
+    assert_eq!(out.current(), None);
+    assert!(fake.open_id().is_none());
+    let count = || {
+        events.lock().unwrap().iter().filter(|e| matches!(e,
+        OutputEvent::OpenFailed { output, error } if output.id == "airpods" && error.contains("unsupported actual output sample rate")
+    )).count()
+    };
+    assert_eq!(
+        count(),
+        2,
+        "a returning target starts a fresh failure episode"
+    );
+    let rejected = Arc::clone(fake.state().last_slot.as_ref().unwrap());
+    let mut silent = [1.0; 512];
+    rejected.process(&mut silent, 2);
+    assert!(silent.iter().all(|sample| *sample == 0.0));
+    out.poll_now();
+    out.poll_now();
+    assert_eq!(count(), 2, "retries in one episode remain quiet");
+
+    fake.state().open_rate = Some(44_100);
+    assert!(wait_for(Duration::from_secs(4), || out.current().is_some()));
+    assert_eq!(out.current().unwrap().sample_rate, 44_100);
     let audio = left(&fake.pull(44_100));
     assert!((219..=221).contains(&upward_crossings(&audio[22_050..])));
 }
