@@ -738,12 +738,18 @@ export function installMockTauri(seed: MockSeed): void {
       throw `"${name}": This file is not a sound Grooviq can open; use WAV, AIFF, FLAC, MP3 or OGG.`;
     }
   };
+  let unconfirmNextSave = false;
   const saveTo = (target: string | null) => {
     const path = target === null ? s.path : withExtension(target, "grooviq", false);
     if (path === null) throw "Choose where to save this project.";
     if (files.get(path)?.kind === "project") s.backups.set(path, (s.backups.get(path) ?? 0) + 1);
     files.set(path, { kind: "project", project: clone(s.project) });
     s.path = path;
+    if (unconfirmNextSave) {
+      unconfirmNextSave = false;
+      if (!dirty()) changed();
+      throw "The file was written, but directory durability could not be confirmed. Keep recovery copies and try saving again.";
+    }
     markClean();
     return view();
   };
@@ -1153,6 +1159,7 @@ export function installMockTauri(seed: MockSeed): void {
       return null;
     },
     transport_play: () => {
+      if (s.transport.playing) return null;
       s.transport = { playing: true, startMs: performance.now(), startTicks: 0, held: null };
       return null;
     },
@@ -1436,6 +1443,8 @@ export function installMockTauri(seed: MockSeed): void {
     },
     /** A file as the mock holds it (a saved project's notes, ...), or null. */
     file: (path: string) => clone(files.get(path) ?? null),
+    /** Next save writes its file/path, retains dirty state, then reports uncertainty. */
+    unconfirmNextSave: () => { unconfirmNextSave = true; },
     /** Answers for the next open/save dialogs, in order (`null`: the person cancels). */
     queueDialog: (...answers: unknown[]) => s.dialogs.push(...answers),
     /** What the shell does on a window close or Cmd+Q: ask the UI while there are unsaved
@@ -1500,7 +1509,7 @@ export function installMockTauri(seed: MockSeed): void {
       emit("midi-inputs-changed", null);
     },
     /** One logical MIDI producer, independent of typing/preview ownership. Velocity uses
-     * decoded MIDI bytes, like Player::handle_in; zero-velocity NoteOn is a release. This
+     * decoded MIDI bytes, like Player::handle_in; zero-velocity NoteOn is a release.
      * Port, pedal, multi-input and project/channel-instance invalidation remain #247. */
     midiNote: (key: number, velocity: number, on: boolean) => {
       if (!Number.isInteger(key) || key < 0 || key > 127 || !Number.isInteger(velocity) || velocity < 0 || velocity > 127) {
