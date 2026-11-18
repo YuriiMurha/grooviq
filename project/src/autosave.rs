@@ -54,6 +54,24 @@ pub fn autosave_tick_with(
     now: Instant,
     after_write: impl FnOnce(),
 ) -> AutosaveTick {
+    autosave_tick_on(
+        session,
+        recovery,
+        now,
+        after_write,
+        &mut crate::file::RealDisk,
+    )
+}
+
+/// Fault-injection boundary for the actual autosave lifecycle.
+#[doc(hidden)]
+pub fn autosave_tick_on(
+    session: &Mutex<Session>,
+    recovery: &Mutex<Option<RecoveryDir>>,
+    now: Instant,
+    after_write: impl FnOnce(),
+    disk: &mut impl crate::file::Disk,
+) -> AutosaveTick {
     let snapshot = {
         let mut session = lock(session);
         if session.autosave_due(now) {
@@ -68,8 +86,11 @@ pub fn autosave_tick_with(
     let Some((generation, (project, samples, original))) = snapshot else {
         return AutosaveTick::Idle;
     };
-    let written = match lock(recovery).as_ref() {
-        Some(dir) => dir.write_autosave(&project, &samples, original.as_deref()),
+    let (written, sequence) = match lock(recovery).as_ref() {
+        Some(dir) => (
+            dir.write_autosave_on(&project, &samples, original.as_deref(), || Ok(()), disk),
+            dir.write_sequence(),
+        ),
         None => return AutosaveTick::Stopped,
     };
     after_write();
@@ -81,12 +102,22 @@ pub fn autosave_tick_with(
             }
             // A crash now would offer the project the person just left. If the folder cannot
             // be cleared, the next autosave of the open project replaces it.
-            if let Some(dir) = lock(recovery).as_ref() {
-                let _ = dir.clear_autosave();
+            if let Some(dir) = lock(recovery).as_ref()
+                && let Err(e) = dir.clear_autosave_if_current(sequence)
+            {
+                return AutosaveTick::Failed(e);
             }
             AutosaveTick::Replaced
         }
         Err(e) => {
+            if crate::file::directory_unconfirmed(&e) && lock(session).generation() != generation {
+                if let Some(dir) = lock(recovery).as_ref()
+                    && let Err(cleanup) = dir.clear_autosave_if_current(sequence)
+                {
+                    return AutosaveTick::Failed(cleanup);
+                }
+                return AutosaveTick::Replaced;
+            }
             lock(session).autosave_failed(Instant::now());
             AutosaveTick::Failed(e)
         }

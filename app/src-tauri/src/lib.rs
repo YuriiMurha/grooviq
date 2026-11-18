@@ -294,10 +294,7 @@ fn autosave_loop(
             }
             AutosaveTick::Failed(e) => {
                 // The log has every failure; the person is told once per distinct error.
-                lock(log).push(
-                    Level::Warn,
-                    format!("The autosave could not be written: {e}"),
-                );
+                lock(log).push(Level::Warn, format!("Autosave needs attention: {e}"));
                 if let Some(message) = lock(status).failed(&e) {
                     let _ = app.emit(FAILED_EVENT, message);
                 }
