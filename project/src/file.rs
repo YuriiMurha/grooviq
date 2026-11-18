@@ -270,13 +270,17 @@ fn read_limited(path: &Path, limit: u64) -> io::Result<SampleFile> {
 pub trait Disk {
     /// Sync the renamed entry's parent directory.
     fn sync_folder(&mut self, path: &Path) -> io::Result<()> {
-        sync_folder(path)
+        sync_folder_on(path, self)
+    }
+    /// Flush the completed temporary file before syncing it.
+    fn flush(&mut self, file: &mut File) -> io::Result<()> {
+        file.flush()
     }
     /// Runs once the zip is written and flushed into the temp file, before it is synced.
     fn written(&mut self, _file: &mut File) -> io::Result<()> {
         Ok(())
     }
-    /// Syncs the temp file's bytes to the disk (see [`sync_file`]).
+    /// Syncs a temporary file or its parent directory (see [`sync_file`]).
     fn sync(&mut self, file: &File) -> io::Result<()> {
         sync_file(file)
     }
@@ -286,14 +290,16 @@ pub trait Disk {
     }
 }
 
-/// Syncs `file`'s bytes to the disk: the one sync a save makes, whatever [`Disk`] runs it.
+/// Syncs a file or directory through the operating system, whatever [`Disk`] runs it.
 /// Tests count the syncs that succeed (on their own thread), so a save that stops syncing
 /// fails one.
 #[doc(hidden)]
 pub fn sync_file(file: &File) -> io::Result<()> {
     file.sync_all().inspect(|()| {
         #[cfg(test)]
-        tests::SYNCED.with(|n| n.set(n.get() + 1));
+        if file.metadata().is_ok_and(|m| m.is_file()) {
+            tests::SYNCED.with(|n| n.set(n.get() + 1));
+        }
     })
 }
 
@@ -557,7 +563,7 @@ fn stage(
         done: false,
     };
     write(&mut staged._lock)?;
-    staged._lock.flush()?;
+    disk.flush(&mut staged._lock)?;
     disk.written(&mut staged._lock)?;
     // Before the rename: a power cut after it must find the new bytes, not an empty file.
     disk.sync(&staged._lock)?;
@@ -592,18 +598,18 @@ pub(crate) fn confirm_directory(disk: &mut impl Disk, path: &Path) -> io::Result
 }
 
 #[cfg(unix)]
-fn sync_folder(path: &Path) -> io::Result<()> {
+fn sync_folder_on(path: &Path, disk: &mut (impl Disk + ?Sized)) -> io::Result<()> {
     let folder = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    File::open(folder)?.sync_all()
+    disk.sync(&File::open(folder)?)
 }
 
 // Windows has no Unix directory-fsync contract. Saves retain the platform's rename
 // guarantees; success here does not claim directory durability on unsupported platforms.
 #[cfg(not(unix))]
-fn sync_folder(_path: &Path) -> io::Result<()> {
+fn sync_folder_on(_path: &Path, _disk: &mut (impl Disk + ?Sized)) -> io::Result<()> {
     Ok(())
 }
 
@@ -911,6 +917,103 @@ fn zip_error(e: ZipError) -> LoadError {
     }
 }
 
+#[cfg(all(test, unix))]
+pub(crate) mod order_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    pub(crate) struct Audit {
+        pub target: PathBuf,
+        pub ops: Vec<&'static str>,
+        pub fail: &'static str,
+        synced_file: Option<(u64, u64)>,
+    }
+    impl Audit {
+        pub fn new(target: &Path, fail: &'static str) -> Self {
+            Self {
+                target: target.into(),
+                ops: Vec::new(),
+                fail,
+                synced_file: None,
+            }
+        }
+        fn step(&mut self, op: &'static str) -> io::Result<()> {
+            self.ops.push(op);
+            if op == self.fail {
+                Err(io::Error::other(op))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    impl Disk for Audit {
+        fn flush(&mut self, file: &mut File) -> io::Result<()> {
+            assert!(self.ops.is_empty());
+            self.step("flush")?;
+            file.flush()
+        }
+        fn sync(&mut self, file: &File) -> io::Result<()> {
+            if file.metadata()?.is_dir() {
+                let actual = file.metadata()?;
+                let expected = fs::metadata(self.target.parent().unwrap())?;
+                assert_eq!(
+                    (actual.dev(), actual.ino()),
+                    (expected.dev(), expected.ino())
+                );
+                assert_eq!(self.ops.last(), Some(&"rename"));
+                assert_ne!(fs::read(&self.target)?, b"old");
+                self.step("directory")?;
+            } else {
+                assert_eq!(self.ops, ["flush"]);
+                assert!(file.metadata()?.len() > 0);
+                assert_eq!(fs::read(&self.target)?, b"old");
+                let metadata = file.metadata()?;
+                self.synced_file = Some((metadata.dev(), metadata.ino()));
+                self.step("file")?;
+            }
+            file.sync_all()
+        }
+        fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
+            assert_eq!(to, self.target);
+            let metadata = fs::metadata(from)?;
+            assert_eq!(self.synced_file, Some((metadata.dev(), metadata.ino())));
+            assert_eq!(self.ops, ["flush", "file"]);
+            assert_eq!(fs::read(to)?, b"old");
+            self.step("rename")?;
+            fs::rename(from, to)
+        }
+    }
+
+    #[test]
+    fn save_sync_order_and_failures() {
+        for fail in ["", "flush", "file", "rename", "directory"] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("song.grooviq");
+            fs::write(&path, b"old").unwrap();
+            let mut disk = Audit::new(&path, fail);
+            let result = stage_save(&Project::default(), &SampleFiles::new(), &path, &mut disk)
+                .and_then(|staged| staged.commit(&mut disk));
+            let expected = match fail {
+                "flush" => vec!["flush"],
+                "file" => vec!["flush", "file"],
+                "rename" => vec!["flush", "file", "rename"],
+                _ => vec!["flush", "file", "rename", "directory"],
+            };
+            assert_eq!(disk.ops, expected);
+            assert_eq!(result.is_ok(), fail.is_empty());
+            if matches!(fail, "flush" | "file" | "rename") {
+                assert_eq!(fs::read(&path).unwrap(), b"old");
+            } else {
+                assert!(load(&path).is_ok());
+            }
+            if fail == "directory" {
+                assert!(directory_unconfirmed(&result.unwrap_err()));
+            }
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,7 +1027,9 @@ mod tests {
     #[test]
     fn directory_open_errors_are_propagated() {
         let root = tempfile::tempdir().unwrap();
-        let error = sync_folder(&root.path().join("missing").join("song.grooviq")).unwrap_err();
+        let error = RealDisk
+            .sync_folder(&root.path().join("missing").join("song.grooviq"))
+            .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
