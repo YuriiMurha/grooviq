@@ -74,6 +74,8 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test -- --run
+      - name: Largest grid CPU budget
+        run: node ../../scripts/grid-budget.mjs
       - run: npm run build
 
   # Not a required check: Playwright against the web build with the mock engine
@@ -81,20 +83,30 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    container:
+      # Keep this version equal to @playwright/test in app/ui/package-lock.json.
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --init --ipc=host
     defaults:
       run:
         working-directory: app/ui
     steps:
       - uses: actions/checkout@v5
+        timeout-minutes: 1
       - uses: actions/setup-node@v5
+        timeout-minutes: 1
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: app/ui/package-lock.json
       - run: npm ci
-      - run: npx playwright install --with-deps chromium webkit
+        timeout-minutes: 2
+      # Leave room for diagnostics; container initialization also uses the job budget.
       - run: npm run e2e
-      - if: failure()
+        timeout-minutes: 7
+      # Best effort on cancellation: a runner/job kill can still prevent delivery.
+      - if: failure() || cancelled()
+        timeout-minutes: 1
         uses: actions/upload-artifact@v4
         with:
           name: e2e-results

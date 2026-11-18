@@ -1,3 +1,5 @@
+import { registerSettlement } from "../project/pending";
+import type { PatternStamp } from "../api/patterns";
 import type { NewNote, NotesAck, NotesEdit, WireNote } from "../api/notes";
 import { errorText, type ProjectView } from "../api/project";
 import type { LocalEdit, NoteStore } from "./noteStore";
@@ -16,7 +18,7 @@ export interface QueueHooks {
 }
 
 /** A command that changes the notes without an edit of the roll's own (undo, redo). */
-export type NotesCommand = () => Promise<NotesAck | null>;
+export type NotesCommand = (origin?: PatternStamp) => Promise<NotesAck | null>;
 
 /** The queues with an edit queued or unanswered, the roll that made them open or not. */
 const unsettledQueues = new Set<CommitQueue>();
@@ -33,9 +35,11 @@ export function rollEditsSettled(): Promise<boolean> {
   return Promise.all([...unsettledQueues].map((q) => q.flush())).then((all) => all.every(Boolean));
 }
 
+registerSettlement(rollEditsSettled);
+
 /** What waits in the queue: an edit of the roll's, or a command, each for the project it was
  * made in (its generation). */
-type Queued = ({ edit: LocalEdit } | { command: NotesCommand }) & { generation: number };
+type Queued = ({ edit: LocalEdit } | { command: NotesCommand }) & { stamp: PatternStamp };
 
 /** Sends the piano roll's edits to the engine one at a time, in order. Each edit shows in the
  * store at once; added notes keep temporary negative ids until the engine's reply names them,
@@ -67,8 +71,36 @@ export class CommitQueue {
   private sending = false;
   /** Edits and commands refused or failed so far (see [`flush`]). */
   private failures = 0;
+  private acknowledgedFailures = 0;
+  private ownRevisions = new Map<number, number>();
   /** The open project (`ProjectView.generation`). */
   private generation = 0;
+  private patternId = 0;
+
+  setPatternId(patternId: number) {
+    if (patternId === this.patternId) return;
+    this.replacing();
+    this.patternId = patternId;
+    this.seen = 0; this.announced = 0;
+    this.reopened();
+  }
+  stamp(): PatternStamp { return { generation: this.generation, patternId: this.patternId, revision: this.store.revision }; }
+  private revisionFrom(revision: number): number {
+    const visited = new Set<number>();
+    while (this.ownRevisions.has(revision) && !visited.has(revision)) {
+      visited.add(revision); revision = this.ownRevisions.get(revision)!;
+    }
+    return revision;
+  }
+  rejectHeld() {
+    this.failures += 1; this.reload = true;
+    this.hooks.onError("The pattern changed before this gesture finished. Reload its notes.");
+    this.pump();
+  }
+  accepts(origin: PatternStamp): boolean {
+    return !this.closed && origin.generation === this.generation && origin.patternId === this.patternId
+      && this.revisionFrom(origin.revision) === this.store.revision;
+  }
 
   constructor(
     private store: NoteStore,
@@ -84,9 +116,6 @@ export class CommitQueue {
     this.generation = generation;
   }
 
-  generationNow(): number {
-    return this.generation;
-  }
 
   /** Where failures and returned views go (the piano roll sets them once mounted). */
   setHooks(hooks: QueueHooks) {
@@ -97,15 +126,17 @@ export class CommitQueue {
    * these are put back on top of it, with the selection the gesture made. */
   setHeld(held: () => LocalEdit | null) {
     this.held = held;
+    return () => { this.held = () => null; };
   }
+  hasHeld(): boolean { return this.held() !== null; }
 
   /** Shows `edit` and queues it, for the project of `generation` (a held gesture's: the one it
    * started in). An edit for another project, or made while a replacement is on its way, is
    * dropped unshown. */
-  commit(edit: LocalEdit, generation = this.generation) {
-    if (this.closed || generation !== this.generation) return;
+  commit(edit: LocalEdit, stamp: PatternStamp = this.stamp()) {
+    if (!this.accepts(stamp)) { this.failures += 1; this.track(); return; }
     this.store.apply(edit);
-    this.pending.push({ edit, generation });
+    this.pending.push({ edit, stamp });
     this.pump();
   }
 
@@ -114,7 +145,7 @@ export class CommitQueue {
    * (nothing to do) changes nothing. */
   run(command: NotesCommand) {
     if (this.closed) return;
-    this.pending.push({ command, generation: this.generation });
+    this.pending.push({ command, stamp: this.stamp() });
     this.pump();
   }
 
@@ -125,6 +156,7 @@ export class CommitQueue {
     this.epoch += 1;
     this.pending = [];
     this.real.clear();
+    this.ownRevisions.clear();
     this.reload = true;
     // A reply or fetch still out is ignored: the queue is free for the project that comes next.
     this.sending = false;
@@ -146,7 +178,7 @@ export class CommitQueue {
 
   /** Keeps [`rollEditsUnsettled`] up to date. */
   private track() {
-    if (this.unsettled()) unsettledQueues.add(this);
+    if (this.unsettled() || this.failures > this.acknowledgedFailures) unsettledQueues.add(this);
     else unsettledQueues.delete(this);
   }
 
@@ -159,8 +191,10 @@ export class CommitQueue {
   /** Resolves once everything queued now has been answered: `true` if all of it was applied,
    * `false` if any edit or command was refused or failed (and what was built on it dropped). */
   async flush(): Promise<boolean> {
-    const before = this.failures;
+    const before = this.acknowledgedFailures;
     await this.idle();
+    this.acknowledgedFailures = this.failures;
+    this.track();
     return this.failures === before;
   }
 
@@ -178,13 +212,15 @@ export class CommitQueue {
     this.track();
     if (this.busy || this.closed) return;
     // Made in a project that is not the open one: never sent (the engine would refuse it too).
-    while (this.pending.length && this.pending[0].generation !== this.generation) this.pending.shift();
+    while (this.pending.length && (this.pending[0].stamp.generation !== this.generation || this.pending[0].stamp.patternId !== this.patternId)) {
+      this.pending.shift(); this.failures += 1;
+    }
     const next = this.pending.shift();
     if (next && "command" in next) {
-      this.runNow(next.command);
+      this.runNow(next.command, next.stamp);
       this.track();
     } else if (next) {
-      this.send(next.edit, next.generation);
+      this.send(next.edit, next.stamp);
       this.track();
     } else if (this.needsFetch()) {
       this.fetch();
@@ -222,7 +258,7 @@ export class CommitQueue {
     return { add: edit.add, update, delete: del };
   }
 
-  private send(local: LocalEdit, generation: number) {
+  private send(local: LocalEdit, stamp: PatternStamp) {
     this.busy = true;
     this.sending = true;
     const epoch = this.epoch;
@@ -235,12 +271,18 @@ export class CommitQueue {
       velocity: n.velocity,
       slide: n.slide,
     }));
-    const edit: NotesEdit = { generation, baseRevision: this.store.revision, add, update: t.update, delete: t.delete };
+    const edit: NotesEdit = { generation: stamp.generation, patternId: stamp.patternId, baseRevision: this.revisionFrom(stamp.revision), add, update: t.update, delete: t.delete };
     this.api.notesEdit(edit).then(
       (ack) => {
         // Sent for a project that was replaced since: its ids and view are that project's.
         if (epoch !== this.epoch) return;
         this.sending = false;
+        if ((ack.view.generation !== undefined && ack.view.generation !== stamp.generation) ||
+            (ack.view.pattern && ack.view.pattern.id !== stamp.patternId)) {
+          this.failures += 1; this.pending = []; this.reload = true; this.done(); return;
+        }
+        if (ack.revision !== edit.baseRevision) this.ownRevisions.set(edit.baseRevision, ack.revision);
+        if (this.ownRevisions.size > 200) this.ownRevisions.delete(this.ownRevisions.keys().next().value!);
         local.add.forEach((n, i) => {
           const id = ack.addedIds[i];
           if (id === undefined) return;
@@ -266,15 +308,22 @@ export class CommitQueue {
     );
   }
 
-  private runNow(command: NotesCommand) {
+  private runNow(command: NotesCommand, origin: PatternStamp) {
     this.busy = true;
     this.sending = true;
     const epoch = this.epoch;
-    command().then(
+    const stamp = { ...origin, revision: this.revisionFrom(origin.revision) };
+    command(stamp).then(
       (ack) => {
         if (epoch !== this.epoch) return;
         this.sending = false;
         if (ack) {
+          if ((ack.view.generation !== undefined && ack.view.generation !== stamp.generation) ||
+              (ack.view.pattern && ack.view.pattern.id !== stamp.patternId)) {
+            this.failures += 1; this.pending = []; this.reload = true; this.done(); return;
+          }
+          if (ack.revision !== stamp.revision) this.ownRevisions.set(stamp.revision, ack.revision);
+          this.store.revision = ack.revision;
           // The store's notes are the ones before the command: edits that go out before the
           // fetch keep the store's older revision, so the engine sees them as stale too.
           this.reload = true;
@@ -302,6 +351,7 @@ export class CommitQueue {
         if (epoch !== this.epoch) return;
         const selected = this.store.selectedIds();
         this.store.load(revision, notes);
+        this.ownRevisions.clear();
         // Edits made while the fetch ran are not in it yet: show them again on top, with the
         // temporary ids the store and the selection know them by.
         for (const e of this.pending) if ("edit" in e) this.store.apply(this.localize(e.edit));

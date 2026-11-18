@@ -182,6 +182,8 @@ impl AudioProcessor {
             self.transport.keep_position(self.clock, len, len);
         }
         self.generation = graph.generation();
+        let mut graph = graph;
+        graph.keep_audio(&self.graph);
         self.graph = graph;
         self.unsent = None;
         self.faulted = false;
@@ -244,6 +246,7 @@ impl AudioProcessor {
         if self.graph.playback_mode == crate::PlaybackMode::Song
             && self.graph.song_loop.is_none()
             && self.transport.playing()
+            && !self.graph.audio_active()
             && end
                 >= self
                     .transport
@@ -453,7 +456,10 @@ impl AudioProcessor {
                             self.with_graph(Graph::transport_stopped);
                             self.transport.seek(start, tick);
                         }
-                        self.with_graph(|g| g.song_loop = region);
+                        self.with_graph(|g| {
+                            g.song_loop = region;
+                            g.reset_audio();
+                        });
                     }
                     Command::Play => {
                         if !self.transport.playing() {
@@ -555,10 +561,11 @@ impl AudioProcessor {
     /// Swaps in a fresh graph, unless it is from an earlier generation: a restart queued
     /// before `reconfigure` arrives after the fresh graph it made, and must not replace it
     /// (cutting held voices, or bringing back the old rate).
-    fn replace_graph(&mut self, graph: Box<Graph>, at: u64) {
+    fn replace_graph(&mut self, mut graph: Box<Graph>, at: u64) {
         let leaving = if graph.generation() == self.generation {
             self.faulted = false;
             let new_len = graph.pattern_length();
+            graph.keep_audio(&self.graph);
             let leaving = std::mem::replace(&mut self.graph, graph);
             // A pattern swap a faulted graph refused arrives with the fresh graph.
             if self.graph.playback_mode == crate::PlaybackMode::Pattern {

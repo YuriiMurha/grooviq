@@ -37,6 +37,7 @@ fn new_note(channel: u32, tick: u32, key: u8) -> NewNote {
 
 fn edit(session: &Session) -> NotesEdit {
     NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add: Vec::new(),
@@ -246,18 +247,15 @@ fn an_edit_naming_an_unknown_channel_changes_nothing() {
 }
 
 #[test]
-fn a_stale_base_revision_asks_for_a_reload() {
+fn a_stale_base_revision_is_refused_without_mutation() {
     let (mut session, _, ch) = with_synth();
     let mut e = edit(&session);
     e.base_revision = e.base_revision.wrapping_sub(1);
     e.add = vec![new_note(ch, 0, 60)];
-    let ack = session.edit_notes(e, Instant::now()).unwrap();
-    assert!(ack.reload);
-    assert_eq!(ack.added_ids.len(), 1, "the edit still applies");
-
-    let mut e = edit(&session);
-    e.add = vec![new_note(ch, 240, 60)];
-    assert!(!session.edit_notes(e, Instant::now()).unwrap().reload);
+    let before = session.view();
+    assert!(session.edit_notes(e, Instant::now()).is_err());
+    assert_eq!(session.view(), before);
+    assert!(session.current_pattern().notes.is_empty());
 }
 
 #[test]
@@ -412,7 +410,7 @@ fn additions_stop_at_the_note_cap() {
 #[test]
 fn edits_have_the_json_shapes_the_ui_sends_and_reads() {
     let e: NotesEdit = serde_json::from_str(
-        r#"{"generation":2,"baseRevision":3,
+        r#"{"generation":2,"patternId":0,"baseRevision":3,
             "add":[{"channel":1,"tick":0,"length":240,"key":60,"velocity":0.8,"slide":false}],
             "update":[{"id":4,"channel":1,"tick":480,"length":960,"key":63,"velocity":1,"slide":true}],
             "delete":[7]}"#,
@@ -662,7 +660,7 @@ fn late_step_edits_and_history_from_the_previous_project_change_nothing() {
 }
 
 #[test]
-fn an_older_revision_of_the_same_project_still_applies() {
+fn a_note_edit_held_across_another_edit_is_refused() {
     // Recording added a note after the UI's copy: its edit is stale, not foreign.
     let (mut session, _, ch) = with_synth();
     let mut e = edit(&session);
@@ -671,8 +669,8 @@ fn an_older_revision_of_the_same_project_still_applies() {
     session.edit_notes(e, Instant::now()).unwrap();
     let mut late = ui;
     late.add = vec![new_note(ch, 480, 62)];
-    let ack = session.edit_notes(late, Instant::now()).unwrap();
-    assert!(ack.reload);
-    assert_eq!(ack.added_ids.len(), 1);
-    assert_eq!(notes(&session).len(), 2);
+    let before = session.view();
+    assert!(session.edit_notes(late, Instant::now()).is_err());
+    assert_eq!(session.view(), before);
+    assert_eq!(notes(&session).len(), 1);
 }

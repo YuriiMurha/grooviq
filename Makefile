@@ -29,6 +29,7 @@ check: ui-install ## Everything CI runs: fmt, clippy, workspace tests, UI lint/t
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 	$(CARGO) test --workspace --all-features
+	$(MAKE) grid-budget
 	$(MAKE) notes-edit-budget
 	$(MAKE) export-budget
 
@@ -73,7 +74,18 @@ install-app: ## Copy the built Grooviq.app into /Applications (run build-app fir
 	rm -rf /Applications/Grooviq.app
 	ditto $(APP_BUNDLE) /Applications/Grooviq.app
 
+.PHONY: grid-budget
+grid-budget: ## Largest step-grid build: original 50 ms budget on standalone V8 CPU time
+	node scripts/grid-budget.mjs
+
 .PHONY: export-budget
 export-budget: ## Optimized 8-second PCM24 export with the original 4-second budget
 	node --test scripts/notes-edit-budget.test.mjs
 	node scripts/export-budget.mjs
+
+.PHONY: qa-stability qa-stability-smoke
+qa-stability: ## Opt-in: twenty full Linux WebKit + Chromium suites at HEAD in Docker (2 CPUs)
+	sh scripts/stability/container.sh proof
+
+qa-stability-smoke: ## Tiny real Playwright fixtures exercising stability accounting in Docker
+	sh scripts/stability/container.sh smoke
