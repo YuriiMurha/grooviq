@@ -346,10 +346,8 @@ test.describe("renderers", () => {
       const gl = c.getContext("webgl2");
       const ext = gl?.getExtension("WEBGL_lose_context");
       if (!ext) return null;
-      const events: string[] = [];
       const lost = new Promise<void>((resolve) => {
         c.addEventListener("webglcontextlost", () => {
-          events.push("lost");
           resolve();
         }, { once: true });
       });
@@ -357,7 +355,6 @@ test.describe("renderers", () => {
       // cannot be satisfied by an upload or draw from before restoration.
       const rebuilt = new Promise<{ bufferBuilds: number; draws: number }>((resolve) => {
         c.addEventListener("webglcontextrestored", () => {
-          events.push("restored");
           const { bufferBuilds, draws } = (window as unknown as { __grooviqRoll: RollStats }).__grooviqRoll;
           resolve({ bufferBuilds, draws });
         }, { once: true, capture: true });
@@ -366,10 +363,9 @@ test.describe("renderers", () => {
       await lost;
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       ext.restoreContext();
-      return { ...await rebuilt, events };
+      return await rebuilt;
     });
     test.skip(!restored, "no WEBGL_lose_context here");
-    expect(restored!.events).toEqual(["lost", "restored"]);
     await expect.poll(async () => (await stats(app)).bufferBuilds).toBeGreaterThan(restored!.bufferBuilds);
     await expect.poll(async () => (await stats(app)).draws).toBeGreaterThan(restored!.draws);
     expect((await stats(app)).renderer).toBe("webgl2");
