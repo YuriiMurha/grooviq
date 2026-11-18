@@ -17,10 +17,28 @@ fn fixture(home: &Path, cli: bool) -> serde_json::Value {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    serde_json::from_slice(&out.stdout).unwrap()
+    let manifest = serde_json::from_slice(&out.stdout).unwrap();
+    isolated_paths(home, &manifest);
+    manifest
 }
 fn path(value: &serde_json::Value) -> &Path {
     Path::new(value.as_str().unwrap())
+}
+
+fn isolated_paths(home: &Path, manifest: &serde_json::Value) {
+    let root = home.canonicalize().unwrap();
+    assert_eq!(path(&manifest["home"]).canonicalize().unwrap(), root);
+    for key in ["project", "backups", "recovery"] {
+        assert!(
+            path(&manifest[key])
+                .canonicalize()
+                .unwrap()
+                .starts_with(&root)
+        );
+    }
+    for sound in manifest["sounds"].as_array().unwrap() {
+        assert!(path(sound).canonicalize().unwrap().starts_with(&root));
+    }
 }
 
 #[test]
@@ -137,18 +155,28 @@ fn symlink_destination_is_preserved() {
 
 #[test]
 fn default_home_persists_and_second_run_refuses_it() {
+    let owned = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_grooviq-qa-fixture"))
         .env_remove("QA_HOME")
+        .env("TMPDIR", owned.path())
+        .env("TMP", owned.path())
+        .env("TEMP", owned.path())
         .output()
         .unwrap();
     assert!(out.status.success());
     let manifest: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let home = path(&manifest["home"]);
+    assert_eq!(
+        home.canonicalize().unwrap().parent().unwrap(),
+        owned.path().canonicalize().unwrap(),
+        "default QA home escaped this test's owned temporary root"
+    );
+    isolated_paths(home, &manifest);
     assert!(path(&manifest["project"]).is_file());
     let before = fs::read(path(&manifest["project"])).unwrap();
     assert!(!run(home, true).status.success());
     assert_eq!(before, fs::read(path(&manifest["project"])).unwrap());
-    fs::remove_dir_all(home).unwrap();
+    // TempDir cleans its own root. Never delete a path supplied by the CLI's output.
 }
 
 #[test]
