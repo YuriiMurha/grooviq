@@ -162,26 +162,79 @@ fn synth_trap_lead_uni7_block(bencher: Bencher, voices: usize) {
     bencher.bench_local(|| synth.process(black_box(&mut l), black_box(&mut r), None, &[]));
 }
 
-#[divan::bench(args = grooviq_dsp::fattener::PRESETS, consts = [64, 128])]
-fn fattener_block<const N: usize>(bencher: Bencher, name: &str) {
-    use grooviq_dsp::fattener::{Fattener, preset};
-    let mut device = Fattener::new(SR);
-    for (index, value) in preset(name).unwrap() {
+#[divan::bench(args = ["Glass Steps", "Soft Spools", "Dusk Circuit"], consts = [64, 128])]
+fn character_delay<const N: usize>(bencher: Bencher, name: &str) {
+    use grooviq_dsp::character_delay::{CharacterDelay, preset};
+    let mut device = CharacterDelay::new(SR);
+    for (i, v) in preset(name).unwrap() {
+        device.set_param(i, v);
+    }
+    let inputs: Vec<([f32; N], [f32; N])> = (0..64)
+        .map(|block| {
+            let l = std::array::from_fn(|i| (((block * N + i) % 97) as f32 / 97.0 - 0.5) * 0.5);
+            let r = std::array::from_fn(|i| (((block * N + i) % 73) as f32 / 73.0 - 0.5) * 0.4);
+            (l, r)
+        })
+        .collect();
+    let mut next = 0;
+    let (mut l, mut r) = ([0.0; N], [0.0; N]);
+    let mut render = || {
+        l.copy_from_slice(&inputs[next].0);
+        r.copy_from_slice(&inputs[next].1);
+        next = (next + 1) % inputs.len();
+        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
+        black_box((&l, &r));
+    };
+    // Charge the repeat/feedback paths with the measured signal, not a constant DC input.
+    for _ in 0..(SR as usize * 4).div_ceil(N) {
+        render();
+    }
+    bencher.bench_local(render);
+}
+
+// Keep the device continuous, but replace the in-place output with fresh stereo input on
+// every timed call. Input synthesis, setup, preset allocation and warmup are not timed.
+#[divan::bench(args = grooviq_dsp::ott::PRESETS, consts = [64, 128])]
+fn multiband_block<const N: usize>(bencher: Bencher, name: &str) {
+    let mut device = grooviq_dsp::ott::Ott::new(SR);
+    for (index, value) in grooviq_dsp::ott::preset(name).unwrap() {
         device.set_param(index, value);
     }
-    let source_l: [f32; N] =
-        std::array::from_fn(|i| libm::sinf(i as f32 * 0.29) * if i < 16 { 0.95 } else { 0.65 });
-    let source_r: [f32; N] = std::array::from_fn(|i| source_l[N - 1 - i] * -0.8);
-    for _ in 0..16 {
-        let (mut l, mut r) = (source_l, source_r);
-        device.process(&mut l, &mut r, None, &[]);
-    }
-    bencher.bench_local(|| {
-        let (mut l, mut r) = (source_l, source_r);
+    // A cycling bank keeps the changing phase and loud/quiet quarters without timing sinf.
+    let inputs: Vec<([f32; N], [f32; N])> = (0..64)
+        .map(|block| {
+            let mut l = [0.0; N];
+            let mut r = [0.0; N];
+            for i in 0..N {
+                let t = (block * N + i) as f32 / SR;
+                let envelope = if i < N / 4 { 0.65 } else { 0.025 };
+                l[i] = envelope
+                    * (libm::sinf(t * 439.823)
+                        + 0.5 * libm::sinf(t * 6283.185)
+                        + 0.3 * libm::sinf(t * 43982.3));
+                r[i] = envelope
+                    * (libm::sinf(t * 552.92)
+                        + 0.4 * libm::sinf(t * 9424.778)
+                        + 0.25 * libm::sinf(t * 50265.484));
+            }
+            (l, r)
+        })
+        .collect();
+    let mut next = 0;
+    let mut l = [0.0; N];
+    let mut r = [0.0; N];
+    let mut render = || {
+        l.copy_from_slice(&inputs[next].0);
+        r.copy_from_slice(&inputs[next].1);
+        next = (next + 1) % inputs.len();
         device.process(black_box(&mut l), black_box(&mut r), None, &[]);
-        black_box((l, r));
-    });
+    };
+    for _ in 0..SETTLE_BLOCKS {
+        render();
+    }
+    bencher.bench_local(render);
 }
+
 /// Continuous device state, fresh transient stereo input per call. Copies are timed;
 /// construction, preset allocation and warmup are outside the measurement.
 fn bitcrusher_block(bencher: Bencher, block: usize, name: &str) {
@@ -229,45 +282,51 @@ fn bitcrusher_grain_block(bencher: Bencher, block: usize) {
     bitcrusher_block(bencher, block, "Loose Grain");
 }
 
-// Keep the device continuous, but replace the in-place output with fresh stereo input on
-// every timed call. Input synthesis, setup, preset allocation and warmup are not timed.
-#[divan::bench(args = grooviq_dsp::ott::PRESETS, consts = [64, 128])]
-fn multiband_block<const N: usize>(bencher: Bencher, name: &str) {
-    let mut device = grooviq_dsp::ott::Ott::new(SR);
-    for (index, value) in grooviq_dsp::ott::preset(name).unwrap() {
+#[divan::bench(args = grooviq_dsp::fattener::PRESETS, consts = [64, 128])]
+fn fattener_block<const N: usize>(bencher: Bencher, name: &str) {
+    use grooviq_dsp::fattener::{Fattener, preset};
+    let mut device = Fattener::new(SR);
+    for (index, value) in preset(name).unwrap() {
         device.set_param(index, value);
     }
-    // A cycling bank keeps the changing phase and loud/quiet quarters without timing sinf.
-    let inputs: Vec<([f32; N], [f32; N])> = (0..64)
-        .map(|block| {
-            let mut l = [0.0; N];
-            let mut r = [0.0; N];
-            for i in 0..N {
-                let t = (block * N + i) as f32 / SR;
-                let envelope = if i < N / 4 { 0.65 } else { 0.025 };
-                l[i] = envelope
-                    * (libm::sinf(t * 439.823)
-                        + 0.5 * libm::sinf(t * 6283.185)
-                        + 0.3 * libm::sinf(t * 43982.3));
-                r[i] = envelope
-                    * (libm::sinf(t * 552.92)
-                        + 0.4 * libm::sinf(t * 9424.778)
-                        + 0.25 * libm::sinf(t * 50265.484));
-            }
-            (l, r)
-        })
-        .collect();
-    let mut next = 0;
-    let mut l = [0.0; N];
-    let mut r = [0.0; N];
-    let mut render = || {
-        l.copy_from_slice(&inputs[next].0);
-        r.copy_from_slice(&inputs[next].1);
-        next = (next + 1) % inputs.len();
-        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
-    };
-    for _ in 0..SETTLE_BLOCKS {
-        render();
+    let source_l: [f32; N] =
+        std::array::from_fn(|i| libm::sinf(i as f32 * 0.29) * if i < 16 { 0.95 } else { 0.65 });
+    let source_r: [f32; N] = std::array::from_fn(|i| source_l[N - 1 - i] * -0.8);
+    for _ in 0..16 {
+        let (mut l, mut r) = (source_l, source_r);
+        device.process(&mut l, &mut r, None, &[]);
     }
-    bencher.bench_local(render);
+    bencher.bench_local(|| {
+        let (mut l, mut r) = (source_l, source_r);
+        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
+        black_box((l, r));
+    });
+}
+
+#[divan::bench(args = grooviq_dsp::saturation::PRESETS, consts = [64, 128])]
+fn saturation_block<const N: usize>(bencher: Bencher, patch: &str) {
+    let mut d = grooviq_dsp::saturation::Saturation::new(SR);
+    for (i, v) in grooviq_dsp::saturation::preset(patch).unwrap() {
+        d.set_param(i, v);
+    }
+    let mut seed = 719u32;
+    let mut source = move || {
+        let mut l = [0.; N];
+        let mut r = l;
+        for i in 0..N {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            l[i] = (seed as f32 / u32::MAX as f32 - 0.5) * 1.6;
+            r[i] = libm::sinf(seed as f32) * 0.7;
+        }
+        (l, r)
+    };
+    for _ in 0..16 {
+        let (mut l, mut r) = source();
+        d.process(&mut l, &mut r, None, &[]);
+    }
+    bencher
+        .with_inputs(source)
+        .bench_local_refs(|(l, r)| d.process(black_box(l), black_box(r), None, &[]));
 }
