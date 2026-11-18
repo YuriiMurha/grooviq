@@ -14,7 +14,7 @@ use std::path::PathBuf;
 /// `project.json`'s `format` value.
 pub const FORMAT: &str = "grooviq-project";
 /// The file format version this build writes and reads.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// A project file's extension, without the dot.
 pub const EXTENSION: &str = "grooviq";
 /// Velocity of a hit added with a click.
@@ -79,6 +79,10 @@ fn default_name() -> String {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
+    #[serde(default)]
+    pub play_mode: crate::arrangement::PlayMode,
+    #[serde(default, deserialize_with = "crate::reading::named")]
+    pub arrangement: crate::arrangement::Arrangement,
     #[serde(default = "default_name")]
     pub name: String,
     /// 20..=400.
@@ -94,7 +98,7 @@ pub struct Project {
     /// The `id` of the pattern the engine plays.
     #[serde(default)]
     pub current_pattern: u32,
-    /// The next unused id for a channel or pattern (one counter for both). Ids are never
+    /// The next unused channel, pattern, arrangement entity or automation priority id. Ids are never
     /// reused, so a note's channel can never point at a different channel after a delete.
     #[serde(default)]
     pub next_id: u32,
@@ -319,6 +323,8 @@ impl Project {
     /// "Untitled", 140 BPM, 4/4, no channels, one empty 16-step pattern "Pattern 1".
     pub fn new() -> Self {
         Self {
+            play_mode: Default::default(),
+            arrangement: Default::default(),
             name: default_name(),
             bpm: BPM.2,
             time_signature: TimeSignature::default(),
@@ -391,6 +397,7 @@ impl Project {
             .iter()
             .map(|c| c.id)
             .chain(self.patterns.iter().map(|p| p.id))
+            .chain(self.arrangement.ids())
             .max()
             .map_or(0, |h| h.saturating_add(1));
         if self.next_id < floor {
@@ -456,6 +463,18 @@ impl Project {
                 "sampler",
                 fixes,
             );
+            // Labels are display metadata; the stored parameters remain the sound source.
+            if c.instrument == InstrumentKind::Synth
+                && c.preset
+                    .as_deref()
+                    .is_some_and(|label| label != "Init" && !synth::PRESETS.contains(&label))
+            {
+                c.preset = None;
+                fixes.push(format!(
+                    "Channel id {}: unknown synth preset label was cleared; sound values were kept.",
+                    c.id
+                ));
+            }
             // Unknown synth names are dropped; unknown sampler names stay ignored (M1 kept them).
             c.synth
                 .retain(|param, _| synth::PARAM_IDS.contains(&param.as_str()));

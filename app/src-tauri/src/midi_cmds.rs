@@ -18,6 +18,7 @@ pub(crate) const INPUTS_CHANGED: &str = "midi-inputs-changed";
 /// One MIDI input as the settings show it.
 #[derive(Serialize)]
 pub struct MidiInputView {
+    id: String,
     name: String,
     enabled: bool,
 }
@@ -26,9 +27,9 @@ pub struct MidiInputView {
 #[tauri::command]
 pub async fn midi_inputs(audio: State<'_, Audio>) -> Result<Vec<MidiInputView>, String> {
     Ok(lock(&audio.midi)
-        .inputs()
+        .input_views()
         .into_iter()
-        .map(|(name, enabled)| MidiInputView { name, enabled })
+        .map(|(id, name, enabled)| MidiInputView { id, name, enabled })
         .collect())
 }
 
@@ -38,18 +39,15 @@ pub async fn midi_inputs(audio: State<'_, Audio>) -> Result<Vec<MidiInputView>, 
 pub async fn midi_set_enabled(
     app: AppHandle,
     audio: State<'_, Audio>,
-    name: String,
+    id: String,
     enabled: bool,
 ) -> Result<(), String> {
     let mut poll = Poll::default();
     commands::apply_and_save(
         &audio,
-        || poll = lock(&audio.midi).set_enabled(&name, enabled),
+        || {},
         |settings| {
-            settings.midi_disabled.retain(|n| *n != name);
-            if !enabled {
-                settings.midi_disabled.push(name.clone());
-            }
+            poll = lock(&audio.midi).switch_configured(settings, &id, enabled);
         },
     );
     report(&poll, &audio.log, &app);
