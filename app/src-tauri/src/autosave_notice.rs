@@ -40,9 +40,13 @@ impl AutosaveStatus {
     /// still the same trouble).
     pub(crate) fn failed(&mut self, error: &io::Error) -> Option<String> {
         let reason = error.to_string();
-        let message = format!(
-            "Autosave is failing: {reason}. Your changes are not being backed up; save the project to keep them."
-        );
+        let message = if grooviq_project::file::directory_unconfirmed(error) {
+            format!("Autosave durability is unconfirmed: {reason}")
+        } else {
+            format!(
+                "Autosave is failing: {reason}. Your changes are not being backed up; save the project to keep them."
+            )
+        };
         self.failure = Some(message.clone());
         self.told.insert(reason).then_some(message)
     }
