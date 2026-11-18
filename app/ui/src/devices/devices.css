@@ -737,6 +737,7 @@
 
 .sample-wave {
   flex: 1;
+  min-height: 64px;
   color: var(--kc);
 }
 
@@ -749,6 +750,7 @@
 }
 
 .sample-missing {
+  padding: 6px;
   position: absolute;
   inset: 0;
   display: flex;
@@ -760,6 +762,15 @@
   font-size: 11.5px;
   font-weight: 700;
 }
+
+.sample-missing > span {
+  min-height: 0;
+  max-width: 100%;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.sample-missing > button { flex: none; }
 
 /* A marker's grip: start and end hang from the top like flags (start's to the right of its line,
    end's to the left); the loop's sits at the bottom. The lines are drawn in the canvas. */
@@ -886,7 +897,9 @@
 }
 
 .sample-file-details {
-  flex: none;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: auto;
   min-width: 0;
   padding: 6px 10px;
   border-top: 1px solid var(--line-soft);

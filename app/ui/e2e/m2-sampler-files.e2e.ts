@@ -60,16 +60,71 @@ test.describe("long logical filename", () => {
   test.use({ seed: { project: longBeat, files: { [`/qa/sounds/${name}`]: { kind: "sample" } } } });
   test("details expand by keyboard inside the plugin", async ({ app }, info) => {
     const rack = await app.locator('.channel-row').boundingBox();
-    await app.getByRole("button", { name: "Edit the Kick sampler" }).click();
+    const opener = app.getByRole("button", { name: "Edit the Kick sampler" });
+    await opener.focus();
+    await app.keyboard.press("Enter");
     const editor = app.getByRole("dialog", { name: "Kick sampler", exact: true });
     const summary = editor.locator("summary");
-    await summary.focus();
+    for (let i = 0; i < 80 && !(await summary.evaluate(el => el === document.activeElement)); i++) await app.keyboard.press("Tab");
+    await expect(summary).toBeFocused();
     await app.keyboard.press("Enter");
     await expect(editor.locator("dd").first()).toHaveText(name);
     await expect(editor.locator("dd").last()).toHaveText("12,345 frames");
     const fit = await editor.locator(".sample-file-details").evaluate((el) => ({ width: el.clientWidth, scroll: el.scrollWidth }));
     expect(fit.scroll).toBeLessThanOrEqual(fit.width);
     expect(await app.locator('.channel-row').boundingBox()).toEqual(rack);
+    // Device windows reserve Space for transport; Enter activates the disclosure.
+    await app.keyboard.press("Space");
+    await expect(app.getByRole("button", { name: "Play", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(editor.locator(".sample-file-details")).toHaveAttribute("open", "");
+    await app.keyboard.press("Space");
+    await expect(app.getByRole("button", { name: "Play", exact: true })).toHaveAttribute("aria-pressed", "false");
+    await app.keyboard.press("Enter");
+    await expect(editor.locator(".sample-file-details")).not.toHaveAttribute("open", "");
+    await app.keyboard.press("Enter");
+    await expect(editor.locator("dd").first()).toBeVisible();
     await app.screenshot({ path: info.outputPath("long-file.png") });
+    await app.keyboard.press("Escape");
+    await expect(editor).toBeHidden();
+    await expect(opener).toBeFocused();
   });
 });
+
+for (const repeats of [15, 20]) {
+  test.describe(`long missing reference (${repeats} repeats)`, () => {
+    const name = `${"Long sample name ".repeat(repeats)}.wav`;
+    const missing = project(["Kick"]);
+    missing.channels[0].sample = `/qa/sounds/${name}`;
+    missing.channels[0].embedded = false;
+    test.use({ seed: { project: missing, files } });
+    test("expanded details preserve the entire recovery action", async ({ app, mock }, info) => {
+      await app.setViewportSize({ width: 900, height: 560 });
+      await app.getByRole("button", { name: "Edit the Kick sampler" }).click();
+      const editor = app.getByRole("dialog", { name: "Kick sampler", exact: true });
+      await editor.locator("summary").click();
+      const recovery = editor.getByRole("button", { name: "Relink Kick", exact: true });
+      const fit = await recovery.evaluate(el => {
+        const b = el.getBoundingClientRect();
+        const wave = el.closest(".sample-wave")!.getBoundingClientRect();
+        const window = el.closest('[role="dialog"]')!.getBoundingClientRect();
+        return { top: b.top, bottom: b.bottom, waveTop: wave.top, waveBottom: wave.bottom,
+          waveHeight: wave.height, windowBottom: window.bottom,
+          hittable: [b.top + 1, b.bottom - 1].every(y => {
+            const hit = document.elementFromPoint(b.x + b.width / 2, y);
+            return hit === el || (hit !== null && el.contains(hit));
+          }) };
+      });
+      expect(fit.waveHeight).toBeGreaterThan(0);
+      expect(fit.top).toBeGreaterThanOrEqual(fit.waveTop);
+      expect(fit.bottom).toBeLessThanOrEqual(fit.waveBottom);
+      expect(fit.bottom).toBeLessThanOrEqual(fit.windowBottom);
+      expect(fit.hittable).toBe(true);
+      await app.screenshot({ path: info.outputPath("long-missing-visible-recovery.png") });
+      await mock.eval("m => m.queueDialog('/qa/sounds/Recovered.wav')");
+      await recovery.click();
+      await expect.poll(() => mock.eval("m => m.state.project.channels[0].sample")).toBe("/qa/sounds/Recovered.wav");
+      await expect(editor.locator("dd").first()).toHaveText("Recovered.wav");
+      await app.screenshot({ path: info.outputPath("long-missing-recovered.png") });
+    });
+  });
+}

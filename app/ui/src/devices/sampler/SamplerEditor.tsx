@@ -209,7 +209,7 @@ export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onE
             <>
               {wave}
               <details className="sample-file-details">
-                <summary>File details</summary>
+                <summary tabIndex={0}>File details</summary>
                 <dl>
                   <dt>{channel.missing ? "Stored reference" : "File"}</dt><dd>{channel.sampleName ?? "No sample"}</dd>
                   <dt>Status</dt><dd>{channel.missing ? "Missing — locate the file to restore playback." : channel.sampleName ? "Loaded" : "No sample yet"}</dd>
