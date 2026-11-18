@@ -1,0 +1,225 @@
+import importlib.util
+import pathlib
+import tempfile
+import unittest
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location('refresh', pathlib.Path(__file__).with_name('refresh_install.py'))
+m = importlib.util.module_from_spec(spec)
+if spec.loader and pathlib.Path(spec.origin).exists():
+    spec.loader.exec_module(m)
+
+
+class InstallTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name).resolve()
+        self.old = self.root / 'Grooviq.app'
+        self.stage = self.root / 'stage.app'
+        self.backup = self.root / 'prior.app'
+        for p, content in [(self.old, b'old'), (self.stage, b'new')]:
+            p.mkdir()
+            (p / 'binary').write_bytes(content)
+
+    def test_failed_placement_restores_prior_app(self):
+        def verify(p):
+            if p == self.old:
+                raise RuntimeError('installed verification failed')
+        with self.assertRaises(RuntimeError):
+            m.place(self.stage, self.old, self.backup, verify)
+        self.assertEqual((self.old / 'binary').read_bytes(), b'old')
+
+    def test_symlink_guard_preserves_external_data(self):
+        external = self.root / 'external'
+        external.mkdir()
+        (external / 'precious').write_text('keep')
+        link = self.root / 'link'
+        link.symlink_to(external)
+        with self.assertRaises(RuntimeError):
+            m.safe_tree(link)
+        self.assertEqual((external / 'precious').read_text(), 'keep')
+
+    def test_manifest_detects_corruption_and_modes(self):
+        first = m.manifest(self.stage)
+        (self.stage / 'binary').write_bytes(b'corrupt')
+        self.assertNotEqual(first, m.manifest(self.stage))
+
+    def test_lock_contention(self):
+        with m.locked(self.root / 'lock'):
+            with self.assertRaises(BlockingIOError):
+                with m.locked(self.root / 'lock'):
+                    self.fail('second coordinator entered')
+
+
+
+
+class TransactionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = pathlib.Path(self.tmp.name).resolve()
+        self.app = root / 'Applications/Grooviq.app'
+        self.app.parent.mkdir()
+        self.cache, self.ops = root / 'cache', root / 'ops'
+        self.ops.mkdir()
+        self.cache.mkdir()
+        self.fixture = root / 'fixture.app'
+        self.make_app(self.app, b'old')
+        self.make_app(self.fixture, b'new')
+        self.calls = []
+        owner = self
+
+        class Fake(m.Refresh):
+            def git(self, *args):
+                owner.calls.append(('git', args))
+                return 'engine/src/lib.rs' if args[0] == 'diff' else 'b' * 40
+
+            def run(self, args, **kwargs):
+                owner.calls.append(tuple(args))
+                if args[0] == 'ditto':
+                    m.shutil.copytree(args[1], args[2])
+                return type('Result', (), {'stdout': ''})()
+
+            def build(self, revision, log):
+                owner.calls.append(('build', revision))
+                return owner.fixture
+
+        self.refresh = Fake(root, self.cache, self.ops, self.app)
+        m.atomic_json(self.ops / 'installed.json', {
+            'source_sha': 'a' * 40,
+            'installed_executable_sha256': m.digest(self.app / 'Contents/MacOS/grooviq')})
+
+    def make_app(self, p, value):
+        (p / 'Contents/MacOS').mkdir(parents=True)
+        (p / 'Contents/MacOS/grooviq').write_bytes(value)
+        (p / 'Contents/Info.plist').write_bytes(m.plistlib.dumps({
+            'CFBundleIdentifier': 'io.github.yuriimurha.grooviq',
+            'CFBundleExecutable': 'grooviq'}))
+
+    def old_preserved(self):
+        self.assertEqual((self.app / 'Contents/MacOS/grooviq').read_bytes(), b'old')
+
+    def test_build_failure_preserves_old(self):
+        with patch.object(self.refresh, 'build', side_effect=RuntimeError('build failed')):
+            with self.assertRaisesRegex(RuntimeError, 'build failed'):
+                self.refresh.refresh()
+        self.old_preserved()
+
+    def test_running_app_refuses_before_build(self):
+        with patch.object(self.refresh, 'idle', side_effect=RuntimeError('running')):
+            with self.assertRaisesRegex(RuntimeError, 'running'):
+                self.refresh.refresh()
+        self.assertFalse(any(x[0] == 'build' for x in self.calls))
+        self.old_preserved()
+
+    def test_corrupt_copy_preserves_old(self):
+        run = self.refresh.run
+        def corrupt(args, **kwargs):
+            result = run(args, **kwargs)
+            if args[0] == 'ditto':
+                (pathlib.Path(args[2]) / 'Contents/MacOS/grooviq').write_bytes(b'bad')
+            return result
+        with patch.object(self.refresh, 'run', side_effect=corrupt):
+            with self.assertRaisesRegex(RuntimeError, 'manifest mismatch'):
+                self.refresh.refresh()
+        self.old_preserved()
+
+    def test_receipt_failure_rolls_back(self):
+        with patch.object(m, 'atomic_json', side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                self.refresh.refresh()
+        self.old_preserved()
+
+    def test_success_records_exact_hash_and_no_launch(self):
+        record = self.refresh.refresh()
+        installed = self.app / 'Contents/MacOS/grooviq'
+        self.assertEqual(record['installed_executable_sha256'], m.digest(installed))
+        self.assertEqual(installed.read_bytes(), b'new')
+        self.assertEqual((pathlib.Path(record['previous_app']) / 'Contents/MacOS/grooviq').read_bytes(), b'old')
+        self.assertFalse(any(x[0] in ('open', 'osascript', 'kill', 'sudo') for x in self.calls))
+        self.assertIn(('build', 'b' * 40), self.calls)
+        self.assertEqual(self.refresh.refresh()['status'], 'unchanged')
+        self.assertEqual(len([x for x in self.calls if x[0] == 'build']), 1)
+
+    def test_unmanaged_app_refusal(self):
+        (self.ops / 'installed.json').unlink()
+        with self.assertRaisesRegex(RuntimeError, 'Unmanaged'):
+            self.refresh.refresh()
+        self.old_preserved()
+
+    def test_actual_process_probe_refuses_running_app(self):
+        with patch.object(self.refresh, 'run', return_value=type('Result', (), {
+                'stdout': '123 /Applications/Grooviq.app/Contents/MacOS/grooviq\n'})()):
+            with self.assertRaisesRegex(RuntimeError, 'running'):
+                self.refresh.idle()
+
+    def test_no_relevant_change_coalesces_without_advancing_receipt(self):
+        git = self.refresh.git
+        with patch.object(self.refresh, 'git', side_effect=lambda *a: '' if a[0] == 'diff' else git(*a)):
+            result = self.refresh.refresh()
+        self.assertEqual(result['status'], 'no app-relevant changes')
+        self.assertEqual(result['source_sha'], 'a' * 40)
+        self.assertFalse(any(x[0] == 'build' for x in self.calls))
+        self.old_preserved()
+
+    def test_cache_symlink_refusal(self):
+        self.cache.rmdir()
+        external = self.cache.parent / 'external'
+        external.mkdir()
+        self.cache.symlink_to(external)
+        with self.assertRaisesRegex(RuntimeError, 'symlink'):
+            self.refresh.refresh()
+        self.assertEqual(list(external.iterdir()), [])
+
+
+class SourceTests(unittest.TestCase):
+    def test_immutable_archive_and_dependency_reuse(self):
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp).resolve()
+            cache = root / 'cache'
+            cache.mkdir()
+            deps = cache / 'ui-dependencies'
+            (deps / 'node_modules/.bin').mkdir(parents=True)
+            (deps / 'node_modules/.bin/tauri').write_text('fake')
+            package = b'{"name":"fixture"}'
+            (deps / 'lock.sha256').write_text(m.hashlib.sha256(package + package).hexdigest())
+            refresh = m.Refresh(root, cache, root / 'ops', root / 'app')
+            commands = []
+            def run(args, **kwargs):
+                commands.append(args)
+                if 'archive' in args:
+                    with m.tarfile.open(cache / 'source.tar', 'w') as archive:
+                        for name in ('package.json', 'package-lock.json'):
+                            member = m.tarfile.TarInfo('app/ui/' + name)
+                            member.size = len(package)
+                            archive.addfile(member, io.BytesIO(package))
+            with patch.object(refresh, 'run', side_effect=run):
+                refresh.build('b' * 40, io.StringIO())
+            self.assertEqual(commands[0][-1], 'b' * 40)
+            self.assertFalse(any(x[:2] == ['npm', 'ci'] for x in commands))
+            self.assertEqual(commands[-1][-3:], ['--locked', '--jobs', '2'])
+            self.assertEqual(refresh.env['CARGO_TARGET_DIR'], str(cache / 'target'))
+
+    def test_archive_link_rejected(self):
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp).resolve()
+            cache = root / 'cache'
+            cache.mkdir()
+            refresh = m.Refresh(root, cache, root / 'ops', root / 'app')
+            def run(args, **kwargs):
+                with m.tarfile.open(cache / 'source.tar', 'w') as archive:
+                    member = m.tarfile.TarInfo('outside')
+                    member.type = m.tarfile.SYMTYPE
+                    member.linkname = str(root)
+                    archive.addfile(member)
+            with patch.object(refresh, 'run', side_effect=run):
+                with self.assertRaisesRegex(RuntimeError, 'links or special'):
+                    refresh.build('b' * 40, io.StringIO())
+            self.assertFalse((root / 'outside').exists())
+
+
+if __name__ == '__main__':
+    unittest.main()

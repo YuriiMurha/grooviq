@@ -69,10 +69,14 @@ build-app: ui-install ## Build the release Grooviq.app (no .dmg) into target/rel
 qa-app: ## Run the built app silently (GROOVIQ_AUDIO=null) with a throwaway home folder (QA_HOME=<dir> reuses one)
 	sh scripts/qa-app.sh
 
-install-app: ## Copy the built Grooviq.app into /Applications (run build-app first)
-	@test -d $(APP_BUNDLE) || { echo "No $(APP_BUNDLE). Run make build-app first."; exit 1; }
-	rm -rf /Applications/Grooviq.app
-	ditto $(APP_BUNDLE) /Applications/Grooviq.app
+install-app: refresh-app ## Alias for the verified merged-main refresh
+
+.PHONY: refresh-app test-refresh-app
+refresh-app: ## Quality only: build merged origin/main in the stable cache and replace safely
+	python3 scripts/refresh_install.py
+
+test-refresh-app: ## Exercise install failures with owned fake apps; never builds or launches
+	python3 -m unittest discover -s scripts -p test_refresh_install.py
 
 .PHONY: grid-budget
 grid-budget: ## Largest step-grid build: original 50 ms budget on standalone V8 CPU time
