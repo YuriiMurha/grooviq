@@ -384,6 +384,8 @@ pub fn run() {
         if menu::is_quit(id) {
             // Raises a preventable `ExitRequested`, held below like a window close.
             app.exit(0);
+        } else if let Some(redo) = menu::history_action(id) {
+            let _ = app.emit("edit-history", redo);
         } else if menu::is_high_refresh(id) {
             toggle_high_refresh(app);
         }
@@ -401,6 +403,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            menu::edit_history_enabled,
             commands::audio_outputs,
             commands::audio_select,
             commands::audio_settings,
