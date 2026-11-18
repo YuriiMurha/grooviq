@@ -20,6 +20,7 @@ fn exact_ranges_signs_and_partial_bins() {
     assert!(pyramid.query(0, 1032, 1).is_err());
     assert!(pyramid.query(0, 1, 16385).is_err());
     assert!(pyramid.query(1, 1, 1).is_err());
+    assert!(pyramid.query(3, 1, 1).is_err());
 }
 #[test]
 fn silence_impulse_tiny_and_invalid_buffers() {

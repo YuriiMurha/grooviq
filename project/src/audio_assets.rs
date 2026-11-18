@@ -764,4 +764,106 @@ mod tests {
             Err(AssetError::Decode(_))
         ));
     }
+    #[test]
+    fn old_reservation_drop_preserves_replacement_lease() {
+        let worker = AudioAssets::new();
+        let budget = worker.queued_bytes.clone();
+        let f = file();
+        let len = f.bytes.len();
+        let key = Arc::as_ptr(&f.bytes) as usize;
+        let r = worker
+            .submit(0, 1, 1, f.clone())
+            .unwrap()
+            .receive()
+            .unwrap();
+        // A later completed job proves the worker released the first job's lease.
+        assert!(matches!(
+            worker
+                .submit(
+                    0,
+                    2,
+                    0,
+                    SampleFile {
+                        name: "empty.wav".into(),
+                        bytes: Arc::new(Vec::new()),
+                    },
+                )
+                .unwrap()
+                .receive(),
+            Err(AssetError::Decode(_))
+        ));
+        let weak_old = budget.lock().unwrap().sources.get(&key).unwrap().clone();
+        let mut guard = budget.lock().unwrap();
+        let t = std::thread::spawn(move || drop(r));
+        while weak_old.strong_count() > 0 {
+            std::thread::yield_now();
+        }
+        // Old Drop is now parked on the lock; replace the expired Weak exactly as submit does.
+        guard.used += len;
+        let newer = Arc::new(SourceReservation {
+            budget: budget.clone(),
+            source: f.bytes.clone(),
+        });
+        guard.sources.insert(key, Arc::downgrade(&newer));
+        drop(guard);
+        t.join().unwrap();
+        let (kept_newer, used) = {
+            let b = budget.lock().unwrap();
+            (
+                b.sources
+                    .get(&key)
+                    .and_then(Weak::upgrade)
+                    .is_some_and(|e| Arc::ptr_eq(&e, &newer)),
+                b.used,
+            )
+        };
+        assert!(kept_newer, "old Drop removed the newer lease");
+        assert_eq!(used, len);
+        let again = worker
+            .submit(0, 2, 1, f.clone())
+            .unwrap()
+            .receive()
+            .unwrap();
+        let used = budget.lock().unwrap().used;
+        assert_eq!(used, len, "same Arc charged twice");
+        drop((again, newer));
+        drop(worker);
+        assert_eq!(budget.lock().unwrap().used, 0);
+    }
+    #[test]
+    fn cancelled_queued_job_never_decodes() {
+        let (worker, mut release, wait, stages) = held(Limits::default(), Stage::Queued);
+        let first = worker.submit(0, 1, 1, file()).unwrap();
+        wait.recv().unwrap();
+        let stale = worker.submit(0, 2, 1, wav(5)).unwrap(); // distinct bytes: no cache hit
+        let superseded = worker.submit(0, 3, 1, wav(6)).unwrap();
+        let fresh = worker.submit(0, 3, 2, file()).unwrap();
+        stale.cancel();
+        release.open();
+        let first_result = first.receive().unwrap(); // keep the cache entry alive
+        assert!(matches!(stale.receive(), Err(AssetError::Cancelled)));
+        assert!(matches!(superseded.receive(), Err(AssetError::Cancelled)));
+        assert!(fresh.receive().is_ok());
+        drop(worker);
+        drop(first_result);
+        let decodes = stages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| **s == Stage::Decode)
+            .count();
+        // first decodes; fresh hits the cache (same bytes); cancelled/superseded never decode.
+        assert_eq!(decodes, 1, "cancelled or superseded queued job decoded");
+    }
+    #[test]
+    fn replaced_project_decode_never_builds_peaks() {
+        let (mut worker, mut release, wait, stages) = held(Limits::default(), Stage::Decoded);
+        let old = worker.submit(0, 1, 1, file()).unwrap();
+        wait.recv().unwrap();
+        worker.replace_project();
+        release.open();
+        assert!(matches!(old.receive(), Err(AssetError::Cancelled)));
+        drop(worker);
+        assert!(!stages.lock().unwrap().contains(&Stage::Built));
+    }
 }
