@@ -64,18 +64,56 @@ fn validate_home(
 }
 use std::os::unix::fs::DirBuilderExt;
 
-fn read_request(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut bytes = Vec::new();
+fn wait_ready(
+    stream: &UnixStream,
+    events: libc::c_short,
+    deadline: Instant,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
     loop {
         let remaining = deadline
             .checked_duration_since(Instant::now())
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "request deadline"))?;
-        // Use whole milliseconds: Darwin rejects a timeval rounded to 1,000,000 usec.
-        let timeout = Duration::from_millis(remaining.as_millis().max(1) as u64);
-        stream.set_read_timeout(Some(timeout))?;
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "socket deadline"))?;
+        let mut fd = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        let milliseconds = remaining.as_millis().max(1).min(i32::MAX as u128) as i32;
+        // SAFETY: one initialized pollfd for a live borrowed socket, bounded timeout.
+        let ready = unsafe { libc::poll(&mut fd, 1, milliseconds) };
+        if ready > 0 {
+            return Ok(());
+        }
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+}
+
+fn read_request(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+    stream.set_nonblocking(true)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut bytes = Vec::new();
+    loop {
+        wait_ready(stream, libc::POLLIN, deadline)?;
         let mut chunk = [0; 4096];
-        let count = stream.read(&mut chunk)?;
+        let count = match stream.read(&mut chunk) {
+            Ok(count) => count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if count == 0 {
             return Ok(bytes);
         }
@@ -89,6 +127,32 @@ fn read_request(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
     }
 }
 
+fn write_response_until(
+    stream: &mut UnixStream,
+    mut bytes: &[u8],
+    deadline: Instant,
+) -> std::io::Result<()> {
+    // Blocking writes can renew a kernel timeout internally while making partial progress.
+    stream.set_nonblocking(true)?;
+    while !bytes.is_empty() {
+        wait_ready(stream, libc::POLLOUT, deadline)?;
+        match stream.write(bytes) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => bytes = &bytes[n..],
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 pub fn start(app: tauri::AppHandle, dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let socket = dir.join("control.sock");
     let listener = UnixListener::bind(&socket)?;
@@ -96,13 +160,15 @@ pub fn start(app: tauri::AppHandle, dir: PathBuf) -> Result<(), Box<dyn std::err
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-            let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
             let request = read_request(&mut stream);
             let bytes = request.as_ref().cloned().unwrap_or_default();
             let shutdown = bytes == b"{\"shutdown\":true}";
             if shutdown {
-                let _ = stream.write_all(b"{\"ok\":true}");
+                let _ = write_response_until(
+                    &mut stream,
+                    b"{\"ok\":true}",
+                    Instant::now() + Duration::from_secs(3),
+                );
                 app.exit(0);
                 break;
             }
@@ -129,7 +195,11 @@ pub fn start(app: tauri::AppHandle, dir: PathBuf) -> Result<(), Box<dyn std::err
                 .ok()
                 .and_then(|v| v.get("id").cloned());
             let reply = serde_json::json!({"id":id,"result":result.as_ref().ok(), "error":result.as_ref().err()});
-            let _ = stream.write_all(reply.to_string().as_bytes());
+            let _ = write_response_until(
+                &mut stream,
+                reply.to_string().as_bytes(),
+                Instant::now() + Duration::from_secs(3),
+            );
         }
         let _ = std::fs::remove_file(socket);
         let _ = std::fs::remove_dir(dir);
@@ -140,6 +210,71 @@ pub fn start(app: tauri::AppHandle, dir: PathBuf) -> Result<(), Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn response_bytes_are_preserved() {
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        write_response_until(&mut writer, b"{}", Instant::now() + Duration::from_secs(1)).unwrap();
+        let mut bytes = [0; 2];
+        reader.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"{}");
+    }
+
+    #[test]
+    fn slow_reader_does_not_renew_response_deadline() {
+        use std::os::fd::AsRawFd;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let size: libc::c_int = 1024;
+        // SAFETY: live socket descriptor and a correctly sized integer socket option.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    writer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&size as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&size) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        reader
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let read = Arc::new(AtomicUsize::new(0));
+        let client = std::thread::spawn({
+            let (stop, read) = (Arc::clone(&stop), Arc::clone(&read));
+            move || {
+                let mut bytes = [0; 1024];
+                while !stop.load(Ordering::Relaxed) {
+                    match reader.read(&mut bytes) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            read.fetch_add(n, Ordering::Relaxed);
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        });
+        let result = write_response_until(
+            &mut writer,
+            &vec![b'x'; LIMIT],
+            Instant::now() + Duration::from_millis(500),
+        );
+        stop.store(true, Ordering::Relaxed);
+        drop(writer);
+        client.join().unwrap();
+        assert!(
+            read.load(Ordering::Relaxed) > 1024,
+            "client made partial progress"
+        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
     #[test]
     fn request_limit_is_enforced_on_the_socket() {
         use std::net::Shutdown;
