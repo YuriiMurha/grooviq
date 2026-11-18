@@ -1,3 +1,6 @@
+import { Knob } from "../devices/controls/Knob";
+import { AMOUNT_RANGES, type TransformAmount } from "./transformAmounts";
+import type { useTransformAmounts } from "./useTransformAmounts";
 import type { ProjectKey } from "../api/project";
 import { CHORDS, CHORD_LABELS } from "./chords";
 import { NOTE_NAMES, SCALES, scaleLabel } from "./scales";
@@ -7,6 +10,7 @@ import { TOOL_BUTTONS, type Tool } from "./tools";
 const INVERSIONS = ["Root position", "1st inversion", "2nd inversion", "3rd inversion"];
 
 interface Props {
+  amounts: ReturnType<typeof useTransformAmounts>;
   tool: Tool;
   onTool: (tool: Tool) => void;
   gridIndex: number;
@@ -129,6 +133,17 @@ export function RollToolbar(p: Props) {
       </div>
       <div className="roll-group">
         {act("Quantize", "Move the starts of the selected notes (all notes with none selected) onto the snap grid (Alt+Q).", p.onQuantize)}
+        <details className="roll-feel">
+          <summary className="roll-tool">Feel</summary>
+          <div className="roll-feel-panel" role="group" aria-label="Transform amounts">
+            {([ ["spread", "Strum spread"], ["timing", "Humanize timing"], ["velocity", "Humanize velocity"] ] as [TransformAmount, string][]).map(([id, label]) => (
+              <Knob key={id} id={id} param={AMOUNT_RANGES[id]} value={p.amounts.values[id]}
+                control={p.amounts.control(id)} label={label} name={label} size={36}
+                format={v => v === 0 ? "Off" : `${Math.round(v / AMOUNT_RANGES[id].max * 100)}%`}
+                does="Adjust the feel of the next operation from low to high." />
+            ))}
+          </div>
+        </details>
         {act("Strum up", "Spread the notes of each chord in time, lowest note first.", () => p.onStrum("up"))}
         {act("Strum down", "Spread the notes of each chord in time, highest note first.", () => p.onStrum("down"))}
         {act("Humanize", "Nudge the timing and velocity of the selected notes (all notes with none selected) a little, at random.", p.onHumanize)}

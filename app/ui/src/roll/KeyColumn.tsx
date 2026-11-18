@@ -1,3 +1,5 @@
+import type { ProjectKey } from "../api/project";
+import { inScale } from "./scales";
 import { useCallback, useEffect, useRef, useState, type PointerEvent, type RefObject } from "react";
 import { channelNoteOff, channelNoteOn, TYPING_VELOCITY } from "../api/notes";
 import { errorText } from "../api/project";
@@ -7,6 +9,7 @@ const BLACK = new Set([1, 3, 6, 8, 10]);
 const KEYS = Array.from({ length: 128 }, (_, i) => 127 - i);
 
 interface Props {
+  projectKey: ProjectKey | null;
   channel: number | null;
   /** The key row under a y offset (CSS pixels from the column's top). */
   keyAt: (y: number) => number;
@@ -20,7 +23,7 @@ interface Props {
 /** The piano keys beside the roll: press one to hear it on the channel, slide to play others.
  * The key sounds until the pointer lets go, the window loses focus or hides, the transport
  * stops, the project is replaced or the channel changes. */
-export function KeyColumn({ channel, keyAt, strip, onError, releaseKeys }: Props) {
+export function KeyColumn({ projectKey, channel, keyAt, strip, onError, releaseKeys }: Props) {
   const [held, setHeld] = useState<number | null>(null);
   const sounding = useRef<{ channel: number; key: number; press: Press } | null>(null);
   const report = useRef(onError);
@@ -93,7 +96,7 @@ export function KeyColumn({ channel, keyAt, strip, onError, releaseKeys }: Props
     >
       <div className="roll-keys-strip" ref={strip}>
         {KEYS.map((k) => (
-          <div key={k} className={`roll-key${BLACK.has(k % 12) ? " black" : ""}${held === k ? " held" : ""}`}>
+          <div key={k} data-key={k} className={`roll-key${projectKey && inScale(k, projectKey.root, projectKey.scale) ? " in-scale" : ""}${projectKey && k % 12 === projectKey.root ? " root" : ""}${BLACK.has(k % 12) ? " black" : ""}${held === k ? " held" : ""}`}>
             {k % 12 === 0 ? `C${k / 12 - 1}` : null}
           </div>
         ))}
