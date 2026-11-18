@@ -11,15 +11,19 @@ pub mod api;
 pub use api::*;
 
 mod fft;
+mod oversampling;
+pub mod saturation;
 mod util;
 mod wavetable;
 
 pub mod bitcrusher;
+pub mod character_delay;
 pub mod comp;
 pub mod delay;
 pub mod drive;
 pub mod drum_shaper;
 pub mod eq;
+pub mod fattener;
 pub mod limiter;
 pub mod ott;
 pub mod reverb;
@@ -35,11 +39,14 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
         "synth" => &synth::SPEC,
         "sampler" => &sampler::SPEC,
         "eq" => &eq::SPEC,
+        "fattener" => &fattener::SPEC,
         "comp" => &comp::SPEC,
         "limiter" => &limiter::SPEC,
         "drive" => &drive::SPEC,
+        "saturation" => &saturation::SPEC,
         "drum_shaper" => &drum_shaper::SPEC,
         "reverb" => &reverb::SPEC,
+        "character_delay" => &character_delay::SPEC,
         "delay" => &delay::SPEC,
         "ott" => &ott::SPEC,
         "utility" => &utility::SPEC,
@@ -56,11 +63,14 @@ pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
         "synth" => Box::new(synth::Synth::new(sample_rate)),
         "sampler" => Box::new(sampler::Sampler::new(sample_rate)),
         "eq" => Box::new(eq::Eq::new(sample_rate)),
+        "fattener" => Box::new(fattener::Fattener::new(sample_rate)),
         "comp" => Box::new(comp::Comp::new(sample_rate)),
         "limiter" => Box::new(limiter::Limiter::new(sample_rate)),
         "drive" => Box::new(drive::Drive::new(sample_rate)),
+        "saturation" => Box::new(saturation::Saturation::new(sample_rate)),
         "drum_shaper" => Box::new(drum_shaper::DrumShaper::new(sample_rate)),
         "reverb" => Box::new(reverb::Reverb::new(sample_rate)),
+        "character_delay" => Box::new(character_delay::CharacterDelay::new(sample_rate)),
         "delay" => Box::new(delay::Delay::new(sample_rate)),
         "ott" => Box::new(ott::Ott::new(sample_rate)),
         "utility" => Box::new(utility::Utility::new(sample_rate)),
