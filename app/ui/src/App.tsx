@@ -1,3 +1,6 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { installMenuHistory } from "./project/menuHistory";
 import { isProjectReplacing } from "./project/replacement";
 import { settleProjectEdits } from "./project/pending";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -196,6 +199,36 @@ export function App() {
     [enqueue, adopt, shown, toast, session],
   );
   useEffect(() => trackDrags(window), []);
+  useEffect(() => {
+    const sync = () => {
+      const text = isTypingTarget(document.activeElement);
+      void invoke("edit_history_enabled", {
+        undo: text ? (document.queryCommandEnabled?.("undo") ?? false) : Boolean(view?.canUndo),
+        redo: text ? (document.queryCommandEnabled?.("redo") ?? false) : Boolean(view?.canRedo),
+      }).catch(() => {});
+    };
+    sync();
+    document.addEventListener("focusin", sync);
+    document.addEventListener("input", sync);
+    document.addEventListener("selectionchange", sync);
+    return () => {
+      document.removeEventListener("focusin", sync);
+      document.removeEventListener("input", sync);
+      document.removeEventListener("selectionchange", sync);
+    };
+  }, [view?.canUndo, view?.canRedo]);
+  useEffect(() => {
+    const router = installMenuHistory(document, stepHistory, () => modalIsOpen());
+    let disposed = false;
+    const listening = listen<boolean>("edit-history", ({ payload }) => {
+      if (!disposed && typeof payload === "boolean") router.dispatch(payload);
+    });
+    return () => {
+      disposed = true;
+      router.dispose();
+      void listening.then((stop) => stop());
+    };
+  }, [stepHistory]);
   const toggleMetronome = () => {
     const on = !metronome;
     metronomeSet(on).then(() => setMetronome(on), (e: unknown) => toast(errorText(e), true));
