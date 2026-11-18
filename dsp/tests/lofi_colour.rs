@@ -117,3 +117,47 @@ fn independent_endpoints_and_physical_echo() {
         assert_eq!(run(&mut x, 4096, 0.37), run(&mut y, 4096, 0.37));
     }
 }
+
+#[test]
+fn maximum_digital_amount_holds_sixteen_changing_frames_in_both_channels() {
+    for sr in [22050., 44100., 48000., 96000., 192000.] {
+        let mut device = LofiColour::new(sr);
+        device.set_param(0, 1.);
+        device.set_param(4, 1.);
+        let mut left = [0.625; 32];
+        let mut right = [0.5; 32];
+        left[0] = 0.375;
+        right[0] = -0.25;
+        device.process(&mut left, &mut right, None, &[]);
+        assert_eq!(&left[..16], &[0.375; 16]);
+        assert_eq!(&right[..16], &[-0.25; 16]);
+        assert_eq!(&left[16..], &[0.625; 16]);
+        assert_eq!(&right[16..], &[0.5; 16]);
+    }
+}
+
+#[test]
+fn space_second_echo_has_point_three_five_feedback_at_every_rate() {
+    for sr in [22050., 44100., 48000., 96000., 192000.] {
+        let mut device = LofiColour::new(sr);
+        device.set_param(0, 1.);
+        device.set_param(5, 1.);
+        let mut left = vec![0.; (sr * 0.21) as usize];
+        let mut right = left.clone();
+        left[0] = 1.;
+        right[0] = 1.;
+        device.process(&mut left, &mut right, None, &[]);
+        for (signal, seconds) in [(&left, 0.073), (&right, 0.097)] {
+            // Read-before-write adds one frame; summing each echo includes the
+            // signed Hermite lobes at rates with fractional delay lengths.
+            let delay = sr * seconds + 1.;
+            let area = |repeat: f32| {
+                let center = (repeat * delay) as usize;
+                signal[center - 8..=center + 8].iter().sum::<f32>()
+            };
+            let (first, second) = (area(1.), area(2.));
+            assert!((first - 0.5).abs() < 1e-4, "first echo at {sr}");
+            assert!((second / first - 0.35).abs() < 1e-4, "feedback at {sr}");
+        }
+    }
+}

@@ -185,6 +185,110 @@ impl Device for LofiColour {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn tick(device: &mut LofiColour, value: f32) -> [f32; 2] {
+        let mut l = [value];
+        let mut r = l;
+        device.process(&mut l, &mut r, None, &[]);
+        [l[0], r[0]]
+    }
+    #[test]
+    fn every_live_control_follows_ten_millisecond_ramps_and_reset_snaps() {
+        for sr in [22050., 44100., 48000., 96000., 192000.] {
+            for (index, spec) in SPEC.iter().enumerate() {
+                let mut device = LofiColour::new(sr);
+                tick(&mut device, 0.);
+                for target in [spec.1, spec.0] {
+                    let start = device.controls[index].cur;
+                    device.set_param(index as u32, target);
+                    assert_eq!(
+                        device.controls[index].cur, start,
+                        "live snap {index} at {sr}"
+                    );
+                    let tau = (sr * 0.01) as usize;
+                    for frame in 1..=tau * 3 {
+                        tick(&mut device, 0.);
+                        if [1, tau / 4, tau, tau * 3].contains(&frame) {
+                            let expected = target
+                                + (start - target) * libm::expf(-(frame as f32) / (sr * 0.01));
+                            assert!(
+                                (device.controls[index].cur - expected).abs() < 0.0003,
+                                "control {index}, {sr} Hz, frame {frame}: {} vs {expected}",
+                                device.controls[index].cur
+                            );
+                        }
+                    }
+                }
+                device.set_param(index as u32, spec.1);
+                tick(&mut device, 0.);
+                assert!(device.controls[index].cur < spec.1);
+                device.reset();
+                assert_eq!(device.controls[index].cur, spec.1);
+                device.set_param(index as u32, spec.0);
+                assert_eq!(
+                    device.controls[index].cur, spec.0,
+                    "reset must re-arm fresh"
+                );
+            }
+        }
+    }
+    #[test]
+    fn dropout_crest_depth_and_unaffected_phase_are_physical() {
+        for sr in [22050., 48000., 192000.] {
+            for amount in [0., 0.5, 1.] {
+                let mut device = LofiColour::new(sr);
+                device.set_param(0, 1.);
+                device.set_param(6, amount);
+                device.phase[0] = 0.25;
+                let out = tick(&mut device, 0.5);
+                for value in out {
+                    assert!((value - 0.5 * (1. - amount)).abs() < 1e-6);
+                }
+            }
+            let mut device = LofiColour::new(sr);
+            device.set_param(0, 1.);
+            device.set_param(6, 1.);
+            assert_eq!(tick(&mut device, 0.5), [0.5; 2]);
+        }
+    }
+    #[test]
+    fn tiny_space_writes_clear_but_legitimate_quiet_material_survives() {
+        for sr in [22050., 48000., 192000.] {
+            for (input, stored) in [(1e-30, 0.), (1e-12, 1e-12)] {
+                let mut device = LofiColour::new(sr);
+                device.set_param(0, 1.);
+                device.set_param(5, 1.);
+                assert_eq!(tick(&mut device, input), [input; 2]);
+                for channel in &device.channels {
+                    assert_eq!(channel.space.read_int(0), stored);
+                }
+            }
+        }
+    }
+    #[test]
+    fn charged_space_tail_reaches_exact_zero_without_reset() {
+        for sr in [22050., 48000., 192000.] {
+            let mut device = LofiColour::new(sr);
+            device.set_param(0, 1.);
+            device.set_param(5, 1.);
+            tick(&mut device, 0.5);
+            assert!(device.channels.iter().all(|c| c.space.read_int(0) == 0.5));
+            let mut left = [0.; 128];
+            let mut right = left;
+            for _ in 0..((sr * 8.) as usize).div_ceil(128) {
+                left.fill(0.);
+                right.fill(0.);
+                device.process(&mut left, &mut right, None, &[]);
+            }
+            assert!(left.iter().chain(&right).all(|x| *x == 0.), "tail at {sr}");
+            for channel in &device.channels {
+                assert!(
+                    (0..=channel.space.max_delay() + 3)
+                        .all(|offset| channel.space.read_int(offset) == 0.),
+                    "charged delay state at {sr}"
+                );
+            }
+        }
+    }
     #[test]
     fn charged_recursive_state_clears() {
         let mut d = LofiColour::new(48000.);
