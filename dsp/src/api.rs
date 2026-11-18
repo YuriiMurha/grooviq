@@ -72,22 +72,68 @@ impl HostTransport {
             0.0
         };
         let unwrapped_tick = self.anchor_tick + elapsed / frames_per_tick + self.shift as f64;
-        let (tick, iteration) =
-            if self.loop_end > self.loop_start && unwrapped_tick >= self.loop_end as f64 {
-                let length = (self.loop_end - self.loop_start) as f64;
-                let iteration = ((unwrapped_tick - self.loop_start as f64) / length).floor() as u64;
-                (
-                    self.loop_start as f64 + (unwrapped_tick - self.loop_start as f64) % length,
-                    iteration,
-                )
-            } else {
-                (unwrapped_tick, 0)
-            };
+        let (tick, iteration) = if self.loop_end > self.loop_start {
+            let length = (self.loop_end - self.loop_start) as f64;
+            let mut iteration = ((unwrapped_tick - self.loop_start as f64) / length)
+                .floor()
+                .max(0.0) as u64;
+            if self.playing {
+                let frame = self.frame + u64::from(offset);
+                // Inverse division can put an exact scheduled boundary just below its
+                // tick. Classify against the scheduler's forward map, never an epsilon.
+                let reached = |i| i == 0 || self.loop_frame(i, length) <= frame;
+                if iteration > 0 && !reached(iteration) {
+                    iteration -= 1;
+                }
+                if let Some(next) = iteration.checked_add(1)
+                    && reached(next)
+                {
+                    iteration = next;
+                }
+                if !reached(iteration) || iteration.checked_add(1).is_some_and(reached) {
+                    // Bounded fallback for distant anchors: at most 64 forward queries.
+                    let (mut lo, mut hi) = (0, u64::MAX);
+                    while lo < hi {
+                        let span = hi - lo;
+                        let mid = lo + span / 2 + span % 2;
+                        if reached(mid) {
+                            lo = mid;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    iteration = lo;
+                }
+            }
+            // Keep the continuous unwrapped phase; only clamp its tiny boundary error
+            // into the selected half-open cycle, so phase and iteration agree.
+            let mut tick = (unwrapped_tick - iteration as f64 * length)
+                .min((self.loop_end as f64).next_down());
+            if iteration > 0 {
+                tick = tick.max(self.loop_start as f64);
+            }
+            (tick, iteration)
+        } else {
+            (unwrapped_tick, 0)
+        };
         Some(HostPosition {
             unwrapped_tick,
             tick,
             iteration,
         })
+    }
+    fn loop_frame(&self, iteration: u64, length: f64) -> u64 {
+        let tick = self.loop_start as f64 + iteration as f64 * length;
+        let played = tick - self.shift as f64;
+        // Same operation order and signed ceil as TransportClock::frame_of.
+        let offset = ((played - self.anchor_tick) * f64::from(self.sample_rate) * 60.0
+            / (f64::from(self.bpm) * 960.0))
+            .ceil();
+        if offset >= 0.0 {
+            self.anchor_frame.saturating_add(offset as u64)
+        } else {
+            self.anchor_frame.saturating_sub((-offset) as u64)
+        }
     }
     /// Every wrap is observable. At 400 BPM/8 kHz a one-tick loop is 1.25 frames,
     /// so at most one edge falls on a sample. Iteration changes and the initial

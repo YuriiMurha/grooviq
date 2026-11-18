@@ -717,3 +717,13 @@ impl SynthNode {
         self.fade = None;
     }
 }
+
+#[cfg(test)]
+impl Graph {
+    pub(crate) fn observe_synth(&mut self, device: Box<dyn grooviq_dsp::Device>) {
+        self.synth.device = device;
+    }
+    pub(crate) fn channel_gain_target(&self) -> f32 {
+        self.channels[0].gain_target()
+    }
+}

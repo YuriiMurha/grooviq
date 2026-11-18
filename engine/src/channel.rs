@@ -765,3 +765,10 @@ mod transport_tests {
         );
     }
 }
+
+#[cfg(test)]
+impl ChannelNode {
+    pub(crate) fn gain_target(&self) -> f32 {
+        self.gain[0].target()
+    }
+}
