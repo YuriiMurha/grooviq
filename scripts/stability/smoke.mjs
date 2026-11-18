@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, rmSync, symlinkSync, copyFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, symlinkSync, copyFileSync, readFileSync, existsSync, statSync, lstatSync, truncateSync } from 'node:fs';
 import { resolve } from 'node:path';
 import assert from 'node:assert/strict';
-import { account, cases, run } from './run.mjs';
+import { account, cases, run, capArtifacts } from './run.mjs';
 const dir = resolve('app/ui/stability-smoke');
 mkdirSync(dir, { recursive: true });
 const config = resolve(dir, 'playwright.config.mjs');
@@ -62,8 +62,8 @@ try {
   assert.deepEqual(account(selected.report, skipped.report, 0, allowed), {passed:0,skipped:2});
   results.push('explicit skips: recorded separately');
   mkdirSync(resolve(dir, 'e2e'));
-  writeFileSync(resolve(dir, 'e2e/tiny.e2e.ts'), `import {test,expect} from '@playwright/test'; test('orchestration', () => {expect(1).toBe(1)});`);
-  writeFileSync(resolve(dir, 'playwright.config.ts'), "export default {projects:[{name:'chromium'}],grep:/no-such-case/,testMatch:'nothing'};");
+  writeFileSync(resolve(dir, 'e2e/tiny.e2e.ts'), `import {test,expect} from '@playwright/test'; test('orchestration', async ({page}) => {expect(await page.evaluate(() => navigator.language)).toBe('en-GB')});`);
+  writeFileSync(resolve(dir, 'playwright.config.ts'), "export default {projects:[{name:'webkit',use:{browserName:'webkit',locale:'en-GB'}},{name:'chromium',use:{browserName:'chromium',locale:'en-GB'}}],grep:/no-such-case/,testMatch:'nothing'};");
   symlinkSync(resolve('app/ui/node_modules'), resolve(dir, 'node_modules'));
   copyFileSync(resolve('app/ui/package-lock.json'), resolve(dir, 'package-lock.json'));
   run({ui:dir, out:'/evidence/orchestration', repeats:2, smoke:true});
@@ -73,6 +73,41 @@ try {
   assert.ok(summary.runs.every(r => r.passed === 2 && r.skipped === 0));
   assert.throws(() => run({ui:dir, out:'/evidence/orchestration', repeats:2, smoke:true}));
   results.push('two-repeat orchestration and evidence overwrite guard: passed');
+  writeFileSync(resolve(dir, 'e2e/tiny.e2e.ts'), `import {test,expect} from '@playwright/test'; test('locale regression', async ({page}) => {expect(await page.evaluate(() => navigator.language)).toBe('en-US')});`);
+  assert.throws(() => run({ui:dir, out:'/evidence/locale-regression', repeats:2, smoke:true}));
+  const locale = JSON.parse(readFileSync('/evidence/locale-regression/summary.json'));
+  assert.equal(locale.complete, false);
+  assert.equal(locale.runs[0].statuses.failed, 2);
+  results.push('candidate locale semantics preserved; real regression rejected');
+  writeFileSync(resolve(dir, 'playwright.config.ts'), "export default {projects:[{name:'chromium'}]};");
+  assert.throws(() => run({ui:dir, out:'/evidence/missing-project', repeats:2, smoke:true}));
+  results.push('unsupported candidate project configuration: rejected');
+  const safe = '/evidence/cleanup', outside = '/evidence/unrelated';
+  mkdirSync(resolve(safe, 'artifacts'), {recursive:true}); mkdirSync(outside);
+  const preserve = resolve(outside, 'preserve.bin');
+  writeFileSync(preserve, 'preserve'); truncateSync(preserve, 129 * 1024 * 1024);
+  writeFileSync(resolve(safe, 'artifacts/a-small'), 'keep');
+  symlinkSync(outside, resolve(safe, 'artifacts/b-link'));
+  symlinkSync('/evidence/no-such-target', resolve(safe, 'artifacts/c-broken'));
+  const oversized = resolve(safe, 'artifacts/z-large'); writeFileSync(oversized, 'owned'); truncateSync(oversized, 129 * 1024 * 1024);
+  capArtifacts(safe, {});
+  assert.equal(statSync(preserve).size, 129 * 1024 * 1024);
+  assert.equal(readFileSync(resolve(safe, 'artifacts/a-small'), 'utf8'), 'keep');
+  assert.equal(existsSync(resolve(safe, 'artifacts/b-link')), false);
+  assert.equal(existsSync(oversized), false);
+  results.push('artifact links do not delete outside evidence; owned cap enforced');
+  assert.throws(() => lstatSync(resolve(safe, 'artifacts/c-broken')), {code:'ENOENT'});
+  const linked = '/evidence/cleanup-root'; mkdirSync(linked);
+  symlinkSync(outside, resolve(linked, 'artifacts'));
+  capArtifacts(linked, {});
+  assert.equal(statSync(preserve).size, 129 * 1024 * 1024);
+  assert.throws(() => lstatSync(resolve(linked, 'artifacts')), {code:'ENOENT'});
+  symlinkSync(outside, '/evidence/linked-evidence-root');
+  assert.throws(() => capArtifacts('/evidence/linked-evidence-root', {}));
+  assert.equal(statSync(preserve).size, 129 * 1024 * 1024);
+  results.push('artifact-root links and linked evidence roots are safe');
+
+
 } finally {
   mkdirSync('/evidence', {recursive:true});
   writeFileSync('/evidence/smoke.json', JSON.stringify(results, null, 2));

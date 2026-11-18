@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync, lstatSync, realpathSync } from 'node:fs';
+import { resolve, relative, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cpus, release } from 'node:os';
 
@@ -36,13 +36,62 @@ export function account(inventory, report, exitCode, allowedSkips = []) {
   return { passed: actual.filter(c => c.test.results[0].status === 'passed').length, skipped: actual.filter(c => c.test.results[0].status === 'skipped').length };
 }
 
+export function capArtifacts(out, summary, limit = 128 * 1024 * 1024) {
+  const outStat = lstatSync(out);
+  if (!outStat.isDirectory() || outStat.isSymbolicLink()) throw Error('evidence directory must be an owned directory');
+  const anchor = realpathSync(out);
+  let bytes = 0;
+  summary.discardedArtifacts = [];
+  function inside(path) {
+    const rel = relative(anchor, path);
+    if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw Error('artifact path escaped evidence');
+  }
+  function visit(path) {
+    inside(resolve(path));
+    let stat;
+    try { stat = lstatSync(path); } catch (error) {
+      if (error.code === 'ENOENT') return;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) {
+      // Remove only the owned link; never inspect or upload its target.
+      rmSync(path);
+      summary.discardedArtifacts.push(path);
+      return;
+    }
+    inside(realpathSync(path));
+    if (stat.isDirectory()) {
+      for (const name of readdirSync(path).sort()) visit(resolve(path, name));
+    } else if (!stat.isFile() || (bytes += stat.size) > limit) {
+      rmSync(path);
+      summary.discardedArtifacts.push(path);
+    }
+  }
+  visit(resolve(anchor, 'artifacts'));
+}
+
 export function run({ ui = resolve('app/ui'), out = resolve('/evidence'), repeats = 20, smoke = false } = {}) {
   if (!Number.isInteger(repeats) || repeats < 1 || (!smoke && repeats !== 20)) throw Error('proof requires twenty full repetitions');
+  if (existsSync(out) && lstatSync(out).isSymbolicLink()) throw Error('evidence directory must not be a symlink');
   mkdirSync(out, { recursive: true });
-  if (existsSync(resolve(out, 'summary.json'))) throw Error('evidence already exists; preserve it and choose a new output directory');
+  if (readdirSync(out).length) throw Error('evidence already exists; preserve it and choose a new output directory');
   const config = resolve(ui, 'stability.generated.config.ts');
-  // Override selection independently of the ordinary config (including grep/project drops).
-  writeFileSync(config, `import base from './playwright.config';\nimport { devices } from '@playwright/test';\nexport default { ...base, testDir: './e2e', testMatch: /.*\\.e2e\\.ts$/, testIgnore: [], grep: /.*/, grepInvert: undefined, shard: null, repeatEach: 1, retries: 0, workers: 2, forbidOnly: true, maxFailures: 0, projects: ['webkit','chromium'].map(name => ({ name, use: { ...devices[name === 'webkit' ? 'Desktop Safari' : 'Desktop Chrome'], viewport: {width:1280,height:800} } })), outputDir: '${out}/artifacts', reporter: [['json']] };\n`);
+  // Preserve candidate execution settings; override only full-selection/proof controls.
+  const artifactPath = JSON.stringify(resolve(out, 'artifacts'));
+  writeFileSync(config, `import base from './playwright.config';
+const names = ['webkit', 'chromium'];
+if (!Array.isArray(base.projects) || base.projects.length !== 2) throw Error('stability requires exactly WebKit and Chromium projects');
+const projects = names.map(name => {
+  const matches = base.projects.filter(project => project.name === name);
+  if (matches.length !== 1) throw Error('missing or duplicate stability browser project: ' + name);
+  const project = matches[0];
+  if (project.dependencies?.length || project.teardown) throw Error('unsupported project lifecycle in stability proof');
+  const use = { ...base.use, ...project.use };
+  if ((use.browserName ?? use.defaultBrowserType ?? 'chromium') !== name) throw Error('project browser does not match its name: ' + name);
+  return { ...project, testDir: './e2e', testMatch: /.*\\.e2e\\.ts$/, testIgnore: [], grep: /.*/, grepInvert: undefined, repeatEach: 1, retries: 0, workers: 2, outputDir: ${artifactPath} };
+});
+export default { ...base, testDir: './e2e', testMatch: /.*\\.e2e\\.ts$/, testIgnore: [], grep: /.*/, grepInvert: undefined, shard: null, repeatEach: 1, retries: 0, workers: 2, forbidOnly: true, maxFailures: 0, projects, outputDir: ${artifactPath}, reporter: [['json']] };
+`, { flag: 'wx' });
   const summary = { containerImage: process.env.STABILITY_CONTAINER_IMAGE, sha: process.env.STABILITY_SHA, image: 'mcr.microsoft.com/playwright:v1.64.1-noble', node: process.version, platform: process.platform, arch: process.arch, kernel: release(), cpuModel: cpus()[0]?.model, projects: ['webkit', 'chromium'], cpus: 2, memory: '4g', workers: 2, retries: 0, repeats, shards: '1/1', smoke, runs: [], complete: false };
   const save = () => writeFileSync(resolve(out, 'summary.json'), JSON.stringify(summary, null, 2));
   save();
@@ -82,21 +131,8 @@ export function run({ ui = resolve('app/ui'), out = resolve('/evidence'), repeat
     summary.error = String(error);
     throw error;
   } finally {
-    // One failed repetition only; cap retained diagnostics even for a suite-wide failure.
-    let bytes = 0;
-    summary.discardedArtifacts = [];
-    function bound(dir) {
-      if (!existsSync(dir)) return;
-      for (const name of readdirSync(dir).sort()) {
-        const path = resolve(dir, name), stat = statSync(path);
-        if (stat.isDirectory()) bound(path);
-        else if ((bytes += stat.size) > 128 * 1024 * 1024) {
-          summary.discardedArtifacts.push(path);
-          rmSync(path);
-        }
-      }
-    }
-    bound(resolve(out, 'artifacts'));
+    // Bound only owned artifact paths, without following links.
+    capArtifacts(out, summary);
     save(); rmSync(config, { force: true });
   }
 }
