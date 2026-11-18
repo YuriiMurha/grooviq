@@ -1369,6 +1369,50 @@ fn a_save_over_the_note_cap_is_refused_and_keeps_the_old_file() {
     );
 }
 
+#[test]
+fn note_cap_save_bounds_labels_without_changing_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("labels.grooviq");
+    let (mut p, samples) = project();
+    save(&p, &samples, &path).unwrap();
+    let old_zip = fs::read(&path).unwrap();
+    p.patterns[0].notes = (1..=MAX_NOTES_PER_PATTERN as u32 + 1)
+        .map(|id| note(id, 1, 0))
+        .collect();
+    p.patterns[0].next_note_id = MAX_NOTES_PER_PATTERN as u32 + 2;
+    for name in [
+        "Full".to_string(),
+        "🎹界".repeat(100_000),
+        format!("\n\r\t\0\u{202e}\u{2066}{}", "🎹".repeat(100_000)),
+    ] {
+        p.patterns[0].name = name.clone();
+        let original = serde_json::to_vec(&p).unwrap();
+        assert!(original.len() < 64 * 1024 * 1024);
+        let err = save(&p, &samples, &path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let diagnostic = err.to_string();
+        assert!(diagnostic.len() <= 400);
+        assert!(diagnostic.contains(&p.patterns[0].notes.len().to_string()));
+        assert!(!diagnostic.chars().any(|c| c.is_control()
+            || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')));
+        if name == "Full" {
+            assert!(diagnostic.contains(&name));
+        } else {
+            assert!(diagnostic.contains('…'));
+        }
+        assert_eq!(serde_json::to_vec(&p).unwrap(), original);
+        assert_eq!(fs::read(&path).unwrap(), old_zip);
+        assert_eq!(names_in(dir.path()), vec!["labels.grooviq"]);
+    }
+    // A valid boundary case retains the complete hostile name and all playable notes.
+    p.patterns[0].notes.pop();
+    save(&p, &samples, &path).unwrap();
+    let loaded = load(&path).unwrap();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    assert_eq!(loaded.project.patterns[0].name, p.patterns[0].name);
+    assert_eq!(loaded.project.patterns[0].notes, p.patterns[0].notes);
+}
+
 fn names_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()
