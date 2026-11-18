@@ -46,6 +46,7 @@ function observeArray(value: NoteArray): NoteArray {
 
 const arrayWork: ProxyHandler<NoteArray> = {
   get(target, property) {
+    if (property === "buffer") throw new Error("Raw backing buffers are unsupported in counted mode");
     if (typeof property === "string" && /^\d+$/.test(property)) work++;
     const member = Reflect.get(target, property, target);
     if (typeof member !== "function") return member;
@@ -53,6 +54,17 @@ const arrayWork: ProxyHandler<NoteArray> = {
       work += property === "subarray"
         ? Math.max(0, Number(args[1] ?? target.length) - Number(args[0] ?? 0))
         : target.length;
+      const callback = args[0];
+      if (typeof callback === "function") {
+        args[0] = function (this: unknown, ...callbackArgs: unknown[]) {
+          // forEach/map pass the array third; reduce passes it fourth. Keep callback
+          // receivers intact while replacing any raw receiver alias with its observer.
+          for (let i = 0; i < callbackArgs.length; i++) {
+            if (callbackArgs[i] === target) callbackArgs[i] = observeArray(target);
+          }
+          return Reflect.apply(callback, this, callbackArgs);
+        };
+      }
       const result = Reflect.apply(member, target, args);
       // Methods can return the receiver (sort/fill/reverse) or a new typed array. Observe
       // either, preserving receiver identity while native calls still use the raw target.
@@ -205,5 +217,42 @@ describe("piano roll budgets", () => {
     // The move landed, and the buckets were rebuilt for it.
     const moved = store.get(1)!;
     expect(store.hitTest(moved.tick, moved.key, 1)).not.toBeNull();
+  });
+});
+
+
+describe.skipIf(performanceGate)("counted typed-array aliases", () => {
+  it("observes forEach callback arrays and preserves the callback receiver", () => {
+    const observed = observeArray(new Float64Array([2, 4, 6]));
+    const receiver = { multiplier: 3 };
+    let total = 0;
+    observed.forEach(function (this: typeof receiver, _value, index, alias) {
+      expect(this).toBe(receiver);
+      expect(alias).toBe(observed);
+      const beforeRead = work;
+      total += alias[index] * this.multiplier;
+      expect(work).toBe(beforeRead + 1);
+    }, receiver);
+    expect(total).toBe(36);
+  });
+
+  it("observes the array argument of reduce and reduceRight", () => {
+    const observed = observeArray(new Float64Array([2, 4, 6]));
+    if (!(observed instanceof Float64Array)) throw new Error("Observer changed the array kind");
+    for (const reduce of [observed.reduce, observed.reduceRight]) {
+      const total = reduce((sum, _value, index, alias) => {
+        expect(alias).toBe(observed);
+        const beforeRead = work;
+        const value = alias[index];
+        expect(work).toBe(beforeRead + 1);
+        return sum + value;
+      }, 0);
+      expect(total).toBe(12);
+    }
+  });
+
+  it("rejects an unobserved typed view over a store buffer", () => {
+    const observed = observeArray(new Float64Array([2, 4, 6]));
+    expect(() => new Float64Array(observed.buffer)).toThrow("Raw backing buffers are unsupported in counted mode");
   });
 });
