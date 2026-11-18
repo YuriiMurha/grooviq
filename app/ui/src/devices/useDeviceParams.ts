@@ -4,12 +4,13 @@ import type { Edit } from "../api/project";
 import { useProject } from "../project/context";
 import { isProjectReplacing, onProjectReplaced, onProjectReplacing } from "../project/replacement";
 import { DEAD_GESTURE, DEAD_GROUP, ParamGestures, type Gesture, type GestureGroup } from "./paramGestures";
-import { editorSink } from "./paramSink";
+import { editorSink, type GuardedEdit } from "./paramSink";
 
 /** An instrument editor's parameter values as it shows them, its one gesture owner
  * (`ParamGestures`): `begin(id)` for a gesture, `group()` for a drag over several parameters,
  * `set(id, value)` for a click or a key, and `send(edit)` for any other edit (a preset). This hook
- * is the editor's only way to the project: device components never see `apply`. Gestures are cancelled when the
+ * is the standard guarded editor API. Lint restricts resolved value dependencies; the branded
+ * send type rejects accidental raw apply substitution (not deliberate casts). Gestures cancel when the
  * window loses focus, when the editor closes and before the project is replaced. While a
  * replacement is on its way the editor takes no input, and nothing from it reaches a project
  * that replaced the one it was opened in: an edit is checked again when its turn in the queue
@@ -67,5 +68,5 @@ export function useDeviceParams(channel: number, stored: Record<string, number>,
     owner.current?.cancelAll();
     return (await sendRef.current?.(edit)) ?? false;
   }, []);
-  return { value, begin, group, set, cancelAll, send };
+  return { value, begin, group, set, cancelAll, send: send as GuardedEdit };
 }
