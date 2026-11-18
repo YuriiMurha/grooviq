@@ -736,12 +736,18 @@ export function installMockTauri(seed: MockSeed): void {
       throw `"${name}": This file is not a sound Grooviq can open; use WAV, AIFF, FLAC, MP3 or OGG.`;
     }
   };
+  let unconfirmNextSave = false;
   const saveTo = (target: string | null) => {
     const path = target === null ? s.path : withExtension(target, "grooviq", false);
     if (path === null) throw "Choose where to save this project.";
     if (files.get(path)?.kind === "project") s.backups.set(path, (s.backups.get(path) ?? 0) + 1);
     files.set(path, { kind: "project", project: clone(s.project) });
     s.path = path;
+    if (unconfirmNextSave) {
+      unconfirmNextSave = false;
+      if (!dirty()) changed();
+      throw "The file was written, but directory durability could not be confirmed. Keep recovery copies and try saving again.";
+    }
     markClean();
     return view();
   };
@@ -1121,12 +1127,13 @@ export function installMockTauri(seed: MockSeed): void {
     },
     // midi_cmds.rs: the list is what the last poll found, `midi_set_enabled` tells the UI only
     // when the switch moved (midi/hub.rs `set_enabled`).
-    midi_inputs: () => s.midi.present.map((name) => ({ name, enabled: !s.midi.disabled.includes(name) })),
+    // Unique fixture port strings serve as both opaque IDs and display names.
+    midi_inputs: () => s.midi.present.map((id) => ({ id, name: id, enabled: !s.midi.disabled.includes(id) })),
     midi_set_enabled: (a) => {
-      const name = a.name as string;
-      const was = !s.midi.disabled.includes(name);
-      s.midi.disabled = s.midi.disabled.filter((n) => n !== name);
-      if (!a.enabled) s.midi.disabled.push(name);
+      const id = a.id as string;
+      const was = !s.midi.disabled.includes(id);
+      s.midi.disabled = s.midi.disabled.filter((n) => n !== id);
+      if (!a.enabled) s.midi.disabled.push(id);
       if (was !== Boolean(a.enabled)) emit("midi-inputs-changed", null);
       return null;
     },
@@ -1145,6 +1152,7 @@ export function installMockTauri(seed: MockSeed): void {
       return null;
     },
     transport_play: () => {
+      if (s.transport.playing) return null;
       s.transport = { playing: true, startMs: performance.now(), startTicks: 0, held: null };
       return null;
     },
@@ -1361,7 +1369,7 @@ export function installMockTauri(seed: MockSeed): void {
     channel_note: { channel: u32, key: u8, velocity: f32, on: bool, press: optional(u64) },
     channel_param_live: { channel: u32, param: str, value: f32 },
     channel_select: { channel: optional(u32) },
-    midi_set_enabled: { name: str, enabled: bool },
+    midi_set_enabled: { id: str, enabled: bool },
     channel_waveform: { channel: u32, points: u32 },
     record_set: { on: bool },
     metronome_set: { on: bool },
@@ -1428,6 +1436,8 @@ export function installMockTauri(seed: MockSeed): void {
     },
     /** A file as the mock holds it (a saved project's notes, ...), or null. */
     file: (path: string) => clone(files.get(path) ?? null),
+    /** Next save writes its file/path, retains dirty state, then reports uncertainty. */
+    unconfirmNextSave: () => { unconfirmNextSave = true; },
     /** Answers for the next open/save dialogs, in order (`null`: the person cancels). */
     queueDialog: (...answers: unknown[]) => s.dialogs.push(...answers),
     /** What the shell does on a window close or Cmd+Q: ask the UI while there are unsaved

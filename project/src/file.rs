@@ -3,7 +3,8 @@
 //! deleted.
 //!
 //! * Saving is atomic: the zip is written to `<path>.tmp`, synced, then renamed over the target,
-//!   so a crash or a full disk leaves the previous file untouched.
+//!   so failures before rename leave the previous file untouched. A directory-sync failure
+//!   after rename reports [`DirectoryUnconfirmed`]: the new file is already visible.
 //! * `save` writes only what `load` reads back: `project.json` is compact and held to the same
 //!   size budget, so a project too big to reopen is refused instead of saved.
 //! * The bytes are a function of the project and the samples: entry order, names and timestamps
@@ -77,7 +78,7 @@ pub struct SampleFile {
     pub bytes: Arc<Vec<u8>>,
 }
 
-/// Sample files by channel id.
+/// Original sample files by channel or audio asset id (one disjoint identity domain).
 pub type SampleFiles = HashMap<u32, SampleFile>;
 
 /// What [`load`] returns.
@@ -148,17 +149,22 @@ struct Document<'a> {
 /// refused without its whole text in memory.
 struct Capped {
     bytes: Vec<u8>,
+    written: u64,
+    keep: bool,
     limit: u64,
     over: bool,
 }
 
 impl Write for Capped {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if (self.bytes.len() + buf.len()) as u64 > self.limit {
+        if self.written.saturating_add(buf.len() as u64) > self.limit {
             self.over = true;
             return Err(io::Error::other("over the limit"));
         }
-        self.bytes.extend_from_slice(buf);
+        self.written += buf.len() as u64;
+        if self.keep {
+            self.bytes.extend_from_slice(buf);
+        }
         Ok(buf.len())
     }
 
@@ -170,8 +176,14 @@ impl Write for Capped {
 /// `project.json`'s bytes: compact (pretty printing tripled a note-heavy project), and at most
 /// `limit`, the most `load` reads.
 fn project_json_bytes(project: &Project, limit: u64) -> io::Result<Vec<u8>> {
+    serialize_capped(project, limit, true)
+}
+
+fn serialize_capped(project: &Project, limit: u64, keep: bool) -> io::Result<Vec<u8>> {
     let mut out = Capped {
         bytes: Vec::new(),
+        written: 0,
+        keep,
         limit,
         over: false,
     };
@@ -188,6 +200,21 @@ fn project_json_bytes(project: &Project, limit: u64) -> io::Result<Vec<u8>> {
         ))),
         Err(e) => Err(io::Error::other(e)),
     }
+}
+
+/// Precommit admission using exactly the writer's schema, embedding and shared budgets.
+/// Counts compact JSON into a capped sink without allocating its serialized bytes.
+pub fn validate_save(project: &Project, samples: &SampleFiles) -> io::Result<()> {
+    validate_save_with_limits(project, samples, LIMITS)
+}
+
+fn validate_save_with_limits(
+    project: &Project,
+    samples: &SampleFiles,
+    limits: Limits,
+) -> io::Result<()> {
+    let (project, _) = plan(project, samples, limits)?;
+    serialize_capped(&project, limits.json, false).map(|_| ())
 }
 
 /// One sample stored in the zip.
@@ -241,6 +268,10 @@ fn read_limited(path: &Path, limit: u64) -> io::Result<SampleFile> {
 /// seam for that order and for each step failing. Not part of the API.
 #[doc(hidden)]
 pub trait Disk {
+    /// Sync the renamed entry's parent directory.
+    fn sync_folder(&mut self, path: &Path) -> io::Result<()> {
+        sync_folder(path)
+    }
     /// Runs once the zip is written and flushed into the temp file, before it is synced.
     fn written(&mut self, _file: &mut File) -> io::Result<()> {
         Ok(())
@@ -359,18 +390,36 @@ fn plan(
             p.notes.len()
         )));
     }
+    project.validate_arrangement().map_err(too_big)?;
     let mut project = project.clone();
     let mut entries: Vec<Entry> = Vec::new();
     let mut total = 0u64;
-    for channel in &mut project.channels {
-        let Some(sample_ref) = channel.sample.as_mut() else {
-            continue;
-        };
-        let Some(file) = samples.get(&channel.id) else {
+    for (id, name, sample_ref) in project
+        .channels
+        .iter_mut()
+        .filter_map(|c| {
+            c.sample
+                .as_mut()
+                .map(|s| (c.id, format!("Channel \"{}\"", c.name), s))
+        })
+        .chain(
+            project
+                .arrangement
+                .audio_assets
+                .iter_mut()
+                .map(|a| (a.id, format!("Audio asset {}", a.id), &mut a.sample)),
+        )
+    {
+        let Some(file) = samples.get(&id) else {
             if sample_ref.file.is_some() {
+                let source = if name.starts_with("Audio asset ") {
+                    "asset"
+                } else {
+                    "channel"
+                };
                 return Err(too_big(format!(
-                    "Channel \"{}\": its sample was not loaded, so saving would lose it. Relink the sample or remove the channel first.",
-                    channel.name
+                    "{}: its sample was not loaded, so saving would lose it. Relink the sample or remove the {source} first.",
+                    name
                 )));
             }
             continue;
@@ -378,8 +427,8 @@ fn plan(
         let size = file.bytes.len() as u64;
         if size > limits.sample {
             return Err(too_big(format!(
-                "Channel \"{}\": its sample is {}, over the {} limit for one sample.",
-                channel.name,
+                "{}: its sample is {}, over the {} limit for one sample.",
+                name,
                 human(size),
                 human(limits.sample)
             )));
@@ -393,8 +442,8 @@ fn plan(
                 total += size;
                 if total > limits.total {
                     return Err(too_big(format!(
-                        "Channel \"{}\": its sample would take the project past the {} limit for all samples.",
-                        channel.name,
+                        "{}: its sample would take the project past the {} limit for all samples.",
+                        name,
                         human(limits.total)
                     )));
                 }
@@ -478,8 +527,7 @@ impl Staged {
     pub(crate) fn commit(mut self, disk: &mut impl Disk) -> io::Result<()> {
         disk.rename(&self.tmp, &self.path)?;
         self.done = true;
-        sync_folder(&self.path);
-        Ok(())
+        confirm_directory(disk, &self.path)
     }
 }
 
@@ -516,21 +564,48 @@ fn stage(
     Ok(staged)
 }
 
-/// Syncs the folder so the rename itself survives a power cut. Best effort: some file systems
-/// refuse to sync a folder, and the file is already in place.
+/// The target was renamed successfully; its directory durability is unconfirmed.
+/// This is distinct from an error before rename: callers must retain the new target.
+#[derive(Debug)]
+pub struct DirectoryUnconfirmed(pub io::Error);
+impl fmt::Display for DirectoryUnconfirmed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "The file was written, but directory durability could not be confirmed: {}. Keep recovery copies and try saving again.",
+            self.0
+        )
+    }
+}
+impl std::error::Error for DirectoryUnconfirmed {}
+
+/// Whether an I/O error reports a completed rename, rather than an unchanged target.
+pub fn directory_unconfirmed(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|e| e.is::<DirectoryUnconfirmed>())
+}
+
+pub(crate) fn confirm_directory(disk: &mut impl Disk, path: &Path) -> io::Result<()> {
+    disk.sync_folder(path)
+        .map_err(|e| io::Error::other(DirectoryUnconfirmed(e)))
+}
+
 #[cfg(unix)]
-pub(crate) fn sync_folder(path: &Path) {
+fn sync_folder(path: &Path) -> io::Result<()> {
     let folder = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    if let Ok(dir) = File::open(folder) {
-        let _ = dir.sync_all();
-    }
+    File::open(folder)?.sync_all()
 }
 
+// Windows has no Unix directory-fsync contract. Saves retain the platform's rename
+// guarantees; success here does not claim directory durability on unsupported platforms.
 #[cfg(not(unix))]
-pub(crate) fn sync_folder(_path: &Path) {}
+fn sync_folder(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
 
 /// Opens a project: reads `project.json`, migrates it to this version, validates it and finds
 /// each channel's sample bytes (see [`Loaded`]).
@@ -572,8 +647,8 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
     file.rewind()?;
     let mut zip = ZipArchive::new(file).map_err(zip_error)?;
 
-    // `project.json` is read twice, streamed from the zip and never held whole: first the header,
-    // the channel ids and which patterns have notes (a newer version is refused before anything
+    // `project.json` is streamed from the zip: header-only refusal, then the outline with
+    // channel ids and which patterns have notes (a newer version is refused before anything
     // is typed), then the typed project, which keeps at most `MAX_NOTES_PER_PATTERN` notes per
     // pattern.
     let does_not_fit = |e: serde_json::Error| match e.classify() {
@@ -582,6 +657,13 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
         }
         _ => json_error(e),
     };
+    let header = outline::read_header(project_json(&mut zip, limits.json)?)
+        .map_err(does_not_fit)?
+        .ok_or(LoadError::NotAProject)?;
+    if header.format.as_deref() != Some(FORMAT) {
+        return Err(LoadError::NotAProject);
+    }
+    checked_version(header.version)?;
     let outline = outline::read(project_json(&mut zip, limits.json)?)
         .map_err(does_not_fit)?
         .ok_or(LoadError::NotAProject)?;
@@ -617,14 +699,27 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
         })
         .ok_or_else(|| LoadError::Corrupt(format!("{PROJECT_JSON} reads differently twice")))?;
     let mut warnings = project.validate_read(&read);
+    project.validate_arrangement().map_err(LoadError::Corrupt)?;
     let mut samples = SampleFiles::new();
     let mut entries: HashMap<String, EntryRead> = HashMap::new();
     // Channels whose embedded sample is too big: their entry name stays.
     let mut skipped = HashSet::new();
-    for channel in &project.channels {
-        let Some(sample_ref) = &channel.sample else {
-            continue;
-        };
+    for (id, name, sample_ref) in project
+        .channels
+        .iter()
+        .filter_map(|c| {
+            c.sample
+                .as_ref()
+                .map(|s| (c.id, format!("Channel \"{}\"", c.name), s))
+        })
+        .chain(
+            project
+                .arrangement
+                .audio_assets
+                .iter()
+                .map(|a| (a.id, format!("Audio asset {}", a.id), &a.sample)),
+        )
+    {
         let embedded = sample_ref.file.as_deref().map(|name| {
             entries
                 .entry(name.to_string())
@@ -633,32 +728,32 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
         });
         match embedded {
             Some(EntryRead::Found(found)) => {
-                samples.insert(channel.id, found);
+                samples.insert(id, found);
                 continue;
             }
             Some(EntryRead::TooBig { over_total }) => {
                 warnings.push(if over_total {
                     format!(
-                        "Channel \"{}\": its sample would take the project past the {} limit for all samples, so it was not loaded.",
-                        channel.name,
+                        "{}: its sample would take the project past the {} limit for all samples, so it was not loaded.",
+                        name,
                         human(limits.total)
                     )
                 } else {
                     format!(
-                        "Channel \"{}\": its sample is larger than {}, so it was not loaded.",
-                        channel.name,
+                        "{}: its sample is larger than {}, so it was not loaded.",
+                        name,
                         human(limits.sample)
                     )
                 });
-                skipped.insert(channel.id);
+                skipped.insert(id);
                 continue;
             }
             Some(EntryRead::Missing) | None => {}
         }
         // Missing or unreadable entry: no bytes. The path in the file is never opened.
         warnings.push(format!(
-            "Channel \"{}\": its sample is missing from the project file. Relink it to hear it.",
-            channel.name
+            "{}: its sample is missing from the project file. Relink it to hear it.",
+            name
         ));
     }
     // A channel whose bytes could not be had keeps its path (to relink) but has no entry.
@@ -668,6 +763,11 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
             && !skipped.contains(&channel.id)
         {
             sample_ref.file = None;
+        }
+    }
+    for asset in &mut project.arrangement.audio_assets {
+        if !samples.contains_key(&asset.id) && !skipped.contains(&asset.id) {
+            asset.sample.file = None;
         }
     }
     Ok(Loaded {
@@ -729,6 +829,10 @@ fn checked_version(version: Option<u64>) -> Result<u32, LoadError> {
 /// A version above [`VERSION`] is [`LoadError::NewerVersion`], 0 is [`LoadError::Corrupt`].
 pub fn migrate(project: &mut Project, version: u32) -> Result<(), LoadError> {
     let version = checked_version(Some(u64::from(version)))?;
+    if version < 3 {
+        project.play_mode = crate::PlayMode::Pattern;
+        project.arrangement = crate::Arrangement::default();
+    }
     if version == 1 {
         for channel in &mut project.channels {
             channel.instrument = InstrumentKind::Sampler;
@@ -765,6 +869,9 @@ fn read_entry<R: Read + Seek>(
     sample_limit: u64,
     left: &mut u64,
 ) -> EntryRead {
+    if !name.starts_with(SAMPLES_DIR) || name[SAMPLES_DIR.len()..].contains(['/', '\\']) {
+        return EntryRead::Missing;
+    }
     let Ok(entry) = zip.by_name(name) else {
         return EntryRead::Missing;
     };
@@ -811,6 +918,129 @@ mod tests {
     thread_local! {
         /// Syncs [`sync_file`] made on this thread.
         pub(super) static SYNCED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_open_errors_are_propagated() {
+        let root = tempfile::tempdir().unwrap();
+        let error = sync_folder(&root.path().join("missing").join("song.grooviq")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn skipped_asset_entry_retains_refusal_and_source_bytes() {
+        let (mut p, mut files) = project_of(1);
+        p.arrangement.audio_assets.push(crate::AudioAsset {
+            id: 100,
+            sample: crate::SampleRef {
+                path: "asset.wav".into(),
+                file: None,
+            },
+            source_rate: 48000,
+            source_frames: 4,
+            original_tempo: None,
+            original_key: None,
+        });
+        files.insert(100, files[&1].clone());
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("skipped.grooviq");
+        save(&p, &files, &path).unwrap();
+        let good = fs::read(&path).unwrap();
+        let loaded = load_with_limits(
+            &path,
+            Limits {
+                sample: 1,
+                ..LIMITS
+            },
+        )
+        .unwrap();
+        assert!(
+            loaded.project.channels[0]
+                .sample
+                .as_ref()
+                .unwrap()
+                .file
+                .is_some()
+        );
+        assert!(
+            loaded.project.arrangement.audio_assets[0]
+                .sample
+                .file
+                .is_some()
+        );
+        assert!(validate_save(&loaded.project, &loaded.samples).is_err());
+        assert!(save(&loaded.project, &loaded.samples, &path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), good);
+    }
+
+    #[test]
+    fn admission_and_writer_share_exact_json_boundary() {
+        let mut p = Project::new();
+        p.name = "near budget".repeat(100);
+        let files = SampleFiles::new();
+        let size = project_json_bytes(&p, LIMITS.json).unwrap().len() as u64;
+        let limits = Limits {
+            json: size,
+            ..LIMITS
+        };
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("boundary.grooviq");
+        validate_save_with_limits(&p, &files, limits).unwrap();
+        assert!(serialize_capped(&p, size, false).unwrap().is_empty());
+        save_with_limits(&p, &files, &path, false, limits).unwrap();
+        assert_eq!(load_with_limits(&path, limits).unwrap().project, p);
+        let good = fs::read(&path).unwrap();
+        let tight = Limits {
+            json: size - 1,
+            ..limits
+        };
+        assert!(validate_save_with_limits(&p, &files, tight).is_err());
+        assert!(save_with_limits(&p, &files, &path, false, tight).is_err());
+        assert_eq!(fs::read(&path).unwrap(), good);
+    }
+
+    #[test]
+    fn assets_share_channel_sample_budgets() {
+        let (mut p, mut files) = project_of(1);
+        p.arrangement.audio_assets.push(crate::AudioAsset {
+            id: 100,
+            sample: crate::SampleRef {
+                path: "asset.wav".into(),
+                file: None,
+            },
+            source_rate: 48000,
+            source_frames: 4,
+            original_tempo: None,
+            original_key: None,
+        });
+        let sample = files[&1].clone();
+        files.insert(100, sample.clone());
+        let size = sample.bytes.len() as u64;
+        let limits = Limits {
+            sample: size,
+            total: size,
+            ..LIMITS
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("asset.grooviq");
+        save_with_limits(&p, &files, &path, false, limits).unwrap();
+        assert_eq!(load_with_limits(&path, limits).unwrap().samples.len(), 2);
+        let good = fs::read(&path).unwrap();
+        files.insert(
+            100,
+            SampleFile {
+                name: "different.wav".into(),
+                bytes: Arc::new(vec![42; size as usize]),
+            },
+        );
+        assert!(save_with_limits(&p, &files, &path, false, limits).is_err());
+        assert_eq!(fs::read(&path).unwrap(), good);
+        let tight = Limits {
+            sample: size - 1,
+            ..limits
+        };
+        assert!(save_with_limits(&p, &files, &path, false, tight).is_err());
     }
 
     #[test]

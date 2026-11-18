@@ -22,6 +22,12 @@ use std::time::{Duration, Instant};
 
 const SR: f32 = 48_000.0;
 
+#[path = "realtime/bitcrusher.rs"]
+mod bitcrusher;
+
+#[path = "realtime/drum_shaper.rs"]
+mod drum_shaper;
+
 /// Built with `RTSAN_ENABLE` set: RealtimeSanitizer is linked in and checks [`realtime`].
 const RTSAN: bool = option_env!("RTSAN_ENABLE").is_some();
 
@@ -732,3 +738,6 @@ fn a_waiting_recording_barrier_never_allocates() {
         "{taken:?}"
     );
 }
+
+#[path = "realtime/multiband.rs"]
+mod multiband;
