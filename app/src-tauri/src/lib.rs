@@ -394,13 +394,17 @@ fn qa_automation() -> bool {
 pub fn run() {
     panic_hook::install();
     if std::env::var_os("GROOVIQ_QA_DRIVER").is_some() && !qa_automation() {
-        panic!("automation requires a macOS qa-driver build");
+        eprintln!("automation requires a macOS qa-driver build");
+        std::process::exit(2);
     }
     #[allow(unused_mut)]
     let mut context = tauri::generate_context!();
     #[cfg(all(feature = "qa-driver", target_os = "macos"))]
     let qa_dir = if qa_automation() {
-        let dir = qa_driver::validate().expect("unsafe QA launch refused");
+        let dir = qa_driver::validate().unwrap_or_else(|error| {
+            eprintln!("QA launch refused: {error}");
+            std::process::exit(2);
+        });
         for window in &mut context.config_mut().app.windows {
             window.create = false;
             window.visible = false;

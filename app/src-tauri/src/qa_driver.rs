@@ -56,6 +56,9 @@ fn validate_home(
     }
     // Create exclusively; never replace another endpoint.
     let endpoint = home.join(".qa-driver");
+    // Validate the platform's byte limit before claiming the home or entering native setup.
+    std::os::unix::net::SocketAddr::from_pathname(endpoint.join("control.sock"))
+        .map_err(|_| "QA socket path is too long; use a shorter QA_HOME".to_string())?;
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&endpoint)
@@ -329,5 +332,19 @@ mod tests {
             std::fs::read_to_string(endpoint.join("sentinel")).unwrap(),
             "keep"
         );
+    }
+
+    #[test]
+    fn long_socket_home_is_rejected_before_claiming_it() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let home = root.join("x".repeat(200));
+        std::fs::create_dir(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for _ in 0..2 {
+            let error = validate_home(&home, &home, &root).unwrap_err();
+            assert!(error.contains("shorter QA_HOME"), "{error}");
+            assert!(!home.join(".qa-driver").exists());
+        }
     }
 }

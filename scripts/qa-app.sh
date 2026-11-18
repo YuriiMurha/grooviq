@@ -25,7 +25,10 @@ if [ -n "${QA_HOME:-}" ]; then
 	owned=0
 else
 	tmp=${TMPDIR:-/tmp}
-	home=$(mktemp -d "${tmp%/}/grooviq-qa.XXXXXX")
+	qa_template=grooviq-qa.XXXXXX
+	# The Unix socket path includes this home, so automation needs a short basename.
+	if [ "${QA_AUTOMATION:-0}" = 1 ]; then qa_template=gq.XXXXXX; fi
+	home=$(mktemp -d "${tmp%/}/$qa_template")
 	owned=1
 fi
 if [ "${QA_AUTOMATION:-0}" = 1 ]; then
