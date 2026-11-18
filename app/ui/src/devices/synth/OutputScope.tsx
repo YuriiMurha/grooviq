@@ -11,7 +11,6 @@ export function OutputScope({ channel, active, generation }: { channel: number; 
   const status = useRef<HTMLSpanElement>(null);
   useEffect(() => {
     let disposed = false;
-    let pending = false;
     let frame = 0;
     let lastRead = -Infinity;
     let lastReply = -Infinity;
@@ -24,20 +23,22 @@ export function OutputScope({ channel, active, generation }: { channel: number; 
     const draw = (now: number) => {
       const visible = active && !document.hidden && !isProjectReplacing();
       if (!visible || now - lastReply > 250) clear();
-      if (visible && generation !== undefined && !pending && now - lastRead >= 33) {
-        pending = true;
-        lastRead = now;
-        void readSynthMeter(channel, generation, instance).then((raw) => {
-          if (disposed || isProjectReplacing()) return;
-          const meter = decodeSynthMeter(raw, instance);
-          if (!meter) { clear(); return; }
-          if (meter.frames === lastClock) return;
-          lastClock = meter.frames;
-          instance = meter.instance;
-          scope = meter.scope;
-          levels = meter.levels;
-          lastReply = performance.now();
-        }, clear).finally(() => { pending = false; });
+      if (visible && generation !== undefined && now - lastRead >= 33) {
+        const request = readSynthMeter(channel, generation, instance);
+        if (request) {
+          lastRead = now;
+          void request.then((raw) => {
+            if (disposed || isProjectReplacing()) return;
+            const meter = decodeSynthMeter(raw, instance);
+            if (!meter) { clear(); return; }
+            if (meter.frames === lastClock) return;
+            lastClock = meter.frames;
+            instance = meter.instance;
+            scope = meter.scope;
+            levels = meter.levels;
+            lastReply = performance.now();
+          }, clear);
+        }
       }
       const c = canvas.current;
       const ctx = c?.getContext("2d");

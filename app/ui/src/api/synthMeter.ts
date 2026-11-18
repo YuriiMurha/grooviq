@@ -15,5 +15,11 @@ export function decodeSynthMeter(raw: unknown, expected: number | null): SynthMe
   if (!raw.every((v) => typeof v === "number" && Number.isFinite(v))) return null;
   return { instance: raw[0], frames: raw[1], levels: raw.length === 2 ? Array(6).fill(0) : raw.slice(2, 8), scope: raw.length === 2 ? Array(256).fill(0) : raw.slice(8) };
 }
-export const readSynthMeter = (channel: number, generation: number, instance: number | null) =>
-  invoke<unknown>("synth_meter", { channel, generation, instance });
+// Unmounting an editor cannot cancel native IPC. Keep ownership for this webview until
+// settlement, so selection changes and reopening never queue another observation behind it.
+let pending: Promise<unknown> | null = null;
+export function readSynthMeter(channel: number, generation: number, instance: number | null): Promise<unknown> | null {
+  if (pending !== null) return null;
+  pending = invoke<unknown>("synth_meter", { channel, generation, instance }).finally(() => { pending = null; });
+  return pending;
+}
