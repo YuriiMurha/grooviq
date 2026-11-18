@@ -2,7 +2,7 @@
 
 use grooviq_dsp::{Device, NoteEvent, create, param_spec};
 
-const IDS: [&str; 13] = [
+const IDS: [&str; 14] = [
     "synth",
     "eq",
     "comp",
@@ -14,10 +14,11 @@ const IDS: [&str; 13] = [
     "utility",
     "drum_shaper",
     "character_delay",
+    "saturation",
     "fattener",
     "bitcrusher",
 ];
-const EFFECTS: [&str; 12] = [
+const EFFECTS: [&str; 13] = [
     "eq",
     "comp",
     "limiter",
@@ -28,6 +29,7 @@ const EFFECTS: [&str; 12] = [
     "utility",
     "drum_shaper",
     "character_delay",
+    "saturation",
     "fattener",
     "bitcrusher",
 ];
@@ -778,6 +780,15 @@ fn random_parameter_sweeps_never_produce_nan() {
 /// A parameter set per effect that exercises its interesting paths.
 fn interesting(id: &str) -> Vec<(u32, f32)> {
     match id {
+        "saturation" => vec![
+            (0, 1.),
+            (1, 18.),
+            (2, 0.5),
+            (3, 6.),
+            (4, 100.),
+            (5, 12000.),
+            (7, 0.7),
+        ],
         "bitcrusher" => vec![(0, 5.7), (1, 23.3), (2, 0.6), (3, 0.4), (4, 1.0), (5, 0.8)],
         "eq" => vec![
             (2 * 6 + 3, 9.0),
@@ -814,6 +825,17 @@ fn interesting(id: &str) -> Vec<(u32, f32)> {
 /// Changes applied at sample 4736 (a multiple of both 128 and 37) to test smoothing paths.
 fn changes(id: &str) -> Vec<(u32, f32)> {
     match id {
+        "saturation" => vec![
+            (0, 3.),
+            (1, 8.),
+            (2, -0.5),
+            (3, 0.),
+            (4, 300.),
+            (5, 6000.),
+            (6, 0.),
+            (7, 0.3),
+            (8, -3.),
+        ],
         "bitcrusher" => vec![(0, 2.5), (1, 2.5), (2, 1.0), (3, 0.2), (4, 0.7), (5, 0.3)],
         "eq" => vec![
             (2 * 6 + 2, 2000.0),

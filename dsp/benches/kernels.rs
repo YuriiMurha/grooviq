@@ -302,3 +302,31 @@ fn fattener_block<const N: usize>(bencher: Bencher, name: &str) {
         black_box((l, r));
     });
 }
+
+#[divan::bench(args = grooviq_dsp::saturation::PRESETS, consts = [64, 128])]
+fn saturation_block<const N: usize>(bencher: Bencher, patch: &str) {
+    let mut d = grooviq_dsp::saturation::Saturation::new(SR);
+    for (i, v) in grooviq_dsp::saturation::preset(patch).unwrap() {
+        d.set_param(i, v);
+    }
+    let mut seed = 719u32;
+    let mut source = move || {
+        let mut l = [0.; N];
+        let mut r = l;
+        for i in 0..N {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            l[i] = (seed as f32 / u32::MAX as f32 - 0.5) * 1.6;
+            r[i] = libm::sinf(seed as f32) * 0.7;
+        }
+        (l, r)
+    };
+    for _ in 0..16 {
+        let (mut l, mut r) = source();
+        d.process(&mut l, &mut r, None, &[]);
+    }
+    bencher
+        .with_inputs(source)
+        .bench_local_refs(|(l, r)| d.process(black_box(l), black_box(r), None, &[]));
+}

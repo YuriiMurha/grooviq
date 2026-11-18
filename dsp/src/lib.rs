@@ -11,6 +11,8 @@ pub mod api;
 pub use api::*;
 
 mod fft;
+mod oversampling;
+pub mod saturation;
 mod util;
 mod wavetable;
 
@@ -41,6 +43,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
         "comp" => &comp::SPEC,
         "limiter" => &limiter::SPEC,
         "drive" => &drive::SPEC,
+        "saturation" => &saturation::SPEC,
         "drum_shaper" => &drum_shaper::SPEC,
         "reverb" => &reverb::SPEC,
         "character_delay" => &character_delay::SPEC,
@@ -64,6 +67,7 @@ pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
         "comp" => Box::new(comp::Comp::new(sample_rate)),
         "limiter" => Box::new(limiter::Limiter::new(sample_rate)),
         "drive" => Box::new(drive::Drive::new(sample_rate)),
+        "saturation" => Box::new(saturation::Saturation::new(sample_rate)),
         "drum_shaper" => Box::new(drum_shaper::DrumShaper::new(sample_rate)),
         "reverb" => Box::new(reverb::Reverb::new(sample_rate)),
         "character_delay" => Box::new(character_delay::CharacterDelay::new(sample_rate)),
