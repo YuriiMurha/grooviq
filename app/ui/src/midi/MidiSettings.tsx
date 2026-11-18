@@ -35,7 +35,7 @@ export function MidiSettings() {
   }, []);
 
   const show = (name: string, enabled: boolean) =>
-    setInputs((list) => list?.map((i) => (i.name === name ? { ...i, enabled } : i)) ?? list);
+    setInputs((list) => list?.map((i) => (i.id === name ? { ...i, enabled } : i)) ?? list);
 
   const toggle = async (name: string, enabled: boolean) => {
     newest.current += 1;
@@ -58,7 +58,7 @@ export function MidiSettings() {
       )}
       {inputs?.map((input) => (
         <label
-          key={input.name}
+          key={input.id}
           className="device"
           data-hint="Plays this MIDI keyboard on the selected channel. Switch it off to ignore it."
         >
@@ -66,7 +66,7 @@ export function MidiSettings() {
             type="checkbox"
             role="switch"
             checked={input.enabled}
-            onChange={(e) => void toggle(input.name, e.target.checked)}
+            onChange={(e) => void toggle(input.id, e.target.checked)}
           />
           <span className="device-name">{input.name}</span>
         </label>
