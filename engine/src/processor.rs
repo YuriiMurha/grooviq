@@ -562,11 +562,21 @@ impl AudioProcessor {
         }
     }
 
+    pub(crate) fn flush_recording_boundaries(&mut self) {
+        self.recorder.flush_mark();
+    }
+
     pub(crate) fn finish_recovery_stop(&mut self, mark: u32) {
         self.stop(self.clock);
         self.recorder
             .set(false, &self.transport, self.clock, &self.live);
         self.recorder.mark(mark);
+        // Rebuilding may fail while the callback remains detached.
+        self.live.publish_transport(
+            self.transport.playing(),
+            self.graph
+                .position(self.transport.position_ticks(self.clock)),
+        );
     }
 
     pub(crate) fn stop_after_failed_rebuild(&mut self) {

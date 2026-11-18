@@ -7,7 +7,7 @@ use crate::state::ChannelId;
 use crate::transport::TransportClock;
 use rtrb::Producer;
 
-/// Events the recording queue holds. When it is full, a new event is dropped and counted
+/// Events the recording queue holds. When it is full, a new note is dropped and counted
 /// ([`crate::Controller::record_dropped`]).
 pub const RECORD_CAPACITY: usize = 1024;
 
@@ -28,8 +28,8 @@ pub enum RecordEvent {
         tick: u64,
         position: u32,
         /// The take it was played in: every note of one take has the same number, and the
-        /// next take's is one more (wrapping). It moves on when the take ends, even if the
-        /// queue had no room for the [`RecordEvent::End`], so it tells takes apart for sure.
+        /// next take's is one more (wrapping). An End that finds the queue full is retained
+        /// ahead of subsequent notes, preserving the accepted take's ending tick.
         take: u32,
         /// The press (see [`NoteId`]): a note-off carries its note-on's, so presses of one key
         /// held at once pair up by it, whichever is let go first.
@@ -49,6 +49,8 @@ pub enum RecordEvent {
 pub(crate) struct Recorder {
     tx: Producer<RecordEvent>,
     on: bool,
+    /// A take end that must precede the next barrier and all later notes.
+    pending_end: Option<RecordEvent>,
     /// A mark that did not fit in the queue yet.
     pending_mark: Option<u32>,
     /// The running (or next) take's number (see [`RecordEvent::Note`]).
@@ -60,6 +62,7 @@ impl Recorder {
         Self {
             tx,
             on: false,
+            pending_end: None,
             pending_mark: None,
             take: 0,
         }
@@ -72,9 +75,15 @@ impl Recorder {
         self.flush_mark();
     }
 
-    /// Sends a waiting mark if the queue has room. Called at the start of every block and
-    /// before every event, so a mark goes out as soon as the queue drains.
+    /// Flushes a retained take End before its barrier. Called before each block/event and
+    /// by the control poller while detached, so consumer progress can release both.
     pub(crate) fn flush_mark(&mut self) {
+        if let Some(end) = self.pending_end {
+            if self.tx.push(end).is_err() {
+                return;
+            }
+            self.pending_end = None;
+        }
         if let Some(id) = self.pending_mark
             && self.tx.push(RecordEvent::Mark { id }).is_ok()
         {
@@ -103,8 +112,16 @@ impl Recorder {
     pub(crate) fn end(&mut self, transport: &TransportClock, at: u64, live: &LiveShared) {
         if self.taking(transport) {
             let (tick, position) = transport.record_at(at, live.output_latency_frames());
-            self.push(RecordEvent::End { tick, position }, live);
-            // Whether or not the End fit: the next take's notes carry the next number.
+            self.flush_mark();
+            // No later note can pass a parked boundary. A subsequent empty take needs
+            // no new End; preserve the first accepted take's original ending tick.
+            if self.pending_end.is_none() && self.pending_mark.is_none() {
+                let end = RecordEvent::End { tick, position };
+                if self.tx.push(end).is_err() {
+                    self.pending_end = Some(end);
+                }
+            }
+            // The next take's notes carry the next number.
             self.take = self.take.wrapping_add(1);
         }
     }
@@ -136,13 +153,14 @@ impl Recorder {
         self.push(event, live);
     }
 
-    /// Real-time safe: a full queue drops the event and counts it, never waits. A waiting mark
-    /// goes first: the controller drains on its own thread and can free room between any two
+    /// Real-time safe: a full queue drops the note and counts it, never waits. A retained End
+    /// and waiting mark go first: the controller drains on its own thread and can free room between any two
     /// pushes, so the mark is retried here, and while it still does not fit the event is
     /// dropped (counted) rather than overtake it.
     fn push(&mut self, event: RecordEvent, live: &LiveShared) {
         self.flush_mark();
-        if self.pending_mark.is_some() || self.tx.push(event).is_err() {
+        if self.pending_end.is_some() || self.pending_mark.is_some() || self.tx.push(event).is_err()
+        {
             live.count_record_drop();
         }
     }
@@ -190,5 +208,44 @@ mod tests {
             "the mark took the free slot; the later event did not overtake it"
         );
         assert_eq!(live.record_dropped(), 1, "the refused event is counted");
+    }
+    #[test]
+    fn full_fifo_retains_end_before_mark_and_later_notes() {
+        let (tx, mut rx) = rtrb::RingBuffer::new(2);
+        let live = LiveShared::default();
+        let mut recorder = Recorder::new(tx);
+        let mut clock = TransportClock::new(48_000.0, 120.0);
+        clock.start(0, None);
+        recorder.set(true, &clock, 0, &live);
+        for on in [true, false] {
+            recorder.note(&clock, 0, &live, (ChannelId(1), 60, 0.8, on, NoteId(1)));
+        }
+        recorder.end(&clock, 64, &live);
+        clock.stop();
+        recorder.set(false, &clock, 64, &live);
+        recorder.mark(7);
+        assert_eq!(live.record_dropped(), 0);
+        assert!(matches!(rx.pop(), Ok(RecordEvent::Note { on: true, .. })));
+        // The next take cannot insert a note or a later End ahead of the first End/Mark.
+        clock.start(128, None);
+        recorder.set(true, &clock, 128, &live);
+        recorder.note(&clock, 128, &live, (ChannelId(1), 61, 0.8, true, NoteId(2)));
+        recorder.end(&clock, 256, &live);
+        assert!(matches!(rx.pop(), Ok(RecordEvent::Note { on: false, .. })));
+        assert_eq!(
+            rx.pop(),
+            Ok(RecordEvent::End {
+                tick: 2,
+                position: 2
+            })
+        );
+        recorder.flush_mark();
+        assert_eq!(rx.pop(), Ok(RecordEvent::Mark { id: 7 }));
+        assert!(rx.pop().is_err());
+        assert_eq!(
+            live.record_dropped(),
+            1,
+            "only the later refused note is dropped"
+        );
     }
 }

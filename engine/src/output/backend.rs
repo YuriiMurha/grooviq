@@ -409,6 +409,11 @@ impl State {
                 }
             }
         }
+        if let Some(processor) = self.processor.as_mut() {
+            // No stream owns it: deliver retained take boundaries even with no callback
+            // and no device available for another rebuild attempt.
+            processor.flush_recording_boundaries();
+        }
         let mut seen = lock(&shared.seen);
         seen.devices = devices;
         seen.current = self.open.as_ref().map(|open| open.info.clone());
@@ -664,5 +669,67 @@ mod tests {
         p.process(&mut out, 2);
         assert!(out.iter().all(|x| *x == 0.0));
         assert!(!c.live().tone);
+    }
+    #[test]
+    fn detached_processor_delivers_recording_boundaries_without_a_callback() {
+        use crate::{ChannelId, ChannelMix, ChannelSetup, NoteId, RecordEvent};
+        struct NoOutput;
+        impl OutputBackend for NoOutput {
+            fn outputs(&self) -> Vec<OutputInfo> {
+                Vec::new()
+            }
+            fn open(&mut self, _: &OutputInfo, _: Arc<AudioSlot>) -> Result<u32, String> {
+                panic!("there must be no output to open")
+            }
+            fn close(&mut self) {}
+        }
+        let (mut c, mut p) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        c.add_channel(ChannelSetup::synth(
+            ChannelId(1),
+            Vec::new(),
+            ChannelMix::default(),
+        ))
+        .unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
+        c.send(Command::Play).unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        for _ in 0..512 {
+            let id = NoteId::live();
+            for on in [true, false] {
+                c.send(Command::ChannelNote {
+                    channel: ChannelId(1),
+                    key: 60,
+                    velocity: 0.8,
+                    on,
+                    id,
+                })
+                .unwrap();
+            }
+            p.process(&mut [0.0; BLOCK * 2], 2);
+        }
+        assert_eq!(c.record_dropped(), 0);
+        p.finish_recovery_stop(77);
+        let c = Arc::new(Mutex::new(c));
+        let output = AudioOutput::start(
+            Box::new(NoOutput),
+            Arc::clone(&c),
+            p,
+            OutputChoice::SystemDefault,
+            false,
+            Box::new(|_| {}),
+        );
+        let mut events = Vec::new();
+        lock(&c).take_recorded(&mut events);
+        assert_eq!(events.len(), 1024);
+        output.poll_now();
+        lock(&c).take_recorded(&mut events);
+        assert!(
+            matches!(events.get(1024), Some(RecordEvent::End { .. })),
+            "missing retained take End"
+        );
+        assert_eq!(events.get(1025), Some(&RecordEvent::Mark { id: 77 }));
+        assert!(!lock(&c).live().playing);
     }
 }

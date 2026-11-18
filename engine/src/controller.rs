@@ -635,6 +635,9 @@ impl Controller {
     /// never on the audio thread. Returns false if construction failed; the processor stays
     /// silent and the previous rate, state and queued commands are retained.
     pub fn reconfigure(&mut self, processor: &mut AudioProcessor, config: EngineConfig) -> bool {
+        // The consumer may have drained while the callback was detached. A retry must
+        // deliver retained take boundaries even if constructing the graph fails again.
+        processor.flush_recording_boundaries();
         if self.stop_owed {
             // The callback is stopped: settle directly even when its command FIFO is full.
             // Earlier transport starts cannot overtake the exhaustion decision on rebuild.
@@ -1343,5 +1346,32 @@ mod tests {
         assert!(!c.synth_preset("Reese"));
         assert_eq!(c.commands.slots(), 39);
         assert_eq!(c.synth, before);
+    }
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn direct_recovery_stop_publishes_before_failed_reconstruction() {
+        let (mut c, mut p) = controller();
+        c.send(Command::Play).unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        c.attempts = 3;
+        fault(&mut c, &mut p);
+        while c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+        assert_eq!(c.check_health().len(), 1);
+        assert!(c.stop_owed);
+        c.replay_panics.set(1);
+        assert!(!c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 96_000.0
+            }
+        ));
+        assert!(!c.recording_armed());
+        assert!(c.recovery_stop_mark().is_some());
+        // A failed output-rate rebuild keeps the callback detached indefinitely.
+        assert!(
+            !c.live().playing,
+            "R5: directly settled stop must publish stopped transport without another callback"
+        );
     }
 }
