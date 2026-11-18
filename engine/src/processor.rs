@@ -183,7 +183,10 @@ impl AudioProcessor {
         }
         self.generation = graph.generation();
         let mut graph = graph;
-        graph.keep_audio(&self.graph);
+        // Silent faulted callbacks advance transport without advancing clip progress.
+        if !self.faulted {
+            graph.keep_audio(&self.graph);
+        }
         self.graph = graph;
         self.unsent = None;
         self.faulted = false;
@@ -563,9 +566,11 @@ impl AudioProcessor {
     /// (cutting held voices, or bringing back the old rate).
     fn replace_graph(&mut self, mut graph: Box<Graph>, at: u64) {
         let leaving = if graph.generation() == self.generation {
-            self.faulted = false;
             let new_len = graph.pattern_length();
-            graph.keep_audio(&self.graph);
+            if !self.faulted {
+                graph.keep_audio(&self.graph);
+            }
+            self.faulted = false;
             let leaving = std::mem::replace(&mut self.graph, graph);
             // A pattern swap a faulted graph refused arrives with the fresh graph.
             if self.graph.playback_mode == crate::PlaybackMode::Pattern {
