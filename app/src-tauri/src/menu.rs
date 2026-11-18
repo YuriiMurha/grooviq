@@ -1,4 +1,4 @@
-//! The macOS app menu: Tauri's standard one, except Quit, plus View > High Refresh Rate.
+//! The macOS app menu: standard items with contextual history, guarded Quit and refresh rate.
 //!
 //! The standard menu's Quit (Cmd+Q) is the native `terminate:` item, and tao 0.37 has no
 //! `applicationShouldTerminate:` handler, so it ends the app at once: no `ExitRequested`, no
@@ -20,6 +20,9 @@ use tauri::menu::{
 use tauri::{AppHandle, Runtime};
 
 /// The id of Grooviq's own Quit item.
+pub(crate) const EDIT_ID: &str = "grooviq-edit";
+pub(crate) const UNDO_ID: &str = "grooviq-undo";
+pub(crate) const REDO_ID: &str = "grooviq-redo";
 pub(crate) const QUIT_ID: &str = "grooviq-quit";
 /// Its shortcut: Cmd+Q on macOS.
 pub(crate) const QUIT_ACCELERATOR: &str = "CmdOrCtrl+Q";
@@ -41,7 +44,9 @@ pub(crate) enum Native {
     #[allow(dead_code)]
     Quit,
     CloseWindow,
+    #[allow(dead_code)]
     Undo,
+    #[allow(dead_code)]
     Redo,
     Cut,
     Copy,
@@ -61,6 +66,7 @@ pub(crate) enum Entry {
     Quit,
     /// The High Refresh Rate check item: [`HIGH_REFRESH_ID`], unticked until the settings load.
     HighRefresh,
+    History(bool),
 }
 
 /// A submenu: its id (when macOS gives it a role), title and entries.
@@ -99,11 +105,11 @@ pub(crate) fn spec(app_name: &str) -> Vec<Sub> {
         ),
         sub(None, "File", vec![N(CloseWindow)]),
         sub(
-            None,
+            Some(EDIT_ID),
             "Edit",
             vec![
-                N(Undo),
-                N(Redo),
+                Entry::History(false),
+                Entry::History(true),
                 Separator,
                 N(Cut),
                 N(Copy),
@@ -171,6 +177,17 @@ pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         };
         for entry in sub.entries {
             match entry {
+                Entry::History(redo) => submenu.append(&MenuItem::with_id(
+                    app,
+                    if redo { REDO_ID } else { UNDO_ID },
+                    if redo { "Redo" } else { "Undo" },
+                    true,
+                    Some(if redo {
+                        "CmdOrCtrl+Shift+Z"
+                    } else {
+                        "CmdOrCtrl+Z"
+                    }),
+                )?)?,
                 Entry::Separator => submenu.append(&PredefinedMenuItem::separator(app)?)?,
                 Entry::Quit => submenu.append(&MenuItem::with_id(
                     app,
@@ -229,6 +246,24 @@ mod tests {
     }
 
     #[test]
+    fn history_events_are_unambiguous() {
+        assert_eq!(history_action(UNDO_ID), Some(false));
+        assert_eq!(history_action(REDO_ID), Some(true));
+        assert_eq!(history_action(QUIT_ID), None);
+        assert_eq!(history_action("undo"), None);
+        let edit = spec("Grooviq")
+            .into_iter()
+            .find(|s| s.title == "Edit")
+            .unwrap();
+        assert_eq!(
+            &edit.entries[..2],
+            &[Entry::History(false), Entry::History(true)]
+        );
+        assert!(!edit.entries.contains(&Entry::Native(Native::Undo)));
+        assert!(!edit.entries.contains(&Entry::Native(Native::Redo)));
+    }
+
+    #[test]
     fn cmd_q_is_our_own_quit_and_the_native_one_is_gone() {
         let menu = spec("Grooviq");
         assert!(
@@ -259,14 +294,7 @@ mod tests {
         }
         // Text fields keep copy and paste.
         let edit = menu.iter().find(|s| s.title == "Edit").unwrap();
-        for native in [
-            Native::Undo,
-            Native::Redo,
-            Native::Cut,
-            Native::Copy,
-            Native::Paste,
-            Native::SelectAll,
-        ] {
+        for native in [Native::Cut, Native::Copy, Native::Paste, Native::SelectAll] {
             assert!(edit.entries.contains(&Entry::Native(native)), "{native:?}");
         }
         let window = menu.iter().find(|s| s.title == "Window").unwrap();
@@ -278,5 +306,29 @@ mod tests {
         assert!(is_quit(QUIT_ID));
         assert!(!is_quit("quit"));
         assert!(!is_quit(""));
+    }
+}
+
+/// Custom items emit one history action; native responder selectors never run as well.
+pub(crate) fn history_action(id: &str) -> Option<bool> {
+    match id {
+        UNDO_ID => Some(false),
+        REDO_ID => Some(true),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+pub(crate) fn edit_history_enabled(app: AppHandle, undo: bool, redo: bool) {
+    if let Some(edit) = app.menu().and_then(|menu| menu.get(EDIT_ID))
+        && let Some(menu) = edit.as_submenu()
+    {
+        for (id, enabled) in [(UNDO_ID, undo), (REDO_ID, redo)] {
+            if let Some(item) = menu.get(id)
+                && let Some(item) = item.as_menuitem()
+            {
+                let _ = item.set_enabled(enabled);
+            }
+        }
     }
 }
