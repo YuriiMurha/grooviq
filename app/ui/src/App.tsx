@@ -25,6 +25,7 @@ import {
   type Output,
 } from "./audio";
 import { HintBar } from "./hint/HintBar";
+import { MeterHistory, type MeterContext } from "./meter/history";
 import { connectLive } from "./live/client";
 import type { LiveFrame } from "./live/decode";
 import { Meter } from "./meter/Meter";
@@ -71,6 +72,9 @@ export function App() {
   const playGuard = useRef(new PlayGuard());
   const [latencyFrames, setLatencyFrames] = useState<number | null>(null);
   const latest = useRef<LiveFrame | null>(null);
+  const [meterHistory] = useState(() => new MeterHistory());
+  const meterContext = useRef<MeterContext>({});
+  const outputRequest = useRef(0);
   const nextToast = useRef(0);
   // The typing keyboard is on by default; R records only while it is off.
   const [keyboard, setKeyboard] = useState(true);
@@ -78,9 +82,19 @@ export function App() {
   const [metronome, setMetronome] = useState(false);
 
   const refresh = useCallback(() => {
-    audioOutputs().then(setOutputs, () => {});
+    const request = ++outputRequest.current;
+    audioOutputs().then((outputs) => {
+      if (request !== outputRequest.current) return;
+      const output = outputs.find((o) => o.current);
+      const context = { id: output?.id, rate: output?.sampleRate };
+      if (context.id !== meterContext.current.id || !Object.is(context.rate, meterContext.current.rate)) {
+        meterHistory.reset();
+      }
+      meterContext.current = context;
+      setOutputs(outputs);
+    }, () => {});
     audioLog().then(setLog, () => {});
-  }, []);
+  }, [meterHistory]);
 
   const toast = useCallback((message: string, warn: boolean) => {
     const id = nextToast.current++;
@@ -249,12 +263,14 @@ export function App() {
     loadSettings();
     const unlisten = onAudioEvent((e) => {
       toast(e.message, eventWarns(e.kind));
+      meterHistory.reset();
+      meterContext.current = {};
       refresh();
     });
     return () => {
       unlisten.then((stop) => stop());
     };
-  }, [refresh, loadSettings, toast]);
+  }, [refresh, loadSettings, toast, meterHistory]);
 
   // Autosave trouble the person must hear of. Listen first, then ask what already happened
   // (a copy running without autosave, a failure before the listener was there); a failure told
@@ -282,7 +298,7 @@ export function App() {
     };
   }, [toast]);
 
-  // The live stream: meters read `latest` every animation frame; the rest becomes state only
+  // Capture each meter observation before latest is overwritten; the rest becomes state only
   // when it changes.
   useEffect(() => {
     let disconnect: (() => void) | null = null;
@@ -291,6 +307,7 @@ export function App() {
       (endpoint) => {
         if (cancelled) return;
         disconnect = connectLive(endpoint, (frame) => {
+          meterHistory.push(frame, meterContext.current, performance.now());
           const before = latest.current;
           latest.current = frame;
           if (before?.tone !== frame.tone) setTone(frame.tone);
@@ -311,7 +328,7 @@ export function App() {
           if (before?.outputLatencyFrames !== frame.outputLatencyFrames) {
             setLatencyFrames(frame.outputLatencyFrames);
           }
-        });
+        }, { onConnectionChange: () => meterHistory.reset() });
       },
       (e: unknown) => toast(`Live meters are off: ${String(e)}`, true),
     );
@@ -319,7 +336,7 @@ export function App() {
       cancelled = true;
       disconnect?.();
     };
-  }, [toast, releaseHeld]);
+  }, [toast, releaseHeld, meterHistory]);
 
   const current = outputs.find((o) => o.current) ?? null;
   const latencyMs =
@@ -412,7 +429,7 @@ export function App() {
             >
               Test tone
             </button>
-            <Meter latest={latest} />
+            <Meter history={meterHistory} />
           </div>
         </header>
         <main className="stage">
