@@ -16,6 +16,7 @@ pub struct SongLoop {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SongData {
+    pub audio: crate::AudioSchedule,
     pub arrangement: ArrangementData,
     /// All-clip musical horizon, including future audio and automation schedules.
     pub end_tick: u64,
@@ -30,6 +31,7 @@ impl SongData {
             || !(8000.0..=384000.0).contains(&self.frame_rate)
             || self.end_frame > 46_080_000_000
             || self.end_tick > MAX_SONG_TICKS
+            || !self.audio.valid_horizon(self.end_tick)
             || self.arrangement.length > self.end_tick
             || self.arrangement.notes.len() > MAX_SONG_NOTES
         {
@@ -60,6 +62,7 @@ impl SongData {
     }
     pub(crate) fn valid_loop(&self, region: Option<SongLoop>) -> bool {
         region.is_none_or(|r| r.start_tick < r.end_tick && r.end_tick <= self.end_tick)
+            && self.audio.validate_loop(region).is_ok()
     }
 }
 
@@ -322,6 +325,7 @@ impl Default for SongData {
             end_tick: 0,
             end_frame: 0,
             frame_rate: 48000.0,
+            audio: crate::AudioSchedule::default(),
         }
     }
 }
@@ -346,6 +350,7 @@ mod tests {
             end_tick: 1000,
             end_frame: 0,
             frame_rate: 48000.0,
+            audio: crate::AudioSchedule::default(),
         }
     }
     #[test]

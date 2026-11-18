@@ -1,3 +1,5 @@
+import { PatternRevisionChain, ProjectCommandQueue, registerSettlement } from "./pending";
+import type { PatternStamp } from "../api/patterns";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorText, projectEdit, projectView, type Edit, type ProjectView } from "../api/project";
 import type { ProjectContextValue, ProjectStamp } from "./context";
@@ -16,14 +18,17 @@ interface Session {
 export function useSession(onError: (message: string) => void) {
   const [state, setState] = useState<Session>(() => ({ view: null, cleanSince: Date.now() }));
   const latest = useRef(state);
-  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const queue = useRef(new ProjectCommandQueue());
+  const revisions = useRef(new PatternRevisionChain());
+  useEffect(() => registerSettlement(() => queue.current.flush()), []);
   /** Commands that change the project, sent or queued, whose view is not in yet. */
   const unanswered = useRef(0);
 
   const adopt = useCallback((view: ProjectView) => {
     const prev = latest.current;
     // A late reply about a project that was replaced since: the open one is drawn, not it.
-    if (prev.view && view.generation < prev.view.generation) return;
+    if (prev.view && (view.generation < prev.view.generation ||
+      (view.generation === prev.view.generation && (view.patternRevision ?? 0) < (prev.view.patternRevision ?? 0)))) return;
     const becameClean =
       !view.dirty && (prev.view === null || prev.view.dirty || prev.view.path !== view.path);
     latest.current = { view, cleanSince: becameClean ? Date.now() : prev.cleanSince };
@@ -32,19 +37,15 @@ export function useSession(onError: (message: string) => void) {
 
   /** Runs `fn` after everything before it has finished. */
   const enqueue = useCallback(<T,>(fn: () => Promise<T>): Promise<T> => {
-    const run = queue.current.then(fn);
-    queue.current = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
+    return queue.current.enqueue(fn, false);
   }, []);
 
+  const enqueueMutation = useCallback(<T,>(fn: () => Promise<T>): Promise<T> => queue.current.enqueue(fn, true), []);
   const run = useCallback(
     async (command: () => Promise<ProjectView>) => {
       unanswered.current += 1;
       try {
-        adopt(await enqueue(command));
+        adopt(await enqueueMutation(command));
         return true;
       } catch (e) {
         if (e !== STALE) onError(errorText(e));
@@ -53,14 +54,22 @@ export function useSession(onError: (message: string) => void) {
         unanswered.current -= 1;
       }
     },
-    [adopt, enqueue, onError],
+    [adopt, enqueueMutation, onError],
   );
   /** Sends `edit` for the project shown now: if another replaced it before the edit's turn, the
    * engine refuses it. */
   const apply = useCallback(
-    (edit: Edit, still?: () => boolean) => {
+    (edit: Edit, still?: () => boolean, origin?: PatternStamp) => {
+      if (isProjectReplacing()) return Promise.resolve(false);
       const generation = latest.current.view?.generation ?? 0;
-      return run(() => (still && !still() ? Promise.reject(STALE) : projectEdit(edit, generation)));
+      const at = origin ?? { generation, patternId: latest.current.view?.pattern.id ?? 0, revision: latest.current.view?.notesRevision ?? 1 };
+      return run(async () => {
+        if (still && !still()) throw STALE;
+        const resolved = revisions.current.resolve(at);
+        const next = await projectEdit(edit, generation, resolved);
+        if (next.generation === resolved.generation && next.pattern.id === resolved.patternId) revisions.current.accepted(resolved, next.notesRevision);
+        return next;
+      });
     },
     [run],
   );
@@ -84,5 +93,5 @@ export function useSession(onError: (message: string) => void) {
   }, [adopt, enqueue, onError]);
 
   const context: ProjectContextValue = { view: state.view, apply, run, setView: adopt, stamp, runFor };
-  return { view: state.view, cleanSince: state.cleanSince, latest, adopt, enqueue, apply, unsettled, context };
+  return { view: state.view, cleanSince: state.cleanSince, latest, adopt, enqueue, enqueueMutation, resolvePatternStamp: (origin: PatternStamp) => revisions.current.resolve(origin), acceptPatternStamp: (origin: PatternStamp, revision: number) => revisions.current.accepted(origin, revision), apply, unsettled, context };
 }

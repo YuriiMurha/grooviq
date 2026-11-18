@@ -1,3 +1,5 @@
+import { beginProjectTransition } from "./pending";
+import { settlePattern } from "../api/patterns";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -88,15 +90,21 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
   /** Waits for the piano roll's queued edits; `false`, with a warning, if any was refused: what
    * the person drew is not all in the project, so nothing is saved (and nothing replaces it). */
   const settled = useCallback(async (): Promise<boolean> => {
-    if (await settleRef.current()) return true;
+    if (await settleRef.current()) {
+      const reply = await settlePattern();
+      if (reply.status === "refused") { toast(reply.message, true); return false; }
+      adopt(reply.state.view);
+      return true;
+    }
     toast("Your latest note edits could not be applied, so the project was not saved. Check the notes, then save again.", true);
     return false;
-  }, [toast]);
+  }, [toast, adopt]);
 
   /** Saves as a path the person picks; `false` if they cancel or it fails. */
   const saveAs = useCallback(async (): Promise<boolean> => {
     const current = viewRef.current;
     if (!current) return false;
+    const finish = beginProjectTransition();
     try {
       const path = await saveDialog({
         title: "Save project as",
@@ -113,7 +121,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
       await enqueue(projectView).then(adopt).catch(() => {});
       fail(e);
       return false;
-    }
+    } finally { finish(); }
   }, [adopt, enqueue, fail, settled]);
 
   /** Saves in place (an untitled project asks for a path); `true` only if it is saved. */
@@ -121,6 +129,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
     const current = viewRef.current;
     if (!current) return false;
     if (current.path === null) return saveAs();
+    const finish = beginProjectTransition();
     try {
       if (!(await settled())) return false;
       adopt(await enqueue(projectSave));
@@ -130,24 +139,26 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
       await enqueue(projectView).then(adopt).catch(() => {});
       fail(e);
       return false;
-    }
+    } finally { finish(); }
   }, [adopt, enqueue, fail, saveAs, settled]);
 
   /** Sends a command that replaces the project (New, Open, Restore), telling what is keyed by
    * the old project's channels before it goes and once it succeeded or failed. */
   const replaceWith = useCallback(
     async <T,>(command: () => Promise<T>): Promise<T> => {
-      projectReplacing();
+      const finish = beginProjectTransition();
       try {
+        if (!(await settled())) throw new Error("Pending edits were refused; the project was not replaced.");
+        projectReplacing();
         const result = await enqueue(command);
         projectReplaced();
         return result;
       } catch (e) {
         projectReplaceFailed();
         throw e;
-      }
+      } finally { finish(); }
     },
-    [enqueue],
+    [enqueue, settled],
   );
 
   const newProject = useCallback(async () => {
