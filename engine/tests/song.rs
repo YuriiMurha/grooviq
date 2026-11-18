@@ -34,6 +34,7 @@ fn state() -> EngineState {
             end_frame: 0,
             frame_rate: 48000.0,
             audio: AudioSchedule::default(),
+            automation: Default::default(),
         },
         ..EngineState::default()
     }
