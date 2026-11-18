@@ -29,6 +29,7 @@ pub struct LiveSnapshot {
 /// layer writes the latency.
 #[derive(Debug, Default)]
 pub struct LiveShared {
+    recovery: AtomicU64,
     peak_l: AtomicU32,
     peak_r: AtomicU32,
     playing: AtomicBool,
@@ -44,6 +45,16 @@ pub struct LiveShared {
 }
 
 impl LiveShared {
+    pub(crate) fn publish_recovery(&self, faults: u32, blocks: u32) {
+        self.recovery
+            .store((u64::from(faults) << 32) | u64::from(blocks), Relaxed);
+    }
+
+    pub(crate) fn recovery(&self) -> (u32, u32) {
+        let word = self.recovery.load(Relaxed);
+        ((word >> 32) as u32, word as u32)
+    }
+
     /// Reads every field. Never blocks; safe from any thread at any rate.
     pub fn snapshot(&self) -> LiveSnapshot {
         LiveSnapshot {

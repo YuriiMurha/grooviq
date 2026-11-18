@@ -153,12 +153,6 @@ impl Instrument {
             Self::Sampler { params, .. } | Self::Synth { params } => params,
         }
     }
-
-    /// Every parameter at its default.
-    pub(crate) fn reset_params(&mut self) {
-        let defaults = self.spec().iter().map(|&(_, _, d)| d).collect();
-        *self.params_mut() = defaults;
-    }
 }
 
 /// Everything that makes a channel.

@@ -507,8 +507,11 @@ impl State {
         };
         {
             let mut controller = lock(&self.controller);
-            if controller.sample_rate() != config.rate() {
-                controller.reconfigure(&mut processor, config);
+            if controller.sample_rate() != config.rate()
+                && !controller.reconfigure(&mut processor, config)
+            {
+                self.processor = Some(processor);
+                return Err("the sound engine could not rebuild for the output rate".into());
             }
         }
         slot.put(processor);

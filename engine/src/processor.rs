@@ -94,6 +94,7 @@ pub struct AudioProcessor {
     transport: TransportClock,
     recorder: Recorder,
     metronome: Metronome,
+    successful_blocks: u32,
     faults: u32,
     guard_hits: u32,
     meter: [f32; 2],
@@ -127,6 +128,7 @@ impl AudioProcessor {
             transport,
             recorder: Recorder::new(recorded),
             metronome: Metronome::new(sample_rate, time_signature),
+            successful_blocks: 0,
             faults: 0,
             guard_hits: 0,
             meter: [0.0; 2],
@@ -179,6 +181,7 @@ impl AudioProcessor {
         self.generation = graph.generation();
         self.graph = graph;
         self.unsent = None;
+        self.successful_blocks = 0;
         self.faulted = false;
         // Leftover frames were rendered at the old rate.
         self.served = BLOCK;
@@ -215,6 +218,7 @@ impl AudioProcessor {
                 graph.render(block_l, block_r, &events[..count])
             })) {
                 Ok(silenced) => {
+                    self.successful_blocks = self.successful_blocks.saturating_add(1);
                     self.guard_hits = self.guard_hits.wrapping_add(silenced);
                     self.metronome.render(
                         &mut self.block_l,
@@ -239,6 +243,8 @@ impl AudioProcessor {
         self.update_meter();
         self.clock = end;
         self.served = 0;
+        self.live
+            .publish_recovery(self.faults, self.successful_blocks);
         let tone = !self.faulted && self.graph.tone_on();
         self.live
             .publish(self.meter, tone, self.clock, self.faults, self.guard_hits);
@@ -477,7 +483,16 @@ impl AudioProcessor {
         }
     }
 
+    pub(crate) fn stop_after_failed_rebuild(&mut self) {
+        self.fault();
+        self.live.publish_recovery(self.faults, 0);
+        self.live
+            .publish(self.meter, false, self.clock, self.faults, self.guard_hits);
+        self.served = BLOCK;
+    }
+
     fn fault(&mut self) {
+        self.successful_blocks = 0;
         self.faulted = true;
         self.faults = self.faults.wrapping_add(1);
     }
@@ -487,6 +502,7 @@ impl AudioProcessor {
     /// (cutting held voices, or bringing back the old rate).
     fn replace_graph(&mut self, graph: Box<Graph>, at: u64) {
         let leaving = if graph.generation() == self.generation {
+            self.successful_blocks = 0;
             self.faulted = false;
             let new_len = graph.pattern_length();
             let leaving = std::mem::replace(&mut self.graph, graph);
