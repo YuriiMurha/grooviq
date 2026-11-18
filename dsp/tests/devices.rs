@@ -2,7 +2,7 @@
 
 use grooviq_dsp::{Device, NoteEvent, create, param_spec};
 
-const IDS: [&str; 14] = [
+const IDS: [&str; 15] = [
     "synth",
     "eq",
     "comp",
@@ -13,12 +13,13 @@ const IDS: [&str; 14] = [
     "ott",
     "utility",
     "drum_shaper",
+    "character_delay",
     "saturation",
     "fattener",
     "bitcrusher",
     "shimmer_reverb",
 ];
-const EFFECTS: [&str; 13] = [
+const EFFECTS: [&str; 14] = [
     "eq",
     "comp",
     "limiter",
@@ -28,6 +29,7 @@ const EFFECTS: [&str; 13] = [
     "ott",
     "utility",
     "drum_shaper",
+    "character_delay",
     "saturation",
     "fattener",
     "bitcrusher",
@@ -806,6 +808,7 @@ fn interesting(id: &str) -> Vec<(u32, f32)> {
         "limiter" => vec![(0, 12.0), (1, -2.0), (2, 30.0)],
         "drive" => vec![(0, 3.0), (1, 18.0), (2, 0.4), (3, 0.8), (5, 2.0)],
         "reverb" => vec![(0, 0.8), (1, 3.0), (2, 35.0), (3, 0.3), (4, 0.7), (7, 0.5)],
+        "character_delay" => vec![(9, 2.0), (10, 0.8), (12, 0.4), (11, 0.5)],
         "delay" => vec![(1, 2.0), (3, 0.6), (4, 1.0), (7, 0.5)],
         "ott" => vec![(0, 0.8), (1, 0.3), (4, 3.0), (6, -2.0)],
         "drum_shaper" => vec![
@@ -849,6 +852,7 @@ fn changes(id: &str) -> Vec<(u32, f32)> {
         "limiter" => vec![(0, 3.0)],
         "drive" => vec![(1, 6.0), (2, -0.5), (3, 0.3)],
         "reverb" => vec![(0, 0.2), (2, 90.0), (5, 400.0), (7, 0.9)],
+        "character_delay" => vec![(9, 1.0), (10, 0.4), (12, 0.7), (11, 0.2), (1, 5.0)],
         "delay" => vec![(1, 5.0), (3, 0.2), (6, 3000.0)],
         "ott" => vec![(7, 300.0), (8, 5000.0), (0, 0.3)],
         "drum_shaper" => vec![
