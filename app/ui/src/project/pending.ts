@@ -48,6 +48,12 @@ export class PatternRevisionChain {
   }
 }
 
+const drafts = new Set<() => void>();
+/** Submit local drafts before the transition fence closes; the command queue awaits them. */
+export function registerProjectDraft(commit: () => void): () => void {
+  drafts.add(commit); return () => { drafts.delete(commit); };
+}
+
 const cancellations = new Set<() => void>();
 export function registerGestureCancellation(cancel: () => void): () => void {
   cancellations.add(cancel); return () => cancellations.delete(cancel);
@@ -56,6 +62,7 @@ let transitions = 0;
 export const isProjectTransitioning = () => transitions > 0;
 export function beginProjectTransition(): () => void {
   for (const cancel of [...cancellations]) cancel();
+  for (const commit of [...drafts]) commit();
   transitions += 1;
   let finished = false;
   return () => { if (!finished) { finished = true; transitions -= 1; } };

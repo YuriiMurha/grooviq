@@ -14,7 +14,7 @@ interface Props {
   sampleRate: number;
   onPlay: () => void;
   onStop: () => void;
-  onTempo: (bpm: number) => void;
+  onTempo: (bpm: number) => Promise<boolean>;
   onSignature: (beats: number, unit: number) => void;
   /** More buttons after play and stop (record, metronome, the typing keyboard). */
   extra?: ReactNode;

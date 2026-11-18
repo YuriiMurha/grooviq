@@ -50,3 +50,22 @@ it("beginning a transition cancels held previews before freezing new gestures", 
   expect(held).toBe(false); expect(isProjectTransitioning()).toBe(true);
   finish(); dispose();
 });
+
+it('submits a draft before freezing and waits for acceptance before snapshot', async () => {
+  const { registerProjectDraft, beginProjectTransition, isProjectTransitioning } = await import('./pending');
+  const queue = new ProjectCommandQueue();
+  let accept!: () => void;
+  let snapshot = false;
+  const dispose = registerProjectDraft(() => {
+    expect(isProjectTransitioning()).toBe(false);
+    void queue.enqueue(() => new Promise<void>(resolve => { accept = resolve; }));
+  });
+  const finish = beginProjectTransition();
+  const save = queue.flush().then(ok => { if (ok) snapshot = true; });
+  await Promise.resolve(); await Promise.resolve();
+  expect(snapshot).toBe(false);
+  expect(accept).toBeTypeOf('function');
+  accept(); await save;
+  expect(snapshot).toBe(true);
+  finish(); dispose();
+});

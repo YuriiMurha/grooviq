@@ -377,7 +377,7 @@ export function App() {
               sampleRate={sampleRate}
               onPlay={play}
               onStop={stop}
-              onTempo={(bpm) => void session.apply({ kind: "setTempo", bpm })}
+              onTempo={(bpm) => session.apply({ kind: "setTempo", bpm })}
               onSignature={(beats, unit) => void session.apply({ kind: "setTimeSignature", beats, unit })}
               extra={
                 <>
