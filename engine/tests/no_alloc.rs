@@ -764,6 +764,7 @@ fn song_swaps_loop_seek_and_full_trash_remain_realtime_safe() {
         end_tick: 1,
         end_frame: 0,
         frame_rate: 48000.0,
+        audio: grooviq_engine::AudioSchedule::default(),
     };
     c.set_song(song.clone()).unwrap();
     c.send(Command::SetPlaybackMode {
@@ -836,6 +837,7 @@ fn review_probe_active_song_transitions_never_allocate() {
         end_tick: 8200,
         end_frame: 500_000,
         frame_rate: 44100.0,
+        audio: grooviq_engine::AudioSchedule::default(),
     };
     c.set_song(song.clone()).unwrap();
     c.send(Command::SetPlaybackMode {
@@ -895,3 +897,104 @@ mod multiband;
 
 #[path = "realtime/shimmer_reverb.rs"]
 mod shimmer_reverb;
+
+#[test]
+fn audio_clip_lifetimes_and_transport_are_realtime_safe() {
+    use grooviq_engine::{AudioAsset, AudioClip, AudioSchedule, PlaybackMode};
+    let sample = Arc::new(SampleBuf {
+        rate: 48000.,
+        l: vec![0.2; 48000],
+        r: vec![-0.2; 48000],
+    });
+    let audio = AudioSchedule::build(
+        vec![AudioAsset {
+            id: 1,
+            source_rate: 48000,
+            source_frames: 48000,
+            decoded: Some(sample),
+        }],
+        vec![AudioClip {
+            id: 1,
+            asset: 1,
+            start_tick: 0,
+            source_start: 0,
+            source_end: 48000,
+            gain: 1.,
+            reverse: true,
+            fade_in: 100,
+            fade_out: 100,
+        }],
+    )
+    .unwrap()
+    .0;
+    let mut state = EngineState {
+        playback_mode: PlaybackMode::Song,
+        ..EngineState::default()
+    };
+    state.song.audio = audio;
+    state.song.end_tick = 3840;
+    let (mut c, mut p) = engine_with(
+        EngineConfig {
+            sample_rate: 48000.,
+        },
+        state,
+    );
+    let mut out = [0.; 128];
+    c.send(Command::Play).unwrap();
+    for i in 0..1600 {
+        if i == 100 {
+            c.send(Command::SetTempo { bpm: 400. }).unwrap();
+        }
+        if i == 150 {
+            c.send(Command::SetSongLoop {
+                region: Some(grooviq_engine::SongLoop {
+                    start_tick: 240,
+                    end_tick: 480,
+                }),
+            })
+            .unwrap();
+        }
+        if i == 200 {
+            c.send(Command::Seek { tick: 240 }).unwrap();
+        }
+        if i == 300 {
+            c.reconfigure(
+                &mut p,
+                EngineConfig {
+                    sample_rate: 96000.,
+                },
+            );
+        }
+        if i == 400 {
+            c.send(Command::Stop).unwrap();
+        }
+        if i == 500 {
+            c.send(Command::Play).unwrap();
+        }
+        if i == 600 {
+            c.set_song(c.state().song.clone()).unwrap();
+        }
+        realtime(|| p.process(&mut out, 2));
+    }
+    let mut refused = false;
+    for _ in 0..3000 {
+        let before = c.state().song.clone();
+        if c.set_song(before.clone()).is_err() {
+            assert_eq!(c.state().song, before);
+            refused = true;
+            break;
+        }
+        realtime(|| p.process(&mut out, 2));
+    }
+    assert!(
+        refused,
+        "trash pressure must eventually stop command admission"
+    );
+    c.reconfigure(
+        &mut p,
+        EngineConfig {
+            sample_rate: 48000.,
+        },
+    );
+    realtime(|| p.process(&mut out, 2));
+}

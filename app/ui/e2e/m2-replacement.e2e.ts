@@ -51,14 +51,14 @@ test.describe("an edit made before Open", () => {
     const dialog = app.getByRole("dialog", { name: "Save changes?" });
     await expect(dialog).toBeVisible();
     await dialog.getByRole("button", { name: "Don't save" }).click();
-    await expect.poll(() => mock.view().then((v) => v.path)).toBe(B);
-
-    // A's late reply arrives: nothing of A's reaches B, and A's view is not drawn.
+    expect(await mock.calls("project_open")).toHaveLength(0);
     await app.evaluate(() => (window as unknown as { releaseAck: () => void }).releaseAck());
+    await expect.poll(() => mock.view().then((v) => v.path)).toBe(B);
+    // Both of A's queued edits settled before replacement; neither reaches B.
     await nextFrame(app);
     await nextFrame(app);
     expect(await sessionNotes(mock)).toEqual([]);
-    expect((await mock.calls("notes_edit")).length).toBe(1);
+    expect((await mock.calls("notes_edit")).length).toBe(2);
     expect(await mock.view().then((v) => v.dirty)).toBe(false);
     await expect(app.getByText("Unsaved changes")).toBeHidden();
 
@@ -81,15 +81,16 @@ test.describe("an edit made before Open", () => {
     await mock.eval(`(m) => m.queueDialog("${B}")`);
     await app.keyboard.press("ControlOrMeta+o");
     await app.getByRole("dialog", { name: "Save changes?" }).getByRole("button", { name: "Don't save" }).click();
-    await expect.poll(async () => (await mock.calls("project_open")).length).toBe(1);
+    expect(await mock.calls("project_open")).toHaveLength(0);
     await app.evaluate(() => (window as unknown as { releaseAck: () => void }).releaseAck());
+    await expect.poll(async () => (await mock.calls("project_open")).length).toBe(1);
     await nextFrame(app);
     await nextFrame(app);
-    expect((await mock.calls("notes_edit")).length).toBe(1);
+    expect((await mock.calls("notes_edit")).length).toBe(2);
     await mock.eval(`(m) => m.releaseCommand("project_open")`);
     await expect.poll(() => mock.view().then((v) => v.path)).toBe(B);
     await nextFrame(app);
-    expect((await mock.calls("notes_edit")).length).toBe(1);
+    expect((await mock.calls("notes_edit")).length).toBe(2);
     expect(await sessionNotes(mock)).toEqual([]);
   });
 
@@ -107,10 +108,10 @@ test.describe("an edit made before Open", () => {
     const dialog = app.getByRole("dialog", { name: "Save changes?" });
     await expect(dialog).toBeVisible();
     await dialog.getByRole("button", { name: "Don't save" }).click();
+    expect(await mock.calls("project_open")).toHaveLength(0);
+    await app.evaluate(() => (window as unknown as { releaseAck: () => void }).releaseAck());
     await expect.poll(() => mock.view().then((v) => v.path)).toBe(B);
     await expect(app.getByText("Unsaved changes")).toBeHidden();
-    // A's reply (A dirty, with its note) comes after B is shown: B stays shown.
-    await app.evaluate(() => (window as unknown as { releaseAck: () => void }).releaseAck());
     await nextFrame(app);
     await nextFrame(app);
     await expect(app.getByText("Unsaved changes")).toBeHidden();
@@ -139,10 +140,10 @@ test.describe("an edit made before Open", () => {
       await ipc.invoke("plugin:event|listen", { event: "notes-changed", target: { kind: "Any" }, handler });
       const note = { channel: 1, tick: 0, length: 240, key: 64, velocity: 0.8, slide: false };
       const acks = [
-        await ipc.invoke("notes_edit", { edit: { generation: a, baseRevision: 1, add: [note], update: [], delete: [1] } }),
+        await ipc.invoke("notes_edit", { edit: { generation: a, patternId: 0, baseRevision: 1, add: [note], update: [], delete: [1] } }),
         await ipc.invoke("project_edit", { edit: { kind: "toggleStep", channel: 1, step: 2 }, generation: a }),
-        await ipc.invoke("notes_undo", { generation: a }),
-        await ipc.invoke("notes_redo", { generation: a }),
+        await ipc.invoke("notes_undo", { stamp: { generation: a, patternId: 0, revision: 1 } }).catch((message) => ({ refused: true, message })),
+        await ipc.invoke("notes_redo", { stamp: { generation: a, patternId: 0, revision: 1 } }).catch((message) => ({ refused: true, message })),
       ];
       return { acks, heard: w.heard };
     }, { a, B });
@@ -154,8 +155,8 @@ test.describe("an edit made before Open", () => {
     const [edit, step, undo, redo] = notesChanged.acks as { reload?: boolean; addedIds?: number[]; generation?: number }[];
     expect(edit).toMatchObject({ reload: true, addedIds: [] });
     expect(step).toMatchObject({ generation: a + 1, dirty: false });
-    expect(undo).toMatchObject({ reload: true });
-    expect(redo).toMatchObject({ reload: true });
+    expect(undo).toMatchObject({ refused: true });
+    expect(redo).toMatchObject({ refused: true });
   });
 });
 

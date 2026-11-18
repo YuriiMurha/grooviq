@@ -12,7 +12,7 @@
 //! snapshot, the sample bytes are shared), [`SaveJob::write`] (outside the lock) and
 //! [`Session::finish_save`].
 
-use crate::backup::prepare_backup;
+use crate::backup::prepare_backup_on;
 use crate::compile::synth_values;
 use crate::compile::{compile_pattern, engine_state, sampler_values};
 use crate::file::{Disk, Loaded, RealDisk, SampleFiles, stage_save};
@@ -173,6 +173,7 @@ pub struct ProjectView {
     /// Counts projects ([`Session::generation`]): requests that edit the project carry it, so
     /// one made for a project that was replaced since is refused.
     pub generation: u64,
+    pub pattern_revision: u64,
 }
 
 /// A channel's instrument, as the UI names it: `"sampler"` or `"synth"`.
@@ -366,6 +367,10 @@ pub enum SessionError {
     /// The request was made in a project that was replaced (New, Open, Restore) before it
     /// arrived: nothing was changed.
     ProjectReplaced,
+    RecordingSettling,
+    StalePatternRevision,
+    Pattern(crate::pattern_edit::PatternError),
+    PendingRecording(String),
 }
 
 impl fmt::Display for SessionError {
@@ -408,6 +413,13 @@ impl fmt::Display for SessionError {
                 "The previous version could not be backed up, so it was not overwritten: {e}."
             ),
             Self::Save(e) => write!(f, "{e}"),
+            Self::StalePatternRevision => write!(f, "Patterns changed. Reload the pattern list."),
+            Self::Pattern(e) => write!(f, "{e}"),
+            Self::RecordingSettling => write!(
+                f,
+                "Recording is ending. Wait for its final notes, then retry."
+            ),
+            Self::PendingRecording(message) => write!(f, "Recorded notes are waiting: {message}"),
             Self::ProjectReplaced => write!(
                 f,
                 "The project changed before this finished, so it was not applied."
@@ -461,8 +473,8 @@ impl SaveJob {
         let staged = stage_save(&self.project, &self.samples, &self.path, disk)
             .map_err(SessionError::Save)?;
         // On an error here the staged file is dropped, and the old file stays as it was.
-        let backup =
-            prepare_backup(&self.path, backups, MAX_BACKUPS).map_err(SessionError::Backup)?;
+        let backup = prepare_backup_on(&self.path, backups, MAX_BACKUPS, disk)
+            .map_err(SessionError::Backup)?;
         match staged.commit(disk) {
             Ok(()) => {
                 backup.confirm();
@@ -523,6 +535,16 @@ pub struct Session {
     live_presses: Mutex<Vec<LivePress>>,
     /// The current pattern's note changes, for undo and redo.
     history: NoteHistory,
+    pattern_histories: HashMap<u32, NoteHistory>,
+    precommit: Option<PrecommitValidator>,
+    patterns_revision: u64,
+    record_settle: Option<u32>,
+}
+
+enum PendingCommit {
+    Empty,
+    Deferred,
+    Applied(u32),
 }
 
 struct LivePress {
@@ -531,14 +553,6 @@ struct LivePress {
     press: NoteId,
     instance: u64,
     releasing: bool,
-}
-
-/// What committing waiting recorded notes did.
-enum Commit {
-    /// Added (the pattern's new revision, if any note was).
-    Done(Option<u32>),
-    /// The engine's queue was full: the notes wait for the next collect.
-    Busy,
 }
 
 fn lock(controller: &Mutex<Controller>) -> MutexGuard<'_, Controller> {
@@ -586,6 +600,56 @@ fn finite(value: f32, what: &str) -> Result<f32, SessionError> {
     }
 }
 
+/// T7 installs song expansion admission here; file admission always runs first.
+pub type PrecommitValidator = Arc<dyn Fn(&Project) -> Result<(), String> + Send + Sync>;
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatternsView {
+    pub generation: u64,
+    pub revision: u64,
+    pub selected: u32,
+    pub patterns: Vec<PatternSummary>,
+    pub view: ProjectView,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatternSummary {
+    pub id: u32,
+    pub name: String,
+    pub revision: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum PatternReply {
+    Applied {
+        state: PatternsView,
+        settlement: PatternSettlement,
+    },
+    Refused {
+        reason: crate::pattern_edit::RefusalReason,
+        message: String,
+        state: PatternsView,
+        settlement: PatternSettlement,
+    },
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatternSettlement {
+    pub recording_disarmed: bool,
+    pub waiting: bool,
+}
+
+/// A gesture's origin, captured before it can be queued or held.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PatternStamp {
+    pub generation: u64,
+    pub pattern_id: u32,
+    pub revision: u32,
+}
+
 impl Session {
     /// An untitled, empty project, with the engine set to match it.
     pub fn new(controller: Arc<Mutex<Controller>>) -> Self {
@@ -608,6 +672,10 @@ impl Session {
             owed_disarm: false,
             live_presses: Mutex::new(Vec::new()),
             history: NoteHistory::default(),
+            pattern_histories: HashMap::new(),
+            precommit: None,
+            patterns_revision: 0,
+            record_settle: None,
         };
         // A fresh queue always has room for a whole state.
         let synced = session.sync_engine();
@@ -616,6 +684,215 @@ impl Session {
         let mark = lock(&session.controller).record_mark();
         session.recorder.reset_until_mark(mark);
         session
+    }
+
+    pub fn pattern_stamp(&self) -> PatternStamp {
+        PatternStamp {
+            generation: self.generation,
+            pattern_id: self.project.current_pattern,
+            revision: self.current().revision,
+        }
+    }
+    fn check_stamp(&self, stamp: PatternStamp) -> Result<(), SessionError> {
+        if stamp.generation != self.generation {
+            return Err(SessionError::ProjectReplaced);
+        }
+        if stamp.pattern_id != self.project.current_pattern
+            || stamp.revision != self.current().revision
+        {
+            return Err(SessionError::InvalidValue(
+                "The pattern changed before this gesture finished. Reload its notes.".into(),
+            ));
+        }
+        Ok(())
+    }
+    pub fn apply_stamped(
+        &mut self,
+        stamp: PatternStamp,
+        edit: Edit,
+        now: Instant,
+    ) -> Result<ProjectView, SessionError> {
+        self.check_stamp(stamp)?;
+        self.apply(edit, now)
+    }
+    pub fn history_stamped(
+        &mut self,
+        stamp: PatternStamp,
+        undo: bool,
+        now: Instant,
+    ) -> Result<Option<NotesAck>, SessionError> {
+        self.check_stamp(stamp)?;
+        self.step_history(undo, now)
+    }
+    pub fn pattern_command(
+        &mut self,
+        generation: u64,
+        revision: u64,
+        edit: crate::pattern_edit::PatternEdit,
+        now: Instant,
+    ) -> PatternReply {
+        use crate::pattern_edit::RefusalReason as R;
+        let was_recording = self.recording;
+        let result = self.edit_patterns(generation, revision, edit, now);
+        let settlement = PatternSettlement {
+            recording_disarmed: was_recording && !self.recording,
+            waiting: self.record_settle.is_some() || !self.pending.is_empty() || self.owed_disarm,
+        };
+        match result {
+            Ok(state) => PatternReply::Applied { state, settlement },
+            Err(e) => {
+                let message = e.to_string();
+                let reason = match &e {
+                    SessionError::ProjectReplaced => R::ProjectReplaced,
+                    SessionError::RecordingSettling => R::RecordingSettling,
+                    SessionError::PendingRecording(_) => R::PendingRecording,
+                    SessionError::Engine(_) => R::EngineBusy,
+                    SessionError::Save(_) => R::FileBudget,
+                    SessionError::StalePatternRevision => R::StaleRevision,
+                    SessionError::Pattern(error) => error.reason(),
+                    _ => R::Validation,
+                };
+                PatternReply::Refused {
+                    reason,
+                    message,
+                    state: self.patterns(),
+                    settlement,
+                }
+            }
+        }
+    }
+
+    fn trim_histories(&mut self) {
+        loop {
+            let (mut steps, mut notes) = self.history.retained();
+            for h in self.pattern_histories.values() {
+                let (s, n) = h.retained();
+                steps += s;
+                notes += n;
+            }
+            if steps <= crate::undo::MAX_UNDO && notes <= crate::undo::MAX_UNDO_NOTES {
+                break;
+            }
+            let oldest = self
+                .pattern_histories
+                .iter()
+                .filter_map(|(id, h)| h.oldest().map(|o| (*id, o)))
+                .chain(
+                    self.history
+                        .oldest()
+                        .map(|o| (self.project.current_pattern, o)),
+                )
+                .min_by_key(|(_, o)| *o);
+            let Some((id, _)) = oldest else {
+                break;
+            };
+            if id == self.project.current_pattern {
+                self.history.evict_oldest();
+            } else {
+                self.pattern_histories.get_mut(&id).unwrap().evict_oldest();
+            }
+        }
+        self.pattern_histories.retain(|_, h| h.retained().0 != 0);
+    }
+    #[doc(hidden)]
+    pub fn retained_note_history(&self) -> (usize, usize) {
+        self.pattern_histories
+            .values()
+            .fold(self.history.retained(), |(s, n), h| {
+                let (hs, hn) = h.retained();
+                (s + hs, n + hn)
+            })
+    }
+
+    pub fn set_precommit_validator(&mut self, validator: Option<PrecommitValidator>) {
+        self.precommit = validator;
+    }
+
+    fn admit(&self, project: &Project) -> Result<(), SessionError> {
+        crate::validate_save(project, &self.files).map_err(SessionError::Save)?;
+        if let Some(validate) = &self.precommit {
+            validate(project).map_err(SessionError::InvalidValue)?;
+        }
+        Ok(())
+    }
+
+    pub fn patterns(&self) -> PatternsView {
+        PatternsView {
+            generation: self.generation,
+            revision: self.patterns_revision,
+            selected: self.project.current_pattern,
+            patterns: self
+                .project
+                .patterns
+                .iter()
+                .map(|p| PatternSummary {
+                    id: p.id,
+                    name: p.name.clone(),
+                    revision: p.revision,
+                })
+                .collect(),
+            view: self.view(),
+        }
+    }
+
+    pub fn edit_patterns(
+        &mut self,
+        generation: u64,
+        revision: u64,
+        edit: crate::pattern_edit::PatternEdit,
+        now: Instant,
+    ) -> Result<PatternsView, SessionError> {
+        if generation != self.generation {
+            return Err(SessionError::ProjectReplaced);
+        }
+        if revision != self.patterns_revision {
+            return Err(SessionError::StalePatternRevision);
+        }
+        if matches!(edit, crate::pattern_edit::PatternEdit::Settle) {
+            self.settle_recording()?;
+            return Ok(self.patterns());
+        }
+        let mut candidate = self.project.clone();
+        crate::pattern_edit::apply(&mut candidate, edit).map_err(SessionError::Pattern)?;
+        if candidate == self.project {
+            return Ok(self.patterns());
+        }
+        self.admit(&candidate)?;
+        let old = self.project.current_pattern;
+        let selected = candidate.current_pattern;
+        if old != selected {
+            // The caller settles its edit queue first. A take must finish on its original
+            // pattern before switching; never reinterpret late recorded notes as new input.
+            self.settle_recording()?;
+            let index = candidate
+                .patterns
+                .iter()
+                .position(|p| p.id == selected)
+                .unwrap();
+            candidate.patterns[index].revision = candidate.patterns[index]
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| {
+                    SessionError::InvalidValue(
+                        "Pattern revisions exhausted. Reopen the project.".into(),
+                    )
+                })?;
+            let p = &candidate.patterns[index];
+            let compiled = compile_pattern(&candidate, p);
+            self.admit(&candidate)?;
+            lock(&self.controller).set_pattern(compiled)?;
+            let history = self.pattern_histories.remove(&selected).unwrap_or_default();
+            let previous = std::mem::replace(&mut self.history, history);
+            if previous.can_undo() || previous.can_redo() {
+                self.pattern_histories.insert(old, previous);
+            }
+        }
+        self.pattern_histories
+            .retain(|id, _| candidate.patterns.iter().any(|p| p.id == *id));
+        self.project = candidate;
+        self.patterns_revision += 1;
+        self.changed(true, now);
+        Ok(self.patterns())
     }
 
     /// The project as it is now.
@@ -702,6 +979,7 @@ impl Session {
             can_undo: self.history.can_undo(),
             can_redo: self.history.can_redo(),
             generation: self.generation,
+            pattern_revision: self.patterns_revision,
         }
     }
 
@@ -1072,9 +1350,9 @@ impl Session {
             return Ok(false);
         }
         let notes = NoteChange::between(self.current(), &pattern);
-        if pattern.notes != self.current().notes {
-            pattern.revision = pattern.revision.wrapping_add(1);
-        }
+        pattern.revision = pattern.revision.checked_add(1).ok_or_else(|| {
+            SessionError::InvalidValue("Pattern revisions exhausted. Reopen the project.".into())
+        })?;
         self.keep_pattern(pattern)?;
         match (notes, take) {
             (Some(notes), Some(take)) => self.history.record(notes, take, steps, growth),
@@ -1086,12 +1364,42 @@ impl Session {
             }
             (None, _) => {}
         }
+        self.trim_histories();
         Ok(true)
     }
 
     /// Sends `pattern` to the engine (which goes on playing), then makes it the current one.
-    fn keep_pattern(&mut self, pattern: Pattern) -> Result<(), SessionError> {
-        let compiled = compile_pattern(&self.project, &pattern);
+    fn keep_pattern(&mut self, mut pattern: Pattern) -> Result<(), SessionError> {
+        // A borrowed candidate avoids cloning every other pattern for each note gesture.
+        // Drop restores the live model on validation error AND unwinding.
+        struct Candidate<'a> {
+            project: &'a mut Project,
+            pattern: &'a mut Pattern,
+            index: usize,
+        }
+        impl Drop for Candidate<'_> {
+            fn drop(&mut self) {
+                std::mem::swap(&mut self.project.patterns[self.index], self.pattern);
+            }
+        }
+        let index = self
+            .project
+            .patterns
+            .iter()
+            .position(|p| p.id == pattern.id)
+            .unwrap();
+        std::mem::swap(&mut self.project.patterns[index], &mut pattern);
+        let candidate = Candidate {
+            project: &mut self.project,
+            pattern: &mut pattern,
+            index,
+        };
+        crate::validate_save(candidate.project, &self.files).map_err(SessionError::Save)?;
+        if let Some(validate) = &self.precommit {
+            validate(candidate.project).map_err(SessionError::InvalidValue)?;
+        }
+        let compiled = compile_pattern(candidate.project, &candidate.project.patterns[index]);
+        drop(candidate);
         lock(&self.controller).set_pattern(compiled)?;
         *self.current_mut() = pattern;
         Ok(())
@@ -1153,7 +1461,9 @@ impl Session {
         change.apply(&mut pattern, undo)?;
         pattern.steps = self.history.length_after(undo);
         let steps = self.current().steps;
-        pattern.revision = pattern.revision.wrapping_add(1);
+        pattern.revision = pattern.revision.checked_add(1).ok_or_else(|| {
+            SessionError::InvalidValue("Pattern revisions exhausted. Reopen the project.".into())
+        })?;
         self.keep_pattern(pattern)?;
         if undo {
             self.history.undone();
@@ -1205,6 +1515,7 @@ impl Session {
         self.decoded.remove(&channel);
         // Undo cannot bring a channel back (structural undo is M6), nor its notes.
         self.history.clear();
+        self.pattern_histories.clear();
         Ok(())
     }
 
@@ -1271,7 +1582,10 @@ impl Session {
         if self.project.channels.len() >= MAX_CHANNELS {
             return Err(SessionError::TooManyChannels);
         }
-        let id = self.project.next_id;
+        let mut candidate = self.project.clone();
+        let id = candidate.take_id().ok_or(SessionError::Pattern(
+            crate::pattern_edit::PatternError::IdExhausted,
+        ))?;
         let name = path
             .file_stem()
             .map_or_else(|| "Sample".into(), |s| s.to_string_lossy().into_owned());
@@ -1293,14 +1607,20 @@ impl Session {
             solo: false,
             choke: 0,
         };
+        candidate.channels.push(channel.clone());
+        let mut candidate_files = self.files.clone();
+        candidate_files.insert(id, file.clone());
+        crate::validate_save(&candidate, &candidate_files).map_err(SessionError::Save)?;
+        if let Some(validate) = &self.precommit {
+            validate(&candidate).map_err(SessionError::InvalidValue)?;
+        }
         lock(&self.controller).add_channel(ChannelSetup::sampler(
             ChannelId(id),
             Some(Arc::clone(&sample)),
             sampler_values(&channel),
             ChannelMix::default(),
         ))?;
-        self.project.channels.push(channel);
-        self.project.next_id = id.saturating_add(1);
+        self.project = candidate;
         self.files.insert(id, file);
         self.decoded.insert(id, sample);
         self.changed(true, now);
@@ -1326,7 +1646,10 @@ impl Session {
             return Err(SessionError::TooManyChannels);
         }
         let values = synth_preset(preset)?;
-        let id = self.project.next_id;
+        let mut candidate = self.project.clone();
+        let id = candidate.take_id().ok_or(SessionError::Pattern(
+            crate::pattern_edit::PatternError::IdExhausted,
+        ))?;
         let channel = Channel {
             id,
             name: preset.to_owned(),
@@ -1342,13 +1665,14 @@ impl Session {
             solo: false,
             choke: 0,
         };
+        candidate.channels.push(channel.clone());
+        self.admit(&candidate)?;
         lock(&self.controller).add_channel(ChannelSetup::synth(
             ChannelId(id),
             synth_values(&channel),
             ChannelMix::default(),
         ))?;
-        self.project.channels.push(channel);
-        self.project.next_id = id.saturating_add(1);
+        self.project = candidate;
         self.changed(true, now);
         Ok(self.view())
     }
@@ -1359,12 +1683,17 @@ impl Session {
     ///
     /// An edit made for another project (`edit.generation`: one replaced since) is refused
     /// before anything is applied: its ids name that project's notes. An older revision of this
-    /// project (recording added notes meanwhile) is applied, and asks for a reload.
+    /// project is refused too: a held gesture must not overwrite a concurrent edit.
     pub fn edit_notes(&mut self, edit: NotesEdit, now: Instant) -> Result<NotesAck, SessionError> {
-        if edit.generation != self.generation {
+        if edit.generation != self.generation || edit.pattern_id != self.project.current_pattern {
             return Ok(self.refused_ack());
         }
         let stale = edit.base_revision != self.current().revision;
+        if stale {
+            return Err(SessionError::InvalidValue(
+                "The pattern changed before this note edit arrived. Reload its notes.".into(),
+            ));
+        }
         let applied = self.apply_notes(&edit, None, now)?;
         Ok(NotesAck {
             revision: self.current().revision,
@@ -1519,14 +1848,36 @@ impl Session {
     /// still refused (and reported), the new take's after it are kept, and an owed record-off
     /// is cancelled.
     pub fn set_recording(&mut self, on: bool) -> Result<(), SessionError> {
-        if self.owed_disarm || self.recorder.refusing() {
+        if self.owed_disarm || self.recorder.refusing() || !on {
             let id = lock(&self.controller).send_marked(Command::SetRecording { on })?;
-            self.recorder.refuse_until_mark(Some(id));
+            if self.recorder.refusing() || self.owed_disarm {
+                self.recorder.refuse_until_mark(Some(id));
+            }
+            if !on {
+                self.record_settle = Some(id);
+            }
             self.owed_disarm = false;
         } else {
             self.send(Command::SetRecording { on })?;
         }
         self.recording = on;
+        Ok(())
+    }
+
+    /// A switch/save/replacement never overtakes a take. A successful record-off is an
+    /// explicit settlement side effect; the project is not changed until its barrier arrives.
+    pub fn settle_recording(&mut self) -> Result<(), SessionError> {
+        if self.recording {
+            self.set_recording(false)?;
+        }
+        if !self.pending.is_empty() {
+            return Err(SessionError::PendingRecording(
+                "retry the recording poll or repair the admission limit before continuing".into(),
+            ));
+        }
+        if self.record_settle.is_some() || self.owed_disarm || self.recorder.open() != 0 {
+            return Err(SessionError::RecordingSettling);
+        }
         Ok(())
     }
 
@@ -1546,6 +1897,12 @@ impl Session {
         if self.owed_disarm {
             self.send_disarm();
         }
+        if events
+            .iter()
+            .any(|e| matches!(e, RecordEvent::Mark { id } if Some(*id) == self.record_settle))
+        {
+            self.record_settle = None;
+        }
         let fed = self.recorder.feed_takes(events);
         self.pending.extend(fed);
         let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
@@ -1560,16 +1917,43 @@ impl Session {
             (room, "noteCap")
         };
         let mut dropped = self.pending.len().saturating_sub(fits);
-        self.pending.truncate(fits);
+        // Capacity overflow is only discarded after admission succeeds (or its explicit
+        // capacity-stop acknowledgement). A compiler refusal retains the whole poll.
+        let overflow = self.pending.split_off(fits.min(self.pending.len()));
 
         let mut out = Recorded::default();
         let mut error = None;
         match self.commit_pending(now) {
-            Ok(revision) => out.revision = revision,
+            Ok(PendingCommit::Empty) => {}
+            Ok(PendingCommit::Deferred) => {
+                // No prefix reached the engine: capacity overflow is still retryable too.
+                self.pending.extend(overflow);
+                return out;
+            }
+            Ok(PendingCommit::Applied(revision)) => out.revision = Some(revision),
             Err((e, lost, revision)) => {
                 out.revision = revision;
                 dropped += lost;
                 reason = "error";
+                if lost == 0 {
+                    self.pending.extend(overflow);
+                    // End the original take through its normal End/barrier, preserving held
+                    // notes. A full command queue leaves recording on and retries next poll.
+                    let ending = !self.recording || self.set_recording(false).is_ok();
+                    out.stopped = Some(RecordingStopped {
+                        reason: "admission",
+                        dropped: 0,
+                        message: format!(
+                            "{} Recorded notes are retained for retry: {e}",
+                            if ending {
+                                "Recording ended."
+                            } else {
+                                "Recording could not end yet; its queue will retry."
+                            }
+                        ),
+                    });
+                    return out;
+                }
                 error = Some(e);
             }
         }
@@ -1628,60 +2012,76 @@ impl Session {
         match lock(&self.controller).send_marked(Command::SetRecording { on: false }) {
             Ok(id) => {
                 self.owed_disarm = false;
+                self.record_settle = Some(id);
                 self.recorder.await_mark(id);
             }
             Err(_) => self.owed_disarm = true,
         }
     }
 
-    /// Adds the waiting recorded notes, take by take in the order they were played: each
-    /// run of one take is a commit of that take (one undo step per take, however many commits
-    /// it takes). A full engine queue keeps what is not in yet for the next collect; any other
-    /// refusal loses it and says how many (with the revision of what did go in).
+    /// Stage every completed take in a poll, admit once, enqueue once, then publish its
+    /// independent history steps. No earlier take can slip through a later refusal.
     fn commit_pending(
         &mut self,
         now: Instant,
-    ) -> Result<Option<u32>, (SessionError, usize, Option<u32>)> {
-        let mut revision = None;
-        while let Some(&(take, _)) = self.pending.first() {
-            let run = self.pending.iter().take_while(|(t, _)| *t == take).count();
-            match self.commit_first(run, take, now) {
-                Ok(Commit::Done(r)) => revision = r.or(revision),
-                Ok(Commit::Busy) => break,
-                Err((e, lost)) => return Err((e, lost, revision)),
-            }
+    ) -> Result<PendingCommit, (SessionError, usize, Option<u32>)> {
+        if self.pending.is_empty() {
+            return Ok(PendingCommit::Empty);
         }
-        Ok(revision)
-    }
-
-    /// Adds the first `n` waiting recorded notes, all of `take`, as one edit.
-    fn commit_first(
-        &mut self,
-        n: usize,
-        take: u32,
-        now: Instant,
-    ) -> Result<Commit, (SessionError, usize)> {
-        let edit = NotesEdit {
-            generation: self.generation,
-            base_revision: self.current().revision,
-            add: self.pending[..n].iter().map(|(_, note)| *note).collect(),
-            update: Vec::new(),
-            delete: Vec::new(),
-        };
-        match self.apply_notes(&edit, Some(take), now) {
-            Ok(applied) => {
-                self.pending.drain(..n);
-                Ok(Commit::Done(
-                    (!applied.added_ids.is_empty()).then(|| self.current().revision),
-                ))
-            }
-            Err(SessionError::Engine(_)) => Ok(Commit::Busy),
-            Err(e) => {
-                let lost = self.pending.len();
-                self.pending.clear();
-                Err((e, lost))
-            }
+        let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
+        let sig = self.project.time_signature;
+        let bar = u32::from(sig.beats) * 3840 / u32::from(sig.unit.max(1));
+        let mut pattern = self.current().clone();
+        let old_steps = pattern.steps;
+        let mut staged = Vec::new();
+        let mut at = 0;
+        while at < self.pending.len() {
+            let take = self.pending[at].0;
+            let run = self.pending[at..]
+                .iter()
+                .take_while(|(t, _)| *t == take)
+                .count();
+            let steps = pattern.steps;
+            let start = pattern.notes.len();
+            let edit = NotesEdit {
+                generation: self.generation,
+                pattern_id: pattern.id,
+                base_revision: pattern.revision,
+                add: self.pending[at..at + run].iter().map(|(_, n)| *n).collect(),
+                update: Vec::new(),
+                delete: Vec::new(),
+            };
+            let applied =
+                notes::apply(&mut pattern, &edit, &channels, bar).map_err(|e| (e, 0, None))?;
+            staged.push((
+                take,
+                steps,
+                NoteChange::added(pattern.notes[start..].to_vec()),
+                applied.growth,
+            ));
+            at += run;
         }
+        pattern.revision = pattern.revision.checked_add(1).ok_or_else(|| {
+            (
+                SessionError::InvalidValue(
+                    "Pattern revisions exhausted. Reopen the project.".into(),
+                ),
+                0,
+                None,
+            )
+        })?;
+        match self.keep_pattern(pattern) {
+            Err(SessionError::Engine(_)) => return Ok(PendingCommit::Deferred),
+            Err(e) => return Err((e, 0, None)),
+            Ok(()) => {}
+        }
+        for (take, steps, change, growth) in staged {
+            self.history.record(change, take, steps, growth);
+        }
+        self.trim_histories();
+        self.pending.clear();
+        self.changed(self.current().steps != old_steps, now);
+        Ok(PendingCommit::Applied(self.current().revision))
     }
 
     /// The decoded sample of a sampler channel, if it has one.
@@ -1742,6 +2142,7 @@ impl Session {
         files: SampleFiles,
         decoded: HashMap<u32, Arc<SampleBuf>>,
     ) -> Result<(), SessionError> {
+        self.settle_recording()?;
         let state = engine_state(&project, &decoded);
         let mark = {
             let mut controller = lock(&self.controller);
@@ -1776,6 +2177,8 @@ impl Session {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         self.history.clear();
+        self.pattern_histories.clear();
+        self.record_settle = None;
         self.project = project;
         self.files = files;
         self.decoded = decoded;
@@ -1839,6 +2242,7 @@ impl Session {
     /// project lives, or is `NoPath` if it is untitled. One save at a time: while a job is out,
     /// this is `SaveRunning`. End every job with [`Self::finish_save`] or [`Self::save_failed`].
     pub fn begin_save(&mut self, path: Option<&Path>) -> Result<SaveJob, SessionError> {
+        self.settle_recording()?;
         if self.saving {
             return Err(SessionError::SaveRunning);
         }
