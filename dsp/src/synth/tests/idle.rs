@@ -191,7 +191,7 @@ fn idle_recurrences_are_audible_on_the_next_note() {
     }
 }
 
-fn compare_audio_and_state(a: &mut Synth, b: &mut Synth, n: usize, events: &[NoteEvent]) {
+fn compare_audio_and_state(a: &mut Synth, b: &mut Synth, n: usize, events: &[NoteEvent]) -> bool {
     let (mut al, mut ar, mut bl, mut br) = (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]);
     a.process(&mut al, &mut ar, None, events);
     b.process(&mut bl, &mut br, None, events);
@@ -204,6 +204,7 @@ fn compare_audio_and_state(a: &mut Synth, b: &mut Synth, n: usize, events: &[Not
         br.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
     );
     same(a, b);
+    bl.iter().chain(&br).any(|sample| sample.abs() > 0.001)
 }
 
 #[test]
@@ -258,9 +259,16 @@ fn every_idle_recurrence_and_pending_boundary_matches_original() {
             }
             compare_audio_and_state(&mut a, &mut b, 129, &[]);
             for offset in [0, 1, 63, 64, 127, 128, 129, 256, 257, 999] {
-                a.reset();
-                b.reset();
-                compare_audio_and_state(
+                // Reset preserves the zeroed parameters above; each onset needs an audible patch.
+                let (mut a, mut b) = (Synth::new(sr), Synth::new(sr));
+                b.force_full_preparation = true;
+                for synth in [&mut a, &mut b] {
+                    synth.set_param(LFO_SHAPE as u32, shape as f32);
+                    synth.set_param(LFO_RATE as u32, 17.0);
+                    synth.set_param(LFO_AMOUNT as u32, 0.8);
+                    synth.set_param(LFO_TARGET as u32, 1.0);
+                }
+                let onset_audible = compare_audio_and_state(
                     &mut a,
                     &mut b,
                     257,
@@ -273,7 +281,11 @@ fn every_idle_recurrence_and_pending_boundary_matches_original() {
                         id: 3,
                     }],
                 );
-                compare_audio_and_state(&mut a, &mut b, 257, &[]);
+                let next_block_audible = compare_audio_and_state(&mut a, &mut b, 257, &[]);
+                assert!(
+                    onset_audible || next_block_audible,
+                    "silent oracle at {sr}/{shape}/{offset}"
+                );
             }
         }
     }

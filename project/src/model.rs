@@ -587,7 +587,7 @@ impl Project {
 
 // Display only: cap work before copying untrusted names. 48 scalars cost at most
 // 192 UTF-8 bytes plus the ellipsis; controls and bidi overrides cannot spoof lines.
-fn warning_label(name: &str) -> String {
+pub(crate) fn warning_label(name: &str) -> String {
     let mut chars = name.chars();
     let mut label = String::with_capacity(195);
     for c in chars.by_ref().take(48) {
