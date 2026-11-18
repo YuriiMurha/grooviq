@@ -1135,12 +1135,13 @@ export function installMockTauri(seed: MockSeed): void {
     },
     // midi_cmds.rs: the list is what the last poll found, `midi_set_enabled` tells the UI only
     // when the switch moved (midi/hub.rs `set_enabled`).
-    midi_inputs: () => s.midi.present.map((name) => ({ name, enabled: !s.midi.disabled.includes(name) })),
+    // Unique fixture port strings serve as both opaque IDs and display names.
+    midi_inputs: () => s.midi.present.map((id) => ({ id, name: id, enabled: !s.midi.disabled.includes(id) })),
     midi_set_enabled: (a) => {
-      const name = a.name as string;
-      const was = !s.midi.disabled.includes(name);
-      s.midi.disabled = s.midi.disabled.filter((n) => n !== name);
-      if (!a.enabled) s.midi.disabled.push(name);
+      const id = a.id as string;
+      const was = !s.midi.disabled.includes(id);
+      s.midi.disabled = s.midi.disabled.filter((n) => n !== id);
+      if (!a.enabled) s.midi.disabled.push(id);
       if (was !== Boolean(a.enabled)) emit("midi-inputs-changed", null);
       return null;
     },
@@ -1376,7 +1377,7 @@ export function installMockTauri(seed: MockSeed): void {
     channel_note: { channel: u32, key: u8, velocity: f32, on: bool, press: optional(u64) },
     channel_param_live: { channel: u32, param: str, value: f32 },
     channel_select: { channel: optional(u32) },
-    midi_set_enabled: { name: str, enabled: bool },
+    midi_set_enabled: { id: str, enabled: bool },
     channel_waveform: { channel: u32, points: u32 },
     record_set: { on: bool },
     metronome_set: { on: bool },

@@ -102,6 +102,8 @@ pub fn drums_4ch_project(samples_dir: &Path) -> (Project, SampleFiles) {
     let next_note_id = notes.len() as u32 + 1;
 
     let project = Project {
+        play_mode: Default::default(),
+        arrangement: Default::default(),
         name: "Drums 4ch".into(),
         bpm: 140.0,
         channels: vec![
