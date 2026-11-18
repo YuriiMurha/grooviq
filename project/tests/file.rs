@@ -264,10 +264,10 @@ fn load_rejects_non_zip_truncated_missing_json_and_newer_versions() {
     ));
     match check(
         "v2.grooviq",
-        &json_zip(r#"{"format":"grooviq-project","version":3,"somethingNew":true}"#),
+        &json_zip(r#"{"format":"grooviq-project","version":4,"somethingNew":true}"#),
     ) {
         Err(LoadError::NewerVersion { found, supported }) => {
-            assert_eq!((found, supported), (3, 2));
+            assert_eq!((found, supported), (4, 3));
         }
         other => panic!("{other:?}"),
     }
@@ -386,7 +386,7 @@ fn a_hand_written_v1_file_loads() {
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["format"], "grooviq-project");
-    assert_eq!(v["version"], 2);
+    assert_eq!(v["version"], VERSION);
     assert_eq!(v["timeSignature"]["beats"], 3);
     assert_eq!(v["currentPattern"], 2);
     assert_eq!(v["nextId"], 3);
@@ -1063,7 +1063,7 @@ fn a_v1_file_opens_and_sounds_the_same() {
     let again = dir.path().join("again.grooviq");
     save(p, &loaded.samples, &again).unwrap();
     let v = saved_json(&again);
-    assert_eq!(v["version"], 2);
+    assert_eq!(v["version"], VERSION);
     assert_eq!(v["channels"][1]["instrument"], "sampler");
     assert_eq!(v["channels"][1]["choke"], 0);
     assert_eq!(v["patterns"][0]["notes"][0]["id"], 1);
@@ -1117,7 +1117,7 @@ fn a_v2_project_survives_save_and_load() {
     save(&p, &samples, &path).unwrap();
 
     let v = saved_json(&path);
-    assert_eq!(v["version"], 2);
+    assert_eq!(v["version"], VERSION);
     assert_eq!(v["key"], serde_json::json!({"root": 9, "scale": "minor"}));
     assert_eq!(v["channels"][1]["instrument"], "synth");
     assert_eq!(v["channels"][1]["preset"], "808 Glide");
@@ -1296,11 +1296,11 @@ fn out_of_range_v2_values_are_clamped_with_warnings() {
 }
 
 #[test]
-fn a_v3_file_is_refused_as_newer() {
-    let json = serde_json::json!({"format": FORMAT, "version": 3, "channels": "whatever"});
-    match migrate(&mut Project::new(), 3) {
+fn a_v4_file_is_refused_as_newer() {
+    let json = serde_json::json!({"format": FORMAT, "version": 4, "channels": "whatever"});
+    match migrate(&mut Project::new(), 4) {
         Err(LoadError::NewerVersion { found, supported }) => {
-            assert_eq!((found, supported), (3, 2));
+            assert_eq!((found, supported), (4, 3));
         }
         other => panic!("{other:?}"),
     }
@@ -1314,8 +1314,8 @@ fn a_v3_file_is_refused_as_newer() {
     assert!(matches!(
         err,
         LoadError::NewerVersion {
-            found: 3,
-            supported: 2
+            found: 4,
+            supported: 3
         }
     ));
     assert!(
@@ -1672,4 +1672,91 @@ fn a_save_the_loader_would_refuse_is_refused_and_keeps_the_old_file() {
     );
     assert_eq!(fs::read(&path).unwrap(), old, "the old file is intact");
     assert_eq!(names_in(dir.path()), vec!["a.grooviq"], "nothing written");
+}
+
+fn preset_project(label: Option<String>) -> Project {
+    let mut p = Project::new();
+    let mut c = channel(1, "Bass", None);
+    c.instrument = InstrumentKind::Synth;
+    c.preset = label;
+    c.synth.insert("filter_cutoff".into(), 731.25);
+    c.synth.insert("glide".into(), 93.5);
+    c.synth.insert("voice_mode".into(), 2.0);
+    p.channels.push(c);
+    p.next_id = 2;
+    p
+}
+
+#[test]
+fn preset_metadata_validation_preserves_known_labels_and_sound() {
+    for label in [None, Some("Init")]
+        .into_iter()
+        .chain(grooviq_dsp::synth::PRESETS.into_iter().map(Some))
+    {
+        let mut p = preset_project(label.map(str::to_owned));
+        let before = serde_json::to_value(&p).unwrap();
+        assert!(p.validate().is_empty());
+        assert_eq!(serde_json::to_value(&p).unwrap(), before);
+    }
+}
+
+#[test]
+fn preset_metadata_validation_clears_unknown_labels_without_changing_sound() {
+    for label in [
+        "Future Patch",
+        "",
+        " Init",
+        "Init ",
+        "init",
+        "sub bass",
+        "Sub Bass\n",
+    ] {
+        let mut p = preset_project(Some(label.into()));
+        let mut expected = serde_json::to_value(&p).unwrap();
+        expected["channels"][0]["preset"] = serde_json::Value::Null;
+        let warnings = p.validate();
+        assert_eq!(p.channels[0].preset, None);
+        assert_eq!(serde_json::to_value(&p).unwrap(), expected);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].len() < 160);
+        assert!(p.validate().is_empty());
+    }
+}
+
+#[test]
+fn preset_metadata_file_roundtrip_normalizes_large_label_preserving_all_other_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.grooviq");
+    let output = dir.path().join("normalized.grooviq");
+    let p = preset_project(Some("UNTRUSTED_LABEL".repeat(750_000)));
+    let mut expected = serde_json::to_value(&p).unwrap();
+    expected["channels"][0]["preset"] = serde_json::Value::Null;
+    save(&p, &SampleFiles::new(), &input).unwrap();
+    let mut loaded = load(&input).unwrap();
+    assert!(loaded.project.channels[0].preset.is_none());
+    assert_eq!(serde_json::to_value(&loaded.project).unwrap(), expected);
+    assert_eq!(loaded.warnings.len(), 1);
+    assert!(loaded.warnings[0].len() < 160);
+    assert!(!loaded.warnings[0].contains("UNTRUSTED_LABEL"));
+    assert!(loaded.project.validate().is_empty());
+    save(&loaded.project, &loaded.samples, &output).unwrap();
+    let reloaded = load(&output).unwrap();
+    assert!(reloaded.warnings.is_empty());
+    assert_eq!(serde_json::to_value(&reloaded.project).unwrap(), expected);
+    let before = saved_json(&input);
+    let after = saved_json(&output);
+    assert_eq!(
+        before["channels"][0]["synth"],
+        after["channels"][0]["synth"]
+    );
+    assert_eq!(before["version"], after["version"]);
+}
+
+#[test]
+fn preset_metadata_validation_leaves_sampler_metadata_alone() {
+    let mut p = preset_project(Some("Sampler display metadata".into()));
+    p.channels[0].instrument = InstrumentKind::Sampler;
+    let before = serde_json::to_value(&p).unwrap();
+    assert!(p.validate().is_empty());
+    assert_eq!(serde_json::to_value(&p).unwrap(), before);
 }

@@ -126,7 +126,7 @@ fn write_atomic(path: &Path, bytes: &[u8], disk: &mut impl Disk) -> io::Result<(
     let written = (|| {
         let mut file = File::create(&tmp)?;
         file.write_all(bytes)?;
-        file.flush()?;
+        disk.flush(&mut file)?;
         disk.sync(&file)?;
         drop(file);
         disk.rename(&tmp, path)
@@ -701,5 +701,41 @@ mod tests {
         drop(session);
         let (_session, again) = RecoveryDir::start_with(dir.path(), full).unwrap();
         assert_eq!(again, found);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod atomic_order_tests {
+    use super::*;
+    use crate::file::order_tests::Audit;
+    #[test]
+    fn metadata_sync_order_and_failures() {
+        for fail in ["", "flush", "file", "rename", "directory"] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("autosave.json");
+            fs::write(&path, b"old").unwrap();
+            let mut disk = Audit::new(&path, fail);
+            let result = write_atomic(&path, b"new metadata", &mut disk);
+            let expected = match fail {
+                "flush" => vec!["flush"],
+                "file" => vec!["flush", "file"],
+                "rename" => vec!["flush", "file", "rename"],
+                _ => vec!["flush", "file", "rename", "directory"],
+            };
+            assert_eq!(disk.ops, expected);
+            assert_eq!(result.is_ok(), fail.is_empty());
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                if matches!(fail, "flush" | "file" | "rename") {
+                    b"old".as_slice()
+                } else {
+                    b"new metadata".as_slice()
+                }
+            );
+            if fail == "directory" {
+                assert!(crate::file::directory_unconfirmed(&result.unwrap_err()));
+            }
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        }
     }
 }

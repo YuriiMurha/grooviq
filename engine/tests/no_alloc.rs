@@ -20,7 +20,21 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "realtime/lofi_colour.rs"]
+mod lofi_colour;
+
 const SR: f32 = 48_000.0;
+
+#[path = "realtime/algorithmic_reverb.rs"]
+mod algorithmic_reverb;
+#[path = "realtime/bitcrusher.rs"]
+mod bitcrusher;
+#[path = "realtime/character_delay.rs"]
+mod character_delay;
+#[path = "realtime/fattener.rs"]
+mod fattener;
+#[path = "realtime/saturation.rs"]
+mod saturation;
 
 #[path = "realtime/drum_shaper.rs"]
 mod drum_shaper;
@@ -876,3 +890,5 @@ fn review_probe_active_song_transitions_never_allocate() {
         }
     }
 }
+#[path = "realtime/multiband.rs"]
+mod multiband;

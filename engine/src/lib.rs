@@ -157,3 +157,5 @@ const _: fn() = || {
     send::<Controller>();
     send::<AudioProcessor>();
 };
+
+pub mod waveform;
