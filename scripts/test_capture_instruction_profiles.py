@@ -72,6 +72,9 @@ elif name == 'cargo':
   exe.write_bytes(pathlib.Path(__file__).read_bytes()); exe.chmod(0o700)
   print(json.dumps({'reason':'compiler-artifact','target':{'name':'instructions'},'executable':str(exe)}))
 elif name == 'harness':
+ # Gungraun 0.20 defaults direct launches without Cargo's --bench marker to
+ # successful test mode: no Valgrind, metrics or output files (runner/meta.rs).
+ if '--bench' not in sys.argv or mode == 'no-measurements': sys.exit(0)
  head = '--baseline=base' in sys.argv
  # Verify BASE evidence was saved before HEAD can overwrite its binary.
  evidence = root / 'evidence/base/binary-0'
@@ -136,7 +139,7 @@ else: print('annotation / symbols')
         self.assertEqual(self.git('status', '--porcelain'), '')
 
     def test_failures_restore_ref_and_remain_failed(self):
-        for mode in ('compile', 'crash', 'missing', 'zero', 'stale', 'wrongbinary'):
+        for mode in ('compile', 'crash', 'missing', 'zero', 'stale', 'wrongbinary', 'no-measurements'):
             with self.subTest(mode=mode):
                 self.mode.write_text(mode)
                 with self.assertRaises(c.CaptureError): self.capture()

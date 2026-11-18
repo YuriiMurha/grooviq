@@ -308,7 +308,8 @@ def capture(repo, base, head, output):
                     raise CaptureError('expected one Cargo instructions executable')
                 executable = Path(executables.pop())
                 regular(executable, target)
-                args = [str(executable), '--save-baseline=base' if i == 0 else '--baseline=base']
+                # Cargo supplies this marker; without it Gungraun defaults to test mode.
+                args = [str(executable), '--bench', '--save-baseline=base' if i == 0 else '--baseline=base']
                 record['build_command'] = build
                 record['command'] = args
                 started = time.time_ns()
