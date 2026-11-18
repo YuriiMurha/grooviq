@@ -40,6 +40,8 @@ pub enum HealthEvent {
 pub enum ControlError {
     /// A value was not finite, or a key, parameter index or pattern length is out of range.
     Rejected,
+    /// Valid state could not be built; the previous state is preserved.
+    BuildFailed,
     /// The queue had no room.
     Full,
     /// No channel has that id.
@@ -57,6 +59,7 @@ impl std::fmt::Display for ControlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Rejected => "a value is out of range or not a number",
+            Self::BuildFailed => "the sound engine could not build the project",
             Self::Full => "the engine's command queue is full",
             Self::UnknownChannel => "no channel has that id",
             Self::ChannelExists => "a channel with that id exists already",
@@ -131,6 +134,11 @@ pub struct Controller {
 }
 
 impl Controller {
+    #[cfg(test)]
+    pub(crate) fn fail_replays(&self, count: u32) {
+        self.replay_panics.set(count);
+    }
+
     pub(crate) fn new(
         sample_rate: f32,
         (commands, trash, recorded): (Producer<Msg>, Consumer<Trash>, Consumer<RecordEvent>),
@@ -320,7 +328,8 @@ impl Controller {
     /// settings). Checked
     /// like [`Self::add_channel`] and [`Self::set_pattern`], and refused as a whole
     /// (`ChannelExists` for two channels with one id, `TooManyChannels` for more than
-    /// [`MAX_CHANNELS`], `Rejected` for a value that is not finite).
+    /// [`MAX_CHANNELS`], `Rejected` for a value that is not finite, or `BuildFailed`
+    /// if constructing the graph fails; the previous state is preserved).
     pub fn load_state(&mut self, state: EngineState) -> Result<(), ControlError> {
         let state = state.checked()?;
         if self.commands.slots() < 5 {
@@ -332,7 +341,7 @@ impl Controller {
             Some(graph) => graph,
             None => {
                 self.state = old;
-                return Err(ControlError::Rejected);
+                return Err(ControlError::BuildFailed);
             }
         };
         self.renew_instances();
@@ -898,7 +907,7 @@ mod tests {
         let queued = c.commands.slots();
         assert_eq!(
             c.load_state(EngineState::default()),
-            Err(ControlError::Rejected)
+            Err(ControlError::BuildFailed)
         );
         assert_eq!(c.state, state);
         assert_eq!(c.instances, instances);

@@ -578,6 +578,72 @@ mod tests {
     use crate::{EngineConfig, engine};
 
     #[test]
+    fn a_failed_rate_rebuild_keeps_the_processor_out_of_the_stream() {
+        struct At44100;
+        impl OutputBackend for At44100 {
+            fn outputs(&self) -> Vec<OutputInfo> {
+                vec![]
+            }
+            fn open(&mut self, _: &OutputInfo, slot: Arc<AudioSlot>) -> Result<u32, String> {
+                // Starting a callback before admission must remain silent too.
+                let mut out = [1.0; BLOCK * 2];
+                slot.process(&mut out, 2);
+                assert!(out.iter().all(|x| *x == 0.0));
+                Ok(44_100)
+            }
+            fn close(&mut self) {}
+        }
+        let (mut c, mut p) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        c.send(Command::TestTone {
+            on: true,
+            hz: 440.0,
+            gain_db: -12.0,
+        })
+        .unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        c.fail_replays(1);
+        let slot = Arc::new(AudioSlot::new(c.live_shared()));
+        let controller = Arc::new(Mutex::new(c));
+        let mut state = State {
+            backend: Box::new(At44100),
+            controller: Arc::clone(&controller),
+            monitor: OutputMonitor::new(OutputChoice::SystemDefault, false),
+            processor: Some(p),
+            open: None,
+            target: None,
+            retry: Retry::default(),
+            owed: false,
+            reported: HashSet::new(),
+        };
+        let target = OutputInfo {
+            id: "fake-output".into(),
+            name: "Fake output".into(),
+            kind: super::super::OutputKind::Headphones,
+            is_default: true,
+            sample_rate: 44_100,
+        };
+        assert!(state.open_stream(&target, &slot).is_err());
+        assert!(state.processor.is_some());
+        assert!(lock(&slot.processor).is_none());
+        assert_eq!(lock(&controller).sample_rate(), 48_000.0);
+        let mut out = [1.0; BLOCK * 2];
+        slot.process(&mut out, 2);
+        assert!(out.iter().all(|x| *x == 0.0));
+
+        // The failed construction left both the processor and tone available for retry.
+        assert_eq!(
+            state.open_stream(&target, &slot).unwrap().sample_rate,
+            44_100
+        );
+        assert_eq!(lock(&controller).sample_rate(), 44_100.0);
+        assert!(state.processor.is_none());
+        slot.process(&mut out, 2);
+        assert!(out.iter().any(|x| *x != 0.0));
+    }
+
+    #[test]
     fn the_guard_silence_gets_past_restarts_waiting_for_room() {
         let (mut c, mut p) = engine(EngineConfig {
             sample_rate: 48_000.0,
