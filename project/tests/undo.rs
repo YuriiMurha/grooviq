@@ -46,6 +46,7 @@ fn melodic(channel: u32, tick: u32, key: u8) -> NewNote {
 
 fn edit_notes(session: &mut Session, add: Vec<NewNote>, update: Vec<Note>, delete: Vec<u32>) {
     let edit = NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add,
@@ -57,6 +58,7 @@ fn edit_notes(session: &mut Session, add: Vec<NewNote>, update: Vec<Note>, delet
 
 fn add_notes(session: &mut Session, add: Vec<NewNote>) -> Vec<u32> {
     let edit = NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add,
@@ -696,6 +698,15 @@ fn opening_a_project_mid_take_starts_afresh() {
     start_take(&mut session, &controller, &mut processor);
     record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
     // The same project again, as a new one: the history is gone, and so is the take.
+    assert!(matches!(
+        session.settle_recording(),
+        Err(SessionError::RecordingSettling)
+    ));
+    render(&mut processor, 4);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    session.collect_recorded(&events, Instant::now());
+    session.settle_recording().unwrap();
     let loaded = Loaded {
         project: session.project().clone(),
         samples: HashMap::new(),
@@ -707,6 +718,7 @@ fn opening_a_project_mid_take_starts_afresh() {
         .unwrap();
     assert!(!session.view().can_undo);
     let opened = keys(&session);
+    session.set_recording(true).unwrap();
     start_take(&mut session, &controller, &mut processor);
     record_chord(&mut session, &controller, &mut processor, ch, &[72]).unwrap();
     assert_eq!(undo_all(&mut session), 1);
@@ -907,11 +919,16 @@ fn a_take_cut_by_the_note_cap_under_a_busy_queue_is_one_step() {
         .is_ok()
     {}
     let got = session.collect_recorded(&events, Instant::now());
-    assert_eq!(got.stopped.map(|s| s.reason), Some("noteCap"));
+    assert!(
+        got.stopped.is_none(),
+        "unpublished capacity overflow waits too"
+    );
     assert_eq!(notes(&session).len(), before + 1, "B waits for the engine");
     // The queue drains; B goes in, with A.
     render(&mut processor, 4);
-    collect(&mut session, &controller).revision.unwrap();
+    let admitted = collect(&mut session, &controller);
+    admitted.revision.unwrap();
+    assert_eq!(admitted.stopped.map(|s| s.reason), Some("noteCap"));
     assert_eq!(notes(&session).len(), MAX_NOTES_PER_PATTERN);
     undo(&mut session);
     assert_eq!(notes(&session).len(), before, "A and B are one take");
@@ -1087,7 +1104,7 @@ fn a_rearm_right_after_the_self_switch_off_starts_a_new_take() {
     add_notes(&mut session, fill);
     session.set_recording(true).unwrap();
     start_take(&mut session, &controller, &mut processor);
-    // A, then B (fits) and C (does not) with the engine's queue full: the self-off is owed.
+    // A, then B (fits) and C (does not) with the engine's queue full: neither is lost yet.
     record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
     play_key(&session, &mut processor, ch, 71);
     play_key(&session, &mut processor, ch, 72);
@@ -1100,13 +1117,18 @@ fn a_rearm_right_after_the_self_switch_off_starts_a_new_take() {
         .is_ok()
     {}
     let got = session.collect_recorded(&events, Instant::now());
-    assert_eq!(got.stopped.map(|s| s.reason), Some("noteCap"));
-    // The queue drains; A is undone to make room; Record goes on again before the next poll.
+    assert!(got.stopped.is_none());
+    // Admission after the queue drains commits B and stops at the cap. Rearm before its
+    // record-off reaches the callback, making room without undoing the admitted old take.
     render(&mut processor, 4);
-    undo(&mut session);
+    let admitted = collect(&mut session, &controller);
+    assert!(admitted.revision.is_some());
+    assert_eq!(admitted.stopped.map(|s| s.reason), Some("noteCap"));
+    let filler = notes(&session).iter().find(|n| n.key == 20).unwrap().id;
+    edit_notes(&mut session, vec![], vec![], vec![filler]);
     session.set_recording(true).unwrap();
     render(&mut processor, 2);
-    collect(&mut session, &controller).revision.unwrap();
+    assert_eq!(collect(&mut session, &controller).revision, None);
     assert!(keys(&session).contains(&71), "B went in");
     record_chord(&mut session, &controller, &mut processor, ch, &[73]).unwrap();
     undo(&mut session);
