@@ -5,6 +5,7 @@ export type MenuAction = Exclude<Action, "playStop" | "record" | "undo" | "redo"
 /** The part of a `KeyboardEvent` the shortcuts read (so tests need no DOM). */
 export interface ShortcutEvent {
   key: string;
+  code?: string;
   metaKey: boolean;
   ctrlKey: boolean;
   shiftKey: boolean;
@@ -64,14 +65,18 @@ export function shortcutFor(event: ShortcutEvent, platform: string, typingKeyboa
   const key = event.key.toLowerCase();
 
   if (mod) {
-    const redoY = !mac && key === "y" && !event.shiftKey;
-    if (key === "z" || redoY) {
+    // Keep printed ASCII letters on QWERTZ/AZERTY; physical positions only rescue
+    // layouts whose delivered key is not an ASCII letter.
+    const codeLetter = /^Key([A-Z])$/.exec(event.code ?? "")?.[1]?.toLowerCase();
+    const modKey = /^[a-z]$/.test(key) ? key : (codeLetter ?? key);
+    const redoY = !mac && modKey === "y" && !event.shiftKey;
+    if (modKey === "z" || redoY) {
       if (isTypingTarget(event.target)) return null;
       return event.shiftKey || redoY ? "redo" : "undo";
     }
-    if (key === "s" && event.shiftKey) return "saveAs";
+    if (modKey === "s" && event.shiftKey) return "saveAs";
     if (event.shiftKey) return null;
-    return MOD_KEYS[key] ?? null;
+    return MOD_KEYS[modKey] ?? null;
   }
   if (event.shiftKey || event.repeat || isTypingTarget(event.target)) return null;
   if (key === " ") return "playStop";

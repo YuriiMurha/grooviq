@@ -73,6 +73,7 @@ describe("commit queue", () => {
     expect(engine.sent).toHaveLength(1);
     expect(engine.sent[0]).toEqual({
       generation: 0,
+      patternId: 0,
       baseRevision: 4,
       add: [{ channel: 1, tick: 480, length: 240, key: 60, velocity: 0.8, slide: false }],
       update: [],
@@ -82,12 +83,13 @@ describe("commit queue", () => {
     await engine.ack({ revision: 5, addedIds: [40] });
     // The second edit names the engine's id, against the new revision.
     expect(engine.sent).toHaveLength(2);
-    expect(engine.sent[1]).toEqual({ generation: 0, baseRevision: 5, add: [], update: [note(40, 960, 62)], delete: [] });
+    expect(engine.sent[1]).toEqual({ generation: 0, patternId: 0, baseRevision: 5, add: [], update: [note(40, 960, 62)], delete: [] });
     expect(views).toEqual([VIEW]);
 
     await engine.ack({ revision: 6 });
     expect(engine.sent[2]).toEqual({
       generation: 0,
+      patternId: 0,
       baseRevision: 6,
       add: [{ channel: 1, tick: 1440, length: 240, key: 60, velocity: 0.8, slide: false }],
       update: [],
@@ -129,7 +131,7 @@ describe("commit queue", () => {
     expect(views.at(-1)?.name).toBe("undone");
     // The edit goes out against the revision the roll last held: stale, so the engine says reload.
     expect(engine.sent).toHaveLength(2);
-    expect(engine.sent[1].baseRevision).toBe(5);
+    expect(engine.sent[1].baseRevision).toBe(6);
     server.revision = 7;
     server.notes = [note(1, 960)];
     await engine.ack({ revision: 7, reload: true });
@@ -163,7 +165,7 @@ describe("commit queue", () => {
   it("a_reply_with_reload_refetches_the_notes", async () => {
     const { store, server, engine, queue } = setup([note(1, 0), note(2, 240)]);
     queue.commit({ add: [], update: [note(1, 3840)], delete: [] });
-    // Meanwhile a recording changed the pattern: the engine applied the edit to a newer revision.
+    // An admitted edit that clamps values asks the mirror to fetch canonical notes.
     server.revision = 9;
     server.notes = [note(1, 3840), note(2, 240), note(3, 720, 64)];
     await engine.ack({ revision: 9, reload: true });
@@ -402,9 +404,38 @@ describe("commit queue", () => {
     const { store, engine, queue } = setup([note(1, 0)]);
     queue.setGeneration(4);
     // A velocity drag that began in project 3 ends after project 4 is shown.
-    queue.commit({ add: [], update: [note(1, 960)], delete: [] }, 3);
+    queue.commit({ add: [], update: [note(1, 960)], delete: [] }, { generation: 3, patternId: 0, revision: 4 });
     expect(store.get(1)).toEqual(note(1, 0));
     expect(engine.sent).toEqual([]);
     expect(queue.unsettled()).toBe(false);
   });
+});
+
+it("a held pattern stamp cannot mutate the next selected pattern", async () => {
+  const { queue, engine, store } = setup([note(1, 0)]);
+  const held = queue.stamp();
+  queue.setPatternId(9);
+  queue.commit({ add: [], update: [note(1, 960)], delete: [] }, held);
+  expect(engine.sent).toEqual([]);
+  expect(store.get(1)?.tick).toBe(0);
+  expect(await queue.flush()).toBe(false);
+});
+
+it("a refused canonical note reply aborts settlement instead of remapping new selection", async () => {
+  const { queue, engine, store, views } = setup([note(1, 0)]);
+  queue.commit({ add: [note(-1, 480)], update: [], delete: [] });
+  const settled = queue.flush();
+  await engine.ack({ revision: 9, addedIds: [7], reload: true,
+    view: { ...VIEW, generation: 0, pattern: { id: 9 } } as ProjectView });
+  expect(await settled).toBe(false);
+  expect(views).toEqual([]);
+  expect(store.get(7)).toBeUndefined();
+});
+
+it("a held unsent preview is never sent by queue settlement", async () => {
+  const { queue, engine } = setup([]);
+  const dispose = queue.setHeld(() => ({ add: [note(-1,0)], update: [], delete: [] }));
+  expect(await queue.flush()).toBe(true);
+  expect(engine.sent).toEqual([]);
+  dispose();
 });

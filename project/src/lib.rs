@@ -41,3 +41,11 @@ pub use model::{
     roll_channels,
 };
 pub use session::{DecodedSamples, decode_samples};
+
+pub mod arrangement;
+pub mod audio_assets;
+pub use arrangement::*;
+
+pub use file::validate_save;
+
+pub mod pattern_edit;

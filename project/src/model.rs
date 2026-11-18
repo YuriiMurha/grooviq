@@ -14,7 +14,7 @@ use std::path::PathBuf;
 /// `project.json`'s `format` value.
 pub const FORMAT: &str = "grooviq-project";
 /// The file format version this build writes and reads.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// A project file's extension, without the dot.
 pub const EXTENSION: &str = "grooviq";
 /// Velocity of a hit added with a click.
@@ -79,6 +79,10 @@ fn default_name() -> String {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
+    #[serde(default)]
+    pub play_mode: crate::arrangement::PlayMode,
+    #[serde(default, deserialize_with = "crate::reading::named")]
+    pub arrangement: crate::arrangement::Arrangement,
     #[serde(default = "default_name")]
     pub name: String,
     /// 20..=400.
@@ -94,7 +98,7 @@ pub struct Project {
     /// The `id` of the pattern the engine plays.
     #[serde(default)]
     pub current_pattern: u32,
-    /// The next unused id for a channel or pattern (one counter for both). Ids are never
+    /// The next unused channel, pattern, arrangement entity or automation priority id. Ids are never
     /// reused, so a note's channel can never point at a different channel after a delete.
     #[serde(default)]
     pub next_id: u32,
@@ -319,6 +323,8 @@ impl Project {
     /// "Untitled", 140 BPM, 4/4, no channels, one empty 16-step pattern "Pattern 1".
     pub fn new() -> Self {
         Self {
+            play_mode: Default::default(),
+            arrangement: Default::default(),
             name: default_name(),
             bpm: BPM.2,
             time_signature: TimeSignature::default(),
@@ -378,7 +384,8 @@ impl Project {
         {
             fixes.push(format!(
                 "The project's key (root {}, scale \"{}\") is not valid; it was cleared.",
-                key.root, key.scale
+                key.root,
+                warning_label(&key.scale)
             ));
             self.key = None;
         }
@@ -391,6 +398,7 @@ impl Project {
             .iter()
             .map(|c| c.id)
             .chain(self.patterns.iter().map(|p| p.id))
+            .chain(self.arrangement.ids())
             .max()
             .map_or(0, |h| h.saturating_add(1));
         if self.next_id < floor {
@@ -413,7 +421,8 @@ impl Project {
             if !fresh {
                 fixes.push(format!(
                     "Channel id {} is used twice; the second channel \"{}\" was dropped.",
-                    c.id, c.name
+                    c.id,
+                    warning_label(&c.name)
                 ));
             }
             fresh
@@ -426,7 +435,7 @@ impl Project {
         }
 
         for c in &mut self.channels {
-            let name = c.name.clone();
+            let name = warning_label(&c.name);
             c.volume = clamp_fix(
                 c.volume,
                 VOLUME,
@@ -456,6 +465,18 @@ impl Project {
                 "sampler",
                 fixes,
             );
+            // Labels are display metadata; the stored parameters remain the sound source.
+            if c.instrument == InstrumentKind::Synth
+                && c.preset
+                    .as_deref()
+                    .is_some_and(|label| label != "Init" && !synth::PRESETS.contains(&label))
+            {
+                c.preset = None;
+                fixes.push(format!(
+                    "Channel id {}: unknown synth preset label was cleared; sound values were kept.",
+                    c.id
+                ));
+            }
             // Unknown synth names are dropped; unknown sampler names stay ignored (M1 kept them).
             c.synth
                 .retain(|param, _| synth::PARAM_IDS.contains(&param.as_str()));
@@ -473,7 +494,7 @@ impl Project {
     fn validate_patterns(&mut self, read: &[NoteDrops], fixes: &mut Vec<String>) {
         let channels: HashSet<u32> = self.channels.iter().map(|c| c.id).collect();
         for (i, p) in self.patterns.iter_mut().enumerate() {
-            let name = p.name.clone();
+            let name = warning_label(&p.name);
             if !(1..=MAX_STEPS).contains(&p.steps) {
                 let fixed = p.steps.clamp(1, MAX_STEPS);
                 fixes.push(format!(
@@ -538,7 +559,8 @@ impl Project {
                 let id = self.next_id;
                 fixes.push(format!(
                     "Pattern id {} is used twice; \"{}\" got id {id}.",
-                    p.id, p.name
+                    p.id,
+                    warning_label(&p.name)
                 ));
                 p.id = id;
                 seen.insert(id);
@@ -556,11 +578,32 @@ impl Project {
             let first = &self.patterns[0];
             fixes.push(format!(
                 "Current pattern {} does not exist; switched to \"{}\".",
-                self.current_pattern, first.name
+                self.current_pattern,
+                warning_label(&first.name)
             ));
             self.current_pattern = first.id;
         }
     }
+}
+
+// Display only: cap work before copying untrusted names. 48 scalars cost at most
+// 192 UTF-8 bytes plus the ellipsis; controls and bidi overrides cannot spoof lines.
+pub(crate) fn warning_label(name: &str) -> String {
+    let mut chars = name.chars();
+    let mut label = String::with_capacity(195);
+    for c in chars.by_ref().take(48) {
+        label.push(if c.is_control()
+            || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        {
+            '\u{fffd}'
+        } else {
+            c
+        });
+    }
+    if chars.next().is_some() {
+        label.push('…');
+    }
+    label
 }
 
 /// Gives every note of `p` an id that is not 0 and not used before it in the pattern, and moves
@@ -592,7 +635,7 @@ fn repair_note_ids(p: &mut Pattern) -> Option<String> {
         p.next_note_id = 0;
         Some(format!(
             "Pattern \"{}\": its note ids left no room for new notes; {} renumbered.",
-            p.name,
+            warning_label(&p.name),
             count(p.notes.len(), "note was", "notes were")
         ))
     } else if bad.is_empty() {
@@ -603,7 +646,7 @@ fn repair_note_ids(p: &mut Pattern) -> Option<String> {
         }
         Some(format!(
             "Pattern \"{}\": {} a missing or repeated id and got new ones.",
-            p.name,
+            warning_label(&p.name),
             count(bad.len(), "note had", "notes had")
         ))
     };

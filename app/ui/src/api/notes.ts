@@ -1,3 +1,4 @@
+import type { PatternStamp } from "./patterns";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ProjectView } from "./project";
@@ -29,6 +30,7 @@ export interface NewNote {
 /** One edit to the notes: deletes, then updates, then adds. Made in the project of `generation`
  * (`ProjectView.generation`), against `baseRevision`. */
 export interface NotesEdit {
+  patternId: number;
   generation: number;
   baseRevision: number;
   add: NewNote[];
@@ -121,10 +123,10 @@ export const patternNotes = async () => decodeNotes(await invoke<ArrayBuffer>("p
 export const notesEdit = (edit: NotesEdit) => invoke<NotesAck>("notes_edit", { edit });
 /** Takes back the last note change (a note edit, a step edit or a recorded take) of the project of
  * `generation`; `null` when there is none. The ack always asks for a reload. */
-export const notesUndo = (generation: number) => invoke<NotesAck | null>("notes_undo", { generation });
+export const notesUndo = (stamp: PatternStamp) => invoke<NotesAck | null>("notes_undo", { stamp });
 /** Makes the last undone note change of the project of `generation` again; `null` when there is
  * none. */
-export const notesRedo = (generation: number) => invoke<NotesAck | null>("notes_redo", { generation });
+export const notesRedo = (stamp: PatternStamp) => invoke<NotesAck | null>("notes_redo", { stamp });
 /** Adds a synth channel named after the preset. */
 export const channelAddSynth = (preset: string, generation: number) =>
   invoke<ProjectView>("channel_add_synth", { preset, generation });
@@ -148,14 +150,15 @@ export const metronomeSet = (on: boolean) => invoke<null>("metronome_set", { on 
 
 /** One MIDI input as the settings show it. */
 export interface MidiInput {
+  id: string;
   name: string;
   enabled: boolean;
 }
 
 /** The MIDI keyboards plugged in now, with whether each plays. */
 export const midiInputs = () => invoke<MidiInput[]>("midi_inputs");
-/** Switches a MIDI keyboard on or off; the shell remembers it by name. */
-export const midiSetEnabled = (name: string, enabled: boolean) => invoke<null>("midi_set_enabled", { name, enabled });
+/** Switches a MIDI keyboard on or off; the shell remembers it by opaque ID. */
+export const midiSetEnabled = (id: string, enabled: boolean) => invoke<null>("midi_set_enabled", { id, enabled });
 
 /** A keyboard was plugged in or out, or switched on or off: ask `midiInputs` again. */
 export function onMidiInputsChanged(handler: () => void): Promise<UnlistenFn> {

@@ -5,6 +5,7 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixture";
 import type { MockNote } from "./mockTauri";
+import type { ProjectView } from "../src/api/project";
 import { twoChannels } from "./rollHelpers";
 
 /** Calls a shell command straight from the page. */
@@ -43,19 +44,17 @@ async function take(page: Page) {
 
 const note = (tick: number, length: number, key = 60) => ({ channel: 1, tick, length, key, velocity: 0.8, slide: false });
 type Ack = { revision: number; addedIds: number[]; reload: boolean };
-/** A note edit on the revision the mock holds now (a stale one asks for a reload anyway). */
+/** A deliberate edit uses the current canonical pattern origin. */
 const edit = async (page: Page, add: object[], del: number[] = []) => {
-  const { baseRevision, generation } = await mockState(page);
-  return call<Ack>(page, "notes_edit", { edit: { generation, baseRevision, add, update: [], delete: del } });
+  const { revision: baseRevision, generation, patternId } = await patternStamp(page);
+  return call<Ack>(page, "notes_edit", { edit: { generation, patternId, baseRevision, add, update: [], delete: del } });
 };
-/** The mock's notes revision and project generation now. */
-const mockState = (page: Page) =>
-  page.evaluate(() => {
-    const s = (window as unknown as { __grooviqMock: { state: { notesRevision: number; generation: number } } }).__grooviqMock.state;
-    return { baseRevision: s.notesRevision, generation: s.generation };
-  });
+const patternStamp = async (page: Page) => {
+  const view = await call<ProjectView>(page, "project_view");
+  return { generation: view.generation, patternId: view.pattern.id, revision: view.notesRevision };
+};
 /** Undo in the project the mock holds now. */
-const undo = async (page: Page) => call(page, "notes_undo", { generation: (await mockState(page)).generation });
+const undo = async (page: Page) => call(page, "notes_undo", { stamp: await patternStamp(page) });
 
 test.describe("recording pairs each release with its own press", () => {
   test.use({ seed: { project: twoChannels([]) } });
@@ -233,4 +232,19 @@ test.describe("recording when the pattern's note ids run out", () => {
     await expect(app.getByRole("status", { name: "Messages" }).locator(".toast.warn")).toHaveCount(1);
     await expect(app.getByRole("button", { name: "Record", exact: true })).toHaveAttribute("aria-pressed", "false");
   });
+});
+
+
+test("play_while_playing_preserves_the_clock_and_held_position", async ({ app, mock }) => {
+  await call(app, "transport_play");
+  await hold(app, 4320);
+  const before = await mock.eval("(m) => ({ ...m.state.transport })");
+  await call(app, "transport_play");
+  expect(await mock.eval("(m) => ({ ...m.state.transport })")).toEqual(before);
+  expect(await mock.eval("(m) => m.ticks()")).toBe(4320);
+  await call(app, "transport_stop");
+  await call(app, "transport_play");
+  expect(await mock.eval("(m) => m.state.transport.playing")).toBe(true);
+  expect(await mock.eval("(m) => m.state.transport.held")).toBeNull();
+  expect(await mock.eval("(m) => m.state.transport.startTicks")).toBe(0);
 });

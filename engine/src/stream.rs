@@ -102,7 +102,7 @@ pub fn start_stream(live: Arc<LiveShared>, hz: u32) -> io::Result<StreamServer> 
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
     let port = addr.port();
-    let period = Duration::from_secs_f64(1.0 / f64::from(hz.clamp(HZ_RANGE.0, HZ_RANGE.1)));
+    let period = frame_period(hz);
 
     let clients = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
@@ -252,6 +252,10 @@ fn serve(
     }
 }
 
+fn frame_period(hz: u32) -> Duration {
+    Duration::from_secs_f64(1.0 / f64::from(hz.clamp(HZ_RANGE.0, HZ_RANGE.1)))
+}
+
 /// When frame `n` is due: absolute deadlines (`start + n * period`), so a late wake-up shortens
 /// the next wait instead of shifting every later frame. After a stall longer than [`MAX_LAG`]
 /// the schedule restarts from the moment of the late frame instead of bursting to catch up.
@@ -316,28 +320,63 @@ fn stream_frames(
     period: Duration,
     stop: &AtomicBool,
 ) {
-    let mut schedule = Schedule::new(Instant::now(), period);
+    run_frames(&mut SocketFrames { ws, live, stop }, period);
+}
+
+// Keep waiting and schedule advancement in one path for sockets and counted-clock tests.
+trait FrameRuntime {
+    fn now(&self) -> Instant;
+    fn sleep(&mut self, duration: Duration);
+    fn poll(&mut self) -> bool;
+    fn send(&mut self) -> bool;
+}
+
+struct SocketFrames<'a> {
+    ws: &'a mut WebSocket<TcpStream>,
+    live: &'a LiveShared,
+    stop: &'a AtomicBool,
+}
+
+impl FrameRuntime for SocketFrames<'_> {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&mut self, duration: Duration) {
+        thread::sleep(duration);
+    }
+
+    fn poll(&mut self) -> bool {
+        !self.stop.load(SeqCst) && drain_incoming(self.ws)
+    }
+
+    fn send(&mut self) -> bool {
+        let frame = encode_live(&self.live.snapshot());
+        // Writes block (bounded by WRITE_TIMEOUT) so a frame is whole or the client is dropped.
+        self.ws.get_ref().set_nonblocking(false).is_ok()
+            && self.ws.send(Message::Binary(frame.to_vec().into())).is_ok()
+            && self.ws.get_ref().set_nonblocking(true).is_ok()
+    }
+}
+
+fn run_frames(runtime: &mut impl FrameRuntime, period: Duration) {
+    let mut schedule = Schedule::new(runtime.now(), period);
     loop {
         loop {
-            if stop.load(SeqCst) || !drain_incoming(ws) {
+            if !runtime.poll() {
                 return;
             }
-            let now = Instant::now();
+            let now = runtime.now();
             let due = schedule.due();
             if now >= due {
                 break;
             }
-            thread::sleep((due - now).min(POLL));
+            runtime.sleep((due - now).min(POLL));
         }
-        let frame = encode_live(&live.snapshot());
-        // Writes block (bounded by WRITE_TIMEOUT) so a frame is whole or the client is dropped.
-        let sent = ws.get_ref().set_nonblocking(false).is_ok()
-            && ws.send(Message::Binary(frame.to_vec().into())).is_ok()
-            && ws.get_ref().set_nonblocking(true).is_ok();
-        if !sent {
+        if !runtime.send() {
             return;
         }
-        schedule.sent(Instant::now());
+        schedule.sent(runtime.now());
     }
 }
 
@@ -366,7 +405,90 @@ mod tests {
         }
     }
 
+    struct CountedFrames {
+        now: Instant,
+        sent: Vec<Instant>,
+        operations: usize,
+    }
+
+    impl FrameRuntime for CountedFrames {
+        fn now(&self) -> Instant {
+            self.now
+        }
+
+        fn sleep(&mut self, duration: Duration) {
+            assert!(duration <= POLL, "control messages must still be polled");
+            // A consistently late wake plus nonzero send work exposes per-frame resets.
+            self.now += duration + Duration::from_millis(1);
+        }
+
+        fn poll(&mut self) -> bool {
+            self.operations += 1;
+            assert!(
+                self.operations < 100_000,
+                "frame loop stopped making progress"
+            );
+            self.sent.len() < 120
+        }
+
+        fn send(&mut self) -> bool {
+            self.sent.push(self.now);
+            self.now += Duration::from_micros(250);
+            true
+        }
+    }
+
+    #[test]
+    fn production_frame_loop_keeps_cadence_with_late_wakes_and_send_work() {
+        for (requested, hz) in [(60, 60), (30, 30), (0, 1), (240, 240), (u32::MAX, 240)] {
+            let start = Instant::now();
+            let mut runtime = CountedFrames {
+                now: start,
+                sent: Vec::new(),
+                operations: 0,
+            };
+            run_frames(&mut runtime, frame_period(requested));
+            assert_eq!(runtime.sent.len(), 120);
+            for (n, sent) in runtime.sent.iter().enumerate() {
+                // Independent rate oracle, not Schedule::due or frame_period.
+                let ideal = start + Duration::from_secs_f64(n as f64 / f64::from(hz));
+                assert!(*sent >= ideal - Duration::from_micros(1), "early frame {n}");
+                assert!(
+                    sent.saturating_duration_since(ideal) < Duration::from_micros(1001),
+                    "requested {requested} Hz, frame {n} drifted by {:?}",
+                    sent.saturating_duration_since(ideal)
+                );
+            }
+        }
+    }
+
     const PERIOD: Duration = Duration::from_micros(16_667);
+
+    #[test]
+    fn requested_rates_produce_the_exact_deadline_count() {
+        for (requested, expected) in [
+            (0, 1),
+            (1, 1),
+            (30, 30),
+            (60, 60),
+            (240, 240),
+            (u32::MAX, 240),
+        ] {
+            let start = Instant::now();
+            let mut schedule = Schedule::new(start, frame_period(requested));
+            // Count one full second after the immediate first frame. Exclude that first
+            // frame and include the last with nanosecond rounding of the period.
+            schedule.sent(start);
+            let end = start + Duration::from_secs(1) + Duration::from_nanos(240);
+            let mut count = 0;
+            while schedule.due() <= end && count <= 240 {
+                let due = schedule.due();
+                schedule.sent(due);
+                count += 1;
+            }
+            assert_eq!(count, expected, "requested {requested} Hz");
+        }
+    }
 
     #[test]
     fn late_wake_ups_do_not_shift_later_frames() {

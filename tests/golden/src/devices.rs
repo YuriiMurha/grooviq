@@ -1,8 +1,8 @@
 //! Golden renders of single devices: a deterministic test input (generated in code) is run
 //! through the device with each factory preset and compared with `refs/ott_<preset>.wav`.
 //! Refresh with `GOLDEN_UPDATE=1 cargo test -p grooviq-golden --test devices` and say why in the
-//! commit message. The devices use std maths, so only [`crate::TOLERANCE`] is guaranteed across
-//! platforms, not bit-exactness.
+//! commit message. The render path uses libm maths and the preset references are compared
+//! bit for bit with [`crate::compare_exact`].
 
 use grooviq_dsp::ott::{PRESETS, preset};
 use grooviq_dsp::{Device, create};

@@ -4,6 +4,7 @@
 import type { Page, TestInfo } from "@playwright/test";
 import { brightness, cellPoint, clickCell, colourDistance, expect, grid, pixelsAt, presetValues, project, soundsFor, test, type Mock } from "./fixture";
 import type { MockProject } from "./mockTauri";
+import type { ProjectView } from "../src/api/project";
 
 const KIT = ["Kick", "Snare", "Hat"];
 const kitSeed = { project: project(KIT, { 1: [0, 8], 2: [4] }), files: soundsFor(KIT) };
@@ -714,14 +715,19 @@ test.describe("the mock follows Task 7 (fix round 1)", () => {
     });
     const seen = () => app.evaluate(() => (window as unknown as { seen: number[] }).seen);
     const revision = () => mock.view().then((v) => v.notesRevision);
+    const stamp = async () => {
+      const view = await call(app, "project_view") as ProjectView;
+      return { generation: view.generation, patternId: view.pattern.id, revision: view.notesRevision };
+    };
     const expected: number[] = [];
     // A step edit.
     const generation = (await mock.view()).generation;
-    await call(app, "project_edit", { edit: { kind: "toggleStep", channel: 1, step: 3 }, generation });
+    await call(app, "project_edit", { edit: { kind: "toggleStep", channel: 1, step: 3 }, generation, stamp: await stamp() });
     expected.push(await revision());
     // A notes edit.
+    const noteOrigin = await stamp();
     await call(app, "notes_edit", {
-      edit: { generation, baseRevision: await revision(), add: [{ channel: 2, tick: 120, length: 600, key: 64, velocity: 0.5, slide: false }], update: [], delete: [] },
+      edit: { generation: noteOrigin.generation, patternId: noteOrigin.patternId, baseRevision: noteOrigin.revision, add: [{ channel: 2, tick: 120, length: 600, key: 64, velocity: 0.5, slide: false }], update: [], delete: [] },
     });
     expected.push(await revision());
     // A mix change is not a note change.
@@ -832,22 +838,41 @@ test.describe("stale and genuine stops after Play (fix round 3)", () => {
 
   test("a_stale_stopped_frame_after_play_is_ignored", async ({ app, mock }) => {
     const play = app.getByRole("button", { name: "Play" });
-    await app.waitForTimeout(100);
-    // The stream holds a stopped frame rendered before Play took effect and delivers it late.
-    await mock.eval("(m) => m.pauseLive(true)");
-    await play.click();
-    await expect(play).toHaveAttribute("aria-pressed", "true");
-    await nameButton(app, "Kick").focus();
-    await app.keyboard.down("z");
-    await expect.poll(() => live(mock)).toEqual(["1:48"]);
-    await mock.eval("(m) => m.injectLive(false)");
-    await mock.eval("(m) => m.pauseLive(false)");
-    // The engine plays: the UI says so, and Z keeps sounding.
-    await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(true);
-    await app.waitForTimeout(400);
-    await expect(play).toHaveAttribute("aria-pressed", "true");
-    expect(await live(mock)).toEqual(["1:48"]);
-    await app.keyboard.up("z");
+    // Freeze only performance.now: real timers, rAF and React work must keep running.
+    const originalClock = await app.evaluate(() => {
+      const now = performance.now();
+      const descriptor = Object.getOwnPropertyDescriptor(performance, "now");
+      Object.defineProperty(performance, "now", {
+        configurable: true,
+        value: () => now,
+      });
+      return descriptor !== undefined;
+    });
+    expect(originalClock).toBe(false);
+    try {
+      await mock.eval("(m) => m.pauseLive(true)");
+      await play.click();
+      await expect(play).toHaveAttribute("aria-pressed", "true");
+      await nameButton(app, "Kick").focus();
+      await app.keyboard.down("z");
+      await expect.poll(() => live(mock)).toEqual(["1:48"]);
+      await mock.eval("(m) => m.injectLive(false)");
+      // Drain rendering before a playing frame can repair a wrongly adopted stop.
+      await app.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+      );
+      await expect(play).toHaveAttribute("aria-pressed", "true");
+      expect(await live(mock)).toEqual(["1:48"]);
+    } finally {
+      await app.evaluate(() => {
+        Reflect.deleteProperty(performance, "now");
+      });
+      await mock.eval("(m) => m.pauseLive(false)");
+      await app.keyboard.up("z");
+    }
     await expect.poll(() => live(mock)).toEqual([]);
   });
 
