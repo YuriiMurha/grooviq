@@ -268,8 +268,8 @@ fn serve(
     }
 }
 
-// All underlying sockets remain nonblocking. Checking before *every* write also
-// bounds tungstenite's internal partial-write loop, not just our flush retries.
+// All underlying sockets remain nonblocking. Check every read/write/flush so
+// tungstenite's partial-frame loops cannot bypass the deadline or shutdown.
 trait WriteClock {
     fn now(&self) -> Instant;
     fn pause(&mut self, duration: Duration);
@@ -297,7 +297,7 @@ impl<S, C: WriteClock> DeadlineIo<'_, S, C> {
         if self.stop.load(SeqCst) || self.clock.now() >= self.deadline {
             Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "stream write deadline",
+                "stream I/O deadline",
             ))
         } else {
             Ok(())
@@ -305,8 +305,9 @@ impl<S, C: WriteClock> DeadlineIo<'_, S, C> {
     }
 }
 
-impl<S: Read, C> Read for DeadlineIo<'_, S, C> {
+impl<S: Read, C: WriteClock> Read for DeadlineIo<'_, S, C> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.check()?;
         self.inner.read(bytes)
     }
 }
@@ -647,6 +648,76 @@ mod tests {
             self.0.set(self.0.get() + duration);
         }
     }
+
+    fn fragmented_message_obeys_budget(stop_after: Option<usize>, expected_reads: usize) {
+        struct Fragments<'a> {
+            clock: std::rc::Rc<std::cell::Cell<Instant>>,
+            stop: &'a AtomicBool,
+            stop_after: Option<usize>,
+            reads: usize,
+        }
+        impl Read for Fragments<'_> {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                if self.reads == 100 {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                // Valid masked fragments with no final frame or payload: message-size
+                // and complete-message limits cannot end this protocol work.
+                let frame = [if self.reads == 0 { 0x02 } else { 0x00 }, 0x80, 0, 0, 0, 0];
+                bytes[..frame.len()].copy_from_slice(&frame);
+                self.reads += 1;
+                self.clock.set(self.clock.get() + Duration::from_millis(10));
+                if self.stop_after == Some(self.reads) {
+                    self.stop.store(true, SeqCst);
+                }
+                Ok(frame.len())
+            }
+        }
+        impl Write for Fragments<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let now = Instant::now();
+        let clock = std::rc::Rc::new(std::cell::Cell::new(now));
+        let stop = AtomicBool::new(false);
+        let io = DeadlineIo {
+            inner: Fragments {
+                clock: clock.clone(),
+                stop: &stop,
+                stop_after,
+                reads: 0,
+            },
+            clock: TestClock(clock.clone()),
+            deadline: now + WRITE_TIMEOUT,
+            stop: &stop,
+        };
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_INCOMING))
+            .max_frame_size(Some(MAX_INCOMING));
+        let mut ws =
+            WebSocket::from_raw_socket(io, tungstenite::protocol::Role::Server, Some(config));
+        assert!(matches!(ws.read(), Err(Error::Io(e)) if e.kind() == io::ErrorKind::TimedOut));
+        assert_eq!(ws.get_ref().inner.reads, expected_reads);
+        assert_eq!(
+            clock.get() - now,
+            Duration::from_millis(10 * expected_reads as u64)
+        );
+    }
+
+    #[test]
+    fn fragmented_message_cannot_outlive_its_control_deadline() {
+        fragmented_message_obeys_budget(None, 5);
+    }
+
+    #[test]
+    fn fragmented_message_cannot_hide_a_shutdown_request() {
+        fragmented_message_obeys_budget(Some(1), 1);
+    }
+
     struct SlowWriter {
         clock: std::rc::Rc<std::cell::Cell<Instant>>,
         bytes: usize,
