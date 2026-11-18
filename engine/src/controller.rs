@@ -302,6 +302,7 @@ impl Controller {
             .notes
             .iter()
             .any(|n| n.channel == id)
+            || self.state.song.automation.references(id)
         {
             return Err(ControlError::Rejected);
         }
@@ -339,6 +340,7 @@ impl Controller {
     pub fn set_song(&mut self, song: crate::SongData) -> Result<(), ControlError> {
         let ids: Vec<_> = self.state.channels.iter().map(|c| c.id).collect();
         let song = song.checked(&ids)?;
+        song.automation.validate(&self.state.channels)?;
         song.audio.validate_loop(self.state.song_loop)?;
         if !song.valid_loop(self.state.song_loop) {
             return Err(ControlError::Rejected);
