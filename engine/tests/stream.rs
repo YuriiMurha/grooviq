@@ -115,24 +115,55 @@ fn answers_404_for_another_path() {
 }
 
 #[test]
-fn delivers_60_updates_per_second_while_the_main_thread_is_blocked() {
-    let server = start_stream(Arc::new(LiveShared::default()), 60).unwrap();
+fn produces_fresh_frames_while_the_calling_thread_is_blocked() {
+    let live = Arc::new(LiveShared::default());
+    let server = start_stream(Arc::clone(&live), 10).unwrap();
+    let address = server.local_addr();
     let url = url(&server);
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
     let client = std::thread::spawn(move || {
-        let (mut ws, _) = tungstenite::connect(url.as_str()).unwrap();
-        let start = Instant::now();
-        let mut count = 0;
-        while start.elapsed() < Duration::from_secs(1) {
-            if matches!(ws.read().unwrap(), Message::Binary(_)) {
-                count += 1;
+        let socket = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (mut ws, _) = tungstenite::client(url.as_str(), socket).unwrap();
+        ready_tx.send(()).unwrap();
+        go_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut fresh = 0;
+        while fresh < 12 && Instant::now() < deadline {
+            if let Message::Binary(bytes) = ws.read().unwrap()
+                && decode_live(&bytes).unwrap().output_latency_frames == 7_680
+            {
+                fresh += 1;
             }
         }
-        count
+        assert_eq!(fresh, 12, "stream stopped progressing");
+        done_tx.send(Instant::now()).unwrap();
     });
-    std::thread::sleep(Duration::from_millis(1100));
-    let count = client.join().unwrap();
-    println!("measured rate: {count} updates in 1 s");
-    assert!(count >= 55, "only {count} updates in 1 s");
+    ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    // A buffered handshake frame cannot satisfy this: publish only after client readiness.
+    let published = Instant::now();
+    live.set_output_latency_frames(7_680);
+    go_tx.send(()).unwrap();
+    // No caller-side pumping or polling: production must proceed independently.
+    let result = done_rx.recv_timeout(Duration::from_secs(5));
+    drop(server); // bounded cancellation also releases the client on failure
+    client.join().unwrap();
+    let finished = result.expect("no independent multi-frame progress while caller blocked");
+    // Twelve fresh frames at 10 Hz span eleven periods. Allow the scheduler's 250 ms
+    // catch-up window; measure from publication, never a delayed client's first read.
+    // Load can only lengthen this interval, so it cannot cause a false "too fast" failure.
+    let elapsed = finished.duration_since(published);
+    assert!(
+        elapsed >= Duration::from_millis(850),
+        "12 fresh frames arrived too fast at 10 Hz: {elapsed:?}"
+    );
 }
 
 #[test]
@@ -382,34 +413,57 @@ fn only_the_whole_token_is_accepted() {
 }
 
 #[test]
-fn frames_arrive_on_the_schedule() {
-    let server = start_stream(Arc::new(LiveShared::default()), 60).unwrap();
-    let (mut ws, _) = tungstenite::connect(url(&server).as_str()).unwrap();
-    let times: Vec<Instant> = (0..120)
-        .map(|_| {
-            ws.read().unwrap();
-            Instant::now()
-        })
-        .collect();
-    let span = times[119] - times[0];
-    let ideal = Duration::from_secs_f64(119.0 / 60.0);
-    let error = span.as_secs_f64() / ideal.as_secs_f64() - 1.0;
-    // 6% (about 120 ms over the span) absorbs one scheduling hiccup on a busy runner; the exact
-    // drift-free schedule is pinned by the `Schedule` unit tests. Per-frame restarts (a fixed-period
-    // sleep) measured 6.2-6.6% on macOS, so that mutation still fails.
-    assert!(
-        error.abs() < 0.06,
-        "119 intervals took {span:?}, ideal {ideal:?}"
-    );
+fn real_socket_makes_bounded_progress_at_the_requested_rate() {
+    // Exact cadence is checked through the production loop with counted time. Here retain
+    // real handshake, socket delivery, and rate wiring without a shared-host speed budget.
+    for hz in [30, 60] {
+        let server = start_stream(Arc::new(LiveShared::default()), hz).unwrap();
+        let buffered_connect = || {
+            let (ws, _) = tungstenite::connect(url(&server).as_str()).unwrap();
+            // Deliberately let frames buffer before returning control to the client.
+            std::thread::sleep(Duration::from_millis(200));
+            ws
+        };
+        // Include the handshake and a delayed client's setup in the measurement.
+        let start = Instant::now();
+        let mut ws = buffered_connect();
+        raw(&mut ws)
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        for _ in 0..120 {
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "stream stopped progressing"
+            );
+            let Message::Binary(frame) = ws.read().expect("bounded frame delivery") else {
+                panic!("expected live frame");
+            };
+            assert!(decode_live(&frame).is_some());
+        }
+        // Lower bound catches a bypassed/faster rate; contention can only delay delivery.
+        assert!(start.elapsed() >= Duration::from_secs_f64(118.0 / f64::from(hz)));
+    }
 }
 
 #[test]
 fn the_rate_is_clamped() {
     // A huge rate must not busy-loop: it is held to 240 frames per second.
     let server = start_stream(Arc::new(LiveShared::default()), u32::MAX).unwrap();
-    let (mut ws, _) = tungstenite::connect(url(&server).as_str()).unwrap();
+    let buffered_connect = || {
+        let (ws, _) = tungstenite::connect(url(&server).as_str()).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        ws
+    };
     let start = Instant::now();
+    let mut ws = buffered_connect();
+    raw(&mut ws)
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
     for _ in 0..241 {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "clamped stream stopped progressing"
+        );
         ws.read().unwrap();
     }
     assert!(

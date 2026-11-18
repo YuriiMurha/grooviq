@@ -730,6 +730,9 @@ impl Disk for Ops {
     }
 
     fn sync(&mut self, file: &std::fs::File) -> std::io::Result<()> {
+        if file.metadata()?.is_dir() {
+            return file.sync_all();
+        }
         // What is synced is the whole zip: written before, not after.
         use std::io::{Read, Seek};
         let mut bytes = Vec::new();
@@ -740,7 +743,24 @@ impl Disk for Ops {
             zip::ZipArchive::new(std::io::Cursor::new(bytes)).is_ok(),
             "synced before the zip was complete"
         );
-        self.step("sync")?;
+        #[cfg(unix)]
+        let backup = {
+            use std::os::unix::fs::MetadataExt;
+            let m = file.metadata()?;
+            let folder = grooviq_project::backup_folder(
+                &self.target,
+                &self.target.parent().unwrap().join("backups"),
+            )?;
+            std::fs::read_dir(folder).is_ok_and(|entries| {
+                entries.flatten().any(|e| {
+                    e.metadata()
+                        .is_ok_and(|x| x.dev() == m.dev() && x.ino() == m.ino())
+                })
+            })
+        };
+        #[cfg(not(unix))]
+        let backup = self.ops.contains(&"sync");
+        self.step(if backup { "backup-sync" } else { "sync" })?;
         // The production sync, as a save makes it.
         grooviq_project::file::RealDisk.sync(file)
     }
@@ -762,7 +782,7 @@ fn a_save_writes_then_syncs_then_renames() {
     let mut disk = Ops::failing("", &path);
     job.write_on(&backups, &mut disk).unwrap();
     session.finish_save(&job);
-    assert_eq!(disk.ops, ["written", "sync", "rename"]);
+    assert_eq!(disk.ops, ["written", "sync", "backup-sync", "rename"]);
     assert_eq!(load(&path).unwrap().project.bpm, 120.0);
     assert_eq!(backup_tempos(&path, &backups), [100.0, 110.0]);
 }
@@ -3205,7 +3225,10 @@ fn an_owed_record_off_keeps_refusing_past_a_replacement_s_barrier() {
 fn directory_failure_keeps_new_bytes_and_reports_uncertainty() {
     struct Refuse;
     impl Disk for Refuse {
-        fn sync_folder(&mut self, _: &Path) -> std::io::Result<()> {
+        fn sync_folder(&mut self, path: &Path) -> std::io::Result<()> {
+            if path.extension().is_none_or(|ext| ext != "grooviq") {
+                return grooviq_project::file::RealDisk.sync_folder(path);
+            }
             Err(std::io::Error::other("folder open/sync refused"))
         }
     }
@@ -3241,7 +3264,10 @@ fn directory_failure_keeps_new_bytes_and_reports_uncertainty() {
 fn a_clean_save_as_warning_records_the_new_path_and_keeps_close_protection() {
     struct Refuse;
     impl Disk for Refuse {
-        fn sync_folder(&mut self, _: &Path) -> std::io::Result<()> {
+        fn sync_folder(&mut self, path: &Path) -> std::io::Result<()> {
+            if path.extension().is_none_or(|ext| ext != "grooviq") {
+                return grooviq_project::file::RealDisk.sync_folder(path);
+            }
             Err(std::io::Error::other("directory sync refused"))
         }
     }
@@ -3421,7 +3447,10 @@ fn ui_release_debt_does_not_cross_project_or_channel_replacement() {
 fn stale_uncertain_save_cannot_adopt_path_after_new_or_open() {
     struct Refuse;
     impl Disk for Refuse {
-        fn sync_folder(&mut self, _: &Path) -> std::io::Result<()> {
+        fn sync_folder(&mut self, path: &Path) -> std::io::Result<()> {
+            if path.extension().is_none_or(|ext| ext != "grooviq") {
+                return grooviq_project::file::RealDisk.sync_folder(path);
+            }
             Err(std::io::Error::other("directory sync refused"))
         }
     }
@@ -3485,4 +3514,377 @@ fn pre_rename_save_failure_keeps_the_sessions_written_facts() {
     assert!(!new.exists());
     session.save(None, &backups).unwrap();
     assert_eq!(session.path(), Some(old.as_path()));
+}
+
+#[test]
+fn failed_publication_at_capacity_preserves_every_backup_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, backups) = saved_twice(dir.path());
+    for bpm in 111..125 {
+        session
+            .apply(Edit::SetTempo { bpm: bpm as f32 }, Instant::now())
+            .unwrap();
+        session.save(None, &backups).unwrap();
+    }
+    let folder = grooviq_project::backup_folder(&path, &backups).unwrap();
+    let snapshot = || {
+        names(&folder)
+            .into_iter()
+            .map(|n| {
+                let bytes = std::fs::read(folder.join(&n)).unwrap();
+                (n, bytes)
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = snapshot();
+    assert_eq!(before.len(), 10);
+    let target = std::fs::read(&path).unwrap();
+    session
+        .apply(Edit::SetTempo { bpm: 130.0 }, Instant::now())
+        .unwrap();
+    for _ in 0..3 {
+        let job = session.begin_save(None).unwrap();
+        let error = job
+            .write_on(&backups, &mut Ops::failing("rename", &path))
+            .unwrap_err();
+        assert!(!error.directory_unconfirmed());
+        assert!(session.end_save(&job, Err(error)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), target);
+        assert_eq!(snapshot(), before);
+        assert_eq!(load(&path).unwrap().project.bpm, 124.0);
+        assert!(session.view().dirty);
+    }
+    session.save(None, &backups).unwrap();
+    assert_eq!(snapshot().len(), 10);
+    assert_eq!(load(&path).unwrap().project.bpm, 130.0);
+    assert!(!session.view().dirty);
+}
+
+#[test]
+fn uncertain_publication_at_capacity_retains_history_until_confirmed_retry() {
+    struct Refuse;
+    impl Disk for Refuse {
+        fn sync_folder(&mut self, path: &Path) -> std::io::Result<()> {
+            if path.extension().is_none_or(|ext| ext != "grooviq") {
+                return grooviq_project::file::RealDisk.sync_folder(path);
+            }
+            Err(std::io::Error::other("injected directory uncertainty"))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, backups) = saved_twice(dir.path());
+    for bpm in 111..125 {
+        session
+            .apply(Edit::SetTempo { bpm: bpm as f32 }, Instant::now())
+            .unwrap();
+        session.save(None, &backups).unwrap();
+    }
+    let folder = grooviq_project::backup_folder(&path, &backups).unwrap();
+    let before: Vec<_> = names(&folder)
+        .into_iter()
+        .map(|n| {
+            let bytes = std::fs::read(folder.join(&n)).unwrap();
+            (n, bytes)
+        })
+        .collect();
+    let old = std::fs::read(&path).unwrap();
+    session
+        .apply(Edit::SetTempo { bpm: 130.0 }, Instant::now())
+        .unwrap();
+    let error = session.save_on(None, &backups, &mut Refuse).unwrap_err();
+    assert!(error.directory_unconfirmed());
+    assert!(session.view().dirty);
+    assert_eq!(load(&path).unwrap().project.bpm, 130.0);
+    assert_eq!(names(&folder).len(), 11);
+    for (name, bytes) in &before {
+        assert_eq!(&std::fs::read(folder.join(name)).unwrap(), bytes);
+    }
+    assert!(
+        names(&folder)
+            .iter()
+            .any(|n| std::fs::read(folder.join(n)).unwrap() == old)
+    );
+    session.save(None, &backups).unwrap();
+    assert_eq!(names(&folder).len(), 10);
+    assert!(!session.view().dirty);
+    assert_eq!(load(&path).unwrap().project.bpm, 130.0);
+}
+
+#[test]
+fn backup_preparation_failure_leaves_target_and_session_unsaved() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, _) = saved_twice(dir.path());
+    let blocked = dir.path().join("blocked");
+    std::fs::write(&blocked, b"unowned").unwrap();
+    let old = std::fs::read(&path).unwrap();
+    session
+        .apply(Edit::SetTempo { bpm: 130.0 }, Instant::now())
+        .unwrap();
+    let error = session.save(None, &blocked).unwrap_err();
+    assert!(matches!(error, SessionError::Backup(_)));
+    assert_eq!(std::fs::read(&blocked).unwrap(), b"unowned");
+    assert_eq!(std::fs::read(&path).unwrap(), old);
+    assert!(session.view().dirty);
+    assert_eq!(load(&path).unwrap().project.bpm, 110.0);
+}
+
+#[test]
+fn overlapping_save_cannot_borrow_a_backup_that_may_roll_back() {
+    struct Interleave<'a> {
+        other: &'a mut Session,
+        backups: &'a Path,
+    }
+    impl Disk for Interleave<'_> {
+        fn rename(&mut self, _: &Path, _: &Path) -> std::io::Result<()> {
+            self.other.save(None, self.backups).unwrap();
+            Err(std::io::Error::other("first publisher refused"))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (mut first, path, backups) = saved_twice(dir.path());
+    let (mut second, _, _) = rig();
+    let loaded = load(&path).unwrap();
+    let decoded = decode_samples(&loaded);
+    second.open(&path, loaded, decoded).unwrap();
+    first
+        .apply(Edit::SetTempo { bpm: 120.0 }, Instant::now())
+        .unwrap();
+    second
+        .apply(Edit::SetTempo { bpm: 130.0 }, Instant::now())
+        .unwrap();
+    let error = first
+        .save_on(
+            None,
+            &backups,
+            &mut Interleave {
+                other: &mut second,
+                backups: &backups,
+            },
+        )
+        .unwrap_err();
+    assert!(!error.directory_unconfirmed());
+    assert!(first.view().dirty);
+    assert!(!second.view().dirty);
+    assert_eq!(load(&path).unwrap().project.bpm, 130.0);
+    assert_eq!(backup_tempos(&path, &backups), [100.0, 110.0]);
+}
+
+#[test]
+fn overlapping_failed_save_does_not_spend_retention_history() {
+    struct Interleave<'a> {
+        other: &'a mut Session,
+        backups: &'a Path,
+    }
+    impl Disk for Interleave<'_> {
+        fn rename(&mut self, _: &Path, _: &Path) -> std::io::Result<()> {
+            self.other.save(None, self.backups).unwrap();
+            Err(std::io::Error::other("first publisher refused"))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (mut first, path, backups) = saved_twice(dir.path());
+    for bpm in 111..125 {
+        first
+            .apply(Edit::SetTempo { bpm: bpm as f32 }, Instant::now())
+            .unwrap();
+        first.save(None, &backups).unwrap();
+    }
+    let before = backup_tempos(&path, &backups);
+    assert_eq!(before.len(), 10);
+    let (mut second, _, _) = rig();
+    let loaded = load(&path).unwrap();
+    let decoded = decode_samples(&loaded);
+    second.open(&path, loaded, decoded).unwrap();
+    first
+        .apply(Edit::SetTempo { bpm: 125.0 }, Instant::now())
+        .unwrap();
+    second
+        .apply(Edit::SetTempo { bpm: 130.0 }, Instant::now())
+        .unwrap();
+    let error = first
+        .save_on(
+            None,
+            &backups,
+            &mut Interleave {
+                other: &mut second,
+                backups: &backups,
+            },
+        )
+        .unwrap_err();
+    assert!(!error.directory_unconfirmed());
+    assert!(first.view().dirty);
+    assert!(!second.view().dirty);
+    assert_eq!(load(&path).unwrap().project.bpm, 130.0);
+    let mut expected = before[1..].to_vec();
+    expected.push(124.0);
+    assert_eq!(backup_tempos(&path, &backups), expected);
+}
+
+#[test]
+fn repeated_saves_and_retained_duplicate_retry_keep_backup_bytes() {
+    struct RefuseDirectory(bool);
+    impl Disk for RefuseDirectory {
+        fn sync_folder(&mut self, path: &Path) -> std::io::Result<()> {
+            if self.0 {
+                Err(std::io::Error::other(
+                    "injected backup confirmation refusal",
+                ))
+            } else {
+                grooviq_project::file::RealDisk.sync_folder(path)
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, backups) = saved_twice(dir.path());
+    for _ in 0..3 {
+        session.save(None, &backups).unwrap();
+    }
+    let folder = grooviq_project::backup_folder(&path, &backups).unwrap();
+    let before: Vec<_> = names(&folder)
+        .into_iter()
+        .map(|name| {
+            let bytes = std::fs::read(folder.join(&name)).unwrap();
+            (name, bytes)
+        })
+        .collect();
+    session
+        .apply(Edit::SetTempo { bpm: 120.0 }, Instant::now())
+        .unwrap();
+    let mut disk = RefuseDirectory(true);
+    for _ in 0..2 {
+        let error = session.save_on(None, &backups, &mut disk).unwrap_err();
+        assert!(matches!(error, SessionError::Backup(_)));
+        assert!(!error.directory_unconfirmed());
+        assert_eq!(load(&path).unwrap().project.bpm, 110.0);
+        assert!(session.view().dirty);
+    }
+    disk.0 = false;
+    session.save_on(None, &backups, &mut disk).unwrap();
+    assert_eq!(load(&path).unwrap().project.bpm, 120.0);
+    assert!(!session.view().dirty);
+    for (name, bytes) in before {
+        assert_eq!(std::fs::read(folder.join(name)).unwrap(), bytes);
+    }
+    assert_eq!(backup_tempos(&path, &backups), [100.0, 110.0]);
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_barriers_fail_before_target_and_retry_duplicate() {
+    use std::os::unix::fs::MetadataExt;
+    struct Barrier {
+        target: std::path::PathBuf,
+        leaf: std::path::PathBuf,
+        fail: String,
+        seen: Vec<String>,
+    }
+    impl Disk for Barrier {
+        fn sync(&mut self, file: &std::fs::File) -> std::io::Result<()> {
+            let m = file.metadata()?;
+            let identity = |p: &Path| {
+                std::fs::metadata(p).is_ok_and(|x| x.dev() == m.dev() && x.ino() == m.ino())
+            };
+            let label = if m.is_file() {
+                if std::fs::read_dir(&self.leaf)
+                    .is_ok_and(|entries| entries.flatten().any(|e| identity(&e.path())))
+                {
+                    "backup-file".to_owned()
+                } else {
+                    "target-file".to_owned()
+                }
+            } else {
+                let mut p = self.leaf.as_path();
+                let mut found = None;
+                loop {
+                    if identity(p) {
+                        found = Some(format!("dir:{}", p.display()));
+                        break;
+                    }
+                    match p.parent() {
+                        Some(parent) => p = parent,
+                        None => break,
+                    }
+                }
+                found.unwrap_or_else(|| "target-dir".into())
+            };
+            self.seen.push(label.clone());
+            if label == self.fail {
+                return Err(std::io::Error::other("backup barrier refused"));
+            }
+            file.sync_all()
+        }
+        fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+            assert_eq!(to, self.target);
+            self.seen.push("rename".into());
+            std::fs::rename(from, to)
+        }
+    }
+    for failure in 0..3 {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("song.grooviq");
+        let backups = root.path().join("new/app/backups");
+        let (mut s, _, _processor) = rig();
+        let original = root.path().join("original.grooviq");
+        s.save(Some(&original), &backups).unwrap();
+        std::fs::copy(&original, &target).unwrap();
+        let old = std::fs::read(&target).unwrap();
+        s.apply(Edit::SetTempo { bpm: 141.0 }, Instant::now())
+            .unwrap();
+        let leaf = grooviq_project::backup_folder(&target, &backups).unwrap();
+        // Canonical spelling matters on macOS (/tmp versus /private/tmp).
+        std::fs::create_dir_all(root.path()).unwrap();
+        let leaf = std::fs::canonicalize(root.path())
+            .unwrap()
+            .join(leaf.strip_prefix(root.path()).unwrap());
+        let fail = match failure {
+            0 => "backup-file".into(),
+            1 => format!("dir:{}", leaf.display()),
+            _ => format!("dir:{}", leaf.parent().unwrap().display()),
+        };
+        let mut disk = Barrier {
+            target: target.clone(),
+            leaf: leaf.clone(),
+            fail,
+            seen: vec![],
+        };
+        let error = s.save_on(Some(&target), &backups, &mut disk).unwrap_err();
+        assert!(matches!(error, SessionError::Backup(_)), "{error}");
+        assert!(!error.directory_unconfirmed());
+        assert_eq!(std::fs::read(&target).unwrap(), old);
+        assert!(s.view().dirty);
+        assert_eq!(s.path(), Some(original.as_path()));
+        assert!(!disk.seen.iter().any(|x| x == "rename"));
+        // Fail again on the same directory: a retained duplicate must not bypass it.
+        if failure != 0 {
+            disk.seen.clear();
+            assert!(matches!(
+                s.save_on(Some(&target), &backups, &mut disk),
+                Err(SessionError::Backup(_))
+            ));
+            assert_eq!(names(&leaf).len(), 1);
+            assert_eq!(std::fs::read(leaf.join(&names(&leaf)[0])).unwrap(), old);
+        }
+        disk.fail.clear();
+        disk.seen.clear();
+        s.save_on(Some(&target), &backups, &mut disk).unwrap();
+        let rename = disk.seen.iter().position(|x| x == "rename").unwrap();
+        let file = disk.seen.iter().position(|x| x == "backup-file").unwrap();
+        let leaf_sync = disk
+            .seen
+            .iter()
+            .position(|x| x == &format!("dir:{}", leaf.display()))
+            .unwrap();
+        let parent_sync = disk
+            .seen
+            .iter()
+            .position(|x| x == &format!("dir:{}", leaf.parent().unwrap().display()))
+            .unwrap();
+        assert!(
+            file < leaf_sync && leaf_sync < parent_sync && parent_sync < rename,
+            "{:?}",
+            disk.seen
+        );
+        assert_eq!(load(&target).unwrap().project.bpm, 141.0);
+        assert!(!s.view().dirty);
+    }
 }
