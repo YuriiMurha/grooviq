@@ -76,6 +76,12 @@ fn fades_multiply_and_gain() {
 fn invalid_and_missing_assets() {
     let mut c = clip();
     c.gain = f32::NAN;
+    assert_eq!(
+        AudioSchedule::build(vec![admission_asset()], vec![c]).unwrap_err(),
+        ControlError::Rejected
+    );
+    // Unknown references are a separate refusal from scalar validation.
+    c.gain = 1.0;
     assert!(AudioSchedule::build(vec![], vec![c]).is_err());
     let (s, w) = AudioSchedule::build(
         vec![AudioAsset {
@@ -99,6 +105,185 @@ fn invalid_and_missing_assets() {
     };
     assert_eq!(controller.set_song(song), Err(ControlError::Rejected));
     assert_eq!(controller.state(), &before);
+}
+
+fn admission_asset() -> AudioAsset {
+    AudioAsset {
+        id: 1,
+        source_rate: 8000,
+        source_frames: 8,
+        decoded: Some(Arc::new(SampleBuf {
+            rate: 8000.0,
+            l: vec![0.25; 8],
+            r: vec![-0.25; 8],
+        })),
+    }
+}
+
+#[test]
+fn scalar_admission_guards_refuse_independently() {
+    AudioSchedule::build(vec![admission_asset()], vec![clip()]).unwrap();
+    for gain in [f32::NAN, f32::NEG_INFINITY, f32::INFINITY, -0.01, 2.01] {
+        let c = AudioClip { gain, ..clip() };
+        assert_eq!(
+            AudioSchedule::build(vec![admission_asset()], vec![c]).unwrap_err(),
+            ControlError::Rejected,
+            "gain={gain}"
+        );
+    }
+    for gain in [0.0, 2.0] {
+        AudioSchedule::build(vec![admission_asset()], vec![AudioClip { gain, ..clip() }]).unwrap();
+    }
+    for (name, c) in [
+        (
+            "fade in",
+            AudioClip {
+                fade_in: 5,
+                ..clip()
+            },
+        ),
+        (
+            "fade out",
+            AudioClip {
+                fade_out: 5,
+                ..clip()
+            },
+        ),
+        (
+            "empty trim",
+            AudioClip {
+                source_start: 5,
+                ..clip()
+            },
+        ),
+        (
+            "source end",
+            AudioClip {
+                source_end: 9,
+                ..clip()
+            },
+        ),
+    ] {
+        assert_eq!(
+            AudioSchedule::build(vec![admission_asset()], vec![c]).unwrap_err(),
+            ControlError::Rejected,
+            "{name}"
+        );
+    }
+    AudioSchedule::build(
+        vec![admission_asset()],
+        vec![AudioClip {
+            fade_in: 4,
+            fade_out: 4,
+            ..clip()
+        }],
+    )
+    .unwrap();
+    for rate in [7999.0, 384001.0] {
+        let mut asset = admission_asset();
+        Arc::make_mut(asset.decoded.as_mut().unwrap()).rate = rate;
+        assert_eq!(
+            AudioSchedule::build(vec![asset], vec![clip()]).unwrap_err(),
+            ControlError::Rejected,
+            "decoded rate={rate}"
+        );
+    }
+    for rate in [8000.0, 384000.0] {
+        let mut asset = admission_asset();
+        Arc::make_mut(asset.decoded.as_mut().unwrap()).rate = rate;
+        AudioSchedule::build(vec![asset], vec![clip()]).unwrap();
+    }
+    let mut empty = admission_asset();
+    empty.source_frames = 0;
+    assert_eq!(
+        AudioSchedule::build(vec![empty], vec![]).unwrap_err(),
+        ControlError::Rejected
+    );
+    for rate in [7999, 384001] {
+        let mut asset = admission_asset();
+        asset.source_rate = rate;
+        asset.decoded = None;
+        assert_eq!(
+            AudioSchedule::build(vec![asset], vec![]).unwrap_err(),
+            ControlError::Rejected,
+            "source rate={rate}"
+        );
+    }
+    for rate in [8000, 384000] {
+        for frames in [1, u64::from(rate) * 600] {
+            let asset = AudioAsset {
+                source_rate: rate,
+                source_frames: frames,
+                decoded: None,
+                ..admission_asset()
+            };
+            AudioSchedule::build(vec![asset], vec![]).unwrap();
+        }
+        let asset = AudioAsset {
+            source_rate: rate,
+            source_frames: u64::from(rate) * 600 + 1,
+            decoded: None,
+            ..admission_asset()
+        };
+        assert_eq!(
+            AudioSchedule::build(vec![asset], vec![]).unwrap_err(),
+            ControlError::Rejected,
+            "source duration at rate={rate}"
+        );
+    }
+}
+
+#[test]
+fn fractional_trim_does_not_mix_excluded_neighbors() {
+    let asset = AudioAsset {
+        id: 1,
+        source_rate: 8000,
+        source_frames: 3,
+        decoded: Some(Arc::new(SampleBuf {
+            rate: 8000.0,
+            l: vec![100.0, 1.0, 100.0],
+            r: vec![-100.0, -1.0, -100.0],
+        })),
+    };
+    for reverse in [false, true] {
+        let c = AudioClip {
+            source_start: 1,
+            source_end: 2,
+            reverse,
+            ..clip()
+        };
+        let mut state = EngineState {
+            playback_mode: PlaybackMode::Song,
+            ..EngineState::default()
+        };
+        state.song.audio = AudioSchedule::build(vec![asset.clone()], vec![c])
+            .unwrap()
+            .0;
+        state.song.end_tick = 960;
+        for partition in [1, 63, 64, 127] {
+            let out = render_offline_with(
+                EngineConfig {
+                    sample_rate: 48000.0,
+                },
+                state.clone(),
+                &[(0, Command::Play)],
+                8,
+                partition,
+            );
+            // One retained unit sample with zero neighbors forms a six-frame linear edge.
+            for frame in 0..8 {
+                let expected = (1.0 - frame as f32 / 6.0).max(0.0);
+                assert!(
+                    (out[frame * 2] - expected).abs() < 1e-6,
+                    "reverse={reverse}, partition={partition}, frame={frame}"
+                );
+                assert!(
+                    (out[frame * 2 + 1] + expected).abs() < 1e-6,
+                    "right: reverse={reverse}, partition={partition}, frame={frame}"
+                );
+            }
+        }
+    }
 }
 fn long_state(rate: u32, frames: usize) -> EngineState {
     let asset = AudioAsset {
