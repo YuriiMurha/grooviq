@@ -107,7 +107,7 @@ test.describe("rows line up with the grid (check 2)", () => {
     lost.channels[1].embedded = false;
     test.use({ seed: { project: lost, files: soundsFor(["Kick", "Hat"]) } });
     test("the Missing row keeps the rows aligned", async ({ app }, info) => {
-      await expect(app.getByRole("button", { name: "Relink Lost Snare" })).toBeVisible();
+      await expect(app.getByRole("button", { name: "Edit the Lost Snare sampler" })).toBeVisible();
       for (const d of await offsets(app, MISSING)) expect(d).toBeLessThanOrEqual(1);
       await app.getByRole("region", { name: "Channel rack" }).screenshot({ path: info.outputPath("rows-missing.png") });
     });
