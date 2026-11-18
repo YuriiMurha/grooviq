@@ -497,8 +497,11 @@ test.describe("held gestures", () => {
       expect(await inkedAt(app, [...g.held])).toEqual(g.held.map(() => true));
       expect(await mock.calls("notes_edit")).toEqual([]);
       await app.mouse.up();
-      await expect.poll(async () => (await mock.calls("notes_edit")).length).toBe(1);
-      await expect.poll(() => sessionNotes(mock).then((n) => n.filter((x) => x[0] === 1).length)).toBe(g.held.length);
+      // A held gesture keeps its starting revision; the concurrent edit wins atomically.
+      expect(await mock.calls("notes_edit")).toHaveLength(0);
+      await expect(app.getByRole("status", { name: "Messages" })).toContainText("pattern changed");
+      await expect.poll(() => sessionNotes(mock).then((n) => n.filter((x) => x[0] === 1).length)).toBe(0);
+      expect((await sessionNotes(mock)).filter((n) => n[0] === 2)).toHaveLength(1);
     });
   }
 
@@ -521,8 +524,10 @@ test.describe("held gestures", () => {
     expect(await inkedAt(app, cells)).toEqual([true, true, true, true]);
     expect(await mock.calls("notes_edit")).toEqual([]);
     await app.mouse.up();
-    await expect.poll(async () => (await mock.calls("notes_edit")).length).toBe(1);
-    await expect.poll(() => sessionNotes(mock).then((n) => n.filter((x) => x[0] === 1).length)).toBe(4);
+    expect(await mock.calls("notes_edit")).toHaveLength(0);
+    await expect(app.getByRole("status", { name: "Messages" })).toContainText("pattern changed");
+    await expect.poll(() => sessionNotes(mock).then((n) => n.filter((x) => x[0] === 1).length)).toBe(0);
+    expect((await sessionNotes(mock)).filter((n) => n[0] === 2)).toHaveLength(1);
   });
 
   test("a_paint_stroke_is_one_edit_and_a_cancelled_one_leaves_nothing", async ({ app, mock }) => {
