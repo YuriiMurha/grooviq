@@ -96,6 +96,7 @@ impl ExportRequest {
                 ExportFormat::Float32 => WavFormat::Float32,
             },
             loops: self.loops,
+            song_region: None,
             max_tail_seconds: EXPORT_TAIL_SECONDS,
         })
     }
