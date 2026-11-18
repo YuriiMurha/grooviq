@@ -40,7 +40,9 @@ mod processor;
 mod record;
 mod sample_file;
 mod sequencer;
+mod song;
 mod state;
+pub use song::{PlaybackMode, SongData, SongLoop};
 mod stream;
 mod transport;
 
@@ -155,3 +157,5 @@ const _: fn() = || {
     send::<Controller>();
     send::<AudioProcessor>();
 };
+
+pub mod waveform;

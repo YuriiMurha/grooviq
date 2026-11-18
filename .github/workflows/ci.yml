@@ -42,6 +42,9 @@ jobs:
       - name: Optimized 10,000-note edit budget
         run: node scripts/notes-edit-budget.mjs
 
+      - name: Optimized 8-second export budget
+        run: node scripts/export-budget.mjs
+
   # The DSP crate is meant to also run in a browser; this keeps it compiling for the web.
   # Not a required check: it only has to stay green, and the `rust` jobs gate merging.
   dsp-wasm32:

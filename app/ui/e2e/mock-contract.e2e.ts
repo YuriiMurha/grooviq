@@ -234,3 +234,18 @@ test.describe("recording when the pattern's note ids run out", () => {
     await expect(app.getByRole("button", { name: "Record", exact: true })).toHaveAttribute("aria-pressed", "false");
   });
 });
+
+
+test("play_while_playing_preserves_the_clock_and_held_position", async ({ app, mock }) => {
+  await call(app, "transport_play");
+  await hold(app, 4320);
+  const before = await mock.eval("(m) => ({ ...m.state.transport })");
+  await call(app, "transport_play");
+  expect(await mock.eval("(m) => ({ ...m.state.transport })")).toEqual(before);
+  expect(await mock.eval("(m) => m.ticks()")).toBe(4320);
+  await call(app, "transport_stop");
+  await call(app, "transport_play");
+  expect(await mock.eval("(m) => m.state.transport.playing")).toBe(true);
+  expect(await mock.eval("(m) => m.state.transport.held")).toBeNull();
+  expect(await mock.eval("(m) => m.state.transport.startTicks")).toBe(0);
+});

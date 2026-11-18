@@ -171,6 +171,10 @@ if (workspace || rustCrates.has("grooviq-project") || changed.some((path) => pat
   step("notes budget runner tests", "node", ["--test", "scripts/notes-edit-budget.test.mjs"]);
   step("notes edit budget", "node", ["scripts/notes-edit-budget.mjs"]);
 }
+if (workspace || rustCrates.has("grooviq-engine") || changed.some((path) => path === "scripts/export-budget.mjs" || path.startsWith("scripts/notes-edit-budget."))) {
+  step("export budget runner tests", "node", ["--test", "scripts/notes-edit-budget.test.mjs"]);
+  step("export budget", "node", ["scripts/export-budget.mjs"]);
+}
 if (tooling) {
   step("tooling: check-changed plans", "node", ["scripts/check-changed.mjs", "--plan", "--base", base]);
   if (existsSync(join(root, ".githooks", "pre-commit")))
