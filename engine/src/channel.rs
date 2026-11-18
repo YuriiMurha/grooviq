@@ -46,6 +46,7 @@ impl Source {
 
 pub(crate) struct ChannelNode {
     id: ChannelId,
+    pub(crate) instance: u64,
     source: Source,
     mix: ChannelMix,
     /// Choke group (0: none).
@@ -93,6 +94,7 @@ impl ChannelNode {
         let idle = matches!(source, Source::Sampler(_));
         Self {
             id: setup.id,
+            instance: 0,
             source,
             mix: setup.mix,
             choke: setup.choke,
@@ -106,6 +108,23 @@ impl ChannelNode {
             #[cfg(test)]
             never_skip: false,
         }
+    }
+
+    pub(crate) fn synth_meter(&self) -> Option<crate::SynthMeter> {
+        let Source::Synth(synth) = &self.source else {
+            return None;
+        };
+        let mut meter = crate::SynthMeter {
+            instance: self.instance,
+            levels: std::array::from_fn(|i| synth.meter(i as u32)),
+            scope: [0.0; crate::SYNTH_SCOPE_LEN],
+        };
+        if meter.levels[2] > 0.0 {
+            synth.meter_array(6, &mut meter.scope);
+        } else {
+            meter.levels = [0.0; 6];
+        }
+        Some(meter)
     }
 
     pub(crate) fn id(&self) -> ChannelId {

@@ -285,6 +285,8 @@ impl Controller {
             ))
         }))
         .map_err(|_| ControlError::Rejected)?;
+        let mut node = node;
+        node.instance = self.next_instance + 1;
         self.push(Msg::AddChannel(node))?;
         self.next_instance += 1;
         self.instances.insert(setup.id, self.next_instance);
@@ -614,6 +616,8 @@ impl Controller {
                 setup,
                 any_solo,
             ));
+            let mut node = node;
+            node.instance = self.instances.get(&setup.id).copied().unwrap_or(0);
             let refused = graph.add_channel(node);
             debug_assert!(refused.is_none(), "the state holds valid channels only");
         }

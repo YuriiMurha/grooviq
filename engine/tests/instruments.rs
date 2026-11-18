@@ -441,3 +441,33 @@ fn channel_edits_queued_before_a_new_project_and_a_rate_change_do_not_reach_it()
     );
     assert!(run(&mut c, &mut p) == expected);
 }
+
+#[test]
+fn synth_observation_captures_output_clears_silence_and_rejects_reused_channel() {
+    let (mut c, mut p) = engine_with(cfg(), state(vec![synth_channel(1, preset("Init"))]));
+    let first = c.channel_instance(ChannelId(1)).unwrap();
+    let live = c.live_shared();
+    assert!(live.synth_meter(first).is_none());
+    c.send(cnote(1, 60, true)).unwrap();
+    let mut output = [0.0; 4096];
+    p.process(&mut output, 2);
+    let meter = live.synth_meter(first).expect("a captured frame");
+    assert!(meter.levels[2] >= 1.0);
+    assert!(meter.scope.iter().any(|v| v.abs() > 0.001));
+    assert!(meter.scope.iter().all(|v| v.is_finite()));
+    p.process(&mut output, 2);
+    assert_ne!(live.synth_meter(first).unwrap().scope, meter.scope);
+    c.send(Command::AllSoundOff).unwrap();
+    for _ in 0..50 {
+        p.process(&mut output, 2);
+        live.synth_meter(first);
+    }
+    assert_eq!(live.synth_meter(first).unwrap().scope, [0.0; 256]);
+    c.remove_channel(ChannelId(1)).unwrap();
+    c.add_channel(synth_channel(1, preset("Init"))).unwrap();
+    let second = c.channel_instance(ChannelId(1)).unwrap();
+    assert_ne!(first, second);
+    assert!(live.synth_meter(second).is_none());
+    p.process(&mut output, 2);
+    assert!(live.synth_meter(first).is_none());
+}

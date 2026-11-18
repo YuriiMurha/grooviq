@@ -266,6 +266,16 @@ impl AudioProcessor {
         let tone = !self.faulted && self.graph.tone_on();
         self.live
             .publish(self.meter, tone, self.clock, self.faults, self.guard_hits);
+        // At most one fixed-size capture per 1024 rendered frames; no work when unleased.
+        if self.clock.is_multiple_of(1024) {
+            let instance = self.live.synth.selected(self.clock);
+            let meter = if instance != 0 && !self.faulted {
+                self.graph.synth_meter(instance)
+            } else {
+                None
+            };
+            self.live.synth.publish(meter.as_ref());
+        }
         self.live.publish_transport(
             self.transport.playing(),
             self.graph.position(self.transport.position_ticks(start)),

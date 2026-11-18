@@ -89,6 +89,36 @@ async function shot(page: Page, info: TestInfo, name: string) {
 test.describe("the synth editor", () => {
   test.use({ seed: { project: withSynth(), files: soundsFor(KIT) } });
 
+  test("output_scope_moves_for_a_held_note_and_clears_when_released", async ({ app, mock }, info) => {
+    await open(app);
+    const scope = editor(app).getByLabel("Synth output waveform");
+    const status = editor(app).locator(".synth-output-status");
+    const pixels = () => scope.evaluate((c: HTMLCanvasElement) => c.toDataURL());
+    await expect(status).toContainText("0 voices");
+    const silent = await pixels();
+    await app.keyboard.down("z");
+    await expect(status).toContainText("1 voice");
+    await expect.poll(pixels).not.toBe(silent);
+    const first = await pixels();
+    await expect.poll(pixels).not.toBe(first);
+    await expect(editor(app).locator('[data-synth-meter="amp"]')).toBeVisible();
+    await shot(app, info, "live-output");
+    await app.keyboard.up("z");
+    await expect.poll(pixels).toBe(silent);
+    await expect(status).toContainText("0 voices");
+    await app.keyboard.down("z");
+    await expect(status).toContainText("1 voice");
+    await mock.eval("(m) => m.pauseLive(true)");
+    await expect.poll(pixels).toBe(silent);
+    await app.keyboard.up("z");
+    await mock.eval("(m) => m.pauseLive(false)");
+    await app.getByRole("button", { name: "Mute Kick", exact: true }).focus();
+    await expect(status).toContainText("0 voices");
+    const before = (await mock.calls("synth_meter")).length;
+    await app.evaluate(() => new Promise((resolve) => setTimeout(resolve, 150)));
+    expect((await mock.calls("synth_meter")).length).toBeLessThanOrEqual(before + 1);
+  });
+
   test("every_one_of_the_40_parameters_has_a_control", async ({ app, mock }, info) => {
     await open(app);
     await shot(app, info, "synth-editor");

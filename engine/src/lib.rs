@@ -33,6 +33,8 @@ mod export;
 mod graph;
 mod leftover;
 mod live;
+mod synth_meter;
+pub use synth_meter::{SYNTH_SCOPE_LEN, SynthMeter};
 mod metronome;
 mod offline;
 mod output;

@@ -884,3 +884,8 @@
 .filter-display.off svg {
   opacity: 0.45;
 }
+
+.synth-output { flex: none; margin: 4px 8px; }
+.synth-output .dcard-head { padding: 4px 6px; gap: 4px; }
+.synth-output-status { color: var(--muted); font-size: 9px; }
+.synth-output canvas { display: block; }

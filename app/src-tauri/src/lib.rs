@@ -436,6 +436,7 @@ pub fn run() {
             notes_cmds::channel_add_synth,
             notes_cmds::channel_note,
             notes_cmds::channel_param_live,
+            notes_cmds::synth_meter,
             notes_cmds::channel_select,
             notes_cmds::channel_waveform,
             notes_cmds::record_set,
