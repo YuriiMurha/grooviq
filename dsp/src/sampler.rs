@@ -991,27 +991,6 @@ impl Device for Sampler {
         &mut self,
         l: &mut [f32],
         r: &mut [f32],
-        sidechain: Option<(&[f32], &[f32])>,
-        events: &[NoteEvent],
-    ) {
-        self.render::<true>(l, r, sidechain, events);
-    }
-
-    fn reset(&mut self) {
-        self.voices.silence();
-        self.rest();
-    }
-
-    fn choke(&mut self) {
-        self.voices.choke();
-    }
-}
-
-impl Sampler {
-    fn render<const CACHED: bool>(
-        &mut self,
-        l: &mut [f32],
-        r: &mut [f32],
         _sidechain: Option<(&[f32], &[f32])>,
         events: &[NoteEvent],
     ) {
@@ -1039,7 +1018,6 @@ impl Sampler {
         let declick = p[DECLICK] >= 0.5;
         let kind = p[FILTER_TYPE] as u8;
         let (env_amount, flt_sustain) = (p[FILTER_ENV], p[FLT_SUSTAIN]);
-        let mut cache: Option<([u32; 3], [f32; 3], f32)> = None;
         let mut ev = events.iter().peekable();
         // Only events (and a choke, before the block) put voices in fade slots.
         let mut span = voices.span();
@@ -1130,19 +1108,7 @@ impl Sampler {
                 }
                 // Control rate, counted from the note's start: block-split independent.
                 if v.ctl == 0 {
-                    // Preserve the original expression and all voice/control advances. Only
-                    // reuse the expensive math for exactly equal inputs within this call.
-                    let octaves = log2_cutoff + ENV_OCTAVES * env_amount * v.fenv + v.vel_oct;
-                    let key = [octaves.to_bits(), sr.to_bits(), c.damp.to_bits()];
-                    if let Some((_, a, k)) = cache.filter(|(old, _, _)| CACHED && *old == key) {
-                        v.a = a;
-                        v.k = k;
-                    } else {
-                        v.filter_coefs(c, log2_cutoff, env_amount, *sr);
-                        if CACHED {
-                            cache = Some((key, v.a, v.k));
-                        }
-                    }
+                    v.filter_coefs(c, log2_cutoff, env_amount, *sr);
                     v.ctl = CONTROL_FRAMES;
                 }
                 v.ctl -= 1;
@@ -1220,97 +1186,13 @@ impl Sampler {
             voices.event(p, *sr, buf, e);
         }
     }
-}
 
-#[cfg(test)]
-mod coefficient_cache_tests {
-    use super::*;
-
-    fn event(offset: u32, key: u8, velocity: f32, id: u64) -> NoteEvent {
-        NoteEvent {
-            offset,
-            key,
-            velocity,
-            on: true,
-            slide: false,
-            id,
-        }
+    fn reset(&mut self) {
+        self.voices.silence();
+        self.rest();
     }
 
-    fn compare(cached: &mut Sampler, reference: &mut Sampler, n: usize, events: &[NoteEvent]) {
-        let (mut l, mut r, mut a, mut b) = (vec![0.; n], vec![0.; n], vec![0.; n], vec![0.; n]);
-        cached.render::<true>(&mut l, &mut r, None, events);
-        reference.render::<false>(&mut a, &mut b, None, events);
-        assert_eq!(
-            l.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-            a.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            r.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-            b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
-        );
-        for (v, w) in cached.voices.v.iter().zip(reference.voices.v.iter()) {
-            assert_eq!(v.a.map(f32::to_bits), w.a.map(f32::to_bits));
-            assert_eq!(v.k.to_bits(), w.k.to_bits());
-            assert_eq!(v.fenv.to_bits(), w.fenv.to_bits());
-            assert_eq!(v.ctl, w.ctl);
-            assert_eq!(v.pos.to_bits(), w.pos.to_bits());
-        }
-    }
-
-    #[test]
-    fn exact_cache_matches_uncached_voice_state_and_audio() {
-        for phase in 0..CONTROL_FRAMES {
-            let sample = Arc::new(SampleBuf {
-                rate: 48_000.,
-                l: (0..4096).map(|i| libm::sinf(i as f32 * 0.17)).collect(),
-                r: (0..4096).map(|i| libm::cosf(i as f32 * 0.13)).collect(),
-            });
-            let mut cached = Sampler::new(48_000.);
-            let mut reference = Sampler::new(48_000.);
-            for d in [&mut cached, &mut reference] {
-                d.set_sample(Some(sample.clone()));
-            }
-            let notes: Vec<_> = (0..16)
-                .map(|i| event(i % 3, 48 + i as u8, 0.2 + i as f32 * 0.05, i as u64))
-                .collect();
-            compare(&mut cached, &mut reference, 64 + phase as usize, &notes);
-            for step in 0..40 {
-                for d in [&mut cached, &mut reference] {
-                    for (name, value) in [
-                        ("filter_type", (step % 4) as f32),
-                        ("cutoff", 150. + step as f32 * 420.),
-                        ("res", (step % 9) as f32 / 9.),
-                        ("filter_env", if step % 2 == 0 { 0. } else { 0.8 }),
-                        ("vel_filter", if step % 3 == 0 { 0. } else { 0.7 }),
-                        ("reverse", (step % 2) as f32),
-                        ("loop", 1.),
-                        ("glide", 100.),
-                        ("voice_mode", (step % 3) as f32),
-                        ("flt_attack", 3.),
-                        ("flt_decay", 21.),
-                        ("flt_sustain", 0.4),
-                    ] {
-                        let index = PARAM_IDS.iter().position(|p| *p == name).unwrap();
-                        d.set_param(index as u32, value);
-                    }
-                }
-                let events = [event(0, 60, 0.3, 200 + step), event(1, 64, 0.9, 300 + step)];
-                compare(
-                    &mut cached,
-                    &mut reference,
-                    [1, 17, 63, 64, 127][step as usize % 5],
-                    &events,
-                );
-                if step == 23 {
-                    cached.reset();
-                    reference.reset();
-                }
-                if step == 30 {
-                    cached.choke();
-                    reference.choke();
-                }
-            }
-        }
+    fn choke(&mut self) {
+        self.voices.choke();
     }
 }
