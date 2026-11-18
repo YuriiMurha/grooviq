@@ -126,7 +126,12 @@ class TransactionTests(unittest.TestCase):
         self.old_preserved()
 
     def test_receipt_failure_rolls_back(self):
-        with patch.object(m, 'atomic_json', side_effect=OSError('disk full')):
+        atomic = m.atomic_json
+        def fail_receipt(path, value):
+            if path == self.ops / 'installed.json':
+                raise OSError('disk full')
+            return atomic(path, value)
+        with patch.object(m, 'atomic_json', side_effect=fail_receipt):
             with self.assertRaisesRegex(OSError, 'disk full'):
                 self.refresh.refresh()
         self.old_preserved()
@@ -164,6 +169,105 @@ class TransactionTests(unittest.TestCase):
         saved = m.json.loads(receipt.read_text())
         self.assertEqual(saved['installed_executable_sha256'], m.digest(self.app / 'Contents/MacOS/grooviq'))
         self.assertEqual(saved['source_sha'], 'b' * 40)
+
+    def test_signature_failures_preserve_app_and_receipt(self):
+        for boundary in ('source', 'stage', 'installed'):
+            with self.subTest(boundary=boundary):
+                receipt = (self.ops / 'installed.json').read_bytes()
+                run = self.refresh.run
+                def reject(args, **kwargs):
+                    if args[:2] == ['codesign', '--verify']:
+                        path = pathlib.Path(args[-1])
+                        new_installed = path == self.app and (path / 'Contents/MacOS/grooviq').read_bytes() == b'new'
+                        if ((boundary == 'source' and path == self.fixture)
+                                or (boundary == 'stage' and path.name.startswith('.Grooviq-quality-stage-'))
+                                or (boundary == 'installed' and new_installed)):
+                            raise m.subprocess.CalledProcessError(1, args)
+                    return run(args, **kwargs)
+                with patch.object(self.refresh, 'run', side_effect=reject):
+                    with self.assertRaises(m.subprocess.CalledProcessError):
+                        self.refresh.refresh()
+                self.old_preserved()
+                self.assertEqual((self.ops / 'installed.json').read_bytes(), receipt)
+
+    def stop_during_placement(self, window):
+        pid = m.os.fork()
+        if pid == 0:
+            def interrupt(stage, app, previous, verify):
+                app.rename(previous)
+                if window in ('new-placed', 'receipt-written'):
+                    stage.rename(app)
+                if window == 'receipt-written':
+                    verify(app)
+                m.os._exit(74)
+            with patch.object(m, 'place', side_effect=interrupt):
+                self.refresh.refresh()
+            m.os._exit(75)
+        _, status = m.os.waitpid(pid, 0)
+        self.assertEqual(m.os.waitstatus_to_exitcode(status), 74)
+
+    def test_interrupted_committed_receipt_finishes_without_rebuild(self):
+        self.stop_during_placement('receipt-written')
+        self.assertEqual(self.refresh.refresh()['status'], 'unchanged')
+        self.assertEqual((self.app / 'Contents/MacOS/grooviq').read_bytes(), b'new')
+        self.assertFalse((self.ops / 'install-intent.json').exists())
+
+    def test_recovery_refuses_foreign_artifact_and_path(self):
+        self.stop_during_placement('new-placed')
+        intent_path = self.ops / 'install-intent.json'
+        intent = m.json.loads(intent_path.read_text())
+        prior = pathlib.Path(intent['previous'])
+        binary = prior / 'Contents/MacOS/grooviq'
+        binary.write_bytes(b'foreign')
+        receipt = (self.ops / 'installed.json').read_bytes()
+        with self.assertRaisesRegex(RuntimeError, 'Foreign transaction artifact'):
+            self.refresh.refresh()
+        self.assertEqual(binary.read_bytes(), b'foreign')
+        self.assertEqual((self.ops / 'installed.json').read_bytes(), receipt)
+        intent['previous'] = str(self.fixture)
+        m.atomic_json(intent_path, intent)
+        with self.assertRaisesRegex(RuntimeError, 'Foreign transaction paths'):
+            self.refresh.refresh()
+        self.assertTrue(self.fixture.exists())
+
+    def test_interrupted_placement_recovers_both_windows(self):
+        for window in ('old-moved', 'new-placed'):
+            with self.subTest(window=window):
+                receipt = (self.ops / 'installed.json').read_bytes()
+                self.stop_during_placement(window)
+                # Recovery executes before a subsequent build; refuse that build to inspect it.
+                with patch.object(self.refresh, 'build', side_effect=RuntimeError('after recovery')):
+                    with self.assertRaisesRegex(RuntimeError, 'after recovery'):
+                        self.refresh.refresh()
+                self.old_preserved()
+                self.assertEqual((self.ops / 'installed.json').read_bytes(), receipt)
+                self.assertFalse((self.ops / 'install-intent.json').exists())
+
+    def test_malformed_legacy_and_metadata_failure_are_warnings(self):
+        legacy = self.ops / 'previous/legacy-Grooviq.app'
+        self.make_app(legacy, b'legacy')
+        (legacy / 'Contents/Info.plist').write_bytes(b'invalid plist')
+        receipt = self.ops / 'installed.json'
+        prior = m.json.loads(receipt.read_text())
+        prior['previous_app'] = str(legacy)
+        m.atomic_json(receipt, prior)
+        git = self.refresh.git
+        calls = 0
+        def fail_final(*args):
+            nonlocal calls
+            if args[0] == 'rev-parse':
+                calls += 1
+                if calls == 2:
+                    raise m.subprocess.CalledProcessError(1, args)
+            return git(*args)
+        with patch.object(self.refresh, 'git', side_effect=fail_final):
+            record = self.refresh.refresh()
+        self.assertEqual(record['status'], 'installed')
+        self.assertIn('cleanup_warning', record)
+        self.assertIn('metadata_warning', record)
+        self.assertTrue(legacy.exists())
+        self.assertEqual(m.json.loads(receipt.read_text())['installed_executable_sha256'],
+                         m.digest(self.app / 'Contents/MacOS/grooviq'))
 
     def test_unmanaged_app_refusal(self):
         (self.ops / 'installed.json').unlink()
@@ -225,6 +329,36 @@ class SourceTests(unittest.TestCase):
             self.assertEqual(commands[-1][-3:], ['--locked', '--jobs', '2'])
             self.assertEqual(refresh.env['CARGO_TARGET_DIR'], str(cache / 'target'))
 
+    def test_source_symlink_never_unlinks_external_dependency(self):
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp).resolve()
+            cache = root / 'cache'
+            cache.mkdir()
+            external = root / 'external'
+            (external / 'app/ui').mkdir(parents=True)
+            link = external / 'app/ui/node_modules'
+            link.symlink_to(cache / 'ui-dependencies/node_modules')
+            (cache / 'source').symlink_to(external)
+            m.atomic_json(cache / 'source-owned.json', {})
+            refresh = m.Refresh(root, cache, root / 'ops', root / 'app')
+            with self.assertRaisesRegex(RuntimeError, 'symlink'):
+                refresh.build('b' * 40, io.StringIO())
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(m.os.readlink(link), str(cache / 'ui-dependencies/node_modules'))
+
+    def test_archive_failure_retry_remains_owned(self):
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp).resolve()
+            cache = root / 'cache'
+            cache.mkdir()
+            refresh = m.Refresh(root, cache, root / 'ops', root / 'app')
+            with patch.object(refresh, 'run', side_effect=RuntimeError('archive failed')):
+                for _ in range(2):
+                    with self.assertRaisesRegex(RuntimeError, 'archive failed'):
+                        refresh.build('b' * 40, io.StringIO())
+
     def test_archive_link_rejected(self):
         import io
         with tempfile.TemporaryDirectory() as tmp:
@@ -245,4 +379,7 @@ class SourceTests(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main()
+    import sys
+    suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    raise SystemExit(0 if result.testsRun > 0 and result.wasSuccessful() and not result.skipped else 1)

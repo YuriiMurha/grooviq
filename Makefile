@@ -21,7 +21,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: ui-install ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
@@ -76,7 +76,7 @@ refresh-app: ## Quality only: build merged origin/main in the stable cache and r
 	python3 scripts/refresh_install.py
 
 test-refresh-app: ## Exercise install failures with owned fake apps; never builds or launches
-	python3 -m unittest discover -s scripts -p test_refresh_install.py
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_refresh_install.py
 
 .PHONY: grid-budget
 grid-budget: ## Largest step-grid build: original 50 ms budget on standalone V8 CPU time

@@ -140,6 +140,9 @@ for (const path of changed) {
 
 const steps = [];
 const step = (name, cmd, args, cwd = root) => steps.push({ name, cmd, args, cwd });
+if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
+    "scripts/refresh_install.py", "scripts/test_refresh_install.py"].includes(path)))
+  step("local refresh safety tests", "make", ["test-refresh-app"]);
 const uiDir = join(root, "app", "ui");
 const needsUi = ui || workspace || rustCrates.has("grooviq-app");
 

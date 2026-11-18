@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import subprocess
 import tarfile
@@ -76,8 +77,16 @@ def place(stage, app, previous, verify):
 def atomic_json(path, value):
     temporary = path.with_suffix('.tmp')
     safe_tree(temporary)
-    temporary.write_text(json.dumps(value, indent=2) + '\n')
+    with temporary.open('w') as stream:
+        stream.write(json.dumps(value, indent=2) + '\n')
+        stream.flush()
+        os.fsync(stream.fileno())
     temporary.replace(path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 class Refresh:
@@ -118,10 +127,11 @@ class Refresh:
 
     def build(self, revision, log):
         safe_tree(self.cache / 'target')
-        source = self.cache / 'source'
-        marker = self.cache / 'source-owned.json'
+        source = safe_path(self.cache / 'source')
+        marker = safe_path(self.cache / 'source-owned.json')
         # Legacy cache may contain precisely the dependency link made by refresh-once.py.
         link = source / 'app/ui/node_modules'
+        safe_path(link.parent)
         if link.is_symlink():
             if (not marker.is_file() or os.readlink(link) != str(self.cache / 'ui-dependencies/node_modules')):
                 raise RuntimeError('Unmanaged dependency link')
@@ -131,6 +141,8 @@ class Refresh:
             if not marker.is_file():
                 raise RuntimeError('Unmanaged source directory')
             shutil.rmtree(source)
+        # Publish ownership before creating partial extraction state, so interruption is retryable.
+        atomic_json(marker, {'source_sha': revision})
         source.mkdir()
         archive = safe_path(self.cache / 'source.tar')
         self.run(['git', '-C', str(self.repo), 'archive', '--format=tar', '-o', str(archive), revision])
@@ -166,6 +178,51 @@ class Refresh:
                   '--locked', '--jobs', '2'], cwd=ui, stdout=log, stderr=subprocess.STDOUT)
         return self.cache / 'target/release/bundle/macos/Grooviq.app'
 
+    def reconcile(self):
+        intent_path = safe_path(self.ops / 'install-intent.json')
+        if not intent_path.exists():
+            return
+        intent = json.loads(intent_path.read_text())
+        stage, previous = Path(intent['stage']), Path(intent['previous'])
+        if (stage.parent != self.app.parent
+                or not re.fullmatch(r'\.Grooviq-quality-stage-[0-9a-f]{32}\.app', stage.name)
+                or previous.parent != self.ops / 'previous'
+                or not re.fullmatch(r'[0-9a-f]{32}-Grooviq\.app', previous.name)):
+            raise RuntimeError('Foreign transaction paths; retained for inspection')
+        receipt = safe_path(self.ops / 'installed.json')
+        current = receipt.read_text() if receipt.exists() else None
+        committed = json.loads(current) == intent['record'] if current is not None else False
+        if not committed and current != intent['old_receipt']:
+            raise RuntimeError('Foreign receipt; transaction retained')
+        def identity(path):
+            safe_tree(path)
+            if not path.exists():
+                return None
+            self.verify(path)
+            return json.loads(json.dumps(manifest(path)))
+        # Validate every occupied path before the first mutation.
+        app_id, stage_id, prior_id = map(identity, (self.app, stage, previous))
+        old, new = intent['old_manifest'], intent['new_manifest']
+        if stage_id not in (None, new) or prior_id not in (None, old):
+            raise RuntimeError('Foreign transaction artifact; retained')
+        if committed:
+            if app_id != new or prior_id != old:
+                raise RuntimeError('Committed transaction identity mismatch')
+        else:
+            valid = ((app_id == old and prior_id is None and stage_id in (None, new))
+                     or (app_id is None and prior_id == old and stage_id == new)
+                     or (app_id == new and prior_id == old and stage_id is None))
+            if not valid:
+                raise RuntimeError('Interrupted transaction identity mismatch')
+            if app_id == new and stage_id is None and (prior_id is not None or old is None) and self.app.exists():
+                self.app.rename(stage)
+            if prior_id is not None:
+                previous.rename(self.app)
+        # Drop the journal only after reconciliation. Stale verified stage data is disposable.
+        if stage.exists():
+            shutil.rmtree(stage)
+        intent_path.unlink()
+
     def refresh(self):
         # Only canonical locations are exposed by the CLI; constructor injection is for fixtures.
         for path in (self.cache, self.ops, self.app):
@@ -174,6 +231,7 @@ class Refresh:
         self.ops.mkdir(parents=True, exist_ok=True)
         with locked(self.cache / 'install.lock'):
             self.idle()
+            self.reconcile()
             self.git('fetch', 'origin', '--prune')
             revision = self.git('rev-parse', 'origin/main')
             receipt = safe_path(self.ops / 'installed.json')
@@ -221,9 +279,18 @@ class Refresh:
                 def finish(path):
                     verify_copy(path)
                     atomic_json(receipt, record)
+                intent_path = safe_path(self.ops / 'install-intent.json')
+                atomic_json(intent_path, dict(stage=str(stage), previous=str(previous),
+                            old_receipt=receipt.read_text() if receipt.exists() else None,
+                            old_manifest=manifest(self.app) if self.app.exists() else None,
+                            new_manifest=expected, record=record))
                 place(stage, self.app, previous, finish)
+                try:
+                    intent_path.unlink()
+                except OSError as error:
+                    record['journal_warning'] = str(error)
             finally:
-                if stage.exists():
+                if stage.exists() and not (self.ops / 'install-intent.json').exists():
                     safe_tree(stage)
                     shutil.rmtree(stage)
             # Placement and its receipt are committed; legacy cleanup cannot undo that success.
@@ -232,10 +299,13 @@ class Refresh:
                 try:
                     self.verify(old)
                     shutil.rmtree(old)
-                except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+                except (OSError, RuntimeError, subprocess.CalledProcessError, plistlib.InvalidFileException) as error:
                     record['cleanup_warning'] = str(error)
                     record['retained_previous_app'] = str(old)
-            record['main_after_install'] = self.git('rev-parse', 'origin/main')
+            try:
+                record['main_after_install'] = self.git('rev-parse', 'origin/main')
+            except (OSError, subprocess.CalledProcessError) as error:
+                record['metadata_warning'] = str(error)
             return record
 
 
