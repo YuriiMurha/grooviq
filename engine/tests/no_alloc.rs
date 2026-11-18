@@ -22,6 +22,9 @@ use std::time::{Duration, Instant};
 
 const SR: f32 = 48_000.0;
 
+#[path = "realtime/bitcrusher.rs"]
+mod bitcrusher;
+
 #[path = "realtime/drum_shaper.rs"]
 mod drum_shaper;
 
