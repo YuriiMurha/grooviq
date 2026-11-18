@@ -20,6 +20,7 @@
 pub mod autosave;
 pub mod backup;
 pub mod compile;
+pub mod compile_song;
 pub mod file;
 pub mod model;
 pub mod notes;

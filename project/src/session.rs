@@ -1488,6 +1488,19 @@ impl Session {
 
     fn remove_channel(&mut self, channel: u32) -> Result<(), SessionError> {
         let index = self.channel_index(channel)?;
+        // Persisted automation must remain valid even while Song mode is inactive.
+        if self.project.arrangement.clips.iter().any(|clip| {
+            matches!(&clip.content, crate::ClipContent::Automation { target, .. }
+                if match target {
+                    crate::AutomationTarget::ChannelVolume { channel: target }
+                    | crate::AutomationTarget::ChannelPan { channel: target }
+                    | crate::AutomationTarget::InstrumentParam { channel: target, .. } => *target == channel,
+                })
+        }) {
+            return Err(SessionError::InvalidValue(
+                "Remove this channel's automation clips before removing the channel.".into(),
+            ));
+        }
         let mut patterns = self.project.patterns.clone();
         for p in &mut patterns {
             let before = p.notes.len();
