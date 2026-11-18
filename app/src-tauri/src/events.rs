@@ -24,6 +24,8 @@ pub struct OutputDto {
 /// The `audio-event` payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AudioEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<OutputDto>,
@@ -106,6 +108,7 @@ pub fn from_output(event: &OutputEvent, current: Option<&OutputInfo>) -> (Level,
         ),
     };
     let event = AudioEvent {
+        id: None,
         kind,
         output: output.map(|o| output_dto(o, current)),
         message,
@@ -126,6 +129,7 @@ pub fn from_health(event: HealthEvent) -> (Level, AudioEvent) {
         ),
     };
     let event = AudioEvent {
+        id: None,
         kind,
         output: None,
         message,

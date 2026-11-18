@@ -15,13 +15,13 @@ import {
   audioSelect,
   audioSetGuard,
   audioSettings,
-  eventWarns,
   liveEndpoint,
   onAudioEvent,
   testTone,
   type LogEntry,
   type Output,
 } from "./audio";
+import { AudioReplay } from "./toast/audioReplay";
 import { HintBar } from "./hint/HintBar";
 import { connectLive } from "./live/client";
 import type { LiveFrame } from "./live/decode";
@@ -70,6 +70,7 @@ export function App() {
   const [latencyFrames, setLatencyFrames] = useState<number | null>(null);
   const latest = useRef<LiveFrame | null>(null);
   const nextToast = useRef(0);
+  const audioReplay = useRef(new AudioReplay());
   // The typing keyboard is on by default; R records only while it is off.
   const [keyboard, setKeyboard] = useState(true);
   const keyboardRef = useRef(true);
@@ -224,27 +225,32 @@ export function App() {
   }, [perform, play, stop, toggleRecord, stepHistory]);
 
   const loadSettings = useCallback(() => {
-    audioSettings().then(
-      (s) => {
-        setChosen(s.output);
-        setGuard(s.guard);
-      },
-      () => {},
-    );
+    audioSettings().then((settings) => {
+      setChosen(settings.output);
+      setGuard(settings.guard);
+    }, () => {});
   }, []);
 
-  // Startup: what plays, the saved settings, the log; then follow audio events.
+  // Subscribe before reading history: native logs each event before emitting it.
   useEffect(() => {
-    refresh();
-    loadSettings();
-    const unlisten = onAudioEvent((e) => {
-      toast(e.message, eventWarns(e.kind));
-      refresh();
-    });
-    return () => {
-      unlisten.then((stop) => stop());
+    let active = true;
+    const refreshAudio = () => {
+      audioOutputs().then((outputs) => { if (active) setOutputs(outputs); }, () => {});
+      audioLog().then((entries) => { if (active) setLog(entries); }, () => {});
     };
-  }, [refresh, loadSettings, toast]);
+    audioOutputs().then((outputs) => { if (active) setOutputs(outputs); }, () => {});
+    audioSettings().then((settings) => {
+      if (!active) return;
+      setChosen(settings.output);
+      setGuard(settings.guard);
+    }, () => {});
+    const stop = audioReplay.current.connect(onAudioEvent, async () => {
+      const entries = await audioLog();
+      if (active) setLog(entries);
+      return entries;
+    }, toast, refreshAudio);
+    return () => { active = false; stop(); };
+  }, [toast]);
 
   // Autosave trouble the person must hear of. Listen first, then ask what already happened
   // (a copy running without autosave, a failure before the listener was there); a failure told

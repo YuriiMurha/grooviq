@@ -100,8 +100,9 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Logs `event` and sends it to the UI.
-fn report(log: &Mutex<AudioLog>, app: &AppHandle, level: Level, event: AudioEvent) {
-    lock(log).push(level, event.message.clone());
+fn report(log: &Mutex<AudioLog>, app: &AppHandle, level: Level, mut event: AudioEvent) {
+    let mut log = lock(log);
+    event.id = Some(log.push(level, event.message.clone()));
     // Fails only while the app shuts down.
     let _ = app.emit(AUDIO_EVENT, event);
 }
