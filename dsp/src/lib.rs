@@ -16,6 +16,7 @@ pub mod saturation;
 mod util;
 mod wavetable;
 
+pub mod bitcrusher;
 pub mod comp;
 pub mod delay;
 pub mod drive;
@@ -32,6 +33,7 @@ pub mod utility;
 /// (`SPEC` index order). Useful for clamping, defaults and UI ranges.
 pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
     Some(match id {
+        "bitcrusher" => &bitcrusher::SPEC,
         "synth" => &synth::SPEC,
         "sampler" => &sampler::SPEC,
         "eq" => &eq::SPEC,
@@ -53,6 +55,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
 /// until the owner of the concrete [`sampler::Sampler`] calls `set_sample`.
 pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
     Some(match id {
+        "bitcrusher" => Box::new(bitcrusher::Bitcrusher::new(sample_rate)),
         "synth" => Box::new(synth::Synth::new(sample_rate)),
         "sampler" => Box::new(sampler::Sampler::new(sample_rate)),
         "eq" => Box::new(eq::Eq::new(sample_rate)),
