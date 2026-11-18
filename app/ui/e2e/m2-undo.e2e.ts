@@ -163,21 +163,32 @@ test.describe("undo and redo", () => {
 const xy = (p: { x: number; y: number }): [number, number] => [p.x, p.y];
 
 test.describe("the live fixture's history", () => {
+  // Correctness under scheduler contention; performance acceptance lives in the bench.
+  test.describe.configure({ timeout: 120_000 });
   test.use({ seed: { project: twoChannels([]) } });
 
-  test("keeps_the_shells_note_budget", async ({ app, mock }) => {
+  test("keeps_the_shells_note_budget", async ({ app, mock }, info) => {
     // undo.rs: MAX_UNDO_NOTES = 2,000,000 changed notes (before and after) over every step.
     // Eleven edits that each change all 100,000 notes hold 200,000 apiece: the oldest one goes.
     const steps = await app.evaluate(async () => {
       const ipc = (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args?: object) => Promise<unknown> } })
         .__TAURI_INTERNALS__;
       const m = (window as unknown as { __grooviqMock: { state: { project: { pattern: { notes: object[] } } } } }).__grooviqMock;
+      const timings: { stage: string; ms: number }[] = [];
+      let last = performance.now();
+      const stamp = (stage: string) => {
+        const now = performance.now();
+        timings.push({ stage, ms: now - last });
+        last = now;
+      };
+      stamp("seed-start");
       const count = 100_000;
       m.state.project.pattern.notes = Array.from({ length: count }, (_, i) => ({
         id: i + 1, channel: 1, tick: i, length: 10, key: 40, velocity: 0.5, slide: false,
       }));
+      stamp("seed-end");
       const { generation } = (await ipc.invoke("project_view")) as { generation: number };
-      const stamp = async () => {
+      const historyStamp = async () => {
         const current = await ipc.invoke("project_view") as { generation: number; notesRevision: number; pattern: { id: number } };
         return { generation: current.generation, patternId: current.pattern.id, revision: current.notesRevision };
       };
@@ -188,23 +199,33 @@ test.describe("the live fixture's history", () => {
         }));
         await ipc.invoke("notes_edit", { edit: { generation, patternId: 0, baseRevision: view.notesRevision, add: [], update, delete: [] } });
       }
+      stamp("edits-end");
       let undone = 0;
-      while ((await ipc.invoke("notes_undo", { stamp: await stamp() })) !== null) undone++;
+      while (undone < 12 && (await ipc.invoke("notes_undo", { stamp: await historyStamp() })) !== null) undone++;
+      stamp("undo-end");
       const first = [...new Set(m.state.project.pattern.notes.map((n) => (n as { key: number }).key))];
       // Five redone, then a new edit: the five undone ones are forgotten, and with them their
       // notes, so six steps fit.
-      for (let i = 0; i < 5; i++) await ipc.invoke("notes_redo", { stamp: await stamp() });
+      for (let i = 0; i < 5; i++) await ipc.invoke("notes_redo", { stamp: await historyStamp() });
+      stamp("redo-end");
       const view = (await ipc.invoke("project_view")) as { notesRevision: number };
       const update = Array.from({ length: count }, (_, i) => ({
         id: i + 1, channel: 1, tick: i, length: 10, key: 90, velocity: 0.5, slide: false,
       }));
       await ipc.invoke("notes_edit", { edit: { generation, patternId: 0, baseRevision: view.notesRevision, add: [], update, delete: [] } });
       let again = 0;
-      while ((await ipc.invoke("notes_undo", { stamp: await stamp() })) !== null) again++;
-      return { undone, first, again };
+      while (again < 12 && (await ipc.invoke("notes_undo", { stamp: await historyStamp() })) !== null) again++;
+      stamp("branch-undo-end");
+      // Check every field of every retained note, not only the set of pitches.
+      const exact = m.state.project.pattern.notes.length === count && m.state.project.pattern.notes.every((raw, i) => {
+        const n = raw as { id: number; channel: number; tick: number; length: number; key: number; velocity: number; slide: boolean };
+        return n.id === i + 1 && n.channel === 1 && n.tick === Math.min(i, 256 * 240 - 1) && n.length === 10 && n.key === 41 && n.velocity === 0.5 && n.slide === false;
+      });
+      return { undone, first, again, exact, timings };
     });
     // Ten steps back is the first edit's notes.
-    expect(steps).toEqual({ undone: 10, first: [41], again: 6 });
+    await info.attach("budget-stages", { body: JSON.stringify(steps.timings), contentType: "application/json" });
+    expect({ ...steps, timings: undefined }).toEqual({ undone: 10, first: [41], again: 6, exact: true, timings: undefined });
     expect(await mock.view().then((v) => [v.canUndo, v.canRedo])).toEqual([false, true]);
   });
 });
