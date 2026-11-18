@@ -392,7 +392,7 @@ fn plan(
     {
         return Err(too_big(format!(
             "Pattern \"{}\" has {} notes, more than the {MAX_NOTES_PER_PATTERN} a pattern can hold, so the project was not saved.",
-            p.name,
+            crate::model::warning_label(&p.name),
             p.notes.len()
         )));
     }
@@ -404,9 +404,13 @@ fn plan(
         .channels
         .iter_mut()
         .filter_map(|c| {
-            c.sample
-                .as_mut()
-                .map(|s| (c.id, format!("Channel \"{}\"", c.name), s))
+            c.sample.as_mut().map(|s| {
+                (
+                    c.id,
+                    format!("Channel \"{}\"", crate::model::warning_label(&c.name)),
+                    s,
+                )
+            })
         })
         .chain(
             project
@@ -714,9 +718,13 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
         .channels
         .iter()
         .filter_map(|c| {
-            c.sample
-                .as_ref()
-                .map(|s| (c.id, format!("Channel \"{}\"", c.name), s))
+            c.sample.as_ref().map(|s| {
+                (
+                    c.id,
+                    format!("Channel \"{}\"", crate::model::warning_label(&c.name)),
+                    s,
+                )
+            })
         })
         .chain(
             project
@@ -1221,6 +1229,213 @@ mod tests {
         }
         p.next_id = n + 1;
         (p, samples)
+    }
+
+    #[test]
+    fn diagnostic_labels_preserve_save_refusal_and_decode_data() {
+        let names = [
+            "Kick".into(),
+            "x".repeat(40_000),
+            "🎵é\n\u{202e}".repeat(8_000),
+            "a\n\u{2066}é".into(),
+        ];
+        for name in names {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("diagnostic.grooviq");
+            let (mut p, mut files) = project_of(2);
+            p.name = "Preserved project".into();
+            p.channels[0].name = name.clone();
+            p.channels[0].volume = 0.37;
+            p.channels[1].pan = -0.25;
+            p.patterns[0].name = "Preserved pattern".into();
+            p.patterns[0].notes.push(crate::Note {
+                id: 1,
+                channel: 2,
+                tick: 0,
+                length: 240,
+                key: 60,
+                velocity: 0.6,
+                slide: false,
+            });
+            p.patterns[0].next_note_id = 2;
+            // The first payload is an invalid WAV; the second is valid audio.
+            files.get_mut(&2).unwrap().bytes = Arc::new(wav_bytes(8));
+            save(&p, &files, &path).unwrap();
+            let old = fs::read(&path).unwrap();
+            let mut loaded = load(&path).unwrap();
+            let mut expected = p.clone();
+            for channel in &mut expected.channels {
+                channel.sample.as_mut().unwrap().file =
+                    Some(format!("samples/{}-{}.wav", channel.id, channel.id));
+            }
+            assert_eq!(loaded.project, expected);
+            assert!(loaded.warnings.is_empty());
+            let original = loaded.project.clone();
+            let original_files = loaded.samples.clone();
+            for case in 0..3 {
+                let mut absent = loaded.samples.clone();
+                if case == 0 {
+                    absent.remove(&1);
+                }
+                let limits = Limits {
+                    sample: if case == 1 { 5 } else { LIMITS.sample },
+                    total: if case == 2 { 5 } else { LIMITS.total },
+                    ..LIMITS
+                };
+                assert!(validate_save_with_limits(&loaded.project, &absent, limits).is_err());
+                let error =
+                    save_with_limits(&loaded.project, &absent, &path, false, limits).unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+                let text = error.to_string();
+                assert!(text.len() <= 400, "save diagnostic bytes: {}", text.len());
+                assert!(
+                    !text
+                        .chars()
+                        .any(|c| c.is_control() || c == '\u{202e}' || c == '\u{2066}')
+                );
+                if name == "Kick" {
+                    assert!(text.contains("Kick"));
+                }
+                assert_eq!(fs::read(&path).unwrap(), old);
+            }
+            // Isolate each untrusted decoder label as well as their combination.
+            for (channel_name, filename) in [
+                (name.as_str(), "bad.wav"),
+                ("Kick", name.as_str()),
+                (name.as_str(), name.as_str()),
+            ] {
+                loaded.project.channels[0].name = channel_name.into();
+                loaded.samples.get_mut(&1).unwrap().name = filename.into();
+                let before = loaded.project.clone();
+                let sample_before = loaded.samples.clone();
+                let decoded = crate::decode_samples(&loaded);
+                assert_eq!(decoded.missing.iter().copied().collect::<Vec<_>>(), [1]);
+                assert_eq!(decoded.samples.len(), 1);
+                assert_eq!(decoded.warnings.len(), 1);
+                let warning = &decoded.warnings[0];
+                assert!(
+                    warning.len() <= 700,
+                    "decode diagnostic bytes: {}",
+                    warning.len()
+                );
+                assert!(
+                    !warning
+                        .chars()
+                        .any(|c| c.is_control() || c == '\u{202e}' || c == '\u{2066}')
+                );
+                if name == "Kick" {
+                    assert!(warning.contains("Kick"));
+                }
+                assert_eq!(loaded.project, before);
+                for (id, file) in sample_before {
+                    assert_eq!(loaded.samples[&id].name, file.name);
+                    assert_eq!(loaded.samples[&id].bytes, file.bytes);
+                }
+                assert_eq!(crate::decode_samples(&loaded).warnings, decoded.warnings);
+            }
+            loaded.project = original.clone();
+            loaded.samples = original_files;
+            save(&loaded.project, &loaded.samples, &path).unwrap();
+            let again = load(&path).unwrap();
+            assert_eq!(again.project, original);
+            for (id, file) in files {
+                assert_eq!(again.samples[&id].bytes, file.bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn sample_warning_labels_preserve_zip_data_and_protection() {
+        let names = [
+            "Kick".to_string(),
+            "a\n\u{202e}é".to_string(),
+            format!("{}end", "🎵é\n\u{2066}".repeat(250_000)),
+        ];
+        for name in names {
+            // Missing, CRC-unreadable, per-sample overflow and total overflow.
+            for case in 0..4 {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("song.grooviq");
+                let (mut p, samples) = project_of(2);
+                p.channels[0].name = name.clone();
+                save(&p, &samples, &path).unwrap();
+                let initial = load(&path).unwrap();
+                let reference = initial.project.channels[0].sample.clone().unwrap();
+                if case < 2 {
+                    let mut bytes = fs::read(&path).unwrap();
+                    let mut zip = ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+                    let entry = zip.by_name(reference.file.as_ref().unwrap()).unwrap();
+                    let offset = entry.data_start().unwrap() as usize;
+                    drop(entry);
+                    drop(zip);
+                    if case == 0 {
+                        // Rename both ZIP headers without changing project.json's reference.
+                        let needle = reference.file.as_ref().unwrap().as_bytes();
+                        let offsets: Vec<_> = bytes
+                            .windows(needle.len())
+                            .enumerate()
+                            .filter_map(|(i, b)| (b == needle).then_some(i))
+                            .collect();
+                        assert_eq!(offsets.len(), 2);
+                        for offset in offsets {
+                            bytes[offset] = b'X';
+                        }
+                    } else {
+                        bytes[offset] ^= 0xff;
+                    }
+                    fs::write(&path, bytes).unwrap();
+                }
+                let old = fs::read(&path).unwrap();
+                let loaded = load_with_limits(
+                    &path,
+                    Limits {
+                        sample: if case == 2 { 5 } else { 100 },
+                        total: if case == 3 { 5 } else { 100 },
+                        ..LIMITS
+                    },
+                )
+                .unwrap();
+                let expected_count = if case >= 2 { 2 } else { 1 };
+                assert_eq!(loaded.warnings.len(), expected_count);
+                for warning in &loaded.warnings {
+                    assert!(warning.len() <= 400, "unbounded warning: {}", warning.len());
+                    assert!(
+                        !warning
+                            .chars()
+                            .any(|c| c.is_control() || c == '\u{202e}' || c == '\u{2066}')
+                    );
+                }
+                if name == "Kick" {
+                    assert!(loaded.warnings[0].contains(&name));
+                } else {
+                    assert!(loaded.warnings[0].contains('�'));
+                }
+                assert_eq!(loaded.project.channels[0].name, name);
+                let actual = loaded.project.channels[0].sample.as_ref().unwrap();
+                assert_eq!(actual.path, reference.path);
+                assert!(!loaded.samples.contains_key(&1));
+                if case >= 2 {
+                    assert_eq!(actual.file, reference.file);
+                    assert!(save(&loaded.project, &loaded.samples, &path).is_err());
+                    assert_eq!(fs::read(&path).unwrap(), old);
+                } else {
+                    assert_eq!(actual.file, None);
+                    assert_eq!(*loaded.samples[&2].bytes, *samples[&2].bytes);
+                    save(&loaded.project, &loaded.samples, &path).unwrap();
+                    let again = load(&path).unwrap();
+                    assert_eq!(again.project.channels[0].name, name);
+                    assert_eq!(
+                        again.project.channels[0].sample.as_ref().unwrap().path,
+                        reference.path
+                    );
+                    assert_eq!(
+                        again.project.channels[0].sample.as_ref().unwrap().file,
+                        None
+                    );
+                    assert_eq!(*again.samples[&2].bytes, *samples[&2].bytes);
+                }
+            }
+        }
     }
 
     #[test]

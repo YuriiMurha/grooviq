@@ -65,6 +65,7 @@ pub struct NotesEdit {
     /// The project the edit was made in ([`ProjectView::generation`]): an edit for a project
     /// that was replaced since is refused whole, however its ids and revision look.
     pub generation: u64,
+    pub pattern_id: u32,
     pub base_revision: u32,
     #[serde(default)]
     pub add: Vec<NewNote>,
