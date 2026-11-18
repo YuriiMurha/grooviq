@@ -46,7 +46,7 @@ golden-update: ## Rewrite the golden reference WAVs on purpose; say why in the P
 	GOLDEN_UPDATE=1 $(CARGO) test -p grooviq-golden
 
 rtsan: ## The no_alloc tests under RealtimeSanitizer (macOS/Linux; downloads LLVM's runtime once)
-	RTSAN_ENABLE=1 RTSAN_OPTIONS=suppressions=$(CURDIR)/engine/tests/rtsan.supp $(CARGO) test -p grooviq-engine --all-features --test no_alloc
+	RTSAN_ENABLE=1 RTSAN_OPTIONS= $(CARGO) test -p grooviq-engine --all-features --test no_alloc
 
 bench: ## Render speed, block times and determinism of the reference scenes, then DSP kernel timings
 	$(CARGO) bench -p grooviq-golden --bench render
