@@ -471,3 +471,85 @@ fn synth_observation_captures_output_clears_silence_and_rejects_reused_channel()
     p.process(&mut output, 2);
     assert!(live.synth_meter(first).is_none());
 }
+
+#[test]
+fn synth_scope_tracks_automation_without_changing_rendered_audio() {
+    use grooviq_engine::{
+        AutomationClip, AutomationPoint, AutomationSchedule, AutomationSegment, AutomationTarget,
+        PlaybackMode, SongData, SynthMeter,
+    };
+    fn render(automated: bool, observed: bool) -> (Vec<f32>, Option<SynthMeter>) {
+        let channel = synth_channel(1, preset("Init"));
+        let automation = if automated {
+            AutomationSchedule::build(
+                vec![AutomationClip {
+                    target: AutomationTarget::InstrumentParam {
+                        channel: ChannelId(1),
+                        instrument: InstrumentKind::Synth,
+                        param: 2,
+                    },
+                    priority: 1,
+                    start_tick: 0,
+                    offset_tick: 0,
+                    length_ticks: 960,
+                    points: vec![AutomationPoint {
+                        tick: 0,
+                        value: 12.0,
+                        segment: AutomationSegment::Hold,
+                    }],
+                }],
+                std::slice::from_ref(&channel),
+            )
+            .unwrap()
+        } else {
+            AutomationSchedule::default()
+        };
+        let (mut c, mut p) = engine_with(
+            cfg(),
+            EngineState {
+                channels: vec![channel],
+                playback_mode: PlaybackMode::Song,
+                song: SongData {
+                    automation,
+                    end_tick: 960,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let instance = c.channel_instance(ChannelId(1)).unwrap();
+        let live = c.live_shared();
+        if observed {
+            live.synth_meter(instance);
+        }
+        c.send(Command::Play).unwrap();
+        c.send(cnote(1, 60, true)).unwrap();
+        let mut output = vec![0.0; 8192];
+        for part in output.chunks_mut(128) {
+            p.process(part, 2);
+        }
+        assert!(c.live().playing);
+        assert!(peak(&output) > 0.01);
+        let meter = observed.then(|| {
+            live.synth_meter(instance)
+                .expect("a current automated capture")
+        });
+        (output, meter)
+    }
+    let (audio, meter) = render(true, true);
+    assert_eq!(
+        audio,
+        render(true, false).0,
+        "observation must not change audio"
+    );
+    let (base, base_meter) = render(false, true);
+    assert_ne!(audio, base, "instrument automation must reach the synth");
+    let meter = meter.unwrap();
+    assert!(meter.scope.iter().all(|v| v.is_finite()));
+    assert!(meter.scope.iter().any(|v| v.abs() > 0.001));
+    assert_ne!(
+        meter.scope,
+        base_meter.unwrap().scope,
+        "scope must capture the automated instrument"
+    );
+}

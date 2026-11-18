@@ -33,6 +33,8 @@ const NO_EVENT: NoteEvent = NoteEvent {
 enum Source {
     Sampler(Sampler),
     Synth(Box<Synth>),
+    #[cfg(test)]
+    Recording(Box<dyn Device>),
 }
 
 impl Source {
@@ -40,15 +42,22 @@ impl Source {
         match self {
             Self::Sampler(s) => s,
             Self::Synth(s) => &mut **s,
+            #[cfg(test)]
+            Self::Recording(s) => &mut **s,
         }
     }
 }
 
 pub(crate) struct ChannelNode {
+    host: Option<grooviq_dsp::HostTransport>,
     id: ChannelId,
     pub(crate) instance: u64,
     source: Source,
     mix: ChannelMix,
+    base_params: Vec<f32>,
+    parameter_automated: Vec<bool>,
+    kind: crate::InstrumentKind,
+    automated: bool,
     /// Choke group (0: none).
     choke: u8,
     /// Left and right gain: volume, pan law and mute/solo together.
@@ -93,10 +102,21 @@ impl ChannelNode {
         let [l, r] = setup.mix.gains(setup.mix.audible(any_solo));
         let idle = matches!(source, Source::Sampler(_));
         Self {
+            host: None,
             id: setup.id,
             instance: 0,
             source,
             mix: setup.mix,
+            base_params: setup
+                .instrument
+                .spec()
+                .iter()
+                .enumerate()
+                .map(|(i, &(_, _, d))| setup.instrument.params().get(i).copied().unwrap_or(d))
+                .collect(),
+            parameter_automated: vec![false; setup.instrument.spec().len()],
+            kind: setup.instrument.kind(),
+            automated: false,
             choke: setup.choke,
             gain: [Ramp::at(l), Ramp::at(r)],
             ramp_len,
@@ -125,6 +145,58 @@ impl ChannelNode {
             meter.levels = [0.0; 6];
         }
         Some(meter)
+    }
+
+    pub(crate) fn automate(
+        &mut self,
+        schedule: &crate::AutomationSchedule,
+        tick: Option<f64>,
+        any_solo: bool,
+    ) {
+        use crate::AutomationTarget as T;
+        let volume = tick.and_then(|t| schedule.value_at(T::ChannelVolume(self.id), t));
+        let pan = tick.and_then(|t| schedule.value_at(T::ChannelPan(self.id), t));
+        let mut active = volume.is_some() || pan.is_some();
+        for (param, &base) in self.base_params.iter().enumerate() {
+            let value = tick.and_then(|t| {
+                schedule.value_at(
+                    T::InstrumentParam {
+                        channel: self.id,
+                        instrument: self.kind,
+                        param: param as u32,
+                    },
+                    t,
+                )
+            });
+            active |= value.is_some();
+            if let Some(value) = value {
+                self.source.device().set_param(param as u32, value);
+            } else if self.parameter_automated[param] {
+                self.source.device().set_param(param as u32, base);
+            }
+            self.parameter_automated[param] = value.is_some();
+        }
+        if active || self.automated {
+            let effective = ChannelMix {
+                volume: volume.unwrap_or(self.mix.volume),
+                pan: pan.unwrap_or(self.mix.pan),
+                ..self.mix
+            };
+            for (ramp, target) in self
+                .gain
+                .iter_mut()
+                .zip(effective.gains(effective.audible(any_solo)))
+            {
+                if ramp.target() != target {
+                    ramp.start(target, self.ramp_len);
+                }
+            }
+        }
+        self.automated = active;
+    }
+
+    pub(crate) fn set_host(&mut self, host: Option<grooviq_dsp::HostTransport>) {
+        self.host = host;
     }
 
     pub(crate) fn id(&self) -> ChannelId {
@@ -167,12 +239,18 @@ impl ChannelNode {
 
     /// Sets a parameter of the instrument, by its index in the instrument's own `SPEC`.
     pub(crate) fn set_param(&mut self, index: u32, value: f32) {
+        if let Some(base) = self.base_params.get_mut(index as usize) {
+            *base = value;
+        }
         self.source.device().set_param(index, value);
     }
 
     /// Sets a sampler parameter; a synth channel ignores it.
     pub(crate) fn set_sampler_param(&mut self, index: u32, value: f32) {
         if let Source::Sampler(sampler) = &mut self.source {
+            if let Some(base) = self.base_params.get_mut(index as usize) {
+                *base = value;
+            }
             sampler.set_param(index, value);
         }
     }
@@ -183,6 +261,8 @@ impl ChannelNode {
         match &mut self.source {
             Source::Sampler(sampler) => sampler.set_sample(sample),
             Source::Synth(_) => sample,
+            #[cfg(test)]
+            Source::Recording(_) => sample,
         }
     }
 
@@ -299,6 +379,9 @@ impl ChannelNode {
                 for e in &mut events[first..end] {
                     e.offset -= start as u32;
                 }
+                if let Some(host) = self.host {
+                    device.set_transport(&host.span(start as u32, (split - start) as u32).unwrap());
+                }
                 device.process(
                     &mut l[start..split],
                     &mut r[start..split],
@@ -311,6 +394,9 @@ impl ChannelNode {
         }
         for e in &mut events[first..] {
             e.offset -= start as u32;
+        }
+        if let Some(host) = self.host {
+            device.set_transport(&host.span(start as u32, (BLOCK - start) as u32).unwrap());
         }
         device.process(&mut l[start..], &mut r[start..], None, &events[first..]);
         for (a, b) in l.iter_mut().zip(r.iter_mut()) {
@@ -478,5 +564,230 @@ mod tests {
             assert!(sl == fl && sr == fr, "block {block}");
         }
         assert!(skipped > 150, "the skip ran: {skipped}");
+    }
+}
+
+#[cfg(test)]
+mod automation_tests {
+    use super::*;
+    use crate::*;
+    fn schedule() -> AutomationSchedule {
+        AutomationSchedule::build(
+            vec![AutomationClip {
+                target: AutomationTarget::ChannelVolume(ChannelId(7)),
+                priority: 1,
+                start_tick: 0,
+                offset_tick: 0,
+                length_ticks: 960,
+                points: vec![
+                    AutomationPoint {
+                        tick: 0,
+                        value: 0.0,
+                        segment: AutomationSegment::Linear,
+                    },
+                    AutomationPoint {
+                        tick: 960,
+                        value: 2.0,
+                        segment: AutomationSegment::Hold,
+                    },
+                ],
+            }],
+            &[ChannelSetup::sampler(
+                ChannelId(7),
+                None,
+                vec![],
+                ChannelMix::default(),
+            )],
+        )
+        .unwrap()
+    }
+    #[test]
+    fn delivered_targets_and_latest_base_restoration() {
+        let setup = ChannelSetup::sampler(ChannelId(7), None, vec![], ChannelMix::default());
+        let mut node = ChannelNode::new(48000.0, 240, &setup, false);
+        let schedule = schedule();
+        for (tick, value) in [(0.0, 0.0), (240.0, 0.5), (480.0, 1.0), (720.0, 1.5)] {
+            node.automate(&schedule, Some(tick), false);
+            assert_eq!(node.gain[0].target(), value);
+            assert_eq!(node.mix.volume, 1.0);
+        }
+        node.set_mix(ChannelMix {
+            volume: 0.25,
+            ..ChannelMix::default()
+        });
+        node.automate(&schedule, Some(800.0), false);
+        node.automate(&schedule, None, false);
+        assert_eq!(node.gain[0].target(), 0.25);
+        node.automate(&schedule, Some(960.0), false);
+        assert_eq!(node.gain[0].target(), 0.25);
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    struct Recorder {
+        pending: Option<grooviq_dsp::HostTransport>,
+        seen: Arc<Mutex<Vec<grooviq_dsp::HostTransport>>>,
+    }
+    impl Device for Recorder {
+        fn set_param(&mut self, _: u32, _: f32) {}
+        fn reset(&mut self) {}
+        fn set_transport(&mut self, h: &grooviq_dsp::HostTransport) {
+            assert!(self.pending.replace(*h).is_none());
+        }
+        fn process(
+            &mut self,
+            l: &mut [f32],
+            r: &mut [f32],
+            _: Option<(&[f32], &[f32])>,
+            _: &[NoteEvent],
+        ) {
+            let h = self.pending.take().expect("host facts precede every span");
+            assert_eq!(h.frames as usize, l.len());
+            self.seen.lock().unwrap().push(h);
+            l.fill(0.0);
+            r.fill(0.0);
+        }
+    }
+    struct Parameters(Arc<Mutex<Vec<(u32, f32)>>>);
+    impl Device for Parameters {
+        fn reset(&mut self) {}
+        fn set_param(&mut self, index: u32, value: f32) {
+            self.0.lock().unwrap().push((index, value));
+        }
+        fn process(
+            &mut self,
+            _: &mut [f32],
+            _: &mut [f32],
+            _: Option<(&[f32], &[f32])>,
+            _: &[NoteEvent],
+        ) {
+        }
+    }
+    #[test]
+    fn recording_device_receives_native_targets_and_manual_base() {
+        use crate::*;
+        let setup = ChannelSetup::sampler(ChannelId(1), None, vec![], ChannelMix::default());
+        let mut node = ChannelNode::new(48000.0, 240, &setup, false);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        node.source = Source::Recording(Box::new(Parameters(seen.clone())));
+        let target = AutomationTarget::InstrumentParam {
+            channel: ChannelId(1),
+            instrument: InstrumentKind::Sampler,
+            param: 1,
+        };
+        let schedule = AutomationSchedule::build(
+            vec![AutomationClip {
+                target,
+                priority: 1,
+                start_tick: 0,
+                offset_tick: 0,
+                length_ticks: 960,
+                points: vec![
+                    AutomationPoint {
+                        tick: 0,
+                        value: -24.0,
+                        segment: AutomationSegment::Linear,
+                    },
+                    AutomationPoint {
+                        tick: 960,
+                        value: 24.0,
+                        segment: AutomationSegment::Hold,
+                    },
+                ],
+            }],
+            &[setup],
+        )
+        .unwrap();
+        for frame in [0, 64, 128, 192, 6000, 12000, 18000] {
+            let tick = frame as f64 / (48000.0 * 60.0 / (120.0 * 960.0));
+            let expected = (-24.0 + 48.0 * tick / 960.0) as f32;
+            seen.lock().unwrap().clear();
+            node.automate(&schedule, Some(tick), false);
+            assert_eq!(
+                seen.lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(i, _)| *i == 1)
+                    .unwrap()
+                    .1,
+                expected
+            );
+        }
+        node.set_param(1, 7.0);
+        node.automate(&schedule, Some(800.0), false);
+        seen.lock().unwrap().clear();
+        node.automate(&schedule, None, false);
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .find(|(i, _)| *i == 1)
+                .unwrap()
+                .1,
+            7.0
+        );
+    }
+    #[test]
+    fn every_actual_choke_span_receives_canonical_facts() {
+        let setup = ChannelSetup::sampler(ChannelId(1), None, vec![], ChannelMix::default());
+        let mut node = ChannelNode::new(8000.0, 40, &setup, false);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        node.source = Source::Recording(Box::new(Recorder {
+            pending: None,
+            seen: seen.clone(),
+        }));
+        node.idle = false;
+        let mut clock = crate::transport::TransportClock::new(8000.0, 400.0);
+        clock.start(0, None);
+        let host = clock.host(
+            0,
+            9,
+            2,
+            true,
+            Some(crate::SongLoop {
+                start_tick: 0,
+                end_tick: 1,
+            }),
+        );
+        node.set_host(Some(host));
+        node.render(&mut [0.0; BLOCK], &mut [0.0; BLOCK], &[0, 1, 17, 63]);
+        let spans = seen.lock().unwrap();
+        assert_eq!(
+            spans.iter().map(|h| h.frames).collect::<Vec<_>>(),
+            [1, 16, 46, 1]
+        );
+        let positions: Vec<_> = spans
+            .iter()
+            .flat_map(|h| (0..h.frames).map(|i| h.position_at(i).unwrap()))
+            .collect();
+        assert_eq!(
+            positions,
+            (0..64)
+                .map(|i| host.position_at(i).unwrap())
+                .collect::<Vec<_>>()
+        );
+        let edges: Vec<_> = spans
+            .iter()
+            .flat_map(|h| {
+                h.edges()
+                    .map(|e| (h.frame + u64::from(e.offset), e.iteration))
+            })
+            .collect();
+        assert_eq!(
+            edges,
+            host.edges()
+                .map(|e| (u64::from(e.offset), e.iteration))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[cfg(test)]
+impl ChannelNode {
+    pub(crate) fn gain_target(&self) -> f32 {
+        self.gain[0].target()
     }
 }

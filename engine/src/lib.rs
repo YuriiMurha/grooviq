@@ -26,6 +26,10 @@
 //! replaces the graph.
 
 mod arrangement;
+mod automation;
+pub use automation::{
+    AutomationClip, AutomationPoint, AutomationSchedule, AutomationSegment, AutomationTarget,
+};
 mod channel;
 mod command;
 mod controller;
