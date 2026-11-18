@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
+// Node type stripping does not resolve Vite-style extensionless runtime imports.
+// New gridModel dependencies must be Node-resolvable, or this gate must bundle them.
 import { buildInstances, STRIDE } from "../app/ui/src/rack/gridModel.ts";
 
 // Same 256x256 workload and one warm-up as the original unit timing test.
