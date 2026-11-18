@@ -1894,7 +1894,9 @@ impl Session {
             (room, "noteCap")
         };
         let mut dropped = self.pending.len().saturating_sub(fits);
-        self.pending.truncate(fits);
+        // Capacity overflow is only discarded after admission succeeds (or its explicit
+        // capacity-stop acknowledgement). A compiler refusal retains the whole poll.
+        let overflow = self.pending.split_off(fits.min(self.pending.len()));
 
         let mut out = Recorded::default();
         let mut error = None;
@@ -1905,10 +1907,21 @@ impl Session {
                 dropped += lost;
                 reason = "error";
                 if lost == 0 {
+                    self.pending.extend(overflow);
+                    // End the original take through its normal End/barrier, preserving held
+                    // notes. A full command queue leaves recording on and retries next poll.
+                    let ending = !self.recording || self.set_recording(false).is_ok();
                     out.stopped = Some(RecordingStopped {
                         reason: "admission",
                         dropped: 0,
-                        message: format!("Recorded notes are retained for retry: {e}"),
+                        message: format!(
+                            "{} Recorded notes are retained for retry: {e}",
+                            if ending {
+                                "Recording ended."
+                            } else {
+                                "Recording could not end yet; its queue will retry."
+                            }
+                        ),
                     });
                     return out;
                 }

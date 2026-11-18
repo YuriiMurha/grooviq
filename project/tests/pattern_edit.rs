@@ -941,3 +941,96 @@ fn pattern_identity_is_checked_even_when_note_revisions_coincide() {
     assert!(ack.added_ids.is_empty());
     assert_eq!(s.view(), before);
 }
+
+#[test]
+fn compile_refusal_retains_the_whole_poll_even_when_only_part_fits_the_note_cap() {
+    use grooviq_engine::{ChannelId, NoteId, RecordEvent};
+    use grooviq_project::notes::NotesEdit;
+    use grooviq_project::{DecodedSamples, Loaded, Note};
+    let (c, _processor) = engine(EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let c = Arc::new(Mutex::new(c));
+    let mut s = Session::new(c.clone());
+    let now = Instant::now();
+    let ch = s.add_synth_channel("Init", now).unwrap().channels[0].id;
+    let mut p = s.project().clone();
+    p.patterns[0].notes = (1..100000)
+        .map(|id| Note {
+            id,
+            channel: ch,
+            tick: 0,
+            length: 240,
+            key: 60,
+            velocity: 0.8,
+            slide: false,
+        })
+        .collect();
+    p.patterns[0].next_note_id = 100000;
+    s.open(
+        std::path::Path::new("cap.grooviq"),
+        Loaded {
+            project: p,
+            samples: Default::default(),
+            warnings: vec![],
+        },
+        DecodedSamples::default(),
+    )
+    .unwrap();
+    let mark = c.lock().unwrap().record_mark();
+    s.collect_recorded(&[RecordEvent::Mark { id: mark }], now);
+    s.set_recording(true).unwrap();
+    s.set_precommit_validator(Some(Arc::new(|p| {
+        if p.patterns[0].notes.len() > 99999 {
+            Err("expanded budget".into())
+        } else {
+            Ok(())
+        }
+    })));
+    let before = s.project().clone();
+    let mut events = vec![];
+    for (id, key) in [(1, 70), (2, 72)] {
+        for on in [true, false] {
+            events.push(RecordEvent::Note {
+                channel: ChannelId(ch),
+                key,
+                velocity: 0.8,
+                on,
+                tick: if on { 0 } else { 240 },
+                position: 0,
+                take: 1,
+                id: NoteId(id),
+            });
+        }
+    }
+    let recorded = s.collect_recorded(&events, now);
+    assert_eq!(recorded.stopped.unwrap().dropped, 0);
+    assert_eq!(s.project(), &before);
+    s.set_precommit_validator(None);
+    s.edit_notes(
+        NotesEdit {
+            generation: s.generation(),
+            pattern_id: 0,
+            base_revision: s.notes_revision(),
+            add: vec![],
+            update: vec![],
+            delete: vec![1, 2],
+        },
+        now,
+    )
+    .unwrap();
+    s.collect_recorded(&[], now);
+    assert_eq!(
+        s.current_pattern()
+            .notes
+            .iter()
+            .filter(|n| n.key >= 70)
+            .count(),
+        2,
+        "the entire rejected poll remains recoverable"
+    );
+    assert!(
+        !s.view().recording,
+        "an admission refusal ends the take without dropping its End"
+    );
+}
