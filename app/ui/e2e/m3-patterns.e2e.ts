@@ -37,7 +37,18 @@ test("canonical pattern replies preserve independent notes, undo and monotonic i
   expect(refused.state).toEqual(undone);
   const deleted = await edit(app, undone, { kind: "delete", pattern: b });
   const created = await edit(app, deleted.state, { kind: "create", name: "C" });
-  expect(created.state.patterns.find((p) => p.name === "C")!.id).toBeGreaterThan(b);
+  const c = created.state.patterns.find((p) => p.name === "C")!.id;
+  expect(c).toBeGreaterThan(b);
+  await invoke(app, "project_save_as", { path: "/qa/projects/patterns.grooviq" });
+  await invoke(app, "project_new");
+  await invoke(app, "project_open", { path: "/qa/projects/patterns.grooviq" });
+  const reopened = await list(app);
+  expect(reopened.revision).toBe(created.state.revision);
+  expect(reopened.generation).toBeGreaterThan(created.state.generation);
+  expect(reopened.patterns.map((p) => [p.id,p.name])).toEqual(created.state.patterns.map((p) => [p.id,p.name]));
+  expect(reopened.view.pattern.cells["1"][0]).toBe(0.8);
+  const next = await edit(app, reopened, { kind:"create", name:"D" });
+  expect(next.state.patterns.find((p) => p.name === "D")!.id).toBeGreaterThan(c);
 });
 
 test("a step held across selection is refused without clearing the new pattern", async ({ app, mock }) => {

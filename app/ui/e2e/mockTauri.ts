@@ -251,7 +251,8 @@ export function installMockTauri(seed: MockSeed): void {
   let patternsRevision = 0;
   let historyOrder = 0;
   const initialisePatterns = () => {
-    patternBank.clear(); patternsRevision = 0;
+    // Session keeps its structural counter across replacement; generation fences its scope.
+    patternBank.clear();
     for (const pattern of s.project.patterns ?? [s.project.pattern]) {
       const normalized = normalise({ ...s.project, pattern: clone(pattern) }).pattern;
       patternBank.set(pattern.id, { pattern: normalized, revision: s.notesRevision, history: emptyHistory() });
