@@ -130,6 +130,7 @@ pub fn engine_state(project: &Project, samples: &HashMap<u32, Arc<SampleBuf>>) -
         channels,
         pattern,
         time_signature: time_signature(project),
+        ..EngineState::default()
     }
 }
 
