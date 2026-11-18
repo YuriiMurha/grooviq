@@ -1753,3 +1753,54 @@ fn nested_presses_of_one_key_record_their_own_lengths_and_each_take_undoes_in_on
     assert_eq!(undo_all(&mut session), 2);
     assert!(notes(&session).is_empty());
 }
+
+#[test]
+fn recovery_exhaustion_finishes_the_actual_take_and_preserves_undo() {
+    let (mut session, controller, mut processor, ch, before) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70, 74]);
+    let _held = session.live_note_on(ch, 76, 0.8).unwrap();
+    render(&mut processor, 6);
+    for delay in [0, 250, 500, 1000] {
+        controller
+            .lock()
+            .unwrap()
+            .send(Command::InjectPanic)
+            .unwrap();
+        render(&mut processor, 1);
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        controller.lock().unwrap().check_health();
+        render(&mut processor, 1);
+    }
+    let stopped = collect(&mut session, &controller).stopped.unwrap();
+    assert_eq!(stopped.reason, "engineRecovery");
+    assert_eq!(stopped.dropped, 0);
+    render(&mut processor, 2);
+    assert!(collect(&mut session, &controller).stopped.is_none());
+    assert!(!controller.lock().unwrap().live().playing);
+    assert!(!session.view().recording);
+    assert!(
+        session.settle_recording().is_ok(),
+        "the End barrier must settle the take"
+    );
+    assert_eq!(notes(&session).len(), before.len() + 3);
+    assert!(session.view().dirty);
+    undo(&mut session);
+    assert_eq!(notes(&session), before);
+    assert!(controller.lock().unwrap().reconfigure(
+        &mut processor,
+        EngineConfig {
+            sample_rate: 48_000.0
+        }
+    ));
+    render(&mut processor, 2);
+    assert!(!controller.lock().unwrap().live().playing);
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    render(&mut processor, 2);
+    session.live_note_on(ch, 79, 0.8).unwrap();
+    render(&mut processor, 3);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    assert!(!events.iter().any(|e| matches!(e, RecordEvent::Note { .. })));
+}

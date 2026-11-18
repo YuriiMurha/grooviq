@@ -562,6 +562,13 @@ impl AudioProcessor {
         }
     }
 
+    pub(crate) fn finish_recovery_stop(&mut self, mark: u32) {
+        self.stop(self.clock);
+        self.recorder
+            .set(false, &self.transport, self.clock, &self.live);
+        self.recorder.mark(mark);
+    }
+
     pub(crate) fn stop_after_failed_rebuild(&mut self) {
         self.fault();
         self.live.publish_recovery(self.faults, 0);

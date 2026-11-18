@@ -131,6 +131,8 @@ pub struct Controller {
     attempts: u8,
     retry_at: Option<Instant>,
     stopped: bool,
+    stop_owed: bool,
+    recovery_stop_mark: Option<u32>,
     reset_owed: bool,
     /// Test switch: this many replays of the state panic, as a device bug in `set_param` would.
     #[cfg(test)]
@@ -169,6 +171,8 @@ impl Controller {
             attempts: 0,
             retry_at: None,
             stopped: false,
+            stop_owed: false,
+            recovery_stop_mark: None,
             reset_owed: false,
             #[cfg(test)]
             replay_panics: std::cell::Cell::new(0),
@@ -207,6 +211,10 @@ impl Controller {
     /// API.
     #[doc(hidden)]
     pub fn send_at(&mut self, due: u64, cmd: Command) -> Result<(), ControlError> {
+        self.flush_recovery_stop();
+        if self.stop_owed {
+            return Err(ControlError::Full);
+        }
         let mut cmd = cmd.clamped().ok_or(ControlError::Rejected)?;
         if let Command::Seek { tick } = &mut cmd
             && let Some(r) = self.state.song_loop
@@ -428,6 +436,7 @@ impl Controller {
     /// before [`crate::RecordEvent::Mark`] with the returned id (the End a `SetRecording { on:
     /// false }` makes included), and everything after it after.
     pub fn send_marked(&mut self, cmd: Command) -> Result<u32, ControlError> {
+        self.flush_recovery_stop();
         if self.commands.slots() < 2 {
             return Err(ControlError::Full);
         }
@@ -438,6 +447,11 @@ impl Controller {
         let queued = self.push(Msg::RecordMark(id));
         debug_assert!(queued.is_ok());
         Ok(id)
+    }
+
+    /// Barrier of the latest exhaustion Stop/disarm transaction, once queued.
+    pub fn recovery_stop_mark(&self) -> Option<u32> {
+        self.recovery_stop_mark
     }
 
     /// Accepted queued recording state, including disarm on a mode transition (even stopped).
@@ -540,6 +554,23 @@ impl Controller {
         self.check_health_at(Instant::now())
     }
 
+    fn flush_recovery_stop(&mut self) {
+        if !self.stop_owed || self.commands.slots() < 3 {
+            return;
+        }
+        // Reserve the complete Stop/disarm/barrier transaction before publishing it.
+        self.record_mark = self.record_mark.wrapping_add(1);
+        for cmd in [Command::Stop, Command::SetRecording { on: false }] {
+            let queued = self.commands.push(Msg::Command { due: 0, cmd });
+            debug_assert!(queued.is_ok());
+        }
+        let queued = self.commands.push(Msg::RecordMark(self.record_mark));
+        debug_assert!(queued.is_ok());
+        self.recording_armed = false;
+        self.recovery_stop_mark = Some(self.record_mark);
+        self.stop_owed = false;
+    }
+
     fn reset_recovery(&mut self) {
         self.reset_owed |= self.attempts > 0 || self.stopped;
         self.attempts = 0;
@@ -549,6 +580,7 @@ impl Controller {
 
     fn check_health_at(&mut self, now: Instant) -> Vec<HealthEvent> {
         self.free_trash();
+        self.flush_recovery_stop();
         let live = self.live.snapshot();
         let (faults, successful_blocks) = self.live.recovery();
         let mut events = Vec::new();
@@ -558,15 +590,13 @@ impl Controller {
         {
             self.reset_recovery();
         }
-        if faults != self.seen_faults
-            && !self.stopped
-            && self.retry_at.is_none_or(|at| now >= at)
-            && self.commands.slots() > 0
-        {
+        if faults != self.seen_faults && !self.stopped && self.retry_at.is_none_or(|at| now >= at) {
             if self.attempts == 3 {
                 self.stopped = true;
+                self.stop_owed = true;
+                self.flush_recovery_stop();
                 events.push(HealthEvent::Stopped { faults });
-            } else {
+            } else if self.commands.slots() > 0 {
                 self.attempts += 1;
                 // Immediate first attempt; then 250, 500 and 1000 ms before another decision.
                 self.retry_at = Some(now + Duration::from_millis(250 << (self.attempts - 1)));
@@ -605,6 +635,30 @@ impl Controller {
     /// never on the audio thread. Returns false if construction failed; the processor stays
     /// silent and the previous rate, state and queued commands are retained.
     pub fn reconfigure(&mut self, processor: &mut AudioProcessor, config: EngineConfig) -> bool {
+        if self.stop_owed {
+            // The callback is stopped: settle directly even when its command FIFO is full.
+            // Earlier transport starts cannot overtake the exhaustion decision on rebuild.
+            for msg in processor.take_queued() {
+                if matches!(
+                    msg,
+                    Msg::Command {
+                        cmd: Command::Play
+                            | Command::PlayLoops { .. }
+                            | Command::SetRecording { on: true },
+                        ..
+                    }
+                ) {
+                    continue;
+                }
+                let queued = self.commands.push(msg);
+                debug_assert!(queued.is_ok());
+            }
+            self.record_mark = self.record_mark.wrapping_add(1);
+            processor.finish_recovery_stop(self.record_mark);
+            self.recording_armed = false;
+            self.recovery_stop_mark = Some(self.record_mark);
+            self.stop_owed = false;
+        }
         // The fresh graph is built from the state every queued message already updated, so a
         // message that only changes the graph would land in it a second time: a channel built
         // for the old rate, a removal of the rebuilt channel, a parameter for a project that
@@ -879,6 +933,77 @@ mod tests {
 
     #[test]
     #[cfg(feature = "test-hooks")]
+    fn exhausted_recovery_stops_and_disarms_after_full_queue() {
+        let (mut c, mut p) = controller();
+        c.send(Command::Play).unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        c.attempts = 3;
+        fault(&mut c, &mut p);
+        while c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+        assert_eq!(
+            c.check_health_at(Instant::now()),
+            [HealthEvent::Stopped { faults: 1 }]
+        );
+        assert!(c.stop_owed);
+        assert!(c.check_health().is_empty());
+        c.replay_panics.set(1);
+        assert!(!c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 96_000.0
+            }
+        ));
+        assert!(!c.stop_owed, "the stopped callback settled the owed stop");
+        assert!(c.check_health().is_empty());
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        c.check_health();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        assert!(!c.live().playing);
+        assert!(!c.recording_armed());
+        let mut events = Vec::new();
+        c.take_recorded(&mut events);
+        assert!(events.iter().any(|e| matches!(e, RecordEvent::End { .. })));
+        assert!(events.iter().any(|e| matches!(e, RecordEvent::Mark { .. })));
+        assert!(c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 48_000.0
+            }
+        ));
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        assert!(!c.live().playing);
+    }
+
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn explicit_recovery_settles_full_queue_before_old_play_commands() {
+        let (mut c, mut p) = controller();
+        c.send(Command::Play).unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        c.attempts = 3;
+        fault(&mut c, &mut p);
+        while c.send(Command::PlayLoops { loops: 2 }).is_ok() {}
+        assert_eq!(c.check_health().len(), 1);
+        assert!(c.stop_owed);
+        assert!(c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 48_000.0
+            }
+        ));
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        assert!(!c.live().playing);
+        assert!(!c.recording_armed());
+        let mut events = Vec::new();
+        c.take_recorded(&mut events);
+        assert!(events.iter().any(|e| matches!(e, RecordEvent::End { .. })));
+        assert!(events.iter().any(|e| matches!(e, RecordEvent::Mark { .. })));
+    }
+
+    #[test]
+    #[cfg(feature = "test-hooks")]
     fn recovery_ceiling_backoff_and_explicit_load() {
         let (mut c, mut p) = controller();
         let start = Instant::now();
@@ -903,6 +1028,7 @@ mod tests {
             c.check_health_at(start + Duration::from_millis(1750)),
             [HealthEvent::Stopped { faults: 4 }]
         );
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
         let slots = c.commands.slots();
         for seconds in [3, 60, 86400] {
             assert!(
