@@ -60,6 +60,9 @@ pub fn backup_before_save(
 pub(crate) struct PreparedBackup {
     candidate: Option<PathBuf>,
     prune: Vec<PathBuf>,
+    // An unfinished candidate must not be borrowed by another save and then rolled back.
+    // Reused, settled copies are locked too, so overlapping saves can make independent copies.
+    _file: Option<fs::File>,
 }
 
 impl PreparedBackup {
@@ -87,6 +90,7 @@ pub(crate) fn prepare_backup(
     let mut prepared = PreparedBackup {
         candidate: None,
         prune: Vec::new(),
+        _file: None,
     };
     if keep == 0 || !target.is_file() {
         return Ok(prepared);
@@ -95,9 +99,12 @@ pub(crate) fn prepare_backup(
     let stem = target.file_stem().unwrap().to_string_lossy();
     fs::create_dir_all(&folder)?;
     let found = existing(&folder, &stem)?;
-    let duplicate = found
-        .last()
-        .is_some_and(|(_, newest)| same_bytes(target, newest));
+    prepared._file = found.last().and_then(|(_, newest)| {
+        let file = fs::File::open(newest).ok()?;
+        file.try_lock().ok()?;
+        same_bytes(target, &file).then_some(file)
+    });
+    let duplicate = prepared._file.is_some();
     if !duplicate {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -111,6 +118,7 @@ pub(crate) fn prepare_backup(
             // Exclusive creation and publication never overwrite another transaction or
             // an abandoned partial. A collision advances rather than claiming ownership.
             let file = fs::OpenOptions::new()
+                .read(true)
                 .write(true)
                 .create_new(true)
                 .open(&partial);
@@ -125,15 +133,21 @@ pub(crate) fn prepare_backup(
                 Err(e) => return Err(e),
             };
             let result = (|| {
+                file.try_lock().map_err(|e| match e {
+                    fs::TryLockError::Error(e) => e,
+                    fs::TryLockError::WouldBlock => {
+                        io::Error::other("a new backup file was locked by another writer")
+                    }
+                })?;
                 io::copy(&mut fs::File::open(target)?, &mut file)?;
                 crate::file::sync_file(&file)?;
                 fs::hard_link(&partial, &copy)
             })();
-            drop(file);
             let cleanup = fs::remove_file(&partial);
             match result {
                 Ok(()) => {
                     prepared.candidate = Some(copy);
+                    prepared._file = Some(file);
                     // A failed partial cleanup retains extra data, not a failed save.
                     let _ = cleanup;
                     break;
@@ -159,8 +173,8 @@ pub(crate) fn prepare_backup(
 
 /// Whether files `a` and `b` hold the same bytes (read in chunks; false if either cannot be
 /// read, so a backup is made).
-fn same_bytes(a: &Path, b: &Path) -> bool {
-    let (Ok(fa), Ok(fb)) = (fs::File::open(a), fs::File::open(b)) else {
+fn same_bytes(a: &Path, fb: &fs::File) -> bool {
+    let Ok(fa) = fs::File::open(a) else {
         return false;
     };
     let same_len = match (fa.metadata(), fb.metadata()) {
@@ -252,6 +266,7 @@ mod tests {
         let prepared = PreparedBackup {
             candidate: Some(candidate.clone()),
             prune: vec![old.clone()],
+            _file: None,
         };
         assert!(prepared.rollback().is_err());
         assert_eq!(fs::read(&old).unwrap(), b"history");
@@ -260,6 +275,7 @@ mod tests {
         PreparedBackup {
             candidate: None,
             prune: vec![candidate.clone()],
+            _file: None,
         }
         .confirm();
         assert!(candidate.is_dir());
