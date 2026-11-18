@@ -884,3 +884,28 @@
 .filter-display.off svg {
   opacity: 0.45;
 }
+
+.sample-file-details {
+  flex: none;
+  min-width: 0;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11px;
+}
+
+.sample-file-details summary {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.sample-file-details dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 8px 0 0;
+  max-height: 90px;
+  overflow: auto;
+}
+
+.sample-file-details dt { color: var(--muted); }
+.sample-file-details dd { margin: 0; overflow-wrap: anywhere; }
