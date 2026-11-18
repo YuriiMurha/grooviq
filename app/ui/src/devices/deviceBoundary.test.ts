@@ -68,7 +68,7 @@ test("follows default value imports alongside named type imports in relays", asy
   writeFileSync(outer, `import rawUseProject, { type Tag } from ${JSON.stringify(inner)}; export const useRaw = rawUseProject; export type Label = Tag;`);
   const [result] = await eslint.lintText(`import { useRaw } from ${JSON.stringify(outer)}; void useRaw().apply;`, { filePath: "src/devices/BoundaryProbe.ts" });
   expect(result.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
-  writeFileSync(outer, `import { type Tag } from ${JSON.stringify(inner)}; export const label: Tag = "t";`);
+  writeFileSync(outer, `import type { Tag } from ${JSON.stringify(inner)}; export const label: Tag = "t";`);
   const [types] = await eslint.lintText(`import { label } from ${JSON.stringify(outer)}; void label;`, { filePath: "src/devices/BoundaryProbe.ts" });
   expect(types.errorCount).toBe(0);
 });
@@ -149,6 +149,70 @@ test.each(["css", "svg"])("rejects arbitrary-extension declarations hiding execu
   expect(indirect.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
   const [types] = await eslint.lintText(`import type Data from ${JSON.stringify(specifier)}; export type Value = typeof Data;`, { filePath: "src/devices/BoundaryProbe.ts" });
   expect(types.errorCount).toBe(0);
+});
+
+test.each([["js", "ts"], ["mjs", "mts"], ["cjs", "cts"], ["jsx", "tsx"], ["", "ts"]])("rejects runtime .%s files hidden by .%s source", async (runtimeExtension, typedExtension) => {
+  const stem = path.join(temp, `runtime-${runtimeExtension || "extensionless"}`);
+  writeFileSync(`${stem}.${typedExtension}`, 'export type Marker = number;');
+  writeFileSync(`${stem}.${runtimeExtension || "js"}`, `import { useProject } from ${JSON.stringify(context)}; export const useRaw = useProject;`);
+  const specifier = runtimeExtension ? `${stem}.${runtimeExtension}` : stem;
+  const [direct] = await eslint.lintText(`import ${JSON.stringify(specifier)}; export const ready = true;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(direct.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+  const relay = `${stem}-outer.ts`;
+  writeFileSync(relay, `import ${JSON.stringify(specifier)}; export const ready = true;`);
+  const [indirect] = await eslint.lintText(`import { ready } from ${JSON.stringify(relay)}; void ready;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(indirect.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+});
+
+test("rejects index collisions and opaque local package entry points", async () => {
+  for (const packaged of [false, true]) {
+    const folder = path.join(temp, packaged ? "local-package" : "local-index");
+    mkdirSync(folder);
+    const types = packaged ? "types.ts" : "index.ts";
+    const runtime = packaged ? "entry.js" : "index.js";
+    writeFileSync(path.join(folder, types), 'export const ready = true;');
+    writeFileSync(path.join(folder, runtime), `import { useProject } from ${JSON.stringify(context)}; export const useRaw = useProject;`);
+    if (packaged) writeFileSync(path.join(folder, "package.json"), JSON.stringify({ types, main: runtime }));
+    const [result] = await eslint.lintText(`import ${JSON.stringify(folder)}; export const ready = true;`, { filePath: "src/devices/BoundaryProbe.ts" });
+    expect(result.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+  }
+});
+
+test("checks named type imports and exports that preserve module evaluation", async () => {
+  const source = path.join(temp, "named-type-runtime.ts");
+  writeFileSync(source, `import { useProject } from ${JSON.stringify(context)}; export { useProject }; export type Marker = number;`);
+  for (const code of [`import { type Marker } from ${JSON.stringify(source)}; export type Value = Marker;`, `export { type Marker } from ${JSON.stringify(source)};`]) {
+    const [direct] = await eslint.lintText(code, { filePath: "src/devices/BoundaryProbe.ts" });
+    expect(direct.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+    const relay = path.join(temp, `named-type-${code.startsWith("import") ? "import" : "export"}.ts`);
+    writeFileSync(relay, `${code} export const ready = true;`);
+    const [indirect] = await eslint.lintText(`import { ready } from ${JSON.stringify(relay)}; void ready;`, { filePath: "src/devices/BoundaryProbe.ts" });
+    expect(indirect.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+  }
+});
+
+test.each(["require('../project/context')", "require(p)"])("checks CommonJS value loads: %s", async (call) => {
+  const [direct] = await eslint.lintText(`const p = '../project/context'; void p; void ${call};`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(direct.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+  const relay = path.join(temp, `require-${call.includes("(p)") ? "computed" : "literal"}.ts`);
+  writeFileSync(relay, `const p = ${JSON.stringify(context)}; export const load = () => require(${call.includes("(p)") ? "p" : JSON.stringify(context)});`);
+  const [indirect] = await eslint.lintText(`import { load } from ${JSON.stringify(relay)}; void load;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(indirect.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+});
+
+test("allows a locally bound function named require", async () => {
+  const code = 'function require(value: number) { return value; } export const ready = require(1);';
+  const [direct] = await eslint.lintText(code, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(direct.errorCount).toBe(0);
+  const relay = path.join(temp, "shadowed-require.ts");
+  writeFileSync(relay, code);
+  const [indirect] = await eslint.lintText(`import { ready } from ${JSON.stringify(relay)}; void ready;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(indirect.errorCount).toBe(0);
+});
+
+test.each(["file:///uninspectable/relay.js", "#conditional-entry", "/src/unresolved-runtime.svg"])("rejects opaque local runtime loads: %s", async (specifier) => {
+  const [result] = await eslint.lintText(`import ${JSON.stringify(specifier)}; export const ready = true;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(result.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
 });
 
 test("raw apply cannot be assigned or passed as a guarded send prop", () => {
