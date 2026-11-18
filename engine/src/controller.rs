@@ -118,6 +118,7 @@ pub struct Controller {
     generation: u64,
     /// The id of the last recording barrier `load_state` queued (see [`Self::record_mark`]).
     record_mark: u32,
+    recording_armed: bool,
     /// Faults already answered with a restart (queued by `check_health`, or done by
     /// `reconfigure`).
     seen_faults: u32,
@@ -158,6 +159,7 @@ impl Controller {
             next_instance: 0,
             generation: 0,
             record_mark: 0,
+            recording_armed: false,
             seen_faults: 0,
             restart_owed: false,
             seen_guard_hits: 0,
@@ -203,6 +205,31 @@ impl Controller {
     #[doc(hidden)]
     pub fn send_at(&mut self, due: u64, cmd: Command) -> Result<(), ControlError> {
         let mut cmd = cmd.clamped().ok_or(ControlError::Rejected)?;
+        if let Command::Seek { tick } = &mut cmd
+            && let Some(r) = self.state.song_loop
+        {
+            *tick = (*tick).clamp(r.start_tick, r.end_tick - 1);
+        }
+        match cmd {
+            Command::Seek { tick }
+                if self.state.playback_mode != crate::PlaybackMode::Song
+                    || tick > self.state.song.end_tick =>
+            {
+                return Err(ControlError::Rejected);
+            }
+            Command::SetSongLoop { region } if !self.state.song.valid_loop(region) => {
+                return Err(ControlError::Rejected);
+            }
+            Command::SetRecording { on: true }
+                if self.state.playback_mode == crate::PlaybackMode::Song =>
+            {
+                return Err(ControlError::Rejected);
+            }
+            Command::PlayLoops { .. } if self.state.playback_mode == crate::PlaybackMode::Song => {
+                return Err(ControlError::Rejected);
+            }
+            _ => {}
+        }
         if let Some(id) = cmd.channel() {
             let kind = self
                 .state
@@ -284,6 +311,16 @@ impl Controller {
     /// Removes a channel, cutting its notes. The processor hands it back to be freed here.
     pub fn remove_channel(&mut self, id: ChannelId) -> Result<(), ControlError> {
         let index = self.channel_index(id)?;
+        if self
+            .state
+            .song
+            .arrangement
+            .notes
+            .iter()
+            .any(|n| n.channel == id)
+        {
+            return Err(ControlError::Rejected);
+        }
         self.push(Msg::RemoveChannel(id))?;
         self.state.channels.remove(index);
         self.instances.remove(&id);
@@ -315,6 +352,17 @@ impl Controller {
     /// Replaces the pattern. Velocities are clamped and notes sorted by tick, then channel;
     /// a length outside 1 tick..=256 steps, a key above 127 or a velocity that is not a number
     /// is `Rejected`.
+    pub fn set_song(&mut self, song: crate::SongData) -> Result<(), ControlError> {
+        let ids: Vec<_> = self.state.channels.iter().map(|c| c.id).collect();
+        let song = song.checked(&ids)?;
+        if !song.valid_loop(self.state.song_loop) {
+            return Err(ControlError::Rejected);
+        }
+        self.push(Msg::SetSong(Box::new(song.clone())))?;
+        self.state.song = song;
+        Ok(())
+    }
+
     pub fn set_pattern(&mut self, pattern: PatternData) -> Result<(), ControlError> {
         let pattern = pattern.checked()?;
         self.push(Msg::SetPattern(Box::new(pattern.clone())))?;
@@ -344,6 +392,10 @@ impl Controller {
                 return Err(ControlError::BuildFailed);
             }
         };
+        if self.state.playback_mode == crate::PlaybackMode::Song {
+            self.recording_armed = false;
+        }
+
         self.renew_instances();
         self.reset_recovery();
         self.seen_faults = self.live.recovery().0;
@@ -379,6 +431,11 @@ impl Controller {
         let queued = self.push(Msg::RecordMark(id));
         debug_assert!(queued.is_ok());
         Ok(id)
+    }
+
+    /// Accepted queued recording state, including disarm on a mode transition (even stopped).
+    pub fn recording_armed(&self) -> bool {
+        self.recording_armed
     }
 
     /// The id of the last recording barrier queued (by [`Self::load_state`] or
@@ -611,6 +668,9 @@ impl Controller {
             debug_assert!(refused.is_none(), "the state holds valid channels only");
         }
         graph.set_pattern(Box::new(self.state.pattern.clone()));
+        graph.set_song(Box::new(self.state.song.clone()));
+        graph.playback_mode = self.state.playback_mode;
+        graph.song_loop = self.state.song_loop;
         // Every channel starts at its mix: nothing ramps in a fresh graph.
         graph.settle();
         graph
@@ -618,6 +678,14 @@ impl Controller {
 
     fn mirror(&mut self, cmd: Command) {
         match cmd {
+            Command::SetPlaybackMode { mode } => {
+                if mode != self.state.playback_mode {
+                    self.recording_armed = false;
+                }
+                self.state.playback_mode = mode;
+            }
+            Command::SetRecording { on } => self.recording_armed = on,
+            Command::SetSongLoop { region } => self.state.song_loop = region,
             Command::TestTone { on, hz, gain_db } => self.tone = ToneState { on, hz, gain_db },
             Command::AllSoundOff => self.tone.on = false,
             Command::SetTempo { bpm } => self.state.bpm = bpm,
@@ -1073,6 +1141,59 @@ mod tests {
             Err(ControlError::Full)
         );
         assert_eq!(c.state, before, "nothing changed");
+    }
+
+    #[test]
+    fn song_load_construction_failure_keeps_recording_and_song_state_transactional() {
+        let (mut c, mut p) = controller();
+        c.add_channel(setup(1)).unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        let before = c.state.clone();
+        let instances = c.instances.clone();
+        let mark = c.record_mark;
+        let slots = c.commands.slots();
+        let mut song = before.clone();
+        song.playback_mode = crate::PlaybackMode::Song;
+        song.song.end_tick = 960;
+        song.song.arrangement.length = 960;
+        song.song.arrangement.notes = vec![crate::SongNote {
+            tick: 0,
+            length: 120,
+            channel: ChannelId(1),
+            key: 60,
+            velocity: 0.8,
+            slide: false,
+            clip_id: 1,
+        }];
+        c.fail_replays(1);
+        assert_eq!(c.load_state(song.clone()), Err(ControlError::BuildFailed));
+        assert_eq!(c.state, before);
+        assert_eq!(c.instances, instances);
+        assert_eq!(c.record_mark, mark);
+        assert_eq!(c.commands.slots(), slots);
+        assert!(c.recording_armed());
+
+        c.load_state(song.clone()).unwrap();
+        assert!(!c.recording_armed());
+        assert_eq!(c.state, song);
+        let graph = c.build_graph();
+        assert_eq!(graph.song(), &song.song);
+        assert_eq!(graph.playback_mode, crate::PlaybackMode::Song);
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        assert_eq!(c.state.song, song.song);
+        assert!(!c.live().playing);
+        let slots = c.commands.slots();
+        let instances = c.instances.clone();
+        c.fail_replays(1);
+        assert_eq!(
+            c.load_state(EngineState::default()),
+            Err(ControlError::BuildFailed)
+        );
+        assert_eq!(c.state, song);
+        assert_eq!(c.instances, instances);
+        assert_eq!(c.commands.slots(), slots);
+        assert!(!c.recording_armed());
     }
 
     #[test]

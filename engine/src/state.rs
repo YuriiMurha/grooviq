@@ -279,6 +279,9 @@ pub struct EngineState {
     /// In insertion order, which is also the order they are mixed in.
     pub channels: Vec<ChannelSetup>,
     pub pattern: PatternData,
+    pub song: crate::SongData,
+    pub playback_mode: crate::PlaybackMode,
+    pub song_loop: Option<crate::SongLoop>,
     /// `(beats, unit)`: beats in a bar, 1..=16, and the note value of a beat, 2, 4, 8 or 16. The
     /// metronome clicks every `3840 / unit` ticks.
     pub time_signature: (u8, u8),
@@ -291,6 +294,9 @@ impl Default for EngineState {
             bpm: DEFAULT_BPM,
             channels: Vec::new(),
             pattern: PatternData::default(),
+            song: crate::SongData::default(),
+            playback_mode: crate::PlaybackMode::Pattern,
+            song_loop: None,
             time_signature: (4, 4),
         }
     }
@@ -313,7 +319,14 @@ impl EngineState {
         if ids.windows(2).any(|w| w[0] == w[1]) {
             return Err(ControlError::ChannelExists);
         }
+        let song = self.song.checked(&ids)?;
+        if !song.valid_loop(self.song_loop) {
+            return Err(ControlError::Rejected);
+        }
         Ok(Self {
+            song,
+            playback_mode: self.playback_mode,
+            song_loop: self.song_loop,
             bpm: self.bpm.clamp(BPM_RANGE.0, BPM_RANGE.1),
             channels: self
                 .channels
