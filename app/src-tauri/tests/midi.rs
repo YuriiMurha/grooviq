@@ -1,7 +1,7 @@
 //! MIDI keyboards: the player (held keys, pedal, selected channel) and the hub (plug, unplug,
 //! disabled inputs), with a fake set of ports and a sink that records the engine's commands.
 
-use grooviq_app::midi::{CommandSink, MidiHub, MidiMessage, MidiPorts, NO_CHANNEL};
+use grooviq_app::midi::{CommandSink, MidiHub, MidiMessage, MidiPort, MidiPorts, NO_CHANNEL};
 use grooviq_engine::{ChannelId, Command, NoteId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -284,7 +284,7 @@ type Callback = Box<dyn FnMut(&[u8]) + Send>;
 
 #[derive(Default)]
 struct FakeState {
-    present: Vec<String>,
+    present: Vec<MidiPort>,
     open: HashMap<String, Callback>,
     opens: Vec<String>,
     refuse: Vec<String>,
@@ -298,11 +298,14 @@ struct Fake(Arc<Mutex<FakeState>>);
 
 impl Fake {
     fn plug(&self, name: &str) {
-        self.0.lock().unwrap().present.push(name.to_owned());
+        self.0.lock().unwrap().present.push(MidiPort {
+            id: name.into(),
+            name: name.into(),
+        });
     }
     fn unplug(&self, name: &str) {
         let mut state = self.0.lock().unwrap();
-        state.present.retain(|n| n != name);
+        state.present.retain(|n| n.id != name);
         // The system closes a vanished port by itself: nothing arrives from it any more.
         state.open.remove(name);
     }
@@ -334,7 +337,7 @@ impl Fake {
 }
 
 impl MidiPorts for Fake {
-    fn list(&self) -> Vec<String> {
+    fn list(&self) -> Vec<MidiPort> {
         self.0.lock().unwrap().present.clone()
     }
     fn open(&mut self, name: &str, sink: Callback) -> Result<(), String> {
@@ -558,7 +561,7 @@ fn the_system_ports_list_without_error_and_refuse_a_name_that_is_not_there() {
     let mut ports = grooviq_app::midi::MidirPorts::new();
     let listed = ports.list();
     let missing = "Grooviq test: no such MIDI input";
-    assert!(!listed.iter().any(|name| name == missing));
+    assert!(!listed.iter().any(|name| name.id == missing));
     assert!(ports.open(missing, Box::new(|_| {})).is_err());
     // Closing what was never opened is not an error either.
     ports.close(missing);
@@ -1808,4 +1811,78 @@ mod voices {
         }
         assert_eq!(failures, Vec::<String>::new());
     }
+}
+
+#[test]
+fn same_name_identity_survives_reorder_rename_and_independent_disable() {
+    let mut rig = rig(&[]);
+    rig.ports.0.lock().unwrap().present = vec![
+        MidiPort {
+            id: "a".into(),
+            name: "Keyboard".into(),
+        },
+        MidiPort {
+            id: "b".into(),
+            name: "Keyboard".into(),
+        },
+        MidiPort {
+            id: "c".into(),
+            name: "Keyboard (2)".into(),
+        },
+    ];
+    // Duplicate enumeration of the same endpoint must not create another player.
+    let duplicate = rig.ports.0.lock().unwrap().present[0].clone();
+    rig.ports.0.lock().unwrap().present.push(duplicate);
+    rig.hub.poll();
+    assert_eq!(rig.ports.opens(), ["a", "b", "c"]);
+    let views = rig.hub.input_views();
+    assert_eq!(
+        views.iter().map(|v| v.1.as_str()).collect::<Vec<_>>(),
+        ["Keyboard", "Keyboard (3)", "Keyboard (2)"]
+    );
+    assert!(rig.ports.send("a", &[NOTE_ON, 60, 64]));
+    assert!(rig.ports.send("b", &[NOTE_ON, 60, 127]));
+    assert_eq!(rig.sent.take(), [on(1, 60, 64.0 / 127.0), on(1, 60, 1.0)]);
+    rig.ports.0.lock().unwrap().present.reverse();
+    rig.hub.poll();
+    assert_eq!(rig.ports.opens(), ["a", "b", "c"]);
+    rig.ports.unplug("a");
+    rig.hub.poll();
+    assert!(rig.sent.take().is_empty());
+    rig.ports.send("b", &[NOTE_OFF, 60, 0]);
+    assert_eq!(rig.sent.take(), [off(1, 60), off(1, 60)]);
+    rig.hub.set_enabled("b", false);
+    assert!(!rig.ports.is_open("b"));
+    assert!(rig.ports.is_open("c"));
+    for port in &mut rig.ports.0.lock().unwrap().present {
+        if port.id == "b" {
+            port.name = "Renamed".into();
+        }
+    }
+    rig.hub.poll();
+    assert!(
+        rig.hub
+            .input_views()
+            .iter()
+            .any(|p| p.0 == "b" && p.1 == "Renamed" && !p.2)
+    );
+    rig.hub.set_enabled("b", true);
+    assert!(rig.ports.is_open("b"));
+}
+
+#[test]
+fn legacy_block_is_pinned_across_metadata_only_rename() {
+    let mut rig = rig(&["Keys"]);
+    rig.ports.plug("Keys");
+    rig.hub.poll();
+    assert!(!rig.ports.is_open("Keys"));
+    rig.ports.0.lock().unwrap().present[0].name = "Renamed".into();
+    assert!(rig.hub.poll().changed);
+    assert_eq!(
+        rig.hub.input_views(),
+        [("Keys".into(), "Renamed".into(), false)]
+    );
+    assert!(!rig.ports.is_open("Keys"));
+    rig.hub.set_enabled("Keys", true);
+    assert!(rig.ports.is_open("Keys"));
 }
