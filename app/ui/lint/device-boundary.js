@@ -4,7 +4,7 @@ import ts from "typescript";
 // A module dependency boundary, not a JavaScript sandbox. Value relays are intentionally
 // conservative: even an unused raw capability in a relay makes it unsuitable for editors.
 export default {
-  meta: { type: "problem", schema: [], messages: { raw: "Device value dependencies must use useDeviceParams; raw project access, unresolved local modules and computed imports are forbidden." } },
+  meta: { type: "problem", schema: [], messages: { raw: "Device value dependencies must use useDeviceParams; raw project access, unresolved local modules, computed imports and import.meta.glob are forbidden." } },
   create(context) {
     const root = context.cwd;
     const canonical = (file) => {
@@ -19,7 +19,8 @@ export default {
     const config = ts.readConfigFile(path.join(root, "tsconfig.json"), ts.sys.readFile);
     const options = ts.parseJsonConfigFileContent(config.config ?? {}, ts.sys, root).options;
     function unsafe(specifier, from, seen) {
-      if (specifier.endsWith(".css")) return false;
+      // Vite returns data for these imports, not executable module capabilities.
+      if (/\.(css|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf)(\?(url|raw|inline|no-inline))?$/i.test(specifier)) return false;
       const resolved = ts.resolveModuleName(specifier, from, options, ts.sys).resolvedModule;
       if (!resolved) return specifier.startsWith(".") || specifier.startsWith("/");
       const file = canonical(resolved.resolvedFileName);
@@ -38,12 +39,18 @@ export default {
         if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
           const clause = ts.isImportDeclaration(node) ? node.importClause : node;
           const bindings = clause && 'namedBindings' in clause ? clause.namedBindings : node.exportClause;
-          const typeOnly = clause?.isTypeOnly || (bindings && ts.isNamedImports(bindings) && bindings.elements.length > 0 && bindings.elements.every((e) => e.isTypeOnly)) || (bindings && ts.isNamedExports(bindings) && bindings.elements.length > 0 && bindings.elements.every((e) => e.isTypeOnly));
+          const typeOnly = clause?.isTypeOnly || (!clause?.name && bindings && ts.isNamedImports(bindings) && bindings.elements.length > 0 && bindings.elements.every((e) => e.isTypeOnly)) || (bindings && ts.isNamedExports(bindings) && bindings.elements.length > 0 && bindings.elements.every((e) => e.isTypeOnly));
           if (!typeOnly && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) bad ||= unsafe(node.moduleSpecifier.text, file, seen);
         }
         if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
           const arg = node.arguments[0];
           bad ||= !arg || !ts.isStringLiteral(arg) || unsafe(arg.text, file, seen);
+        }
+        if (ts.isCallExpression(node)) {
+          const expr = node.expression;
+          const member = ts.isPropertyAccessExpression(expr) ? expr.name.text : ts.isElementAccessExpression(expr) && ts.isStringLiteral(expr.argumentExpression) ? expr.argumentExpression.text : null;
+          const receiver = member !== null ? expr.expression : null;
+          if (member === "glob" && receiver && ts.isMetaProperty(receiver) && receiver.keywordToken === ts.SyntaxKind.ImportKeyword && receiver.name.text === "meta") bad = true;
         }
         ts.forEachChild(node, visit);
       }
@@ -63,6 +70,13 @@ export default {
       },
       ExportAllDeclaration(node) { if (node.exportKind !== "type") check(node, node.source); },
       ImportExpression(node) { check(node, node.source); },
+      CallExpression(node) {
+        const expr = node.callee;
+        if (expr.type !== "MemberExpression") return;
+        const member = expr.computed ? expr.property.value : expr.property.name;
+        const receiver = expr.object;
+        if (member === "glob" && receiver.type === "MetaProperty" && receiver.meta.name === "import" && receiver.property.name === "meta") context.report({ node, messageId: "raw" });
+      },
     };
   },
 };

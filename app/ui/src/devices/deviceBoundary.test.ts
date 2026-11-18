@@ -61,6 +61,46 @@ test("rejects local value declarations that hide a JavaScript relay", async () =
   expect(types.errorCount).toBe(0);
 });
 
+test("follows default value imports alongside named type imports in relays", async () => {
+  const inner = path.join(temp, "default-inner.ts");
+  const outer = path.join(temp, "default-outer.ts");
+  writeFileSync(inner, `import { useProject } from ${JSON.stringify(context)}; export default useProject; export type Tag = "t";`);
+  writeFileSync(outer, `import rawUseProject, { type Tag } from ${JSON.stringify(inner)}; export const useRaw = rawUseProject; export type Label = Tag;`);
+  const [result] = await eslint.lintText(`import { useRaw } from ${JSON.stringify(outer)}; void useRaw().apply;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(result.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+  writeFileSync(outer, `import { type Tag } from ${JSON.stringify(inner)}; export const label: Tag = "t";`);
+  const [types] = await eslint.lintText(`import { label } from ${JSON.stringify(outer)}; void label;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(types.errorCount).toBe(0);
+});
+
+test("rejects computed imports inside relays", async () => {
+  const computed = path.join(temp, "computed-relay.ts");
+  writeFileSync(computed, `const p = ${JSON.stringify(context)}; export const load = async () => (await import(p)).useProject;`);
+  const [result] = await eslint.lintText(`import { load } from ${JSON.stringify(computed)}; void load;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(result.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+});
+
+test.each(["glob", '["glob"]'])("rejects import.meta.%s directly and inside relays", async (member) => {
+  const access = member.startsWith("[") ? `import.meta${member}` : `import.meta.${member}`;
+  const code = `export const modules = ${access}("../project/context.ts", { eager: true });`;
+  const [direct] = await eslint.lintText(code, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(direct.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+  const glob = path.join(temp, `glob-${member.length}.ts`);
+  writeFileSync(glob, code);
+  const [indirect] = await eslint.lintText(`import { modules } from ${JSON.stringify(glob)}; void modules;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(indirect.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+});
+
+test("allows data asset imports directly and through a relay", async () => {
+  const assets = 'import icon from "./knob.svg"; import url from "./knob.svg?url"; import raw from "./knob.svg?raw"; import "./editor.css"; export const data = [icon, url, raw];';
+  const [direct] = await eslint.lintText(assets, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(direct.errorCount).toBe(0);
+  const assetRelay = path.join(temp, "asset-relay.ts");
+  writeFileSync(assetRelay, assets);
+  const [indirect] = await eslint.lintText(`import { data } from ${JSON.stringify(assetRelay)}; void data;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(indirect.errorCount).toBe(0);
+});
+
 test("raw apply cannot be assigned or passed as a guarded send prop", () => {
   const file = path.join(temp, "capability.ts");
   writeFileSync(file, `import type { GuardedEdit } from ${JSON.stringify(path.join(root, "src/devices/paramSink.ts"))};
