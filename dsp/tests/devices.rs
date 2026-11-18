@@ -2,7 +2,7 @@
 
 use grooviq_dsp::{Device, NoteEvent, create, param_spec};
 
-const IDS: [&str; 12] = [
+const IDS: [&str; 13] = [
     "synth",
     "eq",
     "comp",
@@ -17,7 +17,7 @@ const IDS: [&str; 12] = [
     "bitcrusher",
     "lofi_colour",
 ];
-const EFFECTS: [&str; 11] = [
+const EFFECTS: [&str; 12] = [
     "eq",
     "comp",
     "limiter",
