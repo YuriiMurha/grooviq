@@ -406,7 +406,13 @@ mod review_regressions {
                 }
                 let final_target = d.target;
                 assert_eq!(d.tb, first, "active head must not restart");
-                advance(&mut d, duration - duration / 2 + 2);
+                advance(&mut d, duration - duration / 2 - 2);
+                assert!(d.xfading, "fade ended before its nominal duration");
+                assert_eq!(
+                    d.ta, old,
+                    "original head changed before the 50 ms fade ended"
+                );
+                advance(&mut d, 4);
                 assert_eq!(d.ta, first, "first fade must finish at 50 ms");
                 advance(&mut d, duration + 2);
                 assert!(!d.xfading);
