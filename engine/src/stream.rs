@@ -102,7 +102,7 @@ pub fn start_stream(live: Arc<LiveShared>, hz: u32) -> io::Result<StreamServer> 
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
     let port = addr.port();
-    let period = Duration::from_secs_f64(1.0 / f64::from(hz.clamp(HZ_RANGE.0, HZ_RANGE.1)));
+    let period = frame_period(hz);
 
     let clients = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
@@ -252,6 +252,10 @@ fn serve(
     }
 }
 
+fn frame_period(hz: u32) -> Duration {
+    Duration::from_secs_f64(1.0 / f64::from(hz.clamp(HZ_RANGE.0, HZ_RANGE.1)))
+}
+
 /// When frame `n` is due: absolute deadlines (`start + n * period`), so a late wake-up shortens
 /// the next wait instead of shifting every later frame. After a stall longer than [`MAX_LAG`]
 /// the schedule restarts from the moment of the late frame instead of bursting to catch up.
@@ -367,6 +371,32 @@ mod tests {
     }
 
     const PERIOD: Duration = Duration::from_micros(16_667);
+
+    #[test]
+    fn requested_rates_produce_the_exact_deadline_count() {
+        for (requested, expected) in [
+            (0, 1),
+            (1, 1),
+            (30, 30),
+            (60, 60),
+            (240, 240),
+            (u32::MAX, 240),
+        ] {
+            let start = Instant::now();
+            let mut schedule = Schedule::new(start, frame_period(requested));
+            // Count one full second after the immediate first frame. Exclude that first
+            // frame and include the last with nanosecond rounding of the period.
+            schedule.sent(start);
+            let end = start + Duration::from_secs(1) + Duration::from_nanos(240);
+            let mut count = 0;
+            while schedule.due() <= end && count <= 240 {
+                let due = schedule.due();
+                schedule.sent(due);
+                count += 1;
+            }
+            assert_eq!(count, expected, "requested {requested} Hz");
+        }
+    }
 
     #[test]
     fn late_wake_ups_do_not_shift_later_frames() {

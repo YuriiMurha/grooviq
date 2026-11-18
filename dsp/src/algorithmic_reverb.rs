@@ -285,6 +285,61 @@ impl Device for AlgorithmicReverb {
 mod tests {
     use super::*;
     #[test]
+    fn charged_recursive_state_clears_without_subnormals() {
+        for sr in [22050., 48000., 192000.] {
+            for model in 0..4 {
+                let mut network = Network::new(sr, model);
+                let mut charged = false;
+                for frame in 0..(sr * 3.) as usize {
+                    network.tick(
+                        if frame == 0 { [1., 0.3] } else { [0., 0.] },
+                        model,
+                        0.1,
+                        0.85,
+                        sr,
+                    );
+                    charged |= network.damping.iter().any(|x| x.abs() > 1e-6);
+                    assert!(
+                        network.damping.iter().all(|x| *x == 0. || x.is_normal()),
+                        "network {model} at {sr}: subnormal recursive state"
+                    );
+                }
+                assert!(charged, "network {model} at {sr} was never excited");
+                assert_eq!(network.damping, [0.; 4], "network {model} at {sr}");
+                for (line, length) in network.lines.iter().zip(network.lengths) {
+                    assert!((0..length).all(|i| line.read_int(i) == 0.));
+                }
+            }
+            let mut device = AlgorithmicReverb::new(sr);
+            for (index, value) in [(1, 2.), (2, 0.), (3, 0.1), (4, 0.), (6, 0.), (10, 1.)] {
+                device.set_param(index, value);
+            }
+            let mut filters_charged = false;
+            for frame in 0..(sr * 3.) as usize {
+                let (mut l, mut r) = if frame == 0 {
+                    ([1.], [0.3])
+                } else {
+                    ([0.], [0.])
+                };
+                device.process(&mut l, &mut r, None, &[]);
+                filters_charged |= device
+                    .low
+                    .iter()
+                    .chain(&device.high)
+                    .any(|x| x.abs() > 1e-6);
+                assert!(
+                    device
+                        .low
+                        .iter()
+                        .chain(&device.high)
+                        .all(|x| *x == 0. || x.is_normal())
+                );
+            }
+            assert!(filters_charged, "output filters at {sr} were never excited");
+            assert_eq!((device.low, device.high), ([0.; 2], [0.; 2]));
+        }
+    }
+    #[test]
     fn each_control_matches_an_independent_sample_rate_ramp_on_charged_audio() {
         for index in 0..SPEC.len() {
             let mut a = AlgorithmicReverb::new(22050.);

@@ -33,8 +33,16 @@ pub(crate) struct Outline {
 /// Reads `json` once: `None` if the document is not an object. A channel or pattern written as
 /// an array is a `Data` error; broken JSON is a `Syntax` or `Eof` one.
 pub(crate) fn read(json: impl Read) -> serde_json::Result<Option<Outline>> {
+    read_mode(json, false)
+}
+
+pub(crate) fn read_header(json: impl Read) -> serde_json::Result<Option<Outline>> {
+    read_mode(json, true)
+}
+
+fn read_mode(json: impl Read, header_only: bool) -> serde_json::Result<Option<Outline>> {
     let mut de = serde_json::Deserializer::from_reader(json);
-    let outline = (&mut de).deserialize_any(OutlineVisitor)?;
+    let outline = (&mut de).deserialize_any(OutlineVisitor(header_only))?;
     de.end()?;
     Ok(outline)
 }
@@ -82,7 +90,7 @@ fn drain_map<'de, A: MapAccess<'de>>(mut map: A) -> Result<(), A::Error> {
     Ok(())
 }
 
-struct OutlineVisitor;
+struct OutlineVisitor(bool);
 
 impl<'de> Visitor<'de> for OutlineVisitor {
     type Value = Option<Outline>;
@@ -104,8 +112,12 @@ impl<'de> Visitor<'de> for OutlineVisitor {
             match key.as_str() {
                 "format" => outline.format = map.next_value_seed(Lenient(Header::Format))?.text,
                 "version" => outline.version = map.next_value_seed(Lenient(Header::Version))?.int,
-                "channels" => outline.channels = map.next_value_seed(Lenient(Channels))?,
-                "patterns" => outline.has_notes = map.next_value_seed(Lenient(Patterns))?,
+                "channels" if !self.0 => {
+                    outline.channels = map.next_value_seed(Lenient(Channels))?
+                }
+                "patterns" if !self.0 => {
+                    outline.has_notes = map.next_value_seed(Lenient(Patterns))?
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }

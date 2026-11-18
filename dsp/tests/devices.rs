@@ -2,7 +2,7 @@
 
 use grooviq_dsp::{Device, NoteEvent, create, param_spec};
 
-const IDS: [&str; 11] = [
+const IDS: [&str; 12] = [
     "synth",
     "eq",
     "comp",
@@ -14,8 +14,9 @@ const IDS: [&str; 11] = [
     "utility",
     "drum_shaper",
     "algorithmic_reverb",
+    "bitcrusher",
 ];
-const EFFECTS: [&str; 10] = [
+const EFFECTS: [&str; 11] = [
     "eq",
     "comp",
     "limiter",
@@ -26,6 +27,7 @@ const EFFECTS: [&str; 10] = [
     "utility",
     "drum_shaper",
     "algorithmic_reverb",
+    "bitcrusher",
 ];
 const RATES: [f32; 5] = [22050.0, 44100.0, 48000.0, 96000.0, 192000.0];
 
@@ -775,6 +777,7 @@ fn random_parameter_sweeps_never_produce_nan() {
 fn interesting(id: &str) -> Vec<(u32, f32)> {
     match id {
         "algorithmic_reverb" => vec![(0, 1.0), (2, 0.0), (10, 0.7)],
+        "bitcrusher" => vec![(0, 5.7), (1, 23.3), (2, 0.6), (3, 0.4), (4, 1.0), (5, 0.8)],
         "eq" => vec![
             (2 * 6 + 3, 9.0),
             (3 * 6 + 5, 1.0),
@@ -809,6 +812,7 @@ fn interesting(id: &str) -> Vec<(u32, f32)> {
 fn changes(id: &str) -> Vec<(u32, f32)> {
     match id {
         "algorithmic_reverb" => vec![(0, 4.0), (1, 2.0), (4, 0.9), (10, 0.3)],
+        "bitcrusher" => vec![(0, 2.5), (1, 2.5), (2, 1.0), (3, 0.2), (4, 0.7), (5, 0.3)],
         "eq" => vec![
             (2 * 6 + 2, 2000.0),
             (2 * 6 + 3, -12.0),
