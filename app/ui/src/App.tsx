@@ -181,7 +181,14 @@ export function App() {
       // refuses it.
       const origin = { generation: shown.current.view?.generation ?? 0, patternId: shown.current.view?.pattern.id ?? 0, revision: shown.current.view?.notesRevision ?? 1 };
       stepNotesHistory(
-        (queuedOrigin = origin) => enqueue(() => (redo ? notesRedo : notesUndo)(session.resolvePatternStamp(queuedOrigin))),
+        (queuedOrigin = origin) => enqueue(async () => {
+          const stamp = session.resolvePatternStamp(queuedOrigin);
+          const ack = await (redo ? notesRedo : notesUndo)(stamp);
+          if (ack && ack.view.generation === stamp.generation && ack.view.pattern.id === stamp.patternId) {
+            session.acceptPatternStamp(stamp, ack.revision);
+          }
+          return ack;
+        }),
         (ack) => adopt(ack.view),
         (e: unknown) => toast(errorText(e), true),
       );

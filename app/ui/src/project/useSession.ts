@@ -93,5 +93,5 @@ export function useSession(onError: (message: string) => void) {
   }, [adopt, enqueue, onError]);
 
   const context: ProjectContextValue = { view: state.view, apply, run, setView: adopt, stamp, runFor };
-  return { view: state.view, cleanSince: state.cleanSince, latest, adopt, enqueue, enqueueMutation, resolvePatternStamp: (origin: PatternStamp) => revisions.current.resolve(origin), apply, unsettled, context };
+  return { view: state.view, cleanSince: state.cleanSince, latest, adopt, enqueue, enqueueMutation, resolvePatternStamp: (origin: PatternStamp) => revisions.current.resolve(origin), acceptPatternStamp: (origin: PatternStamp, revision: number) => revisions.current.accepted(origin, revision), apply, unsettled, context };
 }

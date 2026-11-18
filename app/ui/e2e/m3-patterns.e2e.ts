@@ -1,4 +1,4 @@
-import { test, expect, project, soundsFor } from "./fixture";
+import { test, expect, project, soundsFor, clickCell } from "./fixture";
 import type { PatternsView, PatternReply } from "../src/api/patterns";
 import type { Page } from "@playwright/test";
 
@@ -13,6 +13,32 @@ async function invoke<T>(page: Page, command: string, args: Record<string, unkno
 const list = (page: Page) => invoke<PatternsView>(page, "pattern_list");
 const edit = (page: Page, state: PatternsView, change: Record<string, unknown>) =>
   invoke<PatternReply>(page, "pattern_edit", { generation: state.generation, revision: state.revision, edit: change });
+
+for (const roll of [false, true]) {
+  test(`queued Undo and Redo advance their own revisions with the roll ${roll ? "open" : "closed"}`, async ({ app, mock }) => {
+    await clickCell(app, 0, 2);
+    await clickCell(app, 0, 4);
+    await expect.poll(() => mock.eval("(m) => m.notes().length")).toBe(3);
+    if (roll) {
+      await app.keyboard.press("F7");
+      await expect(app.getByLabel("Piano roll notes")).toBeVisible();
+    }
+    for (const [command, shortcut, remaining] of [
+      ["notes_undo", "ControlOrMeta+z", 1],
+      ["notes_redo", "ControlOrMeta+Shift+z", 3],
+    ] as const) {
+      const before = (await mock.calls(command)).length;
+      await mock.eval(`(m) => m.holdCommand('${command}')`);
+      await app.keyboard.press(shortcut);
+      await expect.poll(async () => (await mock.calls(command)).length).toBe(before + 1);
+      await app.keyboard.press(shortcut);
+      expect((await mock.calls(command)).length).toBe(before + 1);
+      await mock.eval(`(m) => m.releaseCommand('${command}')`);
+      await expect.poll(async () => (await mock.calls(command)).length).toBe(before + 2);
+      await expect.poll(() => mock.eval("(m) => m.notes().length")).toBe(remaining);
+    }
+  });
+}
 
 test("canonical pattern replies preserve independent notes, undo and monotonic identities", async ({ app }) => {
   const initial = await list(app);
