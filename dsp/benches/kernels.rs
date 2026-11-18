@@ -281,3 +281,24 @@ fn bitcrusher_filtered_block(bencher: Bencher, block: usize) {
 fn bitcrusher_grain_block(bencher: Bencher, block: usize) {
     bitcrusher_block(bencher, block, "Loose Grain");
 }
+
+#[divan::bench(args = grooviq_dsp::fattener::PRESETS, consts = [64, 128])]
+fn fattener_block<const N: usize>(bencher: Bencher, name: &str) {
+    use grooviq_dsp::fattener::{Fattener, preset};
+    let mut device = Fattener::new(SR);
+    for (index, value) in preset(name).unwrap() {
+        device.set_param(index, value);
+    }
+    let source_l: [f32; N] =
+        std::array::from_fn(|i| libm::sinf(i as f32 * 0.29) * if i < 16 { 0.95 } else { 0.65 });
+    let source_r: [f32; N] = std::array::from_fn(|i| source_l[N - 1 - i] * -0.8);
+    for _ in 0..16 {
+        let (mut l, mut r) = (source_l, source_r);
+        device.process(&mut l, &mut r, None, &[]);
+    }
+    bencher.bench_local(|| {
+        let (mut l, mut r) = (source_l, source_r);
+        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
+        black_box((l, r));
+    });
+}
