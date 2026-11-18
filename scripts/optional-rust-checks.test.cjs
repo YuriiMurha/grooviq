@@ -29,6 +29,14 @@ test('empty, truncated, API-limited and changed revisions retain coverage', asyn
   const truncated = request([file('app/ui/a.ts')]);
   truncated.pullRequest.changed_files = 2;
   assert.equal(await shouldRun(truncated), true);
+  for (const [eventCount, currentCount] of [[2, 1], [1, 2]]) {
+    const mismatch = request([file('app/ui/a.ts')]);
+    mismatch.pullRequest.changed_files = eventCount;
+    mismatch.rest.pulls.get = async () => ({ data: {
+      ...mismatch.pullRequest, changed_files: currentCount,
+    } });
+    assert.equal(await shouldRun(mismatch), true, `counts ${eventCount}/${currentCount}/1`);
+  }
   for (const size of [2999, 3000, 3001]) {
     assert.equal(await shouldRun(request(Array.from({ length: size }, (_, i) => file(`app/ui/${i}.ts`)))), size >= 3000);
   }
