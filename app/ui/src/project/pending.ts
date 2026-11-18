@@ -48,11 +48,13 @@ export class PatternRevisionChain {
   }
 }
 
-const drafts = new Set<() => void>();
+const drafts = new Map<() => void, () => boolean>();
 /** Submit local drafts before the transition fence closes; the command queue awaits them. */
-export function registerProjectDraft(commit: () => void): () => void {
-  drafts.add(commit); return () => { drafts.delete(commit); };
+export function registerProjectDraft(commit: () => void, changed: () => boolean = () => false): () => void {
+  drafts.set(commit, changed); return () => { drafts.delete(commit); };
 }
+/** Check intent without committing it before the person chooses Save, Don't save or Cancel. */
+export const hasProjectDraft = () => [...drafts.values()].some((changed) => changed());
 
 const cancellations = new Set<() => void>();
 export function registerGestureCancellation(cancel: () => void): () => void {
@@ -62,7 +64,7 @@ let transitions = 0;
 export const isProjectTransitioning = () => transitions > 0;
 export function beginProjectTransition(): () => void {
   for (const cancel of [...cancellations]) cancel();
-  for (const commit of [...drafts]) commit();
+  for (const commit of [...drafts.keys()]) commit();
   transitions += 1;
   let finished = false;
   return () => { if (!finished) { finished = true; transitions -= 1; } };

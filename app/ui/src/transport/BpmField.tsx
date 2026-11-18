@@ -47,6 +47,11 @@ export function BpmField({ bpm, onCommit }: Props) {
   useLayoutEffect(() => registerProjectDraft(() => {
     drag.current = null;
     if (draftRef.current !== null) commitText(draftRef.current);
+  }, () => {
+    const text = draftRef.current?.trim();
+    if (!text) return false;
+    const value = Number(text.replace(",", "."));
+    return Number.isFinite(value) && round2(clamp(value)) !== bpm;
   }));
   useEffect(() => onProjectReplaced(() => {
     tempo.current.reset(bpm);
