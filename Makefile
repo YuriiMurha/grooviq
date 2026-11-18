@@ -92,3 +92,10 @@ grid-budget: ## Largest step-grid build: original 50 ms budget on standalone V8 
 export-budget: ## Optimized 8-second PCM24 export with the original 4-second budget
 	node --test scripts/notes-edit-budget.test.mjs
 	node scripts/export-budget.mjs
+
+.PHONY: qa-stability qa-stability-smoke
+qa-stability: ## Opt-in: twenty full Linux WebKit + Chromium suites at HEAD in Docker (2 CPUs)
+	sh scripts/stability/container.sh proof
+
+qa-stability-smoke: ## Tiny real Playwright fixtures exercising stability accounting in Docker
+	sh scripts/stability/container.sh smoke
