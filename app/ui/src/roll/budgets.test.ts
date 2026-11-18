@@ -34,6 +34,16 @@ const isNoteArray = (value: unknown): value is NoteArray =>
   value instanceof Float64Array || value instanceof Float32Array || value instanceof Uint32Array
   || value instanceof Int32Array || value instanceof Uint8Array;
 
+const observedArrays = new WeakMap<NoteArray, NoteArray>();
+function observeArray(value: NoteArray): NoteArray {
+  const known = observedArrays.get(value);
+  if (known) return known;
+  const observed = new Proxy(value, arrayWork);
+  observedArrays.set(value, observed);
+  observedArrays.set(observed, observed);
+  return observed;
+}
+
 const arrayWork: ProxyHandler<NoteArray> = {
   get(target, property) {
     if (typeof property === "string" && /^\d+$/.test(property)) work++;
@@ -44,11 +54,9 @@ const arrayWork: ProxyHandler<NoteArray> = {
         ? Math.max(0, Number(args[1] ?? target.length) - Number(args[0] ?? 0))
         : target.length;
       const result = Reflect.apply(member, target, args);
-      // A draw-order view shares the store's data: its direct reads count too, including
-      // views made from other views. Native methods still receive the raw typed array.
-      if (property !== "subarray") return result;
-      if (!isNoteArray(result)) throw new Error("Expected a typed-array view.");
-      return new Proxy(result, arrayWork);
+      // Methods can return the receiver (sort/fill/reverse) or a new typed array. Observe
+      // either, preserving receiver identity while native calls still use the raw target.
+      return isNoteArray(result) ? observeArray(result) : result;
     };
   },
 };
@@ -58,7 +66,7 @@ function counted(store: NoteStore): NoteStore {
   for (const key of Object.keys(store)) {
     const value = Reflect.get(store, key);
     if (!isNoteArray(value)) continue;
-    Reflect.set(store, key, new Proxy(value, arrayWork));
+    Reflect.set(store, key, observeArray(value));
   }
   return store;
 }
