@@ -2,7 +2,7 @@
 
 use grooviq_dsp::{Device, NoteEvent, create, param_spec};
 
-const IDS: [&str; 10] = [
+const IDS: [&str; 12] = [
     "synth",
     "eq",
     "comp",
@@ -13,8 +13,10 @@ const IDS: [&str; 10] = [
     "ott",
     "utility",
     "drum_shaper",
+    "fattener",
+    "bitcrusher",
 ];
-const EFFECTS: [&str; 9] = [
+const EFFECTS: [&str; 11] = [
     "eq",
     "comp",
     "limiter",
@@ -24,6 +26,8 @@ const EFFECTS: [&str; 9] = [
     "ott",
     "utility",
     "drum_shaper",
+    "fattener",
+    "bitcrusher",
 ];
 const RATES: [f32; 5] = [22050.0, 44100.0, 48000.0, 96000.0, 192000.0];
 
@@ -772,6 +776,7 @@ fn random_parameter_sweeps_never_produce_nan() {
 /// A parameter set per effect that exercises its interesting paths.
 fn interesting(id: &str) -> Vec<(u32, f32)> {
     match id {
+        "bitcrusher" => vec![(0, 5.7), (1, 23.3), (2, 0.6), (3, 0.4), (4, 1.0), (5, 0.8)],
         "eq" => vec![
             (2 * 6 + 3, 9.0),
             (3 * 6 + 5, 1.0),
@@ -783,6 +788,7 @@ fn interesting(id: &str) -> Vec<(u32, f32)> {
             (48, -3.0),
         ],
         "comp" => vec![(0, -30.0), (2, 1.0), (3, 50.0), (5, 6.0), (6, 0.7)],
+        "fattener" => vec![(0, 0.8), (1, 0.5)],
         "limiter" => vec![(0, 12.0), (1, -2.0), (2, 30.0)],
         "drive" => vec![(0, 3.0), (1, 18.0), (2, 0.4), (3, 0.8), (5, 2.0)],
         "reverb" => vec![(0, 0.8), (1, 3.0), (2, 35.0), (3, 0.3), (4, 0.7), (7, 0.5)],
@@ -805,6 +811,7 @@ fn interesting(id: &str) -> Vec<(u32, f32)> {
 /// Changes applied at sample 4736 (a multiple of both 128 and 37) to test smoothing paths.
 fn changes(id: &str) -> Vec<(u32, f32)> {
     match id {
+        "bitcrusher" => vec![(0, 2.5), (1, 2.5), (2, 1.0), (3, 0.2), (4, 0.7), (5, 0.3)],
         "eq" => vec![
             (2 * 6 + 2, 2000.0),
             (2 * 6 + 3, -12.0),
@@ -812,6 +819,7 @@ fn changes(id: &str) -> Vec<(u32, f32)> {
             (48, 2.0),
         ],
         "comp" => vec![(0, -12.0), (5, 0.0), (6, 1.0)],
+        "fattener" => vec![(0, 0.2), (1, -0.9)],
         "limiter" => vec![(0, 3.0)],
         "drive" => vec![(1, 6.0), (2, -0.5), (3, 0.3)],
         "reverb" => vec![(0, 0.2), (2, 90.0), (5, 400.0), (7, 0.9)],

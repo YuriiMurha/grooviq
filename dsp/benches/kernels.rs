@@ -162,6 +162,73 @@ fn synth_trap_lead_uni7_block(bencher: Bencher, voices: usize) {
     bencher.bench_local(|| synth.process(black_box(&mut l), black_box(&mut r), None, &[]));
 }
 
+#[divan::bench(args = grooviq_dsp::fattener::PRESETS, consts = [64, 128])]
+fn fattener_block<const N: usize>(bencher: Bencher, name: &str) {
+    use grooviq_dsp::fattener::{Fattener, preset};
+    let mut device = Fattener::new(SR);
+    for (index, value) in preset(name).unwrap() {
+        device.set_param(index, value);
+    }
+    let source_l: [f32; N] =
+        std::array::from_fn(|i| libm::sinf(i as f32 * 0.29) * if i < 16 { 0.95 } else { 0.65 });
+    let source_r: [f32; N] = std::array::from_fn(|i| source_l[N - 1 - i] * -0.8);
+    for _ in 0..16 {
+        let (mut l, mut r) = (source_l, source_r);
+        device.process(&mut l, &mut r, None, &[]);
+    }
+    bencher.bench_local(|| {
+        let (mut l, mut r) = (source_l, source_r);
+        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
+        black_box((l, r));
+    });
+}
+/// Continuous device state, fresh transient stereo input per call. Copies are timed;
+/// construction, preset allocation and warmup are outside the measurement.
+fn bitcrusher_block(bencher: Bencher, block: usize, name: &str) {
+    use grooviq_dsp::bitcrusher::{Bitcrusher, preset};
+    let mut device = Bitcrusher::with_seed(SR, 77);
+    for (index, value) in preset(name).expect("a factory preset") {
+        device.set_param(index, value);
+    }
+    let source_l: [f32; 128] = std::array::from_fn(|i| {
+        let envelope = if i < 12 { 0.8 } else { 0.15 };
+        envelope * libm::sinf(i as f32 * 0.31)
+    });
+    let source_r: [f32; 128] = std::array::from_fn(|i| {
+        let envelope = if i < 23 { 0.6 } else { 0.12 };
+        envelope * libm::cosf(i as f32 * 0.19)
+    });
+    let (mut l, mut r) = ([0.0; 128], [0.0; 128]);
+    for _ in 0..SETTLE_BLOCKS {
+        l.copy_from_slice(&source_l);
+        r.copy_from_slice(&source_r);
+        device.process(&mut l[..block], &mut r[..block], None, &[]);
+    }
+    bencher.bench_local(|| {
+        l[..block].copy_from_slice(&source_l[..block]);
+        r[..block].copy_from_slice(&source_r[..block]);
+        device.process(
+            black_box(&mut l[..block]),
+            black_box(&mut r[..block]),
+            None,
+            &[],
+        );
+        black_box((&l[..block], &r[..block]));
+    });
+}
+#[divan::bench(args = [64, 128])]
+fn bitcrusher_clean_block(bencher: Bencher, block: usize) {
+    bitcrusher_block(bencher, block, "Clean Steps");
+}
+#[divan::bench(args = [64, 128])]
+fn bitcrusher_filtered_block(bencher: Bencher, block: usize) {
+    bitcrusher_block(bencher, block, "Filtered Dust");
+}
+#[divan::bench(args = [64, 128])]
+fn bitcrusher_grain_block(bencher: Bencher, block: usize) {
+    bitcrusher_block(bencher, block, "Loose Grain");
+}
+
 // Keep the device continuous, but replace the in-place output with fresh stereo input on
 // every timed call. Input synthesis, setup, preset allocation and warmup are not timed.
 #[divan::bench(args = grooviq_dsp::ott::PRESETS, consts = [64, 128])]
