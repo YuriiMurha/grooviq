@@ -12,7 +12,7 @@
 //! snapshot, the sample bytes are shared), [`SaveJob::write`] (outside the lock) and
 //! [`Session::finish_save`].
 
-use crate::backup::backup_before_save;
+use crate::backup::prepare_backup;
 use crate::compile::synth_values;
 use crate::compile::{compile_pattern, engine_state, sampler_values};
 use crate::file::{Disk, Loaded, RealDisk, SampleFiles, stage_save};
@@ -447,10 +447,9 @@ impl SessionError {
 }
 
 impl SaveJob {
-    /// Saves: writes the new file beside the old one, then backs up the file it replaces
-    /// (keeping [`MAX_BACKUPS`] in `backups`), then puts the new one in place. A save that is
-    /// refused or fails before that point makes no backup, so it never rotates an older one
-    /// out. Run it without the session's lock.
+    /// Stages the new file and protects the old bytes before replacement. Failed publication
+    /// rolls back only its new backup; uncertain durability retains every copy. Retention
+    /// runs only after confirmed publication. Run it without the session's lock.
     pub fn write(&self, backups: &Path) -> Result<(), SessionError> {
         self.write_on(backups, &mut RealDisk)
     }
@@ -462,8 +461,26 @@ impl SaveJob {
         let staged = stage_save(&self.project, &self.samples, &self.path, disk)
             .map_err(SessionError::Save)?;
         // On an error here the staged file is dropped, and the old file stays as it was.
-        backup_before_save(&self.path, backups, MAX_BACKUPS).map_err(SessionError::Backup)?;
-        staged.commit(disk).map_err(SessionError::Save)
+        let backup =
+            prepare_backup(&self.path, backups, MAX_BACKUPS).map_err(SessionError::Backup)?;
+        match staged.commit(disk) {
+            Ok(()) => {
+                backup.confirm();
+                Ok(())
+            }
+            Err(error) if crate::file::directory_unconfirmed(&error) => {
+                // The old bytes remain protected until a later confirmed save.
+                Err(SessionError::Save(error))
+            }
+            Err(error) => {
+                if let Err(cleanup) = backup.rollback() {
+                    return Err(SessionError::Save(io::Error::other(format!(
+                        "{error}; backup candidate retained: {cleanup}"
+                    ))));
+                }
+                Err(SessionError::Save(error))
+            }
+        }
     }
 }
 
