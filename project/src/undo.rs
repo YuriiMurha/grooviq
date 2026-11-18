@@ -56,6 +56,12 @@ impl Growth {
 }
 
 impl NoteChange {
+    pub(crate) fn added(notes: Vec<Note>) -> Self {
+        Self {
+            before: Vec::new(),
+            after: notes,
+        }
+    }
     /// A change of no notes: an edit that only grew the pattern (it resubmitted notes as they
     /// were, after the length was shortened by hand). Its growth is its whole effect.
     pub(crate) fn none() -> Self {
@@ -158,6 +164,7 @@ struct Step {
     change: NoteChange,
     id: u64,
     take: Option<u32>,
+    order: u64,
 }
 
 /// One entry of the length log.
@@ -192,6 +199,43 @@ pub struct NoteHistory {
 }
 
 impl NoteHistory {
+    pub(crate) fn retained(&self) -> (usize, usize) {
+        (self.undo.len() + self.redo.len(), self.notes)
+    }
+    pub(crate) fn oldest(&self) -> Option<u64> {
+        self.undo.iter().chain(&self.redo).map(|s| s.order).min()
+    }
+    pub(crate) fn evict_oldest(&mut self) {
+        let Some(order) = self.oldest() else {
+            return;
+        };
+        let active = self.undo.iter().any(|s| s.order == order);
+        let list = if active {
+            None
+        } else {
+            self.redo.iter().position(|s| s.order == order)
+        };
+        let step = if let Some(i) = list {
+            self.redo.remove(i)
+        } else {
+            self.undo.pop_front().unwrap()
+        };
+        self.notes -= step.change.size();
+        if active {
+            for l in &mut self.log {
+                if let Length::Grew { owner, .. } = l
+                    && *owner == Some(step.id)
+                {
+                    *owner = None;
+                }
+            }
+        } else {
+            self.log
+                .retain(|l| !matches!(l, Length::Grew { owner: Some(id), .. } if *id == step.id));
+        }
+        self.compact();
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -312,7 +356,14 @@ impl NoteHistory {
         let id = self.next_id;
         self.next_id += 1;
         self.notes += change.size();
-        self.undo.push_back(Step { change, id, take });
+        static ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let order = ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.undo.push_back(Step {
+            change,
+            id,
+            take,
+            order,
+        });
         self.trim();
         id
     }
