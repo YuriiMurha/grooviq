@@ -12,7 +12,7 @@
 //! snapshot, the sample bytes are shared), [`SaveJob::write`] (outside the lock) and
 //! [`Session::finish_save`].
 
-use crate::backup::prepare_backup;
+use crate::backup::prepare_backup_on;
 use crate::compile::synth_values;
 use crate::compile::{compile_pattern, engine_state, sampler_values};
 use crate::file::{Disk, Loaded, RealDisk, SampleFiles, stage_save};
@@ -461,8 +461,8 @@ impl SaveJob {
         let staged = stage_save(&self.project, &self.samples, &self.path, disk)
             .map_err(SessionError::Save)?;
         // On an error here the staged file is dropped, and the old file stays as it was.
-        let backup =
-            prepare_backup(&self.path, backups, MAX_BACKUPS).map_err(SessionError::Backup)?;
+        let backup = prepare_backup_on(&self.path, backups, MAX_BACKUPS, disk)
+            .map_err(SessionError::Backup)?;
         match staged.commit(disk) {
             Ok(()) => {
                 backup.confirm();
