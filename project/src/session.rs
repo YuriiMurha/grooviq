@@ -506,6 +506,10 @@ pub struct Session {
     live_presses: Mutex<Vec<LivePress>>,
     /// The current pattern's note changes, for undo and redo.
     history: NoteHistory,
+    pattern_histories: HashMap<u32, NoteHistory>,
+    precommit: Option<PrecommitValidator>,
+    patterns_revision: u64,
+    record_settle: Option<u32>,
 }
 
 struct LivePress {
@@ -569,6 +573,26 @@ fn finite(value: f32, what: &str) -> Result<f32, SessionError> {
     }
 }
 
+/// T7 installs song expansion admission here; file admission always runs first.
+pub type PrecommitValidator = Arc<dyn Fn(&Project) -> Result<(), String> + Send + Sync>;
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatternsView {
+    pub generation: u64,
+    pub revision: u64,
+    pub selected: u32,
+    pub patterns: Vec<PatternSummary>,
+    pub view: ProjectView,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatternSummary {
+    pub id: u32,
+    pub name: String,
+    pub revision: u32,
+}
+
 impl Session {
     /// An untitled, empty project, with the engine set to match it.
     pub fn new(controller: Arc<Mutex<Controller>>) -> Self {
@@ -591,6 +615,10 @@ impl Session {
             owed_disarm: false,
             live_presses: Mutex::new(Vec::new()),
             history: NoteHistory::default(),
+            pattern_histories: HashMap::new(),
+            precommit: None,
+            patterns_revision: 0,
+            record_settle: None,
         };
         // A fresh queue always has room for a whole state.
         let synced = session.sync_engine();
@@ -599,6 +627,90 @@ impl Session {
         let mark = lock(&session.controller).record_mark();
         session.recorder.reset_until_mark(mark);
         session
+    }
+
+    pub fn set_precommit_validator(&mut self, validator: Option<PrecommitValidator>) {
+        self.precommit = validator;
+    }
+
+    fn admit(&self, project: &Project) -> Result<(), SessionError> {
+        crate::validate_save(project, &self.files).map_err(SessionError::Save)?;
+        if let Some(validate) = &self.precommit {
+            validate(project).map_err(SessionError::InvalidValue)?;
+        }
+        Ok(())
+    }
+
+    pub fn patterns(&self) -> PatternsView {
+        PatternsView {
+            generation: self.generation,
+            revision: self.patterns_revision,
+            selected: self.project.current_pattern,
+            patterns: self
+                .project
+                .patterns
+                .iter()
+                .map(|p| PatternSummary {
+                    id: p.id,
+                    name: p.name.clone(),
+                    revision: p.revision,
+                })
+                .collect(),
+            view: self.view(),
+        }
+    }
+
+    pub fn edit_patterns(
+        &mut self,
+        generation: u64,
+        revision: u64,
+        edit: crate::pattern_edit::PatternEdit,
+        now: Instant,
+    ) -> Result<PatternsView, SessionError> {
+        if generation != self.generation {
+            return Err(SessionError::ProjectReplaced);
+        }
+        if revision != self.patterns_revision {
+            return Err(SessionError::InvalidValue(
+                "Patterns changed. Reload the pattern list.".into(),
+            ));
+        }
+        let mut candidate = self.project.clone();
+        crate::pattern_edit::apply(&mut candidate, edit).map_err(SessionError::InvalidValue)?;
+        self.admit(&candidate)?;
+        let old = self.project.current_pattern;
+        let selected = candidate.current_pattern;
+        if old != selected {
+            // The caller settles its edit queue first. A take must finish on its original
+            // pattern before switching; never reinterpret late recorded notes as new input.
+            if self.record_settle.is_some()
+                || self.recording
+                || self.recorder.open() != 0
+                || !self.pending.is_empty()
+                || self.owed_disarm
+            {
+                return Err(SessionError::InvalidValue(
+                    "Stop recording and settle pending notes before selecting a pattern.".into(),
+                ));
+            }
+            let p = candidate
+                .patterns
+                .iter()
+                .find(|p| p.id == selected)
+                .unwrap();
+            lock(&self.controller).set_pattern(compile_pattern(&candidate, p))?;
+            let history = self.pattern_histories.remove(&selected).unwrap_or_default();
+            let previous = std::mem::replace(&mut self.history, history);
+            if previous.can_undo() || previous.can_redo() {
+                self.pattern_histories.insert(old, previous);
+            }
+        }
+        self.pattern_histories
+            .retain(|id, _| candidate.patterns.iter().any(|p| p.id == *id));
+        self.project = candidate;
+        self.patterns_revision += 1;
+        self.changed(true, now);
+        Ok(self.patterns())
     }
 
     /// The project as it is now.
@@ -1059,6 +1171,7 @@ impl Session {
             pattern.revision = pattern.revision.wrapping_add(1);
         }
         self.keep_pattern(pattern)?;
+        self.pattern_histories.clear();
         match (notes, take) {
             (Some(notes), Some(take)) => self.history.record(notes, take, steps, growth),
             (Some(notes), None) => self.history.push(notes, steps, growth),
@@ -1074,7 +1187,15 @@ impl Session {
 
     /// Sends `pattern` to the engine (which goes on playing), then makes it the current one.
     fn keep_pattern(&mut self, pattern: Pattern) -> Result<(), SessionError> {
-        let compiled = compile_pattern(&self.project, &pattern);
+        let mut candidate = self.project.clone();
+        let index = candidate
+            .patterns
+            .iter()
+            .position(|p| p.id == pattern.id)
+            .unwrap();
+        candidate.patterns[index] = pattern.clone();
+        self.admit(&candidate)?;
+        let compiled = compile_pattern(&candidate, &pattern);
         lock(&self.controller).set_pattern(compiled)?;
         *self.current_mut() = pattern;
         Ok(())
@@ -1188,6 +1309,7 @@ impl Session {
         self.decoded.remove(&channel);
         // Undo cannot bring a channel back (structural undo is M6), nor its notes.
         self.history.clear();
+        self.pattern_histories.clear();
         Ok(())
     }
 
@@ -1344,7 +1466,7 @@ impl Session {
     /// before anything is applied: its ids name that project's notes. An older revision of this
     /// project (recording added notes meanwhile) is applied, and asks for a reload.
     pub fn edit_notes(&mut self, edit: NotesEdit, now: Instant) -> Result<NotesAck, SessionError> {
-        if edit.generation != self.generation {
+        if edit.generation != self.generation || edit.pattern_id != self.project.current_pattern {
             return Ok(self.refused_ack());
         }
         let stale = edit.base_revision != self.current().revision;
@@ -1502,9 +1624,14 @@ impl Session {
     /// still refused (and reported), the new take's after it are kept, and an owed record-off
     /// is cancelled.
     pub fn set_recording(&mut self, on: bool) -> Result<(), SessionError> {
-        if self.owed_disarm || self.recorder.refusing() {
+        if self.owed_disarm || self.recorder.refusing() || !on {
             let id = lock(&self.controller).send_marked(Command::SetRecording { on })?;
-            self.recorder.refuse_until_mark(Some(id));
+            if self.recorder.refusing() || self.owed_disarm {
+                self.recorder.refuse_until_mark(Some(id));
+            }
+            if !on {
+                self.record_settle = Some(id);
+            }
             self.owed_disarm = false;
         } else {
             self.send(Command::SetRecording { on })?;
@@ -1528,6 +1655,12 @@ impl Session {
         self.retry_live_releases();
         if self.owed_disarm {
             self.send_disarm();
+        }
+        if events
+            .iter()
+            .any(|e| matches!(e, RecordEvent::Mark { id } if Some(*id) == self.record_settle))
+        {
+            self.record_settle = None;
         }
         let fed = self.recorder.feed_takes(events);
         self.pending.extend(fed);
@@ -1645,6 +1778,7 @@ impl Session {
         now: Instant,
     ) -> Result<Commit, (SessionError, usize)> {
         let edit = NotesEdit {
+            pattern_id: self.project.current_pattern,
             generation: self.generation,
             base_revision: self.current().revision,
             add: self.pending[..n].iter().map(|(_, note)| *note).collect(),
@@ -1759,6 +1893,8 @@ impl Session {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         self.history.clear();
+        self.pattern_histories.clear();
+        self.record_settle = None;
         self.project = project;
         self.files = files;
         self.decoded = decoded;

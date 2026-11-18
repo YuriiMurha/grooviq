@@ -35,7 +35,7 @@ export function rollEditsSettled(): Promise<boolean> {
 
 /** What waits in the queue: an edit of the roll's, or a command, each for the project it was
  * made in (its generation). */
-type Queued = ({ edit: LocalEdit } | { command: NotesCommand }) & { generation: number };
+type Queued = ({ edit: LocalEdit } | { command: NotesCommand }) & { generation: number; patternId: number };
 
 /** Sends the piano roll's edits to the engine one at a time, in order. Each edit shows in the
  * store at once; added notes keep temporary negative ids until the engine's reply names them,
@@ -69,6 +69,9 @@ export class CommitQueue {
   private failures = 0;
   /** The open project (`ProjectView.generation`). */
   private generation = 0;
+  private patternId = 0;
+
+  setPatternId(patternId: number) { this.patternId = patternId; }
 
   constructor(
     private store: NoteStore,
@@ -105,7 +108,7 @@ export class CommitQueue {
   commit(edit: LocalEdit, generation = this.generation) {
     if (this.closed || generation !== this.generation) return;
     this.store.apply(edit);
-    this.pending.push({ edit, generation });
+    this.pending.push({ edit, generation, patternId: this.patternId });
     this.pump();
   }
 
@@ -114,7 +117,7 @@ export class CommitQueue {
    * (nothing to do) changes nothing. */
   run(command: NotesCommand) {
     if (this.closed) return;
-    this.pending.push({ command, generation: this.generation });
+    this.pending.push({ command, generation: this.generation, patternId: this.patternId });
     this.pump();
   }
 
@@ -184,7 +187,7 @@ export class CommitQueue {
       this.runNow(next.command);
       this.track();
     } else if (next) {
-      this.send(next.edit, next.generation);
+      this.send(next.edit, next.generation, next.patternId);
       this.track();
     } else if (this.needsFetch()) {
       this.fetch();
@@ -222,7 +225,7 @@ export class CommitQueue {
     return { add: edit.add, update, delete: del };
   }
 
-  private send(local: LocalEdit, generation: number) {
+  private send(local: LocalEdit, generation: number, patternId: number) {
     this.busy = true;
     this.sending = true;
     const epoch = this.epoch;
@@ -235,7 +238,7 @@ export class CommitQueue {
       velocity: n.velocity,
       slide: n.slide,
     }));
-    const edit: NotesEdit = { generation, baseRevision: this.store.revision, add, update: t.update, delete: t.delete };
+    const edit: NotesEdit = { generation, patternId, baseRevision: this.store.revision, add, update: t.update, delete: t.delete };
     this.api.notesEdit(edit).then(
       (ack) => {
         // Sent for a project that was replaced since: its ids and view are that project's.

@@ -29,6 +29,7 @@ export interface NewNote {
 /** One edit to the notes: deletes, then updates, then adds. Made in the project of `generation`
  * (`ProjectView.generation`), against `baseRevision`. */
 export interface NotesEdit {
+  patternId: number;
   generation: number;
   baseRevision: number;
   add: NewNote[];

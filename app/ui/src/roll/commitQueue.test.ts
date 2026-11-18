@@ -73,6 +73,7 @@ describe("commit queue", () => {
     expect(engine.sent).toHaveLength(1);
     expect(engine.sent[0]).toEqual({
       generation: 0,
+      patternId: 0,
       baseRevision: 4,
       add: [{ channel: 1, tick: 480, length: 240, key: 60, velocity: 0.8, slide: false }],
       update: [],
@@ -82,12 +83,13 @@ describe("commit queue", () => {
     await engine.ack({ revision: 5, addedIds: [40] });
     // The second edit names the engine's id, against the new revision.
     expect(engine.sent).toHaveLength(2);
-    expect(engine.sent[1]).toEqual({ generation: 0, baseRevision: 5, add: [], update: [note(40, 960, 62)], delete: [] });
+    expect(engine.sent[1]).toEqual({ generation: 0, patternId: 0, baseRevision: 5, add: [], update: [note(40, 960, 62)], delete: [] });
     expect(views).toEqual([VIEW]);
 
     await engine.ack({ revision: 6 });
     expect(engine.sent[2]).toEqual({
       generation: 0,
+      patternId: 0,
       baseRevision: 6,
       add: [{ channel: 1, tick: 1440, length: 240, key: 60, velocity: 0.8, slide: false }],
       update: [],

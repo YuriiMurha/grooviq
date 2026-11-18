@@ -46,6 +46,7 @@ fn melodic(channel: u32, tick: u32, key: u8) -> NewNote {
 
 fn edit_notes(session: &mut Session, add: Vec<NewNote>, update: Vec<Note>, delete: Vec<u32>) {
     let edit = NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add,
@@ -57,6 +58,7 @@ fn edit_notes(session: &mut Session, add: Vec<NewNote>, update: Vec<Note>, delet
 
 fn add_notes(session: &mut Session, add: Vec<NewNote>) -> Vec<u32> {
     let edit = NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add,

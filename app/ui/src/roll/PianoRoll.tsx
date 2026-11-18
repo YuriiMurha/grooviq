@@ -64,6 +64,8 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   // project that was replaced since.
   const generation = project?.generation ?? 0;
   useEffect(() => queue.setGeneration(generation), [queue, generation]);
+  const patternId = project?.pattern.id ?? 0;
+  useEffect(() => queue.setPatternId(patternId), [queue, patternId]);
   const report = useRef(onError);
   useEffect(() => {
     report.current = onError;

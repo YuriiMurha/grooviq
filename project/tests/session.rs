@@ -1911,6 +1911,7 @@ fn add_synth(session: &mut Session, preset: &str) -> u32 {
 
 fn add_notes(session: &mut Session, add: Vec<NewNote>) -> Vec<u32> {
     let edit = NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add,
@@ -2906,6 +2907,7 @@ fn overflow_disarm_is_retried_until_the_engine_takes_it() {
     poll(&mut session, &controller, &mut processor);
     // Room again, and the person plays while Record shows off: nothing is recorded.
     let edit = NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add: Vec::new(),
@@ -2949,6 +2951,7 @@ fn turning_record_on_again_cancels_an_owed_disarm() {
     render(&mut processor, 4);
     // The person makes room and turns Record on again before the next poll.
     let edit = NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add: Vec::new(),
@@ -3004,6 +3007,7 @@ fn overflowed_with_an_owed_disarm() -> (Session, Arc<Mutex<Controller>>, AudioPr
     assert_eq!(got.stopped.map(|s| s.dropped), Some(1));
     render(&mut processor, 4);
     let edit = NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add: Vec::new(),

@@ -37,6 +37,7 @@ fn new_note(channel: u32, tick: u32, key: u8) -> NewNote {
 
 fn edit(session: &Session) -> NotesEdit {
     NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add: Vec::new(),
@@ -412,7 +413,7 @@ fn additions_stop_at_the_note_cap() {
 #[test]
 fn edits_have_the_json_shapes_the_ui_sends_and_reads() {
     let e: NotesEdit = serde_json::from_str(
-        r#"{"generation":2,"baseRevision":3,
+        r#"{"generation":2,"patternId":0,"baseRevision":3,
             "add":[{"channel":1,"tick":0,"length":240,"key":60,"velocity":0.8,"slide":false}],
             "update":[{"id":4,"channel":1,"tick":480,"length":960,"key":63,"velocity":1,"slide":true}],
             "delete":[7]}"#,
