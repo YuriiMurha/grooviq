@@ -142,6 +142,29 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(self.refresh.refresh()['status'], 'unchanged')
         self.assertEqual(len([x for x in self.calls if x[0] == 'build']), 1)
 
+    def test_unverifiable_prior_backup_does_not_fail_completed_install(self):
+        legacy = self.ops / 'previous/legacy-Grooviq.app'
+        self.make_app(legacy, b'legacy')
+        receipt = self.ops / 'installed.json'
+        prior = m.json.loads(receipt.read_text())
+        prior['previous_app'] = str(legacy)
+        m.atomic_json(receipt, prior)
+        verify = self.refresh.verify
+        def reject_legacy(path):
+            if path == legacy:
+                raise RuntimeError('unsealed legacy signature')
+            return verify(path)
+        with patch.object(self.refresh, 'verify', side_effect=reject_legacy):
+            record = self.refresh.refresh()
+        self.assertEqual(record['status'], 'installed')
+        self.assertEqual((self.app / 'Contents/MacOS/grooviq').read_bytes(), b'new')
+        self.assertEqual((legacy / 'Contents/MacOS/grooviq').read_bytes(), b'legacy')
+        self.assertIn('unsealed legacy signature', record['cleanup_warning'])
+        self.assertEqual(record['retained_previous_app'], str(legacy))
+        saved = m.json.loads(receipt.read_text())
+        self.assertEqual(saved['installed_executable_sha256'], m.digest(self.app / 'Contents/MacOS/grooviq'))
+        self.assertEqual(saved['source_sha'], 'b' * 40)
+
     def test_unmanaged_app_refusal(self):
         (self.ops / 'installed.json').unlink()
         with self.assertRaisesRegex(RuntimeError, 'Unmanaged'):

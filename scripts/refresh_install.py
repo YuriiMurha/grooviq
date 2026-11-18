@@ -226,11 +226,15 @@ class Refresh:
                 if stage.exists():
                     safe_tree(stage)
                     shutil.rmtree(stage)
-            # Retain the new prior plus the legacy prior. Never remove unrecorded user data.
+            # Placement and its receipt are committed; legacy cleanup cannot undo that success.
             old = Path(prior['previous_app']) if prior.get('previous_app') else None
             if old and old != previous and old.parent == previous.parent and old.exists():
-                self.verify(old)
-                shutil.rmtree(old)
+                try:
+                    self.verify(old)
+                    shutil.rmtree(old)
+                except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+                    record['cleanup_warning'] = str(error)
+                    record['retained_previous_app'] = str(old)
             record['main_after_install'] = self.git('rev-parse', 'origin/main')
             return record
 
