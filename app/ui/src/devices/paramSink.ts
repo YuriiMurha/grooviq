@@ -1,14 +1,16 @@
 // Where everything an editor sends goes: the engine (live values) and the project (edits: a
 // parameter, a preset, anything later), for the project the editor was opened in only. It is
-// the only way out of a device editor; the raw `apply` is not reachable from device components
-// (eslint.config.js). While a New, Open or Restore is on its way nothing new
-// goes out, and an edit already queued is checked again when its turn comes, so it can never
-// land in the project that replaced this one.
+// the standard device edit path. Lint checks resolved value dependencies and the send type
+// prevents accidental substitution of raw apply; neither is a sandbox against casts or eval.
+// Runtime generation checks also refuse queued edits after project replacement.
 
 import type { Edit } from "../api/project";
 import { isProjectReplacing, projectGeneration } from "../project/replacement";
 import { LiveCoalescer } from "./controls/paramDrag";
 import type { GestureSink } from "./paramGestures";
+
+const guardedEdit: unique symbol = Symbol("guarded device edit");
+export type GuardedEdit = ((edit: Edit) => Promise<boolean>) & { readonly [guardedEdit]: true };
 
 export interface SinkDeps {
   channel: number;
@@ -28,7 +30,7 @@ export function editorSink(d: SinkDeps): {
   sink: GestureSink;
   live: LiveCoalescer;
   /** Sends any project edit under the same guard as the gestures' edits. */
-  send: (edit: Edit) => Promise<boolean>;
+  send: GuardedEdit;
 } {
   const generation = projectGeneration();
   // The engine still holds the project this editor was opened in ...
@@ -59,5 +61,5 @@ export function editorSink(d: SinkDeps): {
     edit: (id, v) => send({ kind: "setInstrumentParam", channel: d.channel, param: id, value: v }),
     shown: d.shown,
   };
-  return { sink, live, send };
+  return { sink, live, send: Object.assign(send, { [guardedEdit]: true as const }) };
 }
