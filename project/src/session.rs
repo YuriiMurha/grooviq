@@ -289,13 +289,29 @@ pub fn decode_samples(loaded: &Loaded) -> DecodedSamples {
     }
     let mut out = DecodedSamples::default();
     let mut seen: Vec<Seen<'_>> = Vec::new();
-    for channel in &loaded.project.channels {
-        if channel.sample.is_none() {
-            continue;
-        }
-        let Some(file) = loaded.samples.get(&channel.id) else {
+    let sources = loaded
+        .project
+        .channels
+        .iter()
+        .filter(|c| c.sample.is_some())
+        .map(|c| {
+            (
+                c.id,
+                format!("Channel \"{}\"", crate::model::warning_label(&c.name)),
+            )
+        })
+        .chain(
+            loaded
+                .project
+                .arrangement
+                .audio_assets
+                .iter()
+                .map(|a| (a.id, format!("Audio asset {}", a.id))),
+        );
+    for (id, label) in sources {
+        let Some(file) = loaded.samples.get(&id) else {
             // The loader already said why.
-            out.missing.insert(channel.id);
+            out.missing.insert(id);
             continue;
         };
         let extension = Path::new(&file.name).extension().and_then(|e| e.to_str());
@@ -316,13 +332,13 @@ pub fn decode_samples(loaded: &Loaded) -> DecodedSamples {
         });
         match &seen[at].result {
             Ok(buf) => {
-                out.samples.insert(channel.id, Arc::clone(buf));
+                out.samples.insert(id, Arc::clone(buf));
             }
             Err(e) => {
-                out.missing.insert(channel.id);
+                out.missing.insert(id);
                 out.warnings.push(format!(
-                    "Channel \"{}\": its sample \"{}\" could not be decoded ({e}). Relink it to hear the channel.",
-                    crate::model::warning_label(&channel.name), crate::model::warning_label(&file.name)
+                    "{}: its sample \"{}\" could not be decoded ({e}). Relink it to hear the channel.",
+                    label, crate::model::warning_label(&file.name)
                 ));
             }
         }
@@ -537,6 +553,9 @@ pub struct Session {
     history: NoteHistory,
     pattern_histories: HashMap<u32, NoteHistory>,
     precommit: Option<PrecommitValidator>,
+    compiled_song: grooviq_engine::SongData,
+    song_error: Option<String>,
+    song_note_limit: usize,
     patterns_revision: u64,
     record_settle: Option<u32>,
 }
@@ -674,6 +693,9 @@ impl Session {
             history: NoteHistory::default(),
             pattern_histories: HashMap::new(),
             precommit: None,
+            compiled_song: Default::default(),
+            song_error: None,
+            song_note_limit: grooviq_engine::MAX_SONG_NOTES,
             patterns_revision: 0,
             record_settle: None,
         };
@@ -808,12 +830,128 @@ impl Session {
         self.precommit = validator;
     }
 
-    fn admit(&self, project: &Project) -> Result<(), SessionError> {
+    /// Persistent compilation diagnostic for editable but unplayable loaded songs.
+    pub fn song_error(&self) -> Option<&str> {
+        self.song_error.as_deref()
+    }
+
+    #[doc(hidden)]
+    pub fn set_song_note_limit(&mut self, limit: usize) {
+        self.song_note_limit = limit.min(grooviq_engine::MAX_SONG_NOTES);
+    }
+
+    fn same_audio(&self, project: &Project) -> bool {
+        let clips = |p: &Project| {
+            p.arrangement
+                .clips
+                .iter()
+                .filter(|c| matches!(c.content, crate::ClipContent::Audio { .. }))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let tracks = |p: &Project| {
+            p.arrangement
+                .tracks
+                .iter()
+                .map(|t| (t.id, t.mute))
+                .collect::<Vec<_>>()
+        };
+        // Decoded allocations are Session-owned and cannot change between this proof and
+        // publication under the same exclusive Session borrow.
+        self.project.arrangement.audio_assets == project.arrangement.audio_assets
+            && clips(&self.project) == clips(project)
+            && tracks(&self.project) == tracks(project)
+    }
+
+    fn prepare_song(&self, project: &Project) -> Result<grooviq_engine::SongData, SessionError> {
+        crate::compile_song::compile_song(
+            project,
+            &self.decoded,
+            (self.song_error.is_none() && self.same_audio(project))
+                .then_some(&self.compiled_song.audio),
+            self.song_note_limit,
+        )
+        .map_err(SessionError::InvalidValue)
+    }
+
+    fn timeline(
+        project: &Project,
+        song: grooviq_engine::SongData,
+    ) -> grooviq_engine::TimelineUpdate {
+        let pattern = project
+            .patterns
+            .iter()
+            .find(|p| p.id == project.current_pattern)
+            .or_else(|| project.patterns.first())
+            .map(|p| compile_pattern(project, p))
+            .unwrap_or_default();
+        grooviq_engine::TimelineUpdate {
+            remove_channel: None,
+            pattern: Box::new(pattern),
+            song: Box::new(song),
+            bpm: project.bpm,
+            mode: match project.play_mode {
+                crate::PlayMode::Pattern => grooviq_engine::PlaybackMode::Pattern,
+                crate::PlayMode::Song => grooviq_engine::PlaybackMode::Song,
+            },
+            region: project
+                .arrangement
+                .loop_region
+                .as_ref()
+                .filter(|r| r.enabled)
+                .map(|r| grooviq_engine::SongLoop {
+                    start_tick: r.start_tick,
+                    end_tick: r.end_tick,
+                }),
+        }
+    }
+
+    fn publish_candidate(&mut self, project: &Project) -> Result<(), SessionError> {
+        let song = self.admit(project)?;
+        lock(&self.controller).set_timeline(Self::timeline(project, song.clone()))?;
+        self.compiled_song = song;
+        self.song_error = None;
+        Ok(())
+    }
+
+    pub fn set_play_mode(
+        &mut self,
+        mode: crate::PlayMode,
+        now: Instant,
+    ) -> Result<(), SessionError> {
+        if self.project.play_mode == mode {
+            return Ok(());
+        }
+        let mut candidate = self.project.clone();
+        candidate.play_mode = mode;
+        if mode == crate::PlayMode::Pattern && self.song_error.is_some() {
+            crate::validate_save(&candidate, &self.files).map_err(SessionError::Save)?;
+            let mut update = Self::timeline(&candidate, self.compiled_song.clone());
+            update.region = None;
+            lock(&self.controller).set_timeline(update)?;
+        } else {
+            self.publish_candidate(&candidate)?;
+        }
+        self.project = candidate;
+        self.changed(true, now);
+        Ok(())
+    }
+
+    pub fn play(&self) -> Result<(), SessionError> {
+        if self.project.play_mode == crate::PlayMode::Song
+            && let Some(error) = &self.song_error
+        {
+            return Err(SessionError::InvalidValue(error.clone()));
+        }
+        self.send(Command::Play)
+    }
+
+    fn admit(&self, project: &Project) -> Result<grooviq_engine::SongData, SessionError> {
         crate::validate_save(project, &self.files).map_err(SessionError::Save)?;
         if let Some(validate) = &self.precommit {
             validate(project).map_err(SessionError::InvalidValue)?;
         }
-        Ok(())
+        self.prepare_song(project)
     }
 
     pub fn patterns(&self) -> PatternsView {
@@ -877,10 +1015,9 @@ impl Session {
                         "Pattern revisions exhausted. Reopen the project.".into(),
                     )
                 })?;
-            let p = &candidate.patterns[index];
-            let compiled = compile_pattern(&candidate, p);
-            self.admit(&candidate)?;
-            lock(&self.controller).set_pattern(compiled)?;
+        }
+        self.publish_candidate(&candidate)?;
+        if old != selected {
             let history = self.pattern_histories.remove(&selected).unwrap_or_default();
             let previous = std::mem::replace(&mut self.history, history);
             if previous.can_undo() || previous.can_redo() {
@@ -1117,6 +1254,10 @@ impl Session {
                 if (c.volume, c.pan, c.mute, c.solo) == (mix.volume, mix.pan, mute, solo) {
                     return Ok(false);
                 }
+                let mut candidate = self.project.clone();
+                let c = &mut candidate.channels[index];
+                (c.volume, c.pan, c.mute, c.solo) = (mix.volume, mix.pan, mute, solo);
+                self.admit(&candidate)?;
                 self.send(Command::SetChannelMix {
                     channel: ChannelId(channel),
                     mix,
@@ -1142,6 +1283,11 @@ impl Session {
                 if self.project.channels[index].sampler.get(&param) == Some(&value) {
                     return Ok(false);
                 }
+                let mut candidate = self.project.clone();
+                candidate.channels[index]
+                    .sampler
+                    .insert(param.clone(), value);
+                self.admit(&candidate)?;
                 self.send(Command::SetSamplerParam {
                     channel: ChannelId(channel),
                     index: at as u32,
@@ -1213,8 +1359,18 @@ impl Session {
                 if self.project.bpm == bpm {
                     return Ok(false);
                 }
-                self.send(Command::SetTempo { bpm })?;
-                self.project.bpm = bpm;
+                let mut candidate = self.project.clone();
+                candidate.bpm = bpm;
+                crate::file::validate_scalar_edit(&candidate, &self.files)
+                    .map_err(SessionError::Save)?;
+                if let Some(validate) = &self.precommit {
+                    validate(&candidate).map_err(SessionError::InvalidValue)?;
+                }
+                let song = self.prepare_song(&candidate)?;
+                lock(&self.controller).set_timeline(Self::timeline(&candidate, song.clone()))?;
+                self.compiled_song = song;
+                self.song_error = None;
+                self.project = candidate;
                 Ok(true)
             }
             Edit::SetTimeSignature { beats, unit } => {
@@ -1227,6 +1383,9 @@ impl Session {
                 if self.project.time_signature == signature {
                     return Ok(false);
                 }
+                let mut candidate = self.project.clone();
+                candidate.time_signature = signature;
+                self.admit(&candidate)?;
                 // The metronome counts the beats; the bars are drawn by the UI.
                 self.send(Command::SetTimeSignature { beats, unit })?;
                 self.project.time_signature = signature;
@@ -1250,6 +1409,16 @@ impl Session {
                 if values.get(&param) == Some(&value) {
                     return Ok(false);
                 }
+                let mut candidate = self.project.clone();
+                match kind {
+                    InstrumentKind::Sampler => candidate.channels[index]
+                        .sampler
+                        .insert(param.clone(), value),
+                    InstrumentKind::Synth => {
+                        candidate.channels[index].synth.insert(param.clone(), value)
+                    }
+                };
+                self.admit(&candidate)?;
                 self.send(Command::SetChannelParam {
                     channel: ChannelId(channel),
                     index: at as u32,
@@ -1272,6 +1441,10 @@ impl Session {
                     )));
                 }
                 let values = synth_preset(&preset)?;
+                let mut candidate = self.project.clone();
+                candidate.channels[index].synth = by_param_id(&values);
+                candidate.channels[index].preset = Some(preset.clone());
+                self.admit(&candidate)?;
                 lock(&self.controller).set_channel_params(ChannelId(channel), &values)?;
                 let c = &mut self.project.channels[index];
                 c.synth = by_param_id(&values);
@@ -1284,6 +1457,9 @@ impl Session {
                 if self.project.channels[index].choke == group {
                     return Ok(false);
                 }
+                let mut candidate = self.project.clone();
+                candidate.channels[index].choke = group;
+                self.admit(&candidate)?;
                 self.send(Command::SetChoke {
                     channel: ChannelId(channel),
                     group,
@@ -1303,6 +1479,9 @@ impl Session {
                 if self.project.key == key {
                     return Ok(false);
                 }
+                let mut candidate = self.project.clone();
+                candidate.key = key.clone();
+                self.admit(&candidate)?;
                 self.project.key = key;
                 Ok(true)
             }
@@ -1398,9 +1577,20 @@ impl Session {
         if let Some(validate) = &self.precommit {
             validate(candidate.project).map_err(SessionError::InvalidValue)?;
         }
-        let compiled = compile_pattern(candidate.project, &candidate.project.patterns[index]);
+        let song = crate::compile_song::compile_song(
+            candidate.project,
+            &self.decoded,
+            self.song_error
+                .is_none()
+                .then_some(&self.compiled_song.audio),
+            self.song_note_limit,
+        )
+        .map_err(SessionError::InvalidValue)?;
+        let update = Self::timeline(candidate.project, song.clone());
         drop(candidate);
-        lock(&self.controller).set_pattern(compiled)?;
+        lock(&self.controller).set_timeline(update)?;
+        self.compiled_song = song;
+        self.song_error = None;
         *self.current_mut() = pattern;
         Ok(())
     }
@@ -1509,21 +1699,16 @@ impl Session {
                 p.revision = p.revision.wrapping_add(1);
             }
         }
-        {
-            let mut controller = lock(&self.controller);
-            controller.remove_channel(ChannelId(channel))?;
-            // The engine skips notes of a channel it lacks; the pattern is sent anyway so its
-            // state matches the project's.
-            let mut rest = self.project.clone();
-            rest.channels.remove(index);
-            let current = patterns
-                .iter()
-                .find(|p| p.id == rest.current_pattern)
-                .unwrap_or(&patterns[0]);
-            let _ = controller.set_pattern(compile_pattern(&rest, current));
-        }
-        self.project.channels.remove(index);
-        self.project.patterns = patterns;
+        let mut candidate = self.project.clone();
+        candidate.channels.remove(index);
+        candidate.patterns = patterns;
+        let song = self.admit(&candidate)?;
+        let mut timeline = Self::timeline(&candidate, song.clone());
+        timeline.remove_channel = Some(ChannelId(channel));
+        lock(&self.controller).set_timeline(timeline)?;
+        self.project = candidate;
+        self.compiled_song = song;
+        self.song_error = None;
         self.files.remove(&channel);
         self.decoded.remove(&channel);
         // Undo cannot bring a channel back (structural undo is M6), nor its notes.
@@ -1627,6 +1812,7 @@ impl Session {
         if let Some(validate) = &self.precommit {
             validate(&candidate).map_err(SessionError::InvalidValue)?;
         }
+        self.prepare_song(&candidate)?;
         lock(&self.controller).add_channel(ChannelSetup::sampler(
             ChannelId(id),
             Some(Arc::clone(&sample)),
@@ -2119,6 +2305,18 @@ impl Session {
         now: Instant,
     ) -> Result<ProjectView, SessionError> {
         let index = self.channel_index(channel)?;
+        let mut candidate = self.project.clone();
+        candidate.channels[index].sample = Some(SampleRef {
+            path: path.to_path_buf(),
+            file: None,
+        });
+        let mut files = self.files.clone();
+        files.insert(channel, file.clone());
+        crate::validate_save(&candidate, &files).map_err(SessionError::Save)?;
+        if let Some(validate) = &self.precommit {
+            validate(&candidate).map_err(SessionError::InvalidValue)?;
+        }
+        self.prepare_song(&candidate)?;
         lock(&self.controller).set_channel_sample(ChannelId(channel), Some(Arc::clone(&sample)))?;
         self.project.channels[index].sample = Some(SampleRef {
             path: path.to_path_buf(),
@@ -2143,7 +2341,7 @@ impl Session {
 
     /// Replaces the engine's state with the project's (stopping the transport first).
     fn sync_engine(&self) -> Result<(), SessionError> {
-        let state = engine_state(&self.project, &self.decoded);
+        let state = self.export_state();
         lock(&self.controller).load_state(state)?;
         Ok(())
     }
@@ -2156,7 +2354,24 @@ impl Session {
         decoded: HashMap<u32, Arc<SampleBuf>>,
     ) -> Result<(), SessionError> {
         self.settle_recording()?;
-        let state = engine_state(&project, &decoded);
+        let mut state = engine_state(&project, &decoded);
+        let (song, error) =
+            match crate::compile_song::compile_song(&project, &decoded, None, self.song_note_limit)
+            {
+                Ok(song) => (song, None),
+                Err(error) => (Default::default(), Some(error)),
+            };
+        state.song = song.clone();
+        state.playback_mode = if error.is_some() {
+            grooviq_engine::PlaybackMode::Pattern
+        } else {
+            Self::timeline(&project, song.clone()).mode
+        };
+        state.song_loop = if error.is_some() {
+            None
+        } else {
+            Self::timeline(&project, song.clone()).region
+        };
         let mark = {
             let mut controller = lock(&self.controller);
             // `load_state` stops the transport, then swaps the graph: opening never plays.
@@ -2193,6 +2408,8 @@ impl Session {
         self.pattern_histories.clear();
         self.record_settle = None;
         self.project = project;
+        self.compiled_song = song;
+        self.song_error = error;
         self.files = files;
         self.decoded = decoded;
         self.revision += 1;
@@ -2226,7 +2443,18 @@ impl Session {
         } = loaded;
         warnings.extend(project.validate());
         warnings.extend(decoded.warnings);
+        for asset in &project.arrangement.audio_assets {
+            if let Some(sample) = decoded.samples.get(&asset.id)
+                && (sample.rate != asset.source_rate as f32
+                    || sample.l.len() as u64 != asset.source_frames)
+            {
+                warnings.push(format!("Audio asset {}: decoded geometry differs from saved source metadata; saved trim duration is preserved.", asset.id));
+            }
+        }
         self.replace(project, samples, decoded.samples)?;
+        if let Some(error) = &self.song_error {
+            warnings.push(error.clone());
+        }
         self.path = Some(path.to_path_buf());
         Ok(OpenReport {
             view: self.view(),
@@ -2362,7 +2590,42 @@ impl Session {
 
     /// The engine's state for an export: the project as it plays now.
     pub fn export_state(&self) -> EngineState {
-        engine_state(&self.project, &self.decoded)
+        let mut state = engine_state(&self.project, &self.decoded);
+        state.song = self.compiled_song.clone();
+        state.playback_mode = Self::timeline(&self.project, state.song.clone()).mode;
+        state.song_loop = Self::timeline(&self.project, state.song.clone()).region;
+        state
+    }
+
+    pub fn checked_export_state(&self) -> Result<EngineState, SessionError> {
+        if self.project.play_mode == crate::PlayMode::Song
+            && let Some(error) = &self.song_error
+        {
+            return Err(SessionError::InvalidValue(error.clone()));
+        }
+        Ok(self.export_state())
+    }
+
+    /// Explicit backend export selection. Whole Song ignores transport looping; a region
+    /// is returned only when requested and a valid enabled Song loop exists.
+    pub fn export_selection(
+        &self,
+        loop_region: bool,
+    ) -> Result<(EngineState, Option<grooviq_engine::SongLoop>), SessionError> {
+        let state = self.checked_export_state()?;
+        let region = if loop_region {
+            if state.playback_mode != grooviq_engine::PlaybackMode::Song {
+                return Err(SessionError::InvalidValue(
+                    "Loop-region export requires Song mode.".into(),
+                ));
+            }
+            Some(state.song_loop.ok_or_else(|| {
+                SessionError::InvalidValue("Enable a Song loop region before exporting it.".into())
+            })?)
+        } else {
+            None
+        };
+        Ok((state, region))
     }
 
     /// Whether closing would lose changes.

@@ -299,7 +299,7 @@ fn transport(audio: &Audio, cmd: Command) -> Result<(), String> {
 /// Plays the pattern from its start, looping.
 #[tauri::command]
 pub async fn transport_play(audio: State<'_, Audio>) -> Result<(), String> {
-    transport(&audio, Command::Play)
+    session(&audio).play().map_err(|e| e.to_string())
 }
 
 /// Stops and rewinds.
@@ -406,11 +406,13 @@ pub async fn project_export(
 ) -> Result<ExportResult, String> {
     let options = options.options()?;
     let path = with_extension(Path::new(&path), "wav");
+    let state = session(&audio)
+        .checked_export_state()
+        .map_err(|e| e.to_string())?;
     if audio.export_running.swap(true, Ordering::AcqRel) {
         return Err("An export is already running.".into());
     }
     audio.export_cancel.store(false, Ordering::Release);
-    let state = session(&audio).export_state();
     let cancel = Arc::clone(&audio.export_cancel);
     let result = blocking(move || {
         let mut throttle = Throttle { last: -1.0 };

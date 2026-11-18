@@ -333,3 +333,77 @@ fn fault_recovery_retains_song_region_and_musical_cursor() {
     );
     assert_eq!(c.state().playback_mode, PlaybackMode::Song);
 }
+
+#[test]
+fn compound_timeline_refusal_and_rebuild_preserve_complete_candidate() {
+    let cfg = EngineConfig {
+        sample_rate: 48000.0,
+    };
+    let (mut c, mut p) = engine_with(cfg, state());
+    let update = TimelineUpdate {
+        pattern: Box::new(PatternData {
+            length: 1920,
+            notes: vec![],
+        }),
+        song: Box::new(state().song),
+        bpm: 180.0,
+        mode: PlaybackMode::Song,
+        region: None,
+        remove_channel: None,
+    };
+    while c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+    let before = c.state().clone();
+    assert_eq!(c.set_timeline(update.clone()), Err(ControlError::Full));
+    assert_eq!(c.state(), &before);
+    p.process(&mut [0.0; 128], 2);
+    c.set_timeline(update).unwrap();
+    assert_eq!(c.state().bpm, 180.0);
+    assert_eq!(c.state().pattern.length, 1920);
+    c.reconfigure(
+        &mut p,
+        EngineConfig {
+            sample_rate: 44100.0,
+        },
+    );
+    c.send(Command::Play).unwrap();
+    let mut actual = vec![0.0; 10_000];
+    p.process(&mut actual, 2);
+    let expected = render_offline_with(
+        EngineConfig {
+            sample_rate: 44100.0,
+        },
+        c.state().clone(),
+        &[(0, Command::Play)],
+        5000,
+        64,
+    );
+    assert!(expected.iter().any(|x| *x != 0.0));
+    assert_eq!(actual.as_slice(), expected.as_slice());
+}
+
+#[test]
+fn queued_compound_mode_change_still_stops_transport_after_reconfigure() {
+    let cfg = EngineConfig {
+        sample_rate: 48000.0,
+    };
+    let mut initial = state();
+    initial.playback_mode = PlaybackMode::Pattern;
+    let (mut c, mut p) = engine_with(cfg, initial);
+    c.send(Command::SetRecording { on: true }).unwrap();
+    c.send(Command::Play).unwrap();
+    p.process(&mut [0.0; 128], 2);
+    assert!(c.live().playing);
+    c.set_timeline(TimelineUpdate {
+        pattern: Box::new(PatternData::default()),
+        song: Box::new(state().song),
+        bpm: 180.0,
+        mode: PlaybackMode::Song,
+        region: None,
+        remove_channel: None,
+    })
+    .unwrap();
+    c.reconfigure(&mut p, cfg);
+    p.process(&mut [0.0; 128], 2);
+    assert!(!c.live().playing);
+    assert_eq!(c.state().playback_mode, PlaybackMode::Song);
+}

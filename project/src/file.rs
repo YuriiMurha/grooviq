@@ -208,6 +208,13 @@ pub fn validate_save(project: &Project, samples: &SampleFiles) -> io::Result<()>
     validate_save_with_limits(project, samples, LIMITS)
 }
 
+/// Scalar edits may preserve an already missing embedded sample. They still use the
+/// writer's exact JSON and present-media budgets; Save retains its loss-prevention refusal.
+pub(crate) fn validate_scalar_edit(project: &Project, samples: &SampleFiles) -> io::Result<()> {
+    let (project, _) = plan_with_missing(project, samples, LIMITS, true)?;
+    serialize_capped(&project, LIMITS.json, false).map(|_| ())
+}
+
 fn validate_save_with_limits(
     project: &Project,
     samples: &SampleFiles,
@@ -385,6 +392,15 @@ fn plan(
     samples: &SampleFiles,
     limits: Limits,
 ) -> io::Result<(Project, Vec<Entry>)> {
+    plan_with_missing(project, samples, limits, false)
+}
+
+fn plan_with_missing(
+    project: &Project,
+    samples: &SampleFiles,
+    limits: Limits,
+    allow_missing: bool,
+) -> io::Result<(Project, Vec<Entry>)> {
     if let Some(p) = project
         .patterns
         .iter()
@@ -421,7 +437,7 @@ fn plan(
         )
     {
         let Some(file) = samples.get(&id) else {
-            if sample_ref.file.is_some() {
+            if !allow_missing && sample_ref.file.is_some() {
                 let source = if name.starts_with("Audio asset ") {
                     "asset"
                 } else {

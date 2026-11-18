@@ -41,6 +41,11 @@ struct Bank {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AudioSchedule(Arc<Bank>);
 impl AudioSchedule {
+    /// Whether clones retain the same immutable runtime bank.
+    pub fn shares_bank(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.entries.is_empty()
     }

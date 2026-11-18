@@ -389,6 +389,51 @@ impl AudioProcessor {
                         self.discard(Trash::Sample(sample));
                     }
                 }
+                Msg::TimelineRebuilt {
+                    bpm,
+                    mode,
+                    region,
+                    mode_changed,
+                    loop_changed,
+                } => {
+                    if !self.faulted {
+                        self.timeline_transport(
+                            start,
+                            bpm,
+                            mode,
+                            region,
+                            mode_changed,
+                            loop_changed,
+                        );
+                    }
+                }
+                Msg::Timeline(mut update, mode_changed, loop_changed) => {
+                    let mut removed = None;
+                    if !self.faulted {
+                        let old_len = self.graph.pattern_length();
+                        let new_len = update.pattern.length;
+                        update.pattern = self.graph.set_pattern(update.pattern);
+                        // Graph setters preserve same-bank active audio progress.
+                        update.song = self.graph.set_song(update.song);
+                        if self.graph.playback_mode == crate::PlaybackMode::Pattern {
+                            self.transport.keep_position(start, old_len, new_len);
+                        } else {
+                            self.transport.keep_position(start, new_len, new_len);
+                        }
+                        if let Some(id) = update.remove_channel {
+                            removed = self.graph.remove_channel(id);
+                        }
+                        self.timeline_transport(
+                            start,
+                            update.bpm,
+                            update.mode,
+                            update.region,
+                            mode_changed,
+                            loop_changed,
+                        );
+                    }
+                    self.discard(Trash::Timeline(update, removed));
+                }
                 Msg::SetSong(song) => {
                     let old = if self.faulted {
                         song
@@ -586,6 +631,33 @@ impl AudioProcessor {
         }
     }
 
+    fn timeline_transport(
+        &mut self,
+        start: u64,
+        bpm: f32,
+        mode: crate::PlaybackMode,
+        region: Option<crate::SongLoop>,
+        mode_changed: bool,
+        loop_changed: bool,
+    ) {
+        self.transport.set_bpm(start, bpm);
+        if mode_changed || self.graph.playback_mode != mode {
+            self.recorder.set(false, &self.transport, start, &self.live);
+            self.stop(start);
+            self.graph.playback_mode = mode;
+        }
+        if loop_changed || self.graph.song_loop != region {
+            let tick = self.graph.position(self.transport.position_ticks(start));
+            self.graph.transport_stopped();
+            self.transport.seek(
+                start,
+                region.map_or(tick, |r| tick.clamp(r.start_tick, r.end_tick - 1)),
+            );
+            self.graph.song_loop = region;
+            self.graph.reset_audio();
+        }
+    }
+
     /// Runs `f` on the graph unless it is faulted, catching a panic like a render does.
     fn with_graph(&mut self, f: impl FnOnce(&mut Graph)) {
         if self.faulted {
@@ -717,6 +789,44 @@ mod tests {
         p.process(&mut buf, 2);
         assert_eq!(trash.slots(), 1);
         assert!(p.unsent.is_none());
+    }
+
+    #[test]
+    fn timeline_bundles_park_and_resume_without_partial_publication() {
+        let (mut p, mut commands, mut trash) = processor();
+        for n in [10, 20, 30] {
+            let update = crate::TimelineUpdate {
+                pattern: Box::new(PatternData {
+                    length: n,
+                    notes: vec![],
+                }),
+                song: Box::new(crate::SongData {
+                    end_tick: n as u64,
+                    ..Default::default()
+                }),
+                bpm: 100.0 + n as f32,
+                mode: crate::PlaybackMode::Pattern,
+                region: None,
+                remove_channel: None,
+            };
+            assert!(
+                commands
+                    .push(Msg::Timeline(Box::new(update), false, false))
+                    .is_ok()
+            );
+        }
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert_eq!(p.graph.pattern().length, 20);
+        assert_eq!(p.graph.song().end_tick, 20);
+        assert!(matches!(p.unsent, Some(Trash::Timeline(_, _))));
+        assert_eq!(commands.slots(), QUEUE_CAPACITY - 1);
+        assert!(matches!(trash.pop(), Ok(Trash::Timeline(_, _))));
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert_eq!(p.graph.pattern().length, 30);
+        assert_eq!(p.graph.song().end_tick, 30);
+        assert!(matches!(trash.pop(), Ok(Trash::Timeline(_, _))));
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert!(matches!(trash.pop(), Ok(Trash::Timeline(_, _))));
     }
 
     fn sample() -> Arc<SampleBuf> {

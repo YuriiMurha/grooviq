@@ -1076,3 +1076,38 @@ fn automation_targets_restoration_and_retirement_are_realtime_safe() {
         realtime(|| p.process(&mut out, 2));
     }
 }
+
+#[test]
+fn compound_timeline_retirement_and_fault_refusal_are_realtime_safe() {
+    let (mut c, mut p) = engine(EngineConfig { sample_rate: SR });
+    for i in 0..32 {
+        c.set_timeline(grooviq_engine::TimelineUpdate {
+            pattern: Box::new(PatternData {
+                length: 240 + i,
+                notes: vec![],
+            }),
+            song: Box::default(),
+            bpm: 120.0,
+            mode: grooviq_engine::PlaybackMode::Pattern,
+            region: None,
+            remove_channel: None,
+        })
+        .unwrap();
+    }
+    realtime(|| p.process(&mut [0.0; 128], 2));
+    let _ = c.check_health();
+    c.send(Command::InjectPanic).unwrap();
+    // The injected panic deliberately allocates its unwind payload, as existing fault
+    // tests do; only ordinary publication and refusal belong inside the RT guard.
+    p.process(&mut [0.0; 128], 2);
+    c.set_timeline(grooviq_engine::TimelineUpdate {
+        pattern: Box::default(),
+        song: Box::default(),
+        bpm: 130.0,
+        mode: grooviq_engine::PlaybackMode::Pattern,
+        region: None,
+        remove_channel: None,
+    })
+    .unwrap();
+    realtime(|| p.process(&mut [0.0; 128], 2));
+}

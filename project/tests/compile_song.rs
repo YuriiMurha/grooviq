@@ -51,7 +51,8 @@ fn audio_horizon_has_exact_frames_without_tick_duration_rounding() {
     let mut muted = p.clone();
     muted.arrangement.tracks[0].mute = true;
     let empty = compile_song(&muted, &HashMap::new(), None, 10).unwrap();
-    assert_eq!((empty.end_tick, empty.end_frame), (0, 0));
+    assert_eq!((empty.end_tick, empty.end_frame), (1922, 48_026));
+    assert!(empty.audio.is_empty());
 }
 #[test]
 fn actual_tempo_horizon_refuses_instead_of_truncating() {

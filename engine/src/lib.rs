@@ -166,3 +166,5 @@ pub mod waveform;
 
 mod audio_clip;
 pub use audio_clip::{AudioAsset, AudioClip, AudioDiagnostic, AudioSchedule, MAX_AUDIO_VOICES};
+
+pub use command::TimelineUpdate;

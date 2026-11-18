@@ -16,14 +16,19 @@ pub fn compile_song(
     if !project.bpm.is_finite() || !(20.0..=400.0).contains(&project.bpm) {
         return Err("Song tempo must be between 20 and 400 BPM".into());
     }
-    let audible = |clip: &crate::Clip| {
-        !clip.muted
-            && project
-                .arrangement
-                .tracks
-                .iter()
-                .any(|t| t.id == clip.track && !t.mute)
-    };
+    let tracks: HashMap<_, _> = project
+        .arrangement
+        .tracks
+        .iter()
+        .map(|t| (t.id, t.mute))
+        .collect();
+    let assets: HashMap<_, _> = project
+        .arrangement
+        .audio_assets
+        .iter()
+        .map(|a| (a.id, a))
+        .collect();
+    let audible = |clip: &crate::Clip| !clip.muted && tracks.get(&clip.track) == Some(&false);
     let patterns: Vec<_> = project
         .patterns
         .iter()
@@ -164,43 +169,65 @@ pub fn compile_song(
             });
         }
     }
-    let channels = crate::engine_state(project, decoded).channels;
+    let channels = crate::compile::compile_channels(project, decoded);
     let automation =
         engine::AutomationSchedule::build(curves, &channels).map_err(|e| e.to_string())?;
-    let musical_end = arrangement.length.max(automation.end_tick());
+    let mut musical_end = arrangement.length;
     let mut end_tick = musical_end;
-    for c in project.arrangement.clips.iter().filter(|c| audible(c)) {
-        if let ClipContent::Audio {
-            asset,
-            source_start,
-            source_end,
-            ..
-        } = c.content
-        {
-            let source = project
-                .arrangement
-                .audio_assets
-                .iter()
-                .find(|a| a.id == asset)
-                .ok_or("Missing audio asset")?;
-            let ticks = ((source_end - source_start) as f64 / f64::from(source.source_rate)
-                * f64::from(project.bpm)
-                * 960.0
-                / 60.0)
-                .ceil() as u64;
-            end_tick = end_tick.max(
-                c.start_tick
-                    .checked_add(ticks)
-                    .ok_or("Song horizon overflow")?,
-            );
+    let frame_rate = 48_000.0;
+    let mut audio_frame_end = 0;
+    for c in &project.arrangement.clips {
+        match c.content {
+            ClipContent::Pattern { length_ticks, .. }
+            | ClipContent::Automation { length_ticks, .. } => {
+                musical_end = musical_end.max(
+                    c.start_tick
+                        .checked_add(length_ticks)
+                        .ok_or("Song horizon overflow")?,
+                );
+            }
+            ClipContent::Audio {
+                asset,
+                source_start,
+                source_end,
+                ..
+            } => {
+                let source = assets.get(&asset).ok_or("Missing audio asset")?;
+                let seconds = (source_end - source_start) as f64 / f64::from(source.source_rate);
+                let ticks = (seconds * f64::from(project.bpm) * 960.0 / 60.0).ceil() as u64;
+                end_tick = end_tick.max(
+                    c.start_tick
+                        .checked_add(ticks)
+                        .ok_or("Song horizon overflow")?,
+                );
+                audio_frame_end = audio_frame_end.max(
+                    engine::ticks_to_frames(c.start_tick as f64, project.bpm, frame_rate)
+                        + ((source_end - source_start) as f64 * f64::from(frame_rate)
+                            / f64::from(source.source_rate))
+                        .ceil() as u64,
+                );
+            }
         }
     }
+    end_tick = end_tick.max(musical_end);
     if end_tick > engine::MAX_SONG_TICKS {
         return Err("Song exceeds its current-tempo horizon; shorten or move clips".into());
     }
-    let frame_rate = 48_000.0;
-    let end_frame = engine::ticks_to_frames(musical_end as f64, project.bpm, frame_rate)
-        .max(audio.end_frame(project.bpm, frame_rate));
+    let end_frame =
+        engine::ticks_to_frames(musical_end as f64, project.bpm, frame_rate).max(audio_frame_end);
+    let region = project
+        .arrangement
+        .loop_region
+        .as_ref()
+        .filter(|r| r.enabled)
+        .map(|r| engine::SongLoop {
+            start_tick: r.start_tick,
+            end_tick: r.end_tick,
+        });
+    if region.is_some_and(|r| r.end_tick > end_tick) {
+        return Err("Song loop extends beyond the song; shorten or disable the loop".into());
+    }
+    audio.validate_loop(region).map_err(|e| e.to_string())?;
     Ok(SongData {
         arrangement,
         audio,

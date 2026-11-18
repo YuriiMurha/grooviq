@@ -279,6 +279,15 @@ pub(crate) enum Msg {
     /// The pattern to play; the old one goes back through the trash queue.
     SetPattern(Box<PatternData>),
     SetSong(Box<crate::SongData>),
+    // Flags capture transitions at admission, before a rebuild installs the final graph.
+    Timeline(Box<TimelineUpdate>, bool, bool),
+    TimelineRebuilt {
+        bpm: f32,
+        mode: crate::PlaybackMode,
+        region: Option<crate::SongLoop>,
+        mode_changed: bool,
+        loop_changed: bool,
+    },
     /// Queues [`crate::RecordEvent::Mark`] with this id in the recording queue.
     RecordMark(u32),
 }
@@ -287,8 +296,22 @@ impl Msg {
     /// Whether applying the message may hand something back through the trash queue: such a
     /// message waits while the processor holds a parked item (it has room for only one).
     pub(crate) fn makes_trash(&self) -> bool {
-        !matches!(self, Self::Command { .. } | Self::RecordMark(_))
+        !matches!(
+            self,
+            Self::Command { .. } | Self::RecordMark(_) | Self::TimelineRebuilt { .. }
+        )
     }
+}
+
+/// One control-allocated envelope is also the retirement container for both payloads.
+#[derive(Clone, Debug)]
+pub struct TimelineUpdate {
+    pub pattern: Box<PatternData>,
+    pub song: Box<crate::SongData>,
+    pub bpm: f32,
+    pub mode: crate::PlaybackMode,
+    pub region: Option<crate::SongLoop>,
+    pub remove_channel: Option<ChannelId>,
 }
 
 /// What is left of the queued messages, in queue order, once the graph is rebuilt from the
@@ -320,6 +343,23 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
                 continue;
             }
             Msg::AddChannel(_) | Msg::SetPattern(_) | Msg::SetSong(_) => continue,
+            Msg::Timeline(update, mode_changed, loop_changed) => {
+                if let Some(id) = update.remove_channel {
+                    cut.push(id);
+                }
+                kept.push(Msg::TimelineRebuilt {
+                    bpm: update.bpm,
+                    mode: update.mode,
+                    region: update.region,
+                    mode_changed,
+                    loop_changed,
+                });
+                continue;
+            }
+            transport @ Msg::TimelineRebuilt { .. } => {
+                kept.push(transport);
+                continue;
+            }
             Msg::RecordMark(id) => {
                 kept.push(Msg::RecordMark(id));
                 continue;
@@ -374,6 +414,7 @@ pub(crate) enum Trash {
     Sample(Arc<SampleBuf>),
     Pattern(Box<PatternData>),
     Song(Box<crate::SongData>),
+    Timeline(Box<TimelineUpdate>, Option<Box<ChannelNode>>),
 }
 
 #[cfg(test)]
