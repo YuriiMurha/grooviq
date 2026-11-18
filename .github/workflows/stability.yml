@@ -1,0 +1,30 @@
+name: opt-in Linux stability
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: 'Exact 40-character candidate commit SHA (20 full suites; substantial cost)'
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  stability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Require immutable candidate
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+        run: '[[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.candidate }}
+      - run: make qa-stability
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stability-${{ inputs.candidate }}
+          path: docs/evidence/stability/
+          retention-days: 7
+          if-no-files-found: error
