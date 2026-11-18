@@ -47,8 +47,14 @@ describe("launch replay", () => {
     const show = vi.fn();
     replay.connect(async (h) => { receive = h; return () => {}; }, async () => { throw Error("offline"); }, show, () => {});
     await flush();
-    for (let id = 1; id <= 1000; id++) receive(event(id));
-    receive(event(1)); receive(event(1000)); receive(event(1001));
-    expect(show).toHaveBeenCalledTimes(1001);
+    // Delivery alone cannot distinguish bounded retention from an ever-growing Set.
+    const identities = (replay as unknown as { seen: Set<number> }).seen;
+    for (let id = 1; id <= 10_000; id++) {
+      receive(event(id));
+      expect(identities.size).toBeLessThanOrEqual(200);
+    }
+    receive(event(1)); receive(event(10_000)); receive(event(10_001));
+    expect(show).toHaveBeenCalledTimes(10_001);
+    expect(identities.size).toBeLessThanOrEqual(200);
   });
 });
