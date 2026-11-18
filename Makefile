@@ -21,7 +21,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: ui-install ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles ui-install ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
@@ -95,4 +95,4 @@ capture-instruction-profiles: ## Historical Linux capture; ARGS must give --repo
 	python3 scripts/capture-instruction-profiles.py $(ARGS)
 
 test-instruction-profiles: ## Safe profile capture tests (no Rust build or measurement)
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_capture_instruction_profiles.py' -v
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_capture_instruction_profiles.py

@@ -140,6 +140,7 @@ for (const path of changed) {
 
 const steps = [];
 const step = (name, cmd, args, cwd = root) => steps.push({ name, cmd, args, cwd });
+if (tooling || workspace) step("instruction capture safety tests", "make", ["test-instruction-profiles"]);
 const uiDir = join(root, "app", "ui");
 const needsUi = ui || workspace || rustCrates.has("grooviq-app");
 

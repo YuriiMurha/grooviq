@@ -1,8 +1,14 @@
 import importlib.util
 import json
+import io
+import shutil
 import os
 from pathlib import Path
 import subprocess
+import signal
+import sys
+import time
+import threading
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -52,6 +58,7 @@ class CaptureTests(unittest.TestCase):
 import json, os, pathlib, sys, time
 root = pathlib.Path(__file__).resolve().parent.parent
 mode = (root / 'mode').read_text()
+if mode == 'tracking' and os.environ.get('RUNNER_TRACKING_ID') != 'fixture-tracking': sys.exit(98)
 name = pathlib.Path(sys.argv[0]).name
 target = pathlib.Path(os.environ.get('CARGO_TARGET_DIR', root / 'unused'))
 if name == 'rustc': print('rustc 1.100.0 0ef1bc386059596dada8fb65b50425aab2ea637a')
@@ -148,6 +155,111 @@ else: print('annotation / symbols')
         with patch.object(c.platform, 'system', return_value='Darwin'), patch.object(c, 'run', side_effect=AssertionError('process invoked')):
             with self.assertRaises(c.CaptureError): self.capture()
 
+    def test_runner_tracking_retained_without_metadata_dump(self):
+        self.mode.write_text('tracking')
+        with patch.dict(os.environ, {'RUNNER_TRACKING_ID': 'fixture-tracking', 'CAPTURE_FAKE_TOKEN': 'never-copy-this'}):
+            report = self.capture()
+        self.assertTrue(report['restoration']['succeeded'])
+        manifest = (self.out / 'manifest.json').read_text()
+        self.assertNotIn('fixture-tracking', manifest)
+        self.assertNotIn('never-copy-this', manifest)
+
+    def test_restore_lock_reports_failed_settlement(self):
+        original_run = c.run
+        def locked(args, *a, **kw):
+            if args == ['git', 'checkout', '--quiet', self.branch]:
+                (self.repo / '.git/index.lock').write_text('owned test lock')
+            return original_run(args, *a, **kw)
+        with patch.object(c, 'run', side_effect=locked):
+            with self.assertRaises(c.CaptureError): self.capture()
+        report = json.loads((self.out / 'manifest.json').read_text())
+        self.assertEqual(report['status'], 'failed_restore')
+        self.assertEqual(report['capture_result'], 'completed_with_regression_unmatched_kit')
+        self.assertEqual(report['original_ref']['commit'], self.head)
+        self.assertEqual(report['settled_ref']['branch'], 'HEAD')
+        self.assertFalse(report['restoration']['succeeded'])
+        self.assertTrue((self.repo / '.git/index.lock').exists())
+
+    def native_descendant_probe(self, mode):
+        pidfile = self.root / 'descendant.pid'
+        marker = self.root / 'late-marker'
+        child = f"import os,time,pathlib,signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(.7); pathlib.Path({str(marker)!r}).write_text('late')"
+        parent = f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child!r}]); time.sleep(3)"
+        timer = None
+        try:
+            if mode == 'timeout':
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    c.run([sys.executable, '-c', parent], self.root, timeout=.3)
+            else:
+                with c.cancellation(.3 if mode == 'deadline' else 3):
+                    if mode != 'deadline':
+                        timer = threading.Timer(.3, lambda: os.kill(os.getpid(), mode))
+                        timer.start()
+                    with self.assertRaises(c.CaptureError):
+                        if mode == signal.SIGTERM:
+                            with (self.root / 'child.log').open('xb') as log:
+                                c.save_command([sys.executable, '-c', parent], self.root, None, log, self.root, timeout=2)
+                        else:
+                            c.run([sys.executable, '-c', parent], self.root, timeout=2)
+            self.assertTrue(pidfile.exists(), 'native descendant must actually start')
+            pid = int(pidfile.read_text())
+            state = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True).stdout.strip()
+            self.assertTrue(not state or state.startswith('Z'), f'descendant remains live: {state}')
+            self.assertFalse(marker.exists())
+        finally:
+            if timer:
+                timer.cancel()
+                timer.join()
+            if pidfile.exists():
+                try: os.kill(int(pidfile.read_text()), signal.SIGKILL)
+                except ProcessLookupError: pass
+
+    def test_unsettled_process_preserves_target_and_checkout(self):
+        try:
+            with patch.object(c, 'save_command', side_effect=c.ProcessSettlementError('owned test settlement failure')):
+                with self.assertRaises(c.ProcessSettlementError): self.capture()
+            report = json.loads((self.out / 'manifest.json').read_text())
+            self.assertEqual(report['status'], 'failed_process_cleanup')
+            self.assertFalse(report['restoration']['succeeded'])
+            self.assertEqual(self.git('rev-parse', '--abbrev-ref', 'HEAD'), 'HEAD')
+            self.assertTrue(Path(report['target']).is_dir())
+        finally:
+            if (self.out / 'manifest.json').exists():
+                report = json.loads((self.out / 'manifest.json').read_text())
+                shutil.rmtree(report['target'])
+
+    def test_timeout_stops_native_descendant(self):
+        self.native_descendant_probe('timeout')
+
+    def test_deadline_stops_native_descendant(self):
+        self.native_descendant_probe('deadline')
+
+    def test_sigterm_stops_native_descendant(self):
+        self.native_descendant_probe(signal.SIGTERM)
+
+    def test_sigint_stops_native_descendant(self):
+        self.native_descendant_probe(signal.SIGINT)
+
+    def test_tooling_change_plans_safety_gate_without_builds(self):
+        scripts = self.repo / 'scripts'
+        scripts.mkdir()
+        shutil.copyfile(Path(__file__).with_name('check-changed.mjs'), scripts / 'check-changed.mjs')
+        (self.repo / 'Makefile').write_text('all:\n\ttrue\n')
+        self.git('add', 'scripts/check-changed.mjs', 'Makefile')
+        self.git('commit', '-qm', 'selector fixture')
+        (self.repo / 'Makefile').write_text('all:\n\tfalse\n')
+        home = self.root / 'home'
+        cargo = home / '.cargo/bin/cargo'
+        cargo.parent.mkdir(parents=True)
+        cargo.write_text('#!/usr/bin/env python3\nprint(\'{"packages":[]}\')\n')
+        cargo.chmod(0o700)
+        result = subprocess.run(['node', str(scripts / 'check-changed.mjs'), '--plan', '--base', 'HEAD'],
+                                cwd=self.repo, env={**os.environ, 'HOME': str(home)}, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('instruction capture safety tests: make test-instruction-profiles', result.stdout)
+        self.assertNotIn('cargo clippy', result.stdout)
+        self.assertNotIn('npm ci', result.stdout)
+
     def test_output_ownership_and_budget(self):
         outside = self.root / 'outside'
         outside.mkdir()
@@ -167,5 +279,28 @@ else: print('annotation / symbols')
         with self.assertRaises(c.CaptureError): c.copy_evidence(source, self.out / 'copy', self.root, self.out)
 
 
+def run_safety_suite(suite, stream=None):
+    expected = suite.countTestCases()
+    result = unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
+    return (expected > 0 and result.testsRun == expected and result.wasSuccessful()
+            and not result.skipped and not result.expectedFailures and not result.unexpectedSuccesses)
+
+
+class SafetyGateTests(unittest.TestCase):
+    def test_empty_skipped_expected_failure_and_failed_suites_rejected(self):
+        class Cases(unittest.TestCase):
+            def test_ok(self): pass
+            @unittest.skip('must reject')
+            def test_skip(self): pass
+            @unittest.expectedFailure
+            def test_expected(self): self.fail('must reject')
+            def test_fail(self): self.fail('must reject')
+        for name in ('test_skip', 'test_expected', 'test_fail'):
+            self.assertFalse(run_safety_suite(unittest.TestSuite([Cases(name)]), io.StringIO()))
+        self.assertFalse(run_safety_suite(unittest.TestSuite(), io.StringIO()))
+        self.assertTrue(run_safety_suite(unittest.TestSuite([Cases('test_ok')]), io.StringIO()))
+
+
 if __name__ == '__main__':
-    unittest.main()
+    suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+    sys.exit(0 if run_safety_suite(suite) else 1)

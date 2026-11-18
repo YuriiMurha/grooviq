@@ -65,6 +65,9 @@ jobs:
         working-directory: app/ui
     steps:
       - uses: actions/checkout@v5
+      - name: Instruction capture safety tests
+        working-directory: .
+        run: make test-instruction-profiles
       - uses: actions/setup-node@v5
         with:
           node-version: 24
