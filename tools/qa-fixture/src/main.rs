@@ -54,6 +54,11 @@ fn identifier() -> Result<String> {
     let id = config["identifier"]
         .as_str()
         .ok_or("missing application identifier")?;
+    validate_identifier(id)?;
+    Ok(id.into())
+}
+
+fn validate_identifier(id: &str) -> Result<()> {
     if id.is_empty()
         || id == "."
         || id == ".."
@@ -63,7 +68,7 @@ fn identifier() -> Result<String> {
     {
         return Err("unsafe application identifier".into());
     }
-    Ok(id.into())
+    Ok(())
 }
 
 fn generate(home: &Path) -> Result<serde_json::Value> {
@@ -160,12 +165,30 @@ fn run() -> Result<()> {
             .tempdir()?
             .keep(),
     };
-    println!("{}", generate(&home)?);
+    let fixture = generate(&home).map_err(|error| format!("{}: {error}", home.display()))?;
+    println!("{fixture}");
     Ok(())
 }
 fn main() {
     if let Err(error) = run() {
         eprintln!("qa-fixture: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_identifier;
+
+    #[test]
+    fn application_identifier_is_one_safe_path_component() {
+        for id in ["io.github.yuriimurha.grooviq", "a-b_c.9"] {
+            assert!(validate_identifier(id).is_ok(), "{id:?}");
+        }
+        for id in [
+            "", ".", "..", "a/b", "a\\b", "../a", "C:", "a b", "a\0b", "💿",
+        ] {
+            assert!(validate_identifier(id).is_err(), "{id:?}");
+        }
     }
 }

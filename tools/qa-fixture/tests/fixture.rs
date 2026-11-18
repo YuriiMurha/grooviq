@@ -181,6 +181,8 @@ fn default_home_persists_and_second_run_refuses_it() {
 
 #[test]
 fn concurrent_generators_have_one_winner() {
+    // This pair observes one winner but cannot force the gap between the empty check and
+    // the atomic create_new claim; removing the claim may leave this black-box test green.
     let home = tempfile::tempdir().unwrap();
     let mut a = Command::new(env!("CARGO_BIN_EXE_grooviq-qa-fixture"))
         .arg("--home")
