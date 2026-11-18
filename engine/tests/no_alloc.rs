@@ -28,6 +28,8 @@ mod algorithmic_reverb;
 mod bitcrusher;
 #[path = "realtime/fattener.rs"]
 mod fattener;
+#[path = "realtime/saturation.rs"]
+mod saturation;
 
 #[path = "realtime/drum_shaper.rs"]
 mod drum_shaper;
