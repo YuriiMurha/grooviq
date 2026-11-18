@@ -49,44 +49,112 @@ pub fn backup_before_save(
     backups: &Path,
     keep: usize,
 ) -> io::Result<Option<PathBuf>> {
+    let prepared = prepare_backup(target, backups, keep)?;
+    let copy = prepared.candidate.clone();
+    prepared.confirm();
+    Ok(copy)
+}
+
+/// Only this transaction's candidate may be rolled back. Retention uses the pre-save
+/// snapshot, so a later save's candidate can never be selected for deletion.
+pub(crate) struct PreparedBackup {
+    candidate: Option<PathBuf>,
+    prune: Vec<PathBuf>,
+}
+
+impl PreparedBackup {
+    pub(crate) fn rollback(self) -> io::Result<()> {
+        if let Some(path) = self.candidate {
+            fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn confirm(self) {
+        // Publication has succeeded. Cleanup must not turn that into an untouched-target
+        // error; retaining extra copies on failure is safer than failing the save.
+        for path in self.prune {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+pub(crate) fn prepare_backup(
+    target: &Path,
+    backups: &Path,
+    keep: usize,
+) -> io::Result<PreparedBackup> {
+    let mut prepared = PreparedBackup {
+        candidate: None,
+        prune: Vec::new(),
+    };
     if keep == 0 || !target.is_file() {
-        return Ok(None);
+        return Ok(prepared);
     }
     let folder = backup_folder(target, backups)?;
-    let stem = target
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let stem = target.file_stem().unwrap().to_string_lossy();
     fs::create_dir_all(&folder)?;
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
     let found = existing(&folder, &stem)?;
-    if let Some((_, newest)) = found.last()
-        && same_bytes(target, newest)
-    {
-        return Ok(None);
+    let duplicate = found
+        .last()
+        .is_some_and(|(_, newest)| same_bytes(target, newest));
+    if !duplicate {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let mut number = found
+            .last()
+            .map_or(now, |(n, _)| now.max(n.saturating_add(1)));
+        loop {
+            let copy = folder.join(format!("{stem}-{number}.{}", crate::EXTENSION));
+            let partial = folder.join(format!("{stem}-{number}.partial"));
+            // Exclusive creation and publication never overwrite another transaction or
+            // an abandoned partial. A collision advances rather than claiming ownership.
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&partial);
+            let mut file = match file {
+                Ok(file) => file,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    number = number
+                        .checked_add(1)
+                        .ok_or_else(|| io::Error::other("backup numbers exhausted"))?;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let result = (|| {
+                io::copy(&mut fs::File::open(target)?, &mut file)?;
+                crate::file::sync_file(&file)?;
+                fs::hard_link(&partial, &copy)
+            })();
+            drop(file);
+            let cleanup = fs::remove_file(&partial);
+            match result {
+                Ok(()) => {
+                    prepared.candidate = Some(copy);
+                    // A failed partial cleanup retains extra data, not a failed save.
+                    let _ = cleanup;
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    cleanup?;
+                    number = number
+                        .checked_add(1)
+                        .ok_or_else(|| io::Error::other("backup numbers exhausted"))?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
-    let newest = found.last().map(|&(n, _)| n);
-    let number = newest.map_or(now, |n| now.max(n.saturating_add(1)));
-
-    let copy = folder.join(format!("{stem}-{number}.{}", crate::EXTENSION));
-    // Copy beside the final name, then rename: a crash leaves no half-written backup that
-    // would count as one.
-    let partial = folder.join(format!("{stem}-{number}.partial"));
-    let copied = fs::copy(target, &partial).and_then(|_| fs::rename(&partial, &copy));
-    if let Err(e) = copied {
-        let _ = fs::remove_file(&partial);
-        return Err(e);
-    }
-
-    let all = existing(&folder, &stem)?;
-    for (_, old) in all.iter().take(all.len().saturating_sub(keep)) {
-        // A backup that cannot be deleted is not worth failing the save for.
-        let _ = fs::remove_file(old);
-    }
-    Ok(Some(copy))
+    let excess = (found.len() + usize::from(prepared.candidate.is_some())).saturating_sub(keep);
+    prepared.prune = found
+        .into_iter()
+        .take(excess)
+        .map(|(_, path)| path)
+        .collect();
+    Ok(prepared)
 }
 
 /// Whether files `a` and `b` hold the same bytes (read in chunks; false if either cannot be
@@ -153,4 +221,64 @@ fn existing(folder: &Path, stem: &str) -> io::Result<Vec<(u64, PathBuf)>> {
     }
     found.sort();
     Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_rollback_does_not_own_the_existing_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("song.grooviq");
+        let backups = dir.path().join("backups");
+        fs::write(&target, b"old bytes").unwrap();
+        let copy = backup_before_save(&target, &backups, 1).unwrap().unwrap();
+        prepare_backup(&target, &backups, 1)
+            .unwrap()
+            .rollback()
+            .unwrap();
+        assert_eq!(fs::read(&copy).unwrap(), b"old bytes");
+        assert_eq!(fs::read_dir(copy.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn cleanup_failure_retains_history_and_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old");
+        fs::write(&old, b"history").unwrap();
+        let candidate = dir.path().join("candidate");
+        fs::create_dir(&candidate).unwrap();
+        let prepared = PreparedBackup {
+            candidate: Some(candidate.clone()),
+            prune: vec![old.clone()],
+        };
+        assert!(prepared.rollback().is_err());
+        assert_eq!(fs::read(&old).unwrap(), b"history");
+        assert!(candidate.is_dir());
+        // A pruning failure after publication is harmless and retains the obstructed copy.
+        PreparedBackup {
+            candidate: None,
+            prune: vec![candidate.clone()],
+        }
+        .confirm();
+        assert!(candidate.is_dir());
+    }
+
+    #[test]
+    fn abandoned_partial_and_existing_candidate_are_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("song.grooviq");
+        let backups = dir.path().join("backups");
+        fs::write(&target, b"new old bytes").unwrap();
+        let folder = backup_folder(&target, &backups).unwrap();
+        fs::create_dir_all(&folder).unwrap();
+        let existing = folder.join(format!("song-{}.grooviq", u64::MAX - 1));
+        let partial = folder.join(format!("song-{}.partial", u64::MAX));
+        fs::write(&existing, b"other save").unwrap();
+        fs::write(&partial, b"abandoned").unwrap();
+        assert!(prepare_backup(&target, &backups, 1).is_err());
+        assert_eq!(fs::read(existing).unwrap(), b"other save");
+        assert_eq!(fs::read(partial).unwrap(), b"abandoned");
+    }
 }

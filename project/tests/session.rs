@@ -3486,3 +3486,112 @@ fn pre_rename_save_failure_keeps_the_sessions_written_facts() {
     session.save(None, &backups).unwrap();
     assert_eq!(session.path(), Some(old.as_path()));
 }
+
+#[test]
+fn failed_publication_at_capacity_preserves_every_backup_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, backups) = saved_twice(dir.path());
+    for bpm in 111..125 {
+        session
+            .apply(Edit::SetTempo { bpm: bpm as f32 }, Instant::now())
+            .unwrap();
+        session.save(None, &backups).unwrap();
+    }
+    let folder = grooviq_project::backup_folder(&path, &backups).unwrap();
+    let snapshot = || {
+        names(&folder)
+            .into_iter()
+            .map(|n| {
+                let bytes = std::fs::read(folder.join(&n)).unwrap();
+                (n, bytes)
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = snapshot();
+    assert_eq!(before.len(), 10);
+    let target = std::fs::read(&path).unwrap();
+    session
+        .apply(Edit::SetTempo { bpm: 130.0 }, Instant::now())
+        .unwrap();
+    for _ in 0..3 {
+        let job = session.begin_save(None).unwrap();
+        let error = job
+            .write_on(&backups, &mut Ops::failing("rename", &path))
+            .unwrap_err();
+        assert!(!error.directory_unconfirmed());
+        assert!(session.end_save(&job, Err(error)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), target);
+        assert_eq!(snapshot(), before);
+        assert_eq!(load(&path).unwrap().project.bpm, 124.0);
+        assert!(session.view().dirty);
+    }
+    session.save(None, &backups).unwrap();
+    assert_eq!(snapshot().len(), 10);
+    assert_eq!(load(&path).unwrap().project.bpm, 130.0);
+    assert!(!session.view().dirty);
+}
+
+#[test]
+fn uncertain_publication_at_capacity_retains_history_until_confirmed_retry() {
+    struct Refuse;
+    impl Disk for Refuse {
+        fn sync_folder(&mut self, _: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected directory uncertainty"))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, backups) = saved_twice(dir.path());
+    for bpm in 111..125 {
+        session
+            .apply(Edit::SetTempo { bpm: bpm as f32 }, Instant::now())
+            .unwrap();
+        session.save(None, &backups).unwrap();
+    }
+    let folder = grooviq_project::backup_folder(&path, &backups).unwrap();
+    let before: Vec<_> = names(&folder)
+        .into_iter()
+        .map(|n| {
+            let bytes = std::fs::read(folder.join(&n)).unwrap();
+            (n, bytes)
+        })
+        .collect();
+    let old = std::fs::read(&path).unwrap();
+    session
+        .apply(Edit::SetTempo { bpm: 130.0 }, Instant::now())
+        .unwrap();
+    let error = session.save_on(None, &backups, &mut Refuse).unwrap_err();
+    assert!(error.directory_unconfirmed());
+    assert!(session.view().dirty);
+    assert_eq!(load(&path).unwrap().project.bpm, 130.0);
+    assert_eq!(names(&folder).len(), 11);
+    for (name, bytes) in &before {
+        assert_eq!(&std::fs::read(folder.join(name)).unwrap(), bytes);
+    }
+    assert!(
+        names(&folder)
+            .iter()
+            .any(|n| std::fs::read(folder.join(n)).unwrap() == old)
+    );
+    session.save(None, &backups).unwrap();
+    assert_eq!(names(&folder).len(), 10);
+    assert!(!session.view().dirty);
+    assert_eq!(load(&path).unwrap().project.bpm, 130.0);
+}
+
+#[test]
+fn backup_preparation_failure_leaves_target_and_session_unsaved() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, path, _) = saved_twice(dir.path());
+    let blocked = dir.path().join("blocked");
+    std::fs::write(&blocked, b"unowned").unwrap();
+    let old = std::fs::read(&path).unwrap();
+    session
+        .apply(Edit::SetTempo { bpm: 130.0 }, Instant::now())
+        .unwrap();
+    let error = session.save(None, &blocked).unwrap_err();
+    assert!(matches!(error, SessionError::Backup(_)));
+    assert_eq!(std::fs::read(&blocked).unwrap(), b"unowned");
+    assert_eq!(std::fs::read(&path).unwrap(), old);
+    assert!(session.view().dirty);
+    assert_eq!(load(&path).unwrap().project.bpm, 110.0);
+}
