@@ -75,10 +75,14 @@ def place(stage, app, previous, verify):
 
 
 def atomic_json(path, value):
+    atomic_text(path, json.dumps(value, indent=2) + '\n')
+
+
+def atomic_text(path, text):
     temporary = path.with_suffix('.tmp')
     safe_tree(temporary)
     with temporary.open('w') as stream:
-        stream.write(json.dumps(value, indent=2) + '\n')
+        stream.write(text)
         stream.flush()
         os.fsync(stream.fileno())
     temporary.replace(path)
@@ -201,11 +205,26 @@ class Refresh:
             self.verify(path)
             return json.loads(json.dumps(manifest(path)))
         # Validate every occupied path before the first mutation.
-        app_id, stage_id, prior_id = map(identity, (self.app, stage, previous))
+        cleanup = intent.get('phase') == 'cleanup'
+        app_id, prior_id = map(identity, (self.app, previous))
+        stage_id = None if cleanup else identity(stage)
         old, new = intent['old_manifest'], intent['new_manifest']
         if stage_id not in (None, new) or prior_id not in (None, old):
             raise RuntimeError('Foreign transaction artifact; retained')
-        if committed:
+        if (not cleanup and committed and app_id == old and stage_id == new
+                and prior_id is None):
+            # Older versions rolled the app back after receipt publication. Repair that
+            # exact recorded state, including retry after a failed receipt directory sync.
+            if intent['old_receipt'] is None:
+                receipt.unlink()
+            else:
+                atomic_text(receipt, intent['old_receipt'])
+            committed = False
+        if cleanup:
+            if (app_id != intent['terminal_app'] or prior_id != intent['terminal_previous']
+                    or current != intent['terminal_receipt']):
+                raise RuntimeError('Terminal cleanup identity mismatch')
+        elif committed:
             if app_id != new or prior_id != old:
                 raise RuntimeError('Committed transaction identity mismatch')
         else:
@@ -218,8 +237,22 @@ class Refresh:
                 self.app.rename(stage)
             if prior_id is not None:
                 previous.rename(self.app)
-        # Drop the journal only after reconciliation. Stale verified stage data is disposable.
+        # Persist terminal identities before deletion; a partial stage is no longer a bundle.
+        if not cleanup:
+            intent.update(phase='cleanup', terminal_app=identity(self.app),
+                          terminal_previous=identity(previous),
+                          terminal_receipt=receipt.read_text() if receipt.exists() else None)
+            atomic_json(intent_path, intent)
         if stage.exists():
+            safe_tree(stage)
+            remaining = json.loads(json.dumps(manifest(stage)))
+            directories = {str(parent) for name in new for parent in Path(name).parents}
+            for child in stage.rglob('*'):
+                name = str(child.relative_to(stage))
+                if ((child.is_file() and remaining.get(name) != new.get(name))
+                        or (child.is_dir() and name not in directories)
+                        or not (child.is_file() or child.is_dir())):
+                    raise RuntimeError('Foreign cleanup artifact; retained')
             shutil.rmtree(stage)
         intent_path.unlink()
 
@@ -278,7 +311,14 @@ class Refresh:
                 # Receipt write participates in rollback if disk space/permissions fail.
                 def finish(path):
                     verify_copy(path)
-                    atomic_json(receipt, record)
+                    try:
+                        atomic_json(receipt, record)
+                    except OSError as error:
+                        # Replacement may already be visible. Keep the verified new app with
+                        # its matching receipt; report the failed durability operation honestly.
+                        if not receipt.exists() or json.loads(receipt.read_text()) != record:
+                            raise
+                        record['publication_warning'] = str(error)
                 intent_path = safe_path(self.ops / 'install-intent.json')
                 atomic_json(intent_path, dict(stage=str(stage), previous=str(previous),
                             old_receipt=receipt.read_text() if receipt.exists() else None,

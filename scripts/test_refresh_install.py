@@ -224,6 +224,127 @@ class TransactionTests(unittest.TestCase):
         _, status = m.os.waitpid(pid, 0)
         self.assertEqual(m.os.waitstatus_to_exitcode(status), 74)
 
+    def test_receipt_directory_sync_failure_retains_coherent_install(self):
+        import stat
+        receipt = self.ops / 'installed.json'
+        fsync = m.os.fsync
+        def fail_directory(fd):
+            if (stat.S_ISDIR(m.os.fstat(fd).st_mode)
+                    and m.json.loads(receipt.read_text())['source_sha'] == 'b' * 40):
+                raise OSError('receipt directory sync failed')
+            return fsync(fd)
+        with patch.object(m.os, 'fsync', side_effect=fail_directory):
+            record = self.refresh.refresh()
+        self.assertEqual(record['status'], 'installed')
+        self.assertEqual(m.json.loads(receipt.read_text())['installed_executable_sha256'],
+                         m.digest(self.app / 'Contents/MacOS/grooviq'))
+        self.assertEqual(self.refresh.refresh()['status'], 'unchanged')
+
+    def test_receipt_directory_open_failure_is_coherent(self):
+        receipt = self.ops / 'installed.json'
+        original = m.os.open
+        def fail_open(path, *args, **kwargs):
+            if pathlib.Path(path) == self.ops and m.json.loads(receipt.read_text())['source_sha'] == 'b' * 40:
+                raise OSError('directory open failed')
+            return original(path, *args, **kwargs)
+        with patch.object(m.os, 'open', side_effect=fail_open):
+            record = self.refresh.refresh()
+        self.assertIn('publication_warning', record)
+        self.assertEqual(self.refresh.refresh()['status'], 'unchanged')
+
+    def test_exit_immediately_after_receipt_replace_recovers(self):
+        pid = m.os.fork()
+        if pid == 0:
+            replace = pathlib.Path.replace
+            def stop(path, target):
+                result = replace(path, target)
+                if target == self.ops / 'installed.json':
+                    m.os._exit(74)
+                return result
+            with patch.object(pathlib.Path, 'replace', stop):
+                self.refresh.refresh()
+            m.os._exit(75)
+        _, status = m.os.waitpid(pid, 0)
+        self.assertEqual(m.os.waitstatus_to_exitcode(status), 74)
+        self.assertEqual(self.refresh.refresh()['status'], 'unchanged')
+
+    def test_legacy_postpublication_rollback_is_reconcilable(self):
+        receipt = self.ops / 'installed.json'
+        old_receipt = receipt.read_bytes()
+        self.stop_during_placement('new-placed')
+        intent = m.json.loads((self.ops / 'install-intent.json').read_text())
+        self.app.rename(pathlib.Path(intent['stage']))
+        pathlib.Path(intent['previous']).rename(self.app)
+        m.atomic_json(receipt, intent['record'])
+        self.refresh.reconcile()
+        self.old_preserved()
+        self.assertEqual(receipt.read_bytes(), old_receipt)
+
+    def test_recovery_failure_boundaries_are_retryable(self):
+        for boundary in ('first-move', 'second-move', 'cleanup-start', 'partial-cleanup', 'journal-unlink'):
+            with self.subTest(boundary=boundary):
+                self.stop_during_placement('new-placed')
+                pid = m.os.fork()
+                if pid == 0:
+                    rename, rmtree, unlink = pathlib.Path.rename, m.shutil.rmtree, pathlib.Path.unlink
+                    count = 0
+                    def move(path, target):
+                        nonlocal count
+                        result = rename(path, target)
+                        count += 1
+                        if (boundary == 'first-move' and count == 1) or (boundary == 'second-move' and count == 2):
+                            m.os._exit(74)
+                        return result
+                    def remove(path, *args, **kwargs):
+                        if boundary == 'cleanup-start':
+                            m.os._exit(74)
+                        if boundary == 'partial-cleanup':
+                            unlink(path / 'Contents/MacOS/grooviq')
+                            m.os._exit(74)
+                        return rmtree(path, *args, **kwargs)
+                    def drop(path, *args, **kwargs):
+                        if boundary == 'journal-unlink' and path.name == 'install-intent.json':
+                            m.os._exit(74)
+                        return unlink(path, *args, **kwargs)
+                    with patch.object(pathlib.Path, 'rename', move), patch.object(m.shutil, 'rmtree', remove), patch.object(pathlib.Path, 'unlink', drop):
+                        self.refresh.reconcile()
+                    m.os._exit(75)
+                _, status = m.os.waitpid(pid, 0)
+                self.assertEqual(m.os.waitstatus_to_exitcode(status), 74)
+                self.refresh.reconcile()
+                self.old_preserved()
+                self.assertFalse((self.ops / 'install-intent.json').exists())
+
+    def test_partial_recovery_cleanup_is_retryable_and_strict(self):
+        self.stop_during_placement('new-placed')
+        rmtree = m.shutil.rmtree
+        def partial(path, *args, **kwargs):
+            (path / 'Contents/MacOS/grooviq').unlink()
+            raise OSError('partial cleanup')
+        with patch.object(m.shutil, 'rmtree', side_effect=partial):
+            with self.assertRaisesRegex(OSError, 'partial cleanup'):
+                self.refresh.reconcile()
+        self.old_preserved()
+        intent = m.json.loads((self.ops / 'install-intent.json').read_text())
+        stage = pathlib.Path(intent['stage'])
+        foreign = stage / 'unknown'
+        foreign.write_bytes(b'precious')
+        with self.assertRaisesRegex(RuntimeError, 'cleanup'):
+            self.refresh.reconcile()
+        self.assertEqual(foreign.read_bytes(), b'precious')
+        foreign.unlink()
+        info = stage / 'Contents/Info.plist'
+        original = info.read_bytes()
+        info.write_bytes(b'tampered')
+        with self.assertRaisesRegex(RuntimeError, 'cleanup'):
+            self.refresh.reconcile()
+        self.assertEqual(info.read_bytes(), b'tampered')
+        info.write_bytes(original)
+        self.refresh.reconcile()
+        self.old_preserved()
+        self.assertFalse(stage.exists())
+        self.assertFalse((self.ops / 'install-intent.json').exists())
+
     def test_interrupted_committed_receipt_finishes_without_rebuild(self):
         self.stop_during_placement('receipt-written')
         self.assertEqual(self.refresh.refresh()['status'], 'unchanged')
