@@ -33,8 +33,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  bench:
+  optional-inputs:
     if: ${{ !inputs.capture_only }}
+    name: Optional Rust inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.select.outputs.result }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: make optional-rust-policy-test
+      - uses: actions/github-script@v8
+        id: select
+        with:
+          script: |
+            const { shouldRun } = require('./scripts/optional-rust-checks.cjs');
+            return await shouldRun({
+              eventName: context.eventName,
+              pullRequest: context.payload.pull_request,
+              repo: context.repo,
+              rest: github.rest,
+              paginate: github.paginate,
+            });
+
+  bench:
+    needs: optional-inputs
+    # A failed selector must retain coverage; only an explicit false skips work.
+    if: ${{ !inputs.capture_only && always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
     name: bench (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -126,7 +154,13 @@ jobs:
           PY
 
   instructions:
+<<<<<<< HEAD
     if: ${{ !inputs.capture_only }}
+=======
+    needs: optional-inputs
+    # A failed selector must retain coverage; only an explicit false skips work.
+    if: ${{ always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
+>>>>>>> origin/main
     name: instructions (ubuntu-latest)
     runs-on: ubuntu-latest
     timeout-minutes: 30
