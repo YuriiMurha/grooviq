@@ -1261,3 +1261,21 @@ label.field {
     padding: 0 8px;
   }
 }
+
+.roll-feel { position: relative; }
+.roll-feel summary { cursor: pointer; }
+.roll-feel-panel {
+  position: absolute;
+  z-index: 10;
+  left: 0;
+  top: calc(100% + 6px);
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.roll-feel-panel .dctl { min-width: 90px; }
+.roll-key.in-scale { box-shadow: inset 3px 0 var(--accent), inset 0 0 0 100px color-mix(in srgb, var(--accent) 12%, transparent); }
+.roll-key.root { box-shadow: inset 6px 0 var(--accent); }
