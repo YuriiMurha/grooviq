@@ -78,6 +78,32 @@ mod counts {
         settle(s, &chord(55, voices))
     }
 
+    // Explicit hit/miss workloads: every case has 16 sustained active voices. The
+    // same measured benchmark source is overlaid on BASE in the CI comparison.
+    fn sampler_filter_scenario(modulated: bool, distinct_velocities: bool) -> Sampler {
+        use grooviq_dsp::sampler::PARAM_IDS;
+        let mut s = sampler(16);
+        s.reset();
+        for (name, value) in [
+            ("filter_type", 1.0),
+            ("cutoff", 4_000.0),
+            ("res", 0.5),
+            ("filter_env", if modulated { 0.7 } else { 0.0 }),
+            ("flt_attack", 5_000.0),
+            ("vel_filter", if distinct_velocities { 0.75 } else { 0.0 }),
+        ] {
+            let index = PARAM_IDS.iter().position(|id| *id == name).unwrap();
+            s.set_param(index as u32, value);
+        }
+        let mut notes = chord(55, 16);
+        if distinct_velocities {
+            for (i, note) in notes.iter_mut().enumerate() {
+                note.velocity = 0.2 + i as f32 * 0.04;
+            }
+        }
+        settle(s, &notes)
+    }
+
     fn synth(patch: &str, voices: usize) -> Synth {
         let mut s = Synth::new(SR);
         for (index, value) in preset(patch).expect("a factory preset") {
@@ -89,6 +115,9 @@ mod counts {
     // 100 blocks of 64 frames. (Plain comments: the macro rejects doc attributes.)
     #[library_benchmark]
     #[bench::voices_16(sampler(16))]
+    #[bench::filter_on_hit_16(sampler_filter_scenario(false, false))]
+    #[bench::modulated_hit_16(sampler_filter_scenario(true, false))]
+    #[bench::modulated_miss_16(sampler_filter_scenario(true, true))]
     fn sampler_blocks(mut s: Sampler) -> f32 {
         render(&mut s)
     }
