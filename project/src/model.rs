@@ -384,7 +384,8 @@ impl Project {
         {
             fixes.push(format!(
                 "The project's key (root {}, scale \"{}\") is not valid; it was cleared.",
-                key.root, key.scale
+                key.root,
+                warning_label(&key.scale)
             ));
             self.key = None;
         }
