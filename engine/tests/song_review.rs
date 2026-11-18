@@ -49,6 +49,7 @@ fn song_state(notes: Vec<SongNote>, end_tick: u64) -> EngineState {
             end_frame: 0,
             frame_rate: 48000.0,
             audio: AudioSchedule::default(),
+            automation: Default::default(),
         },
         ..EngineState::default()
     }

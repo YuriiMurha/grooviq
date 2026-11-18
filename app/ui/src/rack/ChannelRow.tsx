@@ -18,8 +18,6 @@ interface Props {
   channel: ChannelView;
   /** Sends the channel's whole mix with these changes. */
   onMix: (change: Partial<Mix>) => Promise<unknown>;
-  /** Asks for the file a missing sample should come from. */
-  onRelink: () => void;
   onError: (message: string) => void;
   selected: boolean;
   onSelect: () => void;
@@ -33,7 +31,7 @@ const PREVIEW_KEY = 60;
 /** One channel of the rack: mute, the name (press to hear it), volume, pan and solo. The steps
  * are drawn by the step grid beside the rows. Pressing a row selects it; Delete on a focused row
  * or its context menu asks to remove it. */
-export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSelect, onRemove }: Props) {
+export function ChannelRow({ channel, onMix, onError, selected, onSelect, onRemove }: Props) {
   /** The preview sounding now (its press), while the name is held. */
   const previewing = useRef<Press | null>(null);
   const pointer = useRef<number | null>(null);
@@ -163,7 +161,7 @@ export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSele
         }}
       >
         <span className="channel-title">{name}</span>
-        <span className="channel-sample">{synth ? (channel.preset ?? "Synth") : (channel.sampleName ?? "No sample")}</span>
+        <span className={channel.missing ? "channel-sample channel-missing" : "channel-sample"}>{channel.missing ? "Missing" : synth ? (channel.preset ?? "Synth") : (channel.sampleName ?? "No sample")}</span>
       </button>
       <button
         type="button"
@@ -180,25 +178,6 @@ export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSele
           <path d={synth ? "M1 6C3 0.5 5 0.5 7 6S11 11.5 13 6L15 3" : "M2 4.5V7.5M5 2V10M8 3.5V8.5M11 1V11M14 4.5V7.5"} />
         </svg>
       </button>
-      {channel.missing && (
-        <>
-          <span
-            className="channel-missing"
-            data-hint={`The sample for ${name} was not found when the project opened. Relink it to a file to hear it again.`}
-          >
-            Missing
-          </span>
-          <button
-            type="button"
-            className="relink"
-            aria-label={`Relink ${name}`}
-            data-hint={`Choose the file ${name} should play.`}
-            onClick={onRelink}
-          >
-            Relink…
-          </button>
-        </>
-      )}
       <Knob
         label={`${name} volume`}
         value={channel.volume}

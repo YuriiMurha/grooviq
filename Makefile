@@ -93,6 +93,10 @@ export-budget: ## Optimized 8-second PCM24 export with the original 4-second bud
 	node --test scripts/notes-edit-budget.test.mjs
 	node scripts/export-budget.mjs
 
+.PHONY: optional-rust-policy-test
+optional-rust-policy-test: ## Test optional Rust CI selection and conservative failure fallback
+	node --test scripts/optional-rust-checks.test.cjs
+
 .PHONY: qa-stability qa-stability-smoke
 qa-stability: ## Opt-in: twenty full Linux WebKit + Chromium suites at HEAD in Docker (2 CPUs)
 	sh scripts/stability/container.sh proof
