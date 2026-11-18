@@ -21,6 +21,7 @@ pub mod drive;
 pub mod drum_shaper;
 pub mod eq;
 pub mod limiter;
+pub mod lofi_colour;
 pub mod ott;
 pub mod reverb;
 pub mod sampler;
@@ -31,6 +32,7 @@ pub mod utility;
 /// (`SPEC` index order). Useful for clamping, defaults and UI ranges.
 pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
     Some(match id {
+        "lofi_colour" => &lofi_colour::SPEC,
         "bitcrusher" => &bitcrusher::SPEC,
         "synth" => &synth::SPEC,
         "sampler" => &sampler::SPEC,
@@ -52,6 +54,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
 /// until the owner of the concrete [`sampler::Sampler`] calls `set_sample`.
 pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
     Some(match id {
+        "lofi_colour" => Box::new(lofi_colour::LofiColour::new(sample_rate)),
         "bitcrusher" => Box::new(bitcrusher::Bitcrusher::new(sample_rate)),
         "synth" => Box::new(synth::Synth::new(sample_rate)),
         "sampler" => Box::new(sampler::Sampler::new(sample_rate)),
