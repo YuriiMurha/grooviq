@@ -745,3 +745,6 @@ fn a_waiting_recording_barrier_never_allocates() {
 
 #[path = "realtime/multiband.rs"]
 mod multiband;
+
+#[path = "realtime/shimmer_reverb.rs"]
+mod shimmer_reverb;

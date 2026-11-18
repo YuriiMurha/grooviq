@@ -27,6 +27,7 @@ pub mod limiter;
 pub mod ott;
 pub mod reverb;
 pub mod sampler;
+pub mod shimmer_reverb;
 pub mod synth;
 pub mod utility;
 
@@ -45,6 +46,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
         "saturation" => &saturation::SPEC,
         "drum_shaper" => &drum_shaper::SPEC,
         "reverb" => &reverb::SPEC,
+        "shimmer_reverb" => &shimmer_reverb::SPEC,
         "delay" => &delay::SPEC,
         "ott" => &ott::SPEC,
         "utility" => &utility::SPEC,
@@ -68,6 +70,7 @@ pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
         "saturation" => Box::new(saturation::Saturation::new(sample_rate)),
         "drum_shaper" => Box::new(drum_shaper::DrumShaper::new(sample_rate)),
         "reverb" => Box::new(reverb::Reverb::new(sample_rate)),
+        "shimmer_reverb" => Box::new(shimmer_reverb::ShimmerReverb::new(sample_rate)),
         "delay" => Box::new(delay::Delay::new(sample_rate)),
         "ott" => Box::new(ott::Ott::new(sample_rate)),
         "utility" => Box::new(utility::Utility::new(sample_rate)),
