@@ -3201,6 +3201,72 @@ fn an_owed_record_off_keeps_refusing_past_a_replacement_s_barrier() {
     assert_eq!(session.project().patterns[0].notes, notes);
 }
 
+#[test]
+fn directory_failure_keeps_new_bytes_and_reports_uncertainty() {
+    struct Refuse;
+    impl Disk for Refuse {
+        fn sync_folder(&mut self, _: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::other("folder open/sync refused"))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("song.grooviq");
+    let backups = dir.path().join("backups");
+    let (mut session, _, _processor) = rig();
+    session.save(Some(&path), &backups).unwrap();
+    let old_bytes = std::fs::read(&path).unwrap();
+    session
+        .apply(Edit::SetTempo { bpm: 137.0 }, Instant::now())
+        .unwrap();
+    let job = session.begin_save(None).unwrap();
+    let error = job.write_on(&backups, &mut Refuse).unwrap_err();
+    assert!(error.to_string().contains("written"));
+    assert_eq!(load(&path).unwrap().project.bpm, 137.0);
+    assert!(error.directory_unconfirmed());
+    assert!(session.end_save(&job, Err(error)).is_err());
+    assert!(session.view().dirty);
+    assert_eq!(session.path(), Some(path.as_path()));
+    let folder = grooviq_project::backup::backup_folder(&path, &backups).unwrap();
+    let copies: Vec<_> = std::fs::read_dir(folder)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(copies.len(), 1);
+    assert_eq!(std::fs::read(&copies[0]).unwrap(), old_bytes);
+    session.save(None, &backups).unwrap();
+    assert!(!session.view().dirty);
+}
+
+#[test]
+fn a_clean_save_as_warning_records_the_new_path_and_keeps_close_protection() {
+    struct Refuse;
+    impl Disk for Refuse {
+        fn sync_folder(&mut self, _: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::other("directory sync refused"))
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let old = root.path().join("old.grooviq");
+    let new = root.path().join("new.grooviq");
+    let backups = root.path().join("backups");
+    let (mut session, _, _processor) = rig();
+    session.save(Some(&old), &backups).unwrap();
+    assert!(
+        session
+            .save_on(Some(&new), &backups, &mut Refuse)
+            .unwrap_err()
+            .directory_unconfirmed()
+    );
+    assert_eq!(session.path(), Some(new.as_path()));
+    assert!(session.needs_confirmation());
+    let due = Instant::now() + AUTOSAVE_PERIOD;
+    assert!(session.autosave_due(due));
+    assert!(session.autosave_snapshot(due).is_some());
+    assert!(load(&new).is_ok());
+    session.save(None, &backups).unwrap();
+    assert!(!session.needs_confirmation());
+}
+
 fn saturate_ui_queue(controller: &Arc<Mutex<Controller>>) {
     let mut c = controller.lock().unwrap();
     while c.send(Command::SetMetronome { on: false }).is_ok() {}
@@ -3350,4 +3416,73 @@ fn ui_release_debt_does_not_cross_project_or_channel_replacement() {
         render(&mut p, 2000);
         assert_eq!(render(&mut p, 10), 0.0);
     }
+}
+#[test]
+fn stale_uncertain_save_cannot_adopt_path_after_new_or_open() {
+    struct Refuse;
+    impl Disk for Refuse {
+        fn sync_folder(&mut self, _: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::other("directory sync refused"))
+        }
+    }
+    for open in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("old.grooviq");
+        let (mut session, _, _processor) = rig();
+        let job = session.begin_save(Some(&old)).unwrap();
+        let result = job.write_on(&root.path().join("backups"), &mut Refuse);
+        assert!(result.as_ref().unwrap_err().directory_unconfirmed());
+        if open {
+            session
+                .open(
+                    &root.path().join("other.grooviq"),
+                    Loaded {
+                        project: Project::new(),
+                        samples: Default::default(),
+                        warnings: vec![],
+                    },
+                    Default::default(),
+                )
+                .unwrap();
+        } else {
+            session.new_project().unwrap();
+        }
+        let before = session.view();
+        assert!(session.end_save(&job, result).is_err());
+        assert_eq!(session.view(), before);
+        assert_ne!(session.path(), Some(old.as_path()));
+        let old_bytes = std::fs::read(&old).unwrap();
+        let retry = session.save(None, &root.path().join("backups"));
+        if open {
+            retry.unwrap();
+        } else {
+            assert!(matches!(retry, Err(SessionError::NoPath)));
+        }
+        assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+    }
+}
+
+#[test]
+fn pre_rename_save_failure_keeps_the_sessions_written_facts() {
+    struct Refuse;
+    impl Disk for Refuse {
+        fn sync(&mut self, _: &std::fs::File) -> std::io::Result<()> {
+            Err(std::io::Error::other("file sync refused"))
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let backups = root.path().join("backups");
+    let old = root.path().join("old.grooviq");
+    let new = root.path().join("new.grooviq");
+    let (mut session, _, _processor) = rig();
+    session.save(Some(&old), &backups).unwrap();
+    let before = session.view();
+    let error = session
+        .save_on(Some(&new), &backups, &mut Refuse)
+        .unwrap_err();
+    assert!(!error.directory_unconfirmed());
+    assert_eq!(session.view(), before);
+    assert!(!new.exists());
+    session.save(None, &backups).unwrap();
+    assert_eq!(session.path(), Some(old.as_path()));
 }
