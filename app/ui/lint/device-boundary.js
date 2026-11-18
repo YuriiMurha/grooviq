@@ -7,20 +7,28 @@ export default {
   meta: { type: "problem", schema: [], messages: { raw: "Device value dependencies must use useDeviceParams; raw project access, unresolved local modules and computed imports are forbidden." } },
   create(context) {
     const root = context.cwd;
-    const bridge = path.resolve(root, "src/devices/useDeviceParams.ts");
-    const filename = path.resolve(context.filename);
+    const canonical = (file) => {
+      const absolute = path.resolve(file);
+      try { return ts.sys.realpath?.(absolute) ?? absolute; }
+      catch { return absolute; }
+    };
+    const bridge = canonical(path.resolve(root, "src/devices/useDeviceParams.ts"));
+    const filename = canonical(context.filename);
     if (filename === bridge || filename.endsWith(".test.ts")) return {};
-    const protectedFiles = new Set(["src/project/context.ts", "src/project/useSession.ts", "src/api/project.ts", "src/devices/paramSink.ts"].map((p) => path.resolve(root, p)));
+    const protectedFiles = new Set(["src/project/context.ts", "src/project/useSession.ts", "src/api/project.ts", "src/devices/paramSink.ts"].map((p) => canonical(path.resolve(root, p))));
     const config = ts.readConfigFile(path.join(root, "tsconfig.json"), ts.sys.readFile);
     const options = ts.parseJsonConfigFileContent(config.config ?? {}, ts.sys, root).options;
     function unsafe(specifier, from, seen) {
       if (specifier.endsWith(".css")) return false;
       const resolved = ts.resolveModuleName(specifier, from, options, ts.sys).resolvedModule;
       if (!resolved) return specifier.startsWith(".") || specifier.startsWith("/");
-      const file = resolved.resolvedFileName;
+      const file = canonical(resolved.resolvedFileName);
       if (file === bridge) return false;
       if (protectedFiles.has(file)) return true;
       if (resolved.isExternalLibraryImport || seen.has(file)) return false;
+      // Local declarations can hide a different runtime .js dependency graph.
+      // Type-only imports are allowed, but value imports need inspectable source.
+      if (/\.d\.(ts|mts|cts)$/i.test(file)) return true;
       seen.add(file);
       const source = ts.sys.readFile(file);
       if (source === undefined) return true;

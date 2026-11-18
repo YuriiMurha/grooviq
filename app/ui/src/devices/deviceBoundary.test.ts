@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "vitest";
 import { ESLint } from "eslint";
 import ts from "typescript";
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, symlinkSync, unlinkSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -35,6 +35,30 @@ test("allows type-only project imports and the trusted hook", async () => {
   expect(result.errorCount).toBe(0);
   const results = await eslint.lintFiles(["src/devices/useDeviceParams.ts"]);
   expect(results.flatMap((r) => r.messages)).toEqual([]);
+});
+
+test("rejects symlink aliases of protected project modules", async () => {
+  const link = path.join(temp, "project-link");
+  symlinkSync(path.dirname(context), link, "junction");
+  try {
+    const source = path.join(link, "context.ts");
+    const [result] = await eslint.lintText(`import { useProject } from ${JSON.stringify(source)};`, { filePath: "src/devices/BoundaryProbe.ts" });
+    expect(result.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+  } finally {
+    // Remove the link itself, never recurse into the real project directory.
+    if (process.platform === "win32") rmdirSync(link);
+    else unlinkSync(link);
+  }
+});
+
+test("rejects local value declarations that hide a JavaScript relay", async () => {
+  const js = path.join(temp, "declared-relay.js");
+  writeFileSync(js, `export { useProject } from ${JSON.stringify(context)};`);
+  writeFileSync(path.join(temp, "declared-relay.d.ts"), `export declare function useProject(): import(${JSON.stringify(context)}).ProjectContextValue;`);
+  const [result] = await eslint.lintText(`import { useProject } from ${JSON.stringify(js)};`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(result.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
+  const [types] = await eslint.lintText(`import type { useProject } from ${JSON.stringify(js)}; export type Probe = typeof useProject;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(types.errorCount).toBe(0);
 });
 
 test("raw apply cannot be assigned or passed as a guarded send prop", () => {
