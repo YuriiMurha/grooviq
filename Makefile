@@ -89,3 +89,10 @@ qa-stability: ## Opt-in: twenty full Linux WebKit + Chromium suites at HEAD in D
 
 qa-stability-smoke: ## Tiny real Playwright fixtures exercising stability accounting in Docker
 	sh scripts/stability/container.sh smoke
+
+.PHONY: capture-instruction-profiles test-instruction-profiles
+capture-instruction-profiles: ## Historical Linux capture; ARGS must give --repo and a new external --output
+	python3 scripts/capture-instruction-profiles.py $(ARGS)
+
+test-instruction-profiles: ## Safe profile capture tests (no Rust build or measurement)
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_capture_instruction_profiles.py' -v
