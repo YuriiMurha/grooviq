@@ -1054,6 +1054,7 @@ fn a_v1_file_opens_and_sounds_the_same() {
         },
         // The file's 4/4 (M1's engine had no time signature: it counted 4/4).
         time_signature: (p.time_signature.beats, p.time_signature.unit),
+        ..EngineState::default()
     };
     assert_eq!(p.time_signature, TimeSignature { beats: 4, unit: 4 });
     assert_eq!(engine_state(p, &decoded.samples), m1);
@@ -1671,4 +1672,202 @@ fn a_save_the_loader_would_refuse_is_refused_and_keeps_the_old_file() {
     );
     assert_eq!(fs::read(&path).unwrap(), old, "the old file is intact");
     assert_eq!(names_in(dir.path()), vec!["a.grooviq"], "nothing written");
+}
+
+fn preset_project(label: Option<String>) -> Project {
+    let mut p = Project::new();
+    let mut c = channel(1, "Bass", None);
+    c.instrument = InstrumentKind::Synth;
+    c.preset = label;
+    c.synth.insert("filter_cutoff".into(), 731.25);
+    c.synth.insert("glide".into(), 93.5);
+    c.synth.insert("voice_mode".into(), 2.0);
+    p.channels.push(c);
+    p.next_id = 2;
+    p
+}
+
+#[test]
+fn preset_metadata_validation_preserves_known_labels_and_sound() {
+    for label in [None, Some("Init")]
+        .into_iter()
+        .chain(grooviq_dsp::synth::PRESETS.into_iter().map(Some))
+    {
+        let mut p = preset_project(label.map(str::to_owned));
+        let before = serde_json::to_value(&p).unwrap();
+        assert!(p.validate().is_empty());
+        assert_eq!(serde_json::to_value(&p).unwrap(), before);
+    }
+}
+
+#[test]
+fn preset_metadata_validation_clears_unknown_labels_without_changing_sound() {
+    for label in [
+        "Future Patch",
+        "",
+        " Init",
+        "Init ",
+        "init",
+        "sub bass",
+        "Sub Bass\n",
+    ] {
+        let mut p = preset_project(Some(label.into()));
+        let mut expected = serde_json::to_value(&p).unwrap();
+        expected["channels"][0]["preset"] = serde_json::Value::Null;
+        let warnings = p.validate();
+        assert_eq!(p.channels[0].preset, None);
+        assert_eq!(serde_json::to_value(&p).unwrap(), expected);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].len() < 160);
+        assert!(p.validate().is_empty());
+    }
+}
+
+#[test]
+fn preset_metadata_file_roundtrip_normalizes_large_label_preserving_all_other_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.grooviq");
+    let output = dir.path().join("normalized.grooviq");
+    let p = preset_project(Some("UNTRUSTED_LABEL".repeat(750_000)));
+    let mut expected = serde_json::to_value(&p).unwrap();
+    expected["channels"][0]["preset"] = serde_json::Value::Null;
+    save(&p, &SampleFiles::new(), &input).unwrap();
+    let mut loaded = load(&input).unwrap();
+    assert!(loaded.project.channels[0].preset.is_none());
+    assert_eq!(serde_json::to_value(&loaded.project).unwrap(), expected);
+    assert_eq!(loaded.warnings.len(), 1);
+    assert!(loaded.warnings[0].len() < 160);
+    assert!(!loaded.warnings[0].contains("UNTRUSTED_LABEL"));
+    assert!(loaded.project.validate().is_empty());
+    save(&loaded.project, &loaded.samples, &output).unwrap();
+    let reloaded = load(&output).unwrap();
+    assert!(reloaded.warnings.is_empty());
+    assert_eq!(serde_json::to_value(&reloaded.project).unwrap(), expected);
+    let before = saved_json(&input);
+    let after = saved_json(&output);
+    assert_eq!(
+        before["channels"][0]["synth"],
+        after["channels"][0]["synth"]
+    );
+    assert_eq!(before["version"], after["version"]);
+}
+
+#[test]
+fn preset_metadata_validation_leaves_sampler_metadata_alone() {
+    let mut p = preset_project(Some("Sampler display metadata".into()));
+    p.channels[0].instrument = InstrumentKind::Sampler;
+    let before = serde_json::to_value(&p).unwrap();
+    assert!(p.validate().is_empty());
+    assert_eq!(serde_json::to_value(&p).unwrap(), before);
+}
+
+#[test]
+fn warning_labels_are_bounded_but_names_roundtrip_losslessly() {
+    for name in [
+        "Kick".into(),
+        "a".repeat(10_000_000),
+        "🎹界".repeat(100_000),
+        format!("\n\r\t\0\u{202e}\u{2066}{}", "🎹".repeat(100_000)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("labels.grooviq");
+        let mut p = Project::new();
+        p.name = name.clone();
+        p.channels = vec![channel(42, &name, None)];
+        p.channels[0].volume = 50.0;
+        p.channels[0].pan = -50.0;
+        p.channels[0].choke = 255;
+        p.channels[0].sampler.insert("tune".into(), 10000.0);
+        p.channels.push(p.channels[0].clone());
+        p.patterns[0].name = name.clone();
+        p.patterns[0].steps = 0;
+        p.patterns[0].swing = 50.0;
+        p.patterns[0].notes = vec![note(0, 42, 0), note(2, 999, 0)];
+        p.patterns.push(p.patterns[0].clone());
+        p.current_pattern = 999;
+        let mut expected = p.clone();
+        expected.validate();
+        assert_eq!(expected.name, name);
+        assert_eq!(expected.channels[0].name, name);
+        assert!(expected.patterns.iter().all(|pattern| pattern.name == name));
+        save(&p, &SampleFiles::new(), &path).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.project, expected);
+        assert_eq!(loaded.project.channels.len(), 1);
+        assert_eq!(loaded.project.channels[0].volume, 2.0);
+        assert_eq!(loaded.project.channels[0].pan, -1.0);
+        assert_eq!(loaded.project.channels[0].choke, 16);
+        assert_eq!(loaded.project.patterns[0].steps, 1);
+        assert_eq!(loaded.project.patterns[0].swing, 1.0);
+        assert_eq!(loaded.project.patterns[0].notes.len(), 1);
+        assert_eq!(loaded.project.patterns[0].notes[0].channel, 42);
+        assert!(
+            loaded.warnings.len() == 16,
+            "repairs must remain reported: {}",
+            loaded.warnings.len()
+        );
+        for warning in &loaded.warnings {
+            assert!(warning.len() < 512, "warning has {} bytes", warning.len());
+            assert!(
+                !warning
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, '\u{202e}' | '\u{2066}'))
+            );
+        }
+        assert!(loaded.warnings.iter().any(|w| w.contains("42")));
+        if name == "Kick" {
+            assert!(loaded.warnings.iter().any(|w| w.contains(&name)));
+        }
+        save(&loaded.project, &loaded.samples, &path).unwrap();
+        let again = load(&path).unwrap();
+        assert_eq!(again.project, expected);
+        assert!(again.warnings.is_empty());
+    }
+}
+
+#[test]
+fn invalid_key_scale_zip_warning_is_bounded_and_preserves_other_data() {
+    for scale in [
+        "x".repeat(4_000_000),
+        "🎹界".repeat(100_000),
+        format!(
+            "\0\n\r\t\u{0085}\u{061c}\u{200e}\u{200f}\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\u{2066}\u{2067}\u{2068}\u{2069}{}",
+            "🎹".repeat(100_000)
+        ),
+        "major".into(),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("shared.grooviq");
+        let output = dir.path().join("normalized.grooviq");
+        let (mut p, samples) = project();
+        let valid = scale == "major";
+        p.key = Some(ProjectKey { root: 7, scale });
+        // Derive only the documented key repair, independently of validation.
+        // Saving fills embedded sample references; keep that disk representation.
+        save(&p, &samples, &input).unwrap();
+        let mut expected = saved_json(&input);
+        if !valid {
+            expected["key"] = serde_json::Value::Null;
+        }
+        let loaded = load(&input).unwrap();
+        assert_eq!(loaded.warnings.len(), usize::from(!valid));
+        for warning in &loaded.warnings {
+            assert!(warning.len() < 300, "warning has {} bytes", warning.len());
+            assert!(!warning.chars().any(|c| c.is_control()
+                || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')));
+        }
+        assert_eq!(loaded.project.key.is_some(), valid);
+        assert_eq!(loaded.samples.len(), samples.len());
+        for (id, sample) in &samples {
+            assert_eq!(loaded.samples[id].name, sample.name);
+            assert_eq!(loaded.samples[id].bytes, sample.bytes);
+        }
+        save(&loaded.project, &loaded.samples, &output).unwrap();
+        assert_eq!(saved_json(&output), expected);
+        let again = load(&output).unwrap();
+        assert_eq!(again.project, loaded.project);
+        assert!(again.warnings.is_empty());
+        save(&again.project, &again.samples, &input).unwrap();
+        assert_eq!(fs::read(&input).unwrap(), fs::read(&output).unwrap());
+    }
 }
