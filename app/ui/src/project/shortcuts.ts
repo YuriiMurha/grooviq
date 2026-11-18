@@ -49,6 +49,12 @@ export function isTypingTarget(target: ShortcutEvent["target"]): boolean {
   return Boolean(box) && !box?.hasAttribute?.("data-device-window");
 }
 
+/** Printed ASCII letters win; only other delivered keys use an exact physical KeyX. */
+export function printedShortcutLetter(event: Pick<ShortcutEvent, "key" | "code">): string {
+  if (/^[a-zA-Z]$/.test(event.key)) return event.key.toLowerCase();
+  return /^Key([A-Z])$/.exec(event.code ?? "")?.[1]?.toLowerCase() ?? "";
+}
+
 const MOD_KEYS: Record<string, Action> = { n: "new", o: "open", s: "save", r: "export" };
 
 /** The action a key press asks for, or `null`. Mod is Cmd on macOS and Ctrl elsewhere; the
@@ -65,10 +71,7 @@ export function shortcutFor(event: ShortcutEvent, platform: string, typingKeyboa
   const key = event.key.toLowerCase();
 
   if (mod) {
-    // Keep printed ASCII letters on QWERTZ/AZERTY; physical positions only rescue
-    // layouts whose delivered key is not an ASCII letter.
-    const codeLetter = /^Key([A-Z])$/.exec(event.code ?? "")?.[1]?.toLowerCase();
-    const modKey = /^[a-z]$/.test(key) ? key : (codeLetter ?? key);
+    const modKey = printedShortcutLetter(event);
     const redoY = !mac && modKey === "y" && !event.shiftKey;
     if (modKey === "z" || redoY) {
       if (isTypingTarget(event.target)) return null;

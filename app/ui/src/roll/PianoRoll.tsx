@@ -7,7 +7,7 @@ import type { LiveFrame } from "../live/decode";
 import { useProject } from "../project/context";
 import { setRollHistory } from "../project/noteHistory";
 import { isProjectReplacing, onProjectReplaceFailed, onProjectReplaced, onProjectReplacing } from "../project/replacement";
-import { isMac, isTypingTarget, modalIsOpen } from "../project/shortcuts";
+import { isTypingTarget, modalIsOpen } from "../project/shortcuts";
 import { displayTicks } from "../transport/position";
 import { createCanvasRoll } from "./canvasRoll";
 import { CommitQueue, type NotesApi } from "./commitQueue";
@@ -18,6 +18,7 @@ import { NoteStore, buildInstances } from "./noteStore";
 import { RollToolbar } from "./RollToolbar";
 import { scaleMask } from "./scales";
 import { DEFAULT_GRID, GRIDS, barTicks, gridTicks, snapTick } from "./snap";
+import { rollShortcutFor } from "./shortcuts";
 import { rollStats } from "./stats";
 import { endGesture, moveGesture, startGesture, EDGE_PX, TOOL_BUTTONS, heldNotes, type Gesture, type Pointer, type Step, type Tool, type ToolContext } from "./tools";
 import { changed, humanize, quantize, strum } from "./transforms";
@@ -554,27 +555,15 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     run.current = actions;
   });
 
-  // Edit shortcuts (Mod = Cmd on macOS, Ctrl elsewhere). Keys are matched by code: Alt+Q types
-  // another letter on a Mac. They stand aside for text fields, dialogs and the channel rack.
+  // Edit chords follow printed letters; Option+Q deliberately follows its physical position.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.repeat || modalIsOpen() || isTypingTarget(e.target)) return;
+      if (modalIsOpen()) return;
       if ((e.target as Element | null)?.closest?.(".panel-rack")) return;
-      const mod = isMac(navigator.platform) ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-      let act: (() => void) | null = null;
-      if (mod && !e.altKey && !e.shiftKey) {
-        if (e.code === "KeyA") act = () => run.current.selectAll();
-        else if (e.code === "KeyC") act = () => run.current.copy();
-        else if (e.code === "KeyV") act = () => run.current.paste();
-        else if (e.code === "KeyB") act = () => run.current.duplicate();
-      } else if (!mod && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && (e.code === "Delete" || e.code === "Backspace")) {
-        act = () => run.current.remove();
-      } else if (!mod && !e.metaKey && !e.ctrlKey && e.altKey && !e.shiftKey && e.code === "KeyQ") {
-        act = () => run.current.quantize();
-      }
-      if (!act) return;
+      const action = rollShortcutFor(e, navigator.platform);
+      if (!action) return;
       e.preventDefault();
-      act();
+      run.current[action]();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
