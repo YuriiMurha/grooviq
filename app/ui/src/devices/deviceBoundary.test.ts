@@ -92,13 +92,24 @@ test.each(["glob", '["glob"]'])("rejects import.meta.%s directly and inside rela
 });
 
 test("allows data asset imports directly and through a relay", async () => {
-  const assets = 'import icon from "./knob.svg"; import url from "./knob.svg?url"; import raw from "./knob.svg?raw"; import "./editor.css"; export const data = [icon, url, raw];';
+  const svg = path.join(temp, "knob.svg");
+  const css = path.join(temp, "editor.css");
+  writeFileSync(svg, '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  writeFileSync(css, ".knob { color: inherit; }");
+  const assets = `import icon from ${JSON.stringify(svg)}; import url from ${JSON.stringify(svg + "?url")}; import raw from ${JSON.stringify(svg + "?raw")}; import ${JSON.stringify(css)}; export const data = [icon, url, raw];`;
   const [direct] = await eslint.lintText(assets, { filePath: "src/devices/BoundaryProbe.ts" });
   expect(direct.errorCount).toBe(0);
   const assetRelay = path.join(temp, "asset-relay.ts");
   writeFileSync(assetRelay, assets);
   const [indirect] = await eslint.lintText(`import { data } from ${JSON.stringify(assetRelay)}; void data;`, { filePath: "src/devices/BoundaryProbe.ts" });
   expect(indirect.errorCount).toBe(0);
+});
+
+test.each(["svg", "css"])("inspects executable modules resolved through a .%s asset specifier", async (extension) => {
+  const specifier = path.join(temp, `executable.${extension}`);
+  writeFileSync(specifier + ".ts", `import { useProject } from ${JSON.stringify(context)}; export const useRaw = useProject;`);
+  const [result] = await eslint.lintText(`import { useRaw } from ${JSON.stringify(specifier)}; export const useLeak = () => useRaw().apply;`, { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(result.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
 });
 
 test("raw apply cannot be assigned or passed as a guarded send prop", () => {

@@ -19,10 +19,11 @@ export default {
     const config = ts.readConfigFile(path.join(root, "tsconfig.json"), ts.sys.readFile);
     const options = ts.parseJsonConfigFileContent(config.config ?? {}, ts.sys, root).options;
     function unsafe(specifier, from, seen) {
-      // Vite returns data for these imports, not executable module capabilities.
-      if (/\.(css|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf)(\?(url|raw|inline|no-inline))?$/i.test(specifier)) return false;
+      // An asset-looking path can resolve to executable source such as knob.svg.ts.
+      // Exempt data assets only when the module resolver finds no source to inspect.
+      const dataAsset = /\.(css|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf)(\?(url|raw|inline|no-inline))?$/i.test(specifier);
       const resolved = ts.resolveModuleName(specifier, from, options, ts.sys).resolvedModule;
-      if (!resolved) return specifier.startsWith(".") || specifier.startsWith("/");
+      if (!resolved) return !dataAsset && (specifier.startsWith(".") || specifier.startsWith("/"));
       const file = canonical(resolved.resolvedFileName);
       if (file === bridge) return false;
       if (protectedFiles.has(file)) return true;
