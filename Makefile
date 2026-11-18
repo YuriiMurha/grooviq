@@ -71,3 +71,8 @@ install-app: ## Copy the built Grooviq.app into /Applications (run build-app fir
 	@test -d $(APP_BUNDLE) || { echo "No $(APP_BUNDLE). Run make build-app first."; exit 1; }
 	rm -rf /Applications/Grooviq.app
 	ditto $(APP_BUNDLE) /Applications/Grooviq.app
+
+.PHONY: qa-fixture
+export QA_HOME
+qa-fixture: ## Generate a persistent offline QA home (optional QA_HOME=<empty directory>; macOS launcher layout)
+	$(CARGO) run --quiet -p grooviq-qa-fixture
