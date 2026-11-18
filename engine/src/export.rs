@@ -243,7 +243,10 @@ fn write_part(
         .song_region
         .map_or(state.song.end_tick, |r| r.end_tick);
     let exact_end = if options.song_region.is_none() {
-        state.song.end_frame_at(rate)
+        state
+            .song
+            .end_frame_at(rate)
+            .max(state.song.audio.end_frame(state.bpm, rate))
     } else {
         0
     };
