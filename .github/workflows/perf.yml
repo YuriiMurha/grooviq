@@ -214,13 +214,19 @@ jobs:
               raise SystemExit('only the verified first historical pair is supported')
           PYTHON
           cp scripts/capture-instruction-profiles.py "$RUNNER_TEMP/capture-instruction-profiles.py"
-      - name: Provision historical measurement tools
-        timeout-minutes: 8
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends valgrind libasound2-dev binutils
-          rustup toolchain install 1.100.0 --profile minimal
-          cargo +1.100.0 install gungraun-runner --version 0.20.0 --locked
+      # Keep the eight-minute setup budget, with a visible failure boundary per tool.
+      - name: Refresh historical tool package indexes
+        timeout-minutes: 2
+        run: sudo apt-get update -qq
+      - name: Install historical Valgrind and system tools
+        timeout-minutes: 2
+        run: sudo apt-get install -y -qq --no-install-recommends valgrind libasound2-dev binutils
+      - name: Install historical Rust toolchain
+        timeout-minutes: 1
+        run: rustup toolchain install 1.100.0 --profile minimal
+      - name: Install historical gungraun runner
+        timeout-minutes: 3
+        run: cargo +1.100.0 install gungraun-runner --version 0.20.0 --locked
         env:
           CARGO_BUILD_JOBS: '2'
           CARGO_INCREMENTAL: '0'
