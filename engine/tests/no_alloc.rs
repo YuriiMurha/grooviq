@@ -892,3 +892,6 @@ fn review_probe_active_song_transitions_never_allocate() {
 }
 #[path = "realtime/multiband.rs"]
 mod multiband;
+
+#[path = "realtime/shimmer_reverb.rs"]
+mod shimmer_reverb;

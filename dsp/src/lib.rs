@@ -30,6 +30,7 @@ pub mod lofi_colour;
 pub mod ott;
 pub mod reverb;
 pub mod sampler;
+pub mod shimmer_reverb;
 pub mod synth;
 pub mod utility;
 
@@ -49,6 +50,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
         "saturation" => &saturation::SPEC,
         "drum_shaper" => &drum_shaper::SPEC,
         "reverb" => &reverb::SPEC,
+        "shimmer_reverb" => &shimmer_reverb::SPEC,
         "algorithmic_reverb" => &algorithmic_reverb::SPEC,
         "character_delay" => &character_delay::SPEC,
         "delay" => &delay::SPEC,
@@ -75,6 +77,7 @@ pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
         "saturation" => Box::new(saturation::Saturation::new(sample_rate)),
         "drum_shaper" => Box::new(drum_shaper::DrumShaper::new(sample_rate)),
         "reverb" => Box::new(reverb::Reverb::new(sample_rate)),
+        "shimmer_reverb" => Box::new(shimmer_reverb::ShimmerReverb::new(sample_rate)),
         "algorithmic_reverb" => Box::new(algorithmic_reverb::AlgorithmicReverb::new(sample_rate)),
         "character_delay" => Box::new(character_delay::CharacterDelay::new(sample_rate)),
         "delay" => Box::new(delay::Delay::new(sample_rate)),

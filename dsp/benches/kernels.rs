@@ -423,3 +423,23 @@ fn lofi_colour_block(bencher: Bencher, block: usize, name: &str) {
 fn lofi_colour_presets<const N: usize>(bencher: Bencher, name: &str) {
     lofi_colour_block(bencher, N, name);
 }
+
+#[divan::bench(args = grooviq_dsp::shimmer_reverb::PRESETS, consts = [64, 128])]
+fn shimmer_reverb_block<const N: usize>(bencher: Bencher, name: &str) {
+    use grooviq_dsp::shimmer_reverb::{ShimmerReverb, preset};
+    let mut device = ShimmerReverb::new(SR);
+    for (index, value) in preset(name).unwrap() {
+        device.set_param(index, value);
+    }
+    let source_l: [f32; N] = std::array::from_fn(|i| libm::sinf(i as f32 * 0.137) * 0.6);
+    let source_r: [f32; N] = std::array::from_fn(|i| libm::cosf(i as f32 * 0.213) * 0.4);
+    for _ in 0..(SR as usize * 4 / N) {
+        let (mut l, mut r) = (source_l, source_r);
+        device.process(&mut l, &mut r, None, &[]);
+    }
+    bencher.bench_local(|| {
+        let (mut l, mut r) = (source_l, source_r);
+        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
+        black_box((l, r));
+    });
+}
