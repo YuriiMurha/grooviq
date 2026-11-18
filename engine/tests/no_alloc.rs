@@ -22,6 +22,9 @@ use std::time::{Duration, Instant};
 
 const SR: f32 = 48_000.0;
 
+#[path = "realtime/drum_shaper.rs"]
+mod drum_shaper;
+
 /// Built with `RTSAN_ENABLE` set: RealtimeSanitizer is linked in and checks [`realtime`].
 const RTSAN: bool = option_env!("RTSAN_ENABLE").is_some();
 

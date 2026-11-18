@@ -19,6 +19,7 @@ mod wavetable;
 pub mod comp;
 pub mod delay;
 pub mod drive;
+pub mod drum_shaper;
 pub mod eq;
 pub mod limiter;
 pub mod ott;
@@ -38,6 +39,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
         "limiter" => &limiter::SPEC,
         "drive" => &drive::SPEC,
         "saturation" => &saturation::SPEC,
+        "drum_shaper" => &drum_shaper::SPEC,
         "reverb" => &reverb::SPEC,
         "delay" => &delay::SPEC,
         "ott" => &ott::SPEC,
@@ -58,6 +60,7 @@ pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
         "limiter" => Box::new(limiter::Limiter::new(sample_rate)),
         "drive" => Box::new(drive::Drive::new(sample_rate)),
         "saturation" => Box::new(saturation::Saturation::new(sample_rate)),
+        "drum_shaper" => Box::new(drum_shaper::DrumShaper::new(sample_rate)),
         "reverb" => Box::new(reverb::Reverb::new(sample_rate)),
         "delay" => Box::new(delay::Delay::new(sample_rate)),
         "ott" => Box::new(ott::Ott::new(sample_rate)),
