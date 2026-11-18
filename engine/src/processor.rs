@@ -171,12 +171,19 @@ impl AudioProcessor {
         self.metronome.set_sample_rate(sample_rate);
         // A pattern of a new length can arrive with the fresh graph (its swap was still queued,
         // or a faulted graph refused it): the place in the loop holds, as in `replace_graph`.
-        self.transport.keep_position(
-            self.clock,
-            self.graph.pattern_length(),
-            graph.pattern_length(),
-        );
+        if graph.playback_mode == crate::PlaybackMode::Pattern {
+            self.transport.keep_position(
+                self.clock,
+                self.graph.pattern_length(),
+                graph.pattern_length(),
+            );
+        } else {
+            let len = graph.pattern_length();
+            self.transport.keep_position(self.clock, len, len);
+        }
         self.generation = graph.generation();
+        let mut graph = graph;
+        graph.keep_audio(&self.graph);
         self.graph = graph;
         self.unsent = None;
         self.faulted = false;
@@ -236,6 +243,20 @@ impl AudioProcessor {
         // Before the next block's commands can change the tick-to-frame map: a sequencer that
         // re-seeks there starts from the first tick this block did not cover.
         self.transport.mark_covered(end);
+        if self.graph.playback_mode == crate::PlaybackMode::Song
+            && self.graph.song_loop.is_none()
+            && self.transport.playing()
+            && !self.graph.audio_active()
+            && end
+                >= self
+                    .transport
+                    .frame_of(self.graph.song().end_tick as f64)
+                    .max(self.transport.song_frame_of(
+                        self.graph.song().end_frame_at(self.transport.sample_rate()),
+                    ))
+        {
+            self.transport.finish(end, self.graph.song().end_tick);
+        }
         self.update_meter();
         self.clock = end;
         self.served = 0;
@@ -244,7 +265,7 @@ impl AudioProcessor {
             .publish(self.meter, tone, self.clock, self.faults, self.guard_hits);
         self.live.publish_transport(
             self.transport.playing(),
-            self.transport.position_ticks(start),
+            self.graph.position(self.transport.position_ticks(start)),
         );
     }
 
@@ -324,6 +345,14 @@ impl AudioProcessor {
                         self.discard(Trash::Sample(sample));
                     }
                 }
+                Msg::SetSong(song) => {
+                    let old = if self.faulted {
+                        song
+                    } else {
+                        self.graph.set_song(song)
+                    };
+                    self.discard(Trash::Song(old));
+                }
                 Msg::SetPattern(pattern) => {
                     let leaving = if self.faulted {
                         pattern
@@ -331,7 +360,11 @@ impl AudioProcessor {
                         let new_len = pattern.length;
                         let leaving = self.graph.set_pattern(pattern);
                         // A new length keeps the place in the loop (no jump, no lost notes).
-                        self.transport.keep_position(start, leaving.length, new_len);
+                        if self.graph.playback_mode == crate::PlaybackMode::Pattern {
+                            self.transport.keep_position(start, leaving.length, new_len);
+                        } else {
+                            self.transport.keep_position(start, new_len, new_len);
+                        }
                         leaving
                     };
                     self.discard(Trash::Pattern(leaving));
@@ -376,7 +409,9 @@ impl AudioProcessor {
                             if self.graph.channel_note(channel, event) {
                                 let at = start + u64::from(event.offset);
                                 let note = (channel, key, velocity, on, id);
-                                self.recorder.note(&self.transport, at, &self.live, note);
+                                if self.graph.playback_mode == crate::PlaybackMode::Pattern {
+                                    self.recorder.note(&self.transport, at, &self.live, note);
+                                }
                             }
                         }
                     }
@@ -399,6 +434,32 @@ impl AudioProcessor {
                     }
                     Command::SetChoke { channel, group } => {
                         self.with_graph(|g| g.set_choke(channel, group));
+                    }
+                    Command::Seek { tick } => {
+                        self.with_graph(Graph::transport_stopped);
+                        self.transport.seek(start, tick);
+                    }
+                    Command::SetPlaybackMode { mode } => {
+                        if mode != self.graph.playback_mode {
+                            self.recorder.set(false, &self.transport, start, &self.live);
+                            self.stop(start);
+                            let len = self.graph.pattern_length();
+                            self.transport.keep_position(start, len, len);
+                            self.with_graph(|g| g.playback_mode = mode);
+                        }
+                    }
+                    Command::SetSongLoop { region } => {
+                        let tick = self.graph.position(self.transport.position_ticks(start));
+                        let tick =
+                            region.map_or(tick, |r| tick.clamp(r.start_tick, r.end_tick - 1));
+                        if self.graph.playback_mode == crate::PlaybackMode::Song {
+                            self.with_graph(Graph::transport_stopped);
+                            self.transport.seek(start, tick);
+                        }
+                        self.with_graph(|g| {
+                            g.song_loop = region;
+                            g.reset_audio();
+                        });
                     }
                     Command::Play => {
                         if !self.transport.playing() {
@@ -440,9 +501,24 @@ impl AudioProcessor {
     fn play(&mut self, at: u64, loops: Option<u32>) {
         if self.transport.playing() {
             self.recorder.end(&self.transport, at, &self.live);
-            self.with_graph(Graph::transport_stopped);
         }
+        // A finish can leave a block-boundary release pending: force it before re-anchoring.
+        self.with_graph(Graph::transport_stopped);
+        let cursor = self.transport.position_ticks(at);
         self.transport.start(at, loops);
+        if self.graph.playback_mode == crate::PlaybackMode::Song {
+            let cursor = self.graph.song_loop.map_or_else(
+                || {
+                    if cursor < self.graph.song().end_tick {
+                        cursor
+                    } else {
+                        0
+                    }
+                },
+                |r| cursor.clamp(r.start_tick, r.end_tick - 1),
+            );
+            self.transport.seek(at, cursor);
+        }
         self.with_graph(Graph::transport_started);
     }
 
@@ -485,14 +561,20 @@ impl AudioProcessor {
     /// Swaps in a fresh graph, unless it is from an earlier generation: a restart queued
     /// before `reconfigure` arrives after the fresh graph it made, and must not replace it
     /// (cutting held voices, or bringing back the old rate).
-    fn replace_graph(&mut self, graph: Box<Graph>, at: u64) {
+    fn replace_graph(&mut self, mut graph: Box<Graph>, at: u64) {
         let leaving = if graph.generation() == self.generation {
             self.faulted = false;
             let new_len = graph.pattern_length();
+            graph.keep_audio(&self.graph);
             let leaving = std::mem::replace(&mut self.graph, graph);
             // A pattern swap a faulted graph refused arrives with the fresh graph.
-            self.transport
-                .keep_position(at, leaving.pattern_length(), new_len);
+            if self.graph.playback_mode == crate::PlaybackMode::Pattern {
+                self.transport
+                    .keep_position(at, leaving.pattern_length(), new_len);
+            } else {
+                self.transport.keep_position(at, new_len, new_len);
+                self.recorder.set(false, &self.transport, at, &self.live);
+            }
             leaving
         } else {
             graph

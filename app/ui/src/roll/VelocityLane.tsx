@@ -1,3 +1,6 @@
+import { registerGestureCancellation } from "../project/pending";
+import { isProjectReplacing } from "../project/replacement";
+import type { PatternStamp } from "../api/patterns";
 import { useEffect, useRef, type PointerEvent, type RefObject } from "react";
 import type { CommitQueue } from "./commitQueue";
 import { FALLBACK } from "../rack/palette";
@@ -31,8 +34,9 @@ export function VelocityLane({ store, queue, channel, view, ink }: Props) {
   const live = useRef({ channel, ink });
   /** A drag under way: the velocities it shows, and the project it started in (its edit is that
    * project's, and is dropped if another replaced it). */
-  const drag = useRef<{ values: Map<number, number>; rev: number; generation: number } | null>(null);
+  const drag = useRef<{ values: Map<number, number>; rev: number; origin: PatternStamp } | null>(null);
   const redraw = useRef(true);
+  useEffect(() => registerGestureCancellation(() => { drag.current = null; redraw.current = true; }), []);
   useEffect(() => {
     live.current = { channel, ink };
     redraw.current = true;
@@ -122,24 +126,24 @@ export function VelocityLane({ store, queue, channel, view, ink }: Props) {
           aria-label="Velocity lane"
           data-hint="Drag to set the velocity of the selected notes. With none selected, drag across the bars to paint them."
           onPointerDown={(e) => {
-            if (e.button !== 0 || drag.current) return;
+            if (e.button !== 0 || drag.current || isProjectReplacing()) return;
             e.preventDefault();
             try {
               e.currentTarget.setPointerCapture(e.pointerId);
             } catch {
               /* no pointer capture here */
             }
-            drag.current = { values: new Map(), rev: 0, generation: queue.generationNow() };
+            drag.current = { values: new Map(), rev: 0, origin: queue.stamp() };
             apply(e);
           }}
           onPointerMove={(e) => drag.current && apply(e)}
           onPointerUp={(e) => {
             const d = drag.current;
-            if (!d) return;
+            if (!d || !queue.accepts(d.origin)) { drag.current = null; return; }
             apply(e);
             drag.current = null;
             const edit = laneEdit(store, d.values);
-            if (edit) queue.commit(edit, d.generation);
+            if (edit) queue.commit(edit, d.origin);
             redraw.current = true;
           }}
           onPointerCancel={() => {

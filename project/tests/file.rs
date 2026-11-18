@@ -1054,6 +1054,7 @@ fn a_v1_file_opens_and_sounds_the_same() {
         },
         // The file's 4/4 (M1's engine had no time signature: it counted 4/4).
         time_signature: (p.time_signature.beats, p.time_signature.unit),
+        ..EngineState::default()
     };
     assert_eq!(p.time_signature, TimeSignature { beats: 4, unit: 4 });
     assert_eq!(engine_state(p, &decoded.samples), m1);
@@ -1758,4 +1759,115 @@ fn preset_metadata_validation_leaves_sampler_metadata_alone() {
     let before = serde_json::to_value(&p).unwrap();
     assert!(p.validate().is_empty());
     assert_eq!(serde_json::to_value(&p).unwrap(), before);
+}
+
+#[test]
+fn warning_labels_are_bounded_but_names_roundtrip_losslessly() {
+    for name in [
+        "Kick".into(),
+        "a".repeat(10_000_000),
+        "🎹界".repeat(100_000),
+        format!("\n\r\t\0\u{202e}\u{2066}{}", "🎹".repeat(100_000)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("labels.grooviq");
+        let mut p = Project::new();
+        p.name = name.clone();
+        p.channels = vec![channel(42, &name, None)];
+        p.channels[0].volume = 50.0;
+        p.channels[0].pan = -50.0;
+        p.channels[0].choke = 255;
+        p.channels[0].sampler.insert("tune".into(), 10000.0);
+        p.channels.push(p.channels[0].clone());
+        p.patterns[0].name = name.clone();
+        p.patterns[0].steps = 0;
+        p.patterns[0].swing = 50.0;
+        p.patterns[0].notes = vec![note(0, 42, 0), note(2, 999, 0)];
+        p.patterns.push(p.patterns[0].clone());
+        p.current_pattern = 999;
+        let mut expected = p.clone();
+        expected.validate();
+        assert_eq!(expected.name, name);
+        assert_eq!(expected.channels[0].name, name);
+        assert!(expected.patterns.iter().all(|pattern| pattern.name == name));
+        save(&p, &SampleFiles::new(), &path).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.project, expected);
+        assert_eq!(loaded.project.channels.len(), 1);
+        assert_eq!(loaded.project.channels[0].volume, 2.0);
+        assert_eq!(loaded.project.channels[0].pan, -1.0);
+        assert_eq!(loaded.project.channels[0].choke, 16);
+        assert_eq!(loaded.project.patterns[0].steps, 1);
+        assert_eq!(loaded.project.patterns[0].swing, 1.0);
+        assert_eq!(loaded.project.patterns[0].notes.len(), 1);
+        assert_eq!(loaded.project.patterns[0].notes[0].channel, 42);
+        assert!(
+            loaded.warnings.len() == 16,
+            "repairs must remain reported: {}",
+            loaded.warnings.len()
+        );
+        for warning in &loaded.warnings {
+            assert!(warning.len() < 512, "warning has {} bytes", warning.len());
+            assert!(
+                !warning
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, '\u{202e}' | '\u{2066}'))
+            );
+        }
+        assert!(loaded.warnings.iter().any(|w| w.contains("42")));
+        if name == "Kick" {
+            assert!(loaded.warnings.iter().any(|w| w.contains(&name)));
+        }
+        save(&loaded.project, &loaded.samples, &path).unwrap();
+        let again = load(&path).unwrap();
+        assert_eq!(again.project, expected);
+        assert!(again.warnings.is_empty());
+    }
+}
+
+#[test]
+fn invalid_key_scale_zip_warning_is_bounded_and_preserves_other_data() {
+    for scale in [
+        "x".repeat(4_000_000),
+        "🎹界".repeat(100_000),
+        format!(
+            "\0\n\r\t\u{0085}\u{061c}\u{200e}\u{200f}\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\u{2066}\u{2067}\u{2068}\u{2069}{}",
+            "🎹".repeat(100_000)
+        ),
+        "major".into(),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("shared.grooviq");
+        let output = dir.path().join("normalized.grooviq");
+        let (mut p, samples) = project();
+        let valid = scale == "major";
+        p.key = Some(ProjectKey { root: 7, scale });
+        // Derive only the documented key repair, independently of validation.
+        // Saving fills embedded sample references; keep that disk representation.
+        save(&p, &samples, &input).unwrap();
+        let mut expected = saved_json(&input);
+        if !valid {
+            expected["key"] = serde_json::Value::Null;
+        }
+        let loaded = load(&input).unwrap();
+        assert_eq!(loaded.warnings.len(), usize::from(!valid));
+        for warning in &loaded.warnings {
+            assert!(warning.len() < 300, "warning has {} bytes", warning.len());
+            assert!(!warning.chars().any(|c| c.is_control()
+                || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')));
+        }
+        assert_eq!(loaded.project.key.is_some(), valid);
+        assert_eq!(loaded.samples.len(), samples.len());
+        for (id, sample) in &samples {
+            assert_eq!(loaded.samples[id].name, sample.name);
+            assert_eq!(loaded.samples[id].bytes, sample.bytes);
+        }
+        save(&loaded.project, &loaded.samples, &output).unwrap();
+        assert_eq!(saved_json(&output), expected);
+        let again = load(&output).unwrap();
+        assert_eq!(again.project, loaded.project);
+        assert!(again.warnings.is_empty());
+        save(&again.project, &again.samples, &input).unwrap();
+        assert_eq!(fs::read(&input).unwrap(), fs::read(&output).unwrap());
+    }
 }
