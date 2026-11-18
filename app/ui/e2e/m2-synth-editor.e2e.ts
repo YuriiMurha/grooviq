@@ -206,11 +206,20 @@ test.describe("the synth editor", () => {
       ["osc1_semi", 1],
       ["osc1_semi", 2],
     ]);
+    // Keep the gesture pending across host RPCs; advance frames explicitly below.
+    await app.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await app.clock.pauseAt(new Date("2026-01-01T00:01:00Z"));
     // A wheel gesture is live while it turns and commits once when it settles.
     const level = control(app, "osc1_level");
     await level.hover();
-    for (let i = 0; i < 3; i++) await app.mouse.wheel(0, -100);
+    for (let i = 0; i < 3; i++) {
+      await app.mouse.wheel(0, -100);
+      await app.clock.runFor(32);
+      await expect.poll(() => liveValue(mock, "osc1_level")).toBeCloseTo(0.9 + (i + 1) * 0.025, 6);
+    }
     await expect.poll(() => liveValue(mock, "osc1_level")).toBeGreaterThan(0.9);
+    expect(await paramEdits(mock)).toHaveLength(2);
+    await app.clock.runFor(299);
     await expect.poll(() => paramEdits(mock)).toHaveLength(3);
     expect((await paramEdits(mock))[2][0]).toBe("osc1_level");
     expect((await stored(mock)).synth.osc1_level).toBeCloseTo(0.9 + 3 * 0.025, 6);
@@ -395,12 +404,17 @@ test.describe("ending a gesture early", () => {
 
   test("closing_during_a_wheel_gesture_sends_no_edit", async ({ app, mock }) => {
     await open(app);
+    // Keep the gesture pending across host RPCs; advance frames explicitly below.
+    await app.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await app.clock.pauseAt(new Date("2026-01-01T00:01:00Z"));
     await control(app, "filter_cutoff").hover();
     await app.mouse.wheel(0, -100);
+    await app.clock.runFor(32);
     await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
+    expect(await paramEdits(mock)).toEqual([]);
     await app.keyboard.press("Escape");
     await expect(editor(app)).toHaveCount(0);
-    await app.waitForTimeout(600);
+    await app.clock.runFor(600);
     expect(await paramEdits(mock)).toEqual([]);
     expect(await liveValue(mock, "filter_cutoff")).toBe(650);
   });
@@ -424,11 +438,16 @@ test.describe("presets during a gesture", () => {
 
   test("a_preset_during_a_wheel_gesture_wins", async ({ app, mock }) => {
     await open(app);
+    // Keep the gesture pending across host RPCs; advance frames explicitly below.
+    await app.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await app.clock.pauseAt(new Date("2026-01-01T00:01:00Z"));
     await control(app, "filter_cutoff").hover();
     await app.mouse.wheel(0, -100);
+    await app.clock.runFor(32);
     await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
+    expect(await paramEdits(mock)).toEqual([]);
     await editor(app).getByRole("button", { name: "Reese", exact: true }).evaluate((b: HTMLElement) => b.click());
-    await app.waitForTimeout(600);
+    await app.clock.runFor(600);
     expect(await paramEdits(mock)).toEqual([]);
     expect(await stored(mock)).toMatchObject({ preset: "Reese", synth: presetValues("Reese") });
     expectShown(await shown(app), presetValues("Reese"));
