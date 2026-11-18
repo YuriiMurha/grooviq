@@ -193,36 +193,57 @@ mod tests {
     use super::*;
     #[test]
     fn pitch_readers_shift_all_four_intervals() {
+        // Independent musical oracle: octaves and pure 3:2 / 2:3 fifths.
+        // Reading RATIOS here would make wrong production tuning self-validating.
+        let expected_ratios = [2.0_f64, 1.5, 0.5, 2.0 / 3.0];
         for sr in [22050., 48000., 192000.] {
-            for (k, ratio) in RATIOS.iter().enumerate() {
-                let mut d = ShimmerReverb::new(sr);
-                let line = &mut d.lines[0];
-                let frequency = 400.;
-                let mut projection = [0f64; 2];
-                let mut original = [0f64; 2];
-                for n in 0..sr as usize * 2 {
-                    line.data[line.pos] =
-                        libm::sinf(n as f32 * frequency * std::f32::consts::TAU / sr);
-                    let y = line.shifted(k as f32, 0., 0.);
-                    line.pos = (line.pos + 1) % line.data.len();
-                    if n > sr as usize {
-                        let t = n as f64 / sr as f64 * std::f64::consts::TAU;
-                        projection[0] += y as f64 * libm::cos(t * frequency as f64 * *ratio as f64);
-                        projection[1] += y as f64 * libm::sin(t * frequency as f64 * *ratio as f64);
-                        original[0] += y as f64 * libm::cos(t * frequency as f64);
-                        original[1] += y as f64 * libm::sin(t * frequency as f64);
+            for (carrier, frequency) in [400., 403.17].into_iter().enumerate() {
+                for (k, &ratio) in expected_ratios.iter().enumerate() {
+                    let mut d = ShimmerReverb::new(sr);
+                    let line = &mut d.lines[0];
+                    let mut projection = [0f64; 2];
+                    let mut original = [0f64; 2];
+                    for n in 0..sr as usize * 2 {
+                        line.data[line.pos] =
+                            libm::sinf(n as f32 * frequency * std::f32::consts::TAU / sr);
+                        let before = line.phase[k] as f64;
+                        let y = line.shifted(k as f32, 0., 0.);
+                        let mut advance = line.phase[k] as f64 - before;
+                        if advance > 0.5 {
+                            advance -= 1.;
+                        } else if advance < -0.5 {
+                            advance += 1.;
+                        }
+                        let observed_ratio = 1. - advance * line.window as f64;
+                        assert!(
+                            (observed_ratio - ratio).abs() < 0.002,
+                            "reader speed at {sr}, interval {k}: {observed_ratio} vs {ratio}"
+                        );
+                        line.pos = (line.pos + 1) % line.data.len();
+                        if n > sr as usize {
+                            let t = n as f64 / sr as f64 * std::f64::consts::TAU;
+                            projection[0] += y as f64 * libm::cos(t * frequency as f64 * ratio);
+                            projection[1] += y as f64 * libm::sin(t * frequency as f64 * ratio);
+                            original[0] += y as f64 * libm::cos(t * frequency as f64);
+                            original[1] += y as f64 * libm::sin(t * frequency as f64);
+                        }
+                    }
+                    let power = |a: [f64; 2]| a[0] * a[0] + a[1] * a[1];
+                    assert!(
+                        power(projection) > power(original) * 10.,
+                        "rate {sr}, frequency {frequency}, interval {k}"
+                    );
+                    // Only the whole-cycle carrier is grain-phase coherent.
+                    // The noninteger carrier spreads into sidebands; its reader
+                    // speed is still checked independently on every sample.
+                    if carrier == 0 {
+                        assert!(
+                            power(projection) > (sr as f64 * 0.04) * (sr as f64 * 0.04),
+                            "rate {sr}, frequency {frequency}, interval {k}: {:?}",
+                            projection
+                        );
                     }
                 }
-                let power = |a: [f64; 2]| a[0] * a[0] + a[1] * a[1];
-                assert!(
-                    power(projection) > power(original) * 10.,
-                    "rate {sr}, interval {k}"
-                );
-                assert!(
-                    power(projection) > (sr as f64 * 0.04) * (sr as f64 * 0.04),
-                    "rate {sr}, interval {k}: {:?}",
-                    projection
-                );
             }
         }
     }
