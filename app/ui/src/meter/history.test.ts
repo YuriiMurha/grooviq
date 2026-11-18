@@ -26,6 +26,13 @@ test("FIFO deadlines shift the original step/release without filtering", () => {
   expect(h.read(409)).toEqual([0.3,0.1]);
   expect(h.read(410)).toEqual([0.2,0]);
 });
+test("FIFO deadlines survive eviction of the original delayed observation", () => {
+  const h = new MeterHistory();
+  h.push(obs(1n, 96000), context, 0);
+  for (let i = 1; i <= 512; i++) h.push(obs(BigInt(i + 1), 0), context, i);
+  expect(h.pendingCount).toBe(512);
+  expect(h.read(513)).toEqual([0, 0]);
+});
 test("cap, fixed resource bound, and stale expiry without push", () => {
   const h = new MeterHistory();
   for (let i = 0; i < 800; i++) h.push(obs(BigInt(i), 0xffffffff), context, i);
