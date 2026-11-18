@@ -439,6 +439,13 @@ pub struct SaveJob {
     generation: u64,
 }
 
+impl SessionError {
+    /// A completed rename whose directory sync failed.
+    pub fn directory_unconfirmed(&self) -> bool {
+        matches!(self, Self::Save(e) if crate::file::directory_unconfirmed(e))
+    }
+}
+
 impl SaveJob {
     /// Saves: writes the new file beside the old one, then backs up the file it replaces
     /// (keeping [`MAX_BACKUPS`] in `backups`), then puts the new one in place. A save that is
@@ -1861,20 +1868,61 @@ impl Session {
         true
     }
 
+    /// Records disk facts after rename without clearing dirty or autosave protection.
+    pub fn save_unconfirmed(&mut self, job: &SaveJob) {
+        self.saving = false;
+        if job.generation != self.generation {
+            return;
+        }
+        self.path = Some(job.path.clone());
+        self.project.name = job.project.name.clone();
+        if self.revision == self.saved_revision {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        self.pending_since.get_or_insert_with(Instant::now);
+    }
+
     /// Records that the job from [`Self::begin_save`] was not written: the next save may start.
     pub fn save_failed(&mut self) {
         self.saving = false;
     }
 
+    /// Applies the disk outcome once for both synchronous and desktop saves.
+    pub fn end_save(
+        &mut self,
+        job: &SaveJob,
+        result: Result<(), SessionError>,
+    ) -> Result<bool, SessionError> {
+        match result {
+            Ok(()) => Ok(self.finish_save(job)),
+            Err(e) => {
+                if e.directory_unconfirmed() {
+                    self.save_unconfirmed(job);
+                } else {
+                    self.save_failed();
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// Saves in one go (begin, write, finish). Holds the session the whole time: the app splits
     /// the steps instead.
     pub fn save(&mut self, path: Option<&Path>, backups: &Path) -> Result<PathBuf, SessionError> {
+        self.save_on(path, backups, &mut RealDisk)
+    }
+
+    /// Synchronous save with an injectable disk boundary.
+    #[doc(hidden)]
+    pub fn save_on(
+        &mut self,
+        path: Option<&Path>,
+        backups: &Path,
+        disk: &mut impl Disk,
+    ) -> Result<PathBuf, SessionError> {
         let job = self.begin_save(path)?;
-        if let Err(e) = job.write(backups) {
-            self.save_failed();
-            return Err(e);
-        }
-        self.finish_save(&job);
+        let result = job.write_on(backups, disk);
+        self.end_save(&job, result)?;
         Ok(job.path)
     }
 
