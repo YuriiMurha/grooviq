@@ -1,3 +1,6 @@
+import { registerGestureCancellation } from "../project/pending";
+import { isProjectReplacing } from "../project/replacement";
+import type { PatternStamp } from "../api/patterns";
 import {
   useCallback,
   useEffect,
@@ -86,6 +89,7 @@ interface Override {
 }
 
 interface Press {
+  origin: PatternStamp;
   cell: Cell;
   y: number;
   start: number;
@@ -118,7 +122,10 @@ export function StepGrid({
   createRenderer = createGlRenderer,
   createFallbackRenderer = createCanvasRenderer,
 }: Props) {
-  const { apply } = useProject();
+  const { apply, view: projectView } = useProject();
+  const originNow = useRef<PatternStamp>({ generation: 0, patternId: 0, revision: 1 });
+  useEffect(() => { originNow.current = { generation: projectView?.generation ?? 0, patternId: pattern.id, revision: projectView?.notesRevision ?? 1 }; }, [projectView?.generation, projectView?.notesRevision, pattern.id]);
+  const stamp = (): PatternStamp => originNow.current;
   const canvas = useRef<HTMLCanvasElement>(null);
   const [focus, setFocus] = useState<Cell>({ row: 0, step: 0 });
   const [hasFocus, setHasFocus] = useState(false);
@@ -145,6 +152,7 @@ export function StepGrid({
   // Set once a velocity edit is applied: the next view holds the value, so the override goes.
   const settled = useRef(false);
   const press = useRef<Press | null>(null);
+
   const renderer = useRef<GridRenderer | null>(null);
   const palette = useRef<Palette | null>(null);
   const factories = useRef({ gl: createRenderer, fallback: createFallbackRenderer });
@@ -279,7 +287,7 @@ export function StepGrid({
   const valueAt = (cell: Cell): number | null => cells[cell.row]?.[cell.step] ?? null;
   const channelAt = (cell: Cell) => channels[cell.row];
 
-  const send = useCallback((edit: Edit) => apply(edit), [apply]);
+  const send = useCallback((edit: Edit, origin?: PatternStamp) => apply(edit, undefined, origin), [apply]);
 
   const cellFrom = (e: { clientX: number; clientY: number }): Cell | null => {
     const el = canvas.current;
@@ -303,13 +311,14 @@ export function StepGrid({
   };
 
   const onPointerDown = (e: PointerEvent<HTMLCanvasElement>) => {
+    if (isProjectReplacing()) return;
     if (e.button !== 0) return;
     const cell = cellFrom(e);
     if (!cell) return;
     setFocus(cell);
     // A roll channel's preview opens the piano roll on release; it never edits a step.
     const value = channelAt(cell)?.roll ? null : valueAt(cell);
-    press.current = { cell, y: e.clientY, start: value ?? 0, lit: value !== null, moved: false };
+    press.current = { origin: stamp(), cell, y: e.clientY, start: value ?? 0, lit: value !== null, moved: false };
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
@@ -347,7 +356,8 @@ export function StepGrid({
       const velocity = round2(override.current.velocity);
       override.current = { ...p.cell, velocity };
       const { row, step } = p.cell;
-      void send({ kind: "setStepVelocity", channel: ch.id, step, velocity }).then((applied) => {
+      void send({ kind: "setStepVelocity", channel: ch.id, step, velocity }, p.origin).then((applied) => {
+        if (stamp().patternId !== p.origin.patternId || stamp().generation !== p.origin.generation) return;
         if (override.current?.row !== row || override.current.step !== step) return;
         if (!applied || scene.current?.cells[row]?.[step] === velocity) {
           // Refused (the view is unchanged), or the new view is already in the scene.
@@ -358,9 +368,17 @@ export function StepGrid({
         }
       });
     } else if (!p.moved) {
-      void send({ kind: "toggleStep", channel: ch.id, step: p.cell.step });
+      void send({ kind: "toggleStep", channel: ch.id, step: p.cell.step }, p.origin);
     }
   };
+
+  useEffect(() => registerGestureCancellation(() => {
+    press.current = null; override.current = null; dirty.current = true;
+  }), []);
+
+  useEffect(() => {
+    press.current = null; override.current = null; dirty.current = true;
+  }, [pattern.id, projectView?.generation]);
 
   const onPointerCancel = () => {
     press.current = null;

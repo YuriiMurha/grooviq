@@ -1,3 +1,5 @@
+import { registerGestureCancellation } from "../project/pending";
+import type { PatternStamp } from "../api/patterns";
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent, type RefObject } from "react";
 import { onNotesChanged, notesEdit, patternNotes, type WireNote } from "../api/notes";
 import type { ProjectKey } from "../api/project";
@@ -65,7 +67,6 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   const generation = project?.generation ?? 0;
   useEffect(() => queue.setGeneration(generation), [queue, generation]);
   const patternId = project?.pattern.id ?? 0;
-  useEffect(() => queue.setPatternId(patternId), [queue, patternId]);
   const report = useRef(onError);
   useEffect(() => {
     report.current = onError;
@@ -93,13 +94,26 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   /** The key the view was centred on, kept in the middle as the roll is resized until the person scrolls or zooms. */
   const centreKey = useRef<number | null>(null);
   const gesture = useRef<Gesture | null>(null);
+  const gestureOrigin = useRef<PatternStamp | null>(null);
+  useEffect(() => {
+    abandon(store, gesture.current); gesture.current = null; gestureOrigin.current = null;
+    store.setSelection([]);
+    queue.setPatternId(patternId);
+  }, [queue, store, patternId, generation]);
+
   const lastLength = useRef(STEP_TICKS);
   const tempId = useRef(0);
   const dirty = useRef(true);
+  useEffect(() => registerGestureCancellation(() => {
+    if (gestureOrigin.current && queue.accepts(gestureOrigin.current)) abandon(store, gesture.current);
+    gesture.current = null; gestureOrigin.current = null; dirty.current = true;
+  }), [queue, store]);
+
+
   const built = useRef<{ version: number; channel: number | null; renderer: RollRenderer | null; ghosts: string }>({ version: -1, channel: null, renderer: null, ghosts: "" });
   // A refetch of the engine's notes must not erase what a held gesture shows.
   useEffect(() => {
-    queue.setHeld(() => {
+    return queue.setHeld(() => {
       const held = heldNotes(gesture.current);
       return held.length ? { add: held, update: [], delete: [] } : null;
     });
@@ -424,8 +438,10 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   };
   const take = (step: Step) => {
     // A held stamp shows in the store only; the release sends it.
+    const origin = gestureOrigin.current ?? queue.stamp();
+    if (!queue.accepts(origin)) return null;
     if (step.preview) store.apply(step.preview);
-    if (step.edit) queue.commit(step.edit);
+    if (step.edit) queue.commit(step.edit, origin);
     if (step.select) store.setSelection(step.select);
     if (step.lastLength !== undefined) lastLength.current = step.lastLength;
     dirty.current = true;
@@ -443,6 +459,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     } catch {
       /* no pointer capture here */
     }
+    gestureOrigin.current = queue.stamp();
     gesture.current = take(startGesture(ctx, pointer(e)));
   };
   const onPointerMove = (e: PointerEvent<HTMLCanvasElement>) => {
@@ -461,12 +478,16 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     const ctx = context();
     const held = gesture.current;
     gesture.current = null;
-    if (ctx && held) take(endGesture(ctx, held, pointer(e)));
+    if (ctx && held && gestureOrigin.current) {
+      if (queue.accepts(gestureOrigin.current)) take(endGesture(ctx, held, pointer(e)));
+      else queue.rejectHeld();
+    }
+    gestureOrigin.current = null;
     dirty.current = true;
   };
   const onPointerCancel = () => {
-    abandon(store, gesture.current);
-    gesture.current = null;
+    if (gestureOrigin.current && queue.accepts(gestureOrigin.current)) abandon(store, gesture.current);
+    gesture.current = null; gestureOrigin.current = null;
     dirty.current = true;
   };
 

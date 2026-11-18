@@ -1,3 +1,4 @@
+import type { PatternStamp } from "./patterns";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ProjectView } from "./project";
@@ -122,10 +123,10 @@ export const patternNotes = async () => decodeNotes(await invoke<ArrayBuffer>("p
 export const notesEdit = (edit: NotesEdit) => invoke<NotesAck>("notes_edit", { edit });
 /** Takes back the last note change (a note edit, a step edit or a recorded take) of the project of
  * `generation`; `null` when there is none. The ack always asks for a reload. */
-export const notesUndo = (generation: number) => invoke<NotesAck | null>("notes_undo", { generation });
+export const notesUndo = (stamp: PatternStamp) => invoke<NotesAck | null>("notes_undo", { stamp });
 /** Makes the last undone note change of the project of `generation` again; `null` when there is
  * none. */
-export const notesRedo = (generation: number) => invoke<NotesAck | null>("notes_redo", { generation });
+export const notesRedo = (stamp: PatternStamp) => invoke<NotesAck | null>("notes_redo", { stamp });
 /** Adds a synth channel named after the preset. */
 export const channelAddSynth = (preset: string, generation: number) =>
   invoke<ProjectView>("channel_add_synth", { preset, generation });

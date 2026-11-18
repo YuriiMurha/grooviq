@@ -698,6 +698,15 @@ fn opening_a_project_mid_take_starts_afresh() {
     start_take(&mut session, &controller, &mut processor);
     record_chord(&mut session, &controller, &mut processor, ch, &[70]).unwrap();
     // The same project again, as a new one: the history is gone, and so is the take.
+    assert!(matches!(
+        session.settle_recording(),
+        Err(SessionError::RecordingSettling)
+    ));
+    render(&mut processor, 4);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    session.collect_recorded(&events, Instant::now());
+    session.settle_recording().unwrap();
     let loaded = Loaded {
         project: session.project().clone(),
         samples: HashMap::new(),
@@ -709,6 +718,7 @@ fn opening_a_project_mid_take_starts_afresh() {
         .unwrap();
     assert!(!session.view().can_undo);
     let opened = keys(&session);
+    session.set_recording(true).unwrap();
     start_take(&mut session, &controller, &mut processor);
     record_chord(&mut session, &controller, &mut processor, ch, &[72]).unwrap();
     assert_eq!(undo_all(&mut session), 1);

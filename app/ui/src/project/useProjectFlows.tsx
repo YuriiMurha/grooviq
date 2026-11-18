@@ -1,3 +1,5 @@
+import { beginProjectTransition } from "./pending";
+import { settlePattern } from "../api/patterns";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -88,10 +90,15 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
   /** Waits for the piano roll's queued edits; `false`, with a warning, if any was refused: what
    * the person drew is not all in the project, so nothing is saved (and nothing replaces it). */
   const settled = useCallback(async (): Promise<boolean> => {
-    if (await settleRef.current()) return true;
+    if (await settleRef.current()) {
+      const reply = await settlePattern();
+      if (reply.status === "refused") { toast(reply.message, true); return false; }
+      adopt(reply.state.view);
+      return true;
+    }
     toast("Your latest note edits could not be applied, so the project was not saved. Check the notes, then save again.", true);
     return false;
-  }, [toast]);
+  }, [toast, adopt]);
 
   /** Saves as a path the person picks; `false` if they cancel or it fails. */
   const saveAs = useCallback(async (): Promise<boolean> => {
@@ -137,17 +144,19 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
    * the old project's channels before it goes and once it succeeded or failed. */
   const replaceWith = useCallback(
     async <T,>(command: () => Promise<T>): Promise<T> => {
-      projectReplacing();
+      const finish = beginProjectTransition();
       try {
+        if (!(await settled())) throw new Error("Pending edits were refused; the project was not replaced.");
+        projectReplacing();
         const result = await enqueue(command);
         projectReplaced();
         return result;
       } catch (e) {
         projectReplaceFailed();
         throw e;
-      }
+      } finally { finish(); }
     },
-    [enqueue],
+    [enqueue, settled],
   );
 
   const newProject = useCallback(async () => {

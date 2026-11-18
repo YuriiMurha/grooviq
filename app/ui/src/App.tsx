@@ -1,3 +1,5 @@
+import { isProjectReplacing } from "./project/replacement";
+import { settleProjectEdits } from "./project/pending";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -34,7 +36,7 @@ import { Workspace } from "./layout/Workspace";
 import { ProjectMenu } from "./project/ProjectMenu";
 import { SaveState } from "./project/SaveState";
 import { stepNotesHistory, trackDrags } from "./project/noteHistory";
-import { rollEditsSettled, rollEditsUnsettled } from "./roll/commitQueue";
+import { rollEditsUnsettled } from "./roll/commitQueue";
 import { isTypingTarget, modalIsOpen, shortcutFor } from "./project/shortcuts";
 import { useProjectFlows } from "./project/useProjectFlows";
 import { useSession } from "./project/useSession";
@@ -105,7 +107,7 @@ export function App() {
     toast,
     stopIfPlaying,
     unsettled: () => session.unsettled() || rollEditsUnsettled(),
-    settle: rollEditsSettled,
+    settle: settleProjectEdits,
   });
   const { perform, modalOpen } = flows;
 
@@ -170,20 +172,21 @@ export function App() {
   }, [runCommand, toast]);
   // Undo and redo of note changes: in the project's queue (behind step edits) and, with the
   // piano roll open, in its queue too (behind note edits). Ignored during a drag.
-  const { enqueue, adopt } = session;
+  const { enqueueMutation: enqueue, adopt } = session;
   const shown = session.latest;
   const stepHistory = useCallback(
     (redo: boolean) => {
+      if (isProjectReplacing()) return;
       // For the project shown now: if another replaced it before the command's turn, the engine
       // refuses it.
-      const generation = shown.current.view?.generation ?? 0;
+      const origin = { generation: shown.current.view?.generation ?? 0, patternId: shown.current.view?.pattern.id ?? 0, revision: shown.current.view?.notesRevision ?? 1 };
       stepNotesHistory(
-        () => enqueue(() => (redo ? notesRedo : notesUndo)(generation)),
+        (queuedOrigin = origin) => enqueue(() => (redo ? notesRedo : notesUndo)(session.resolvePatternStamp(queuedOrigin))),
         (ack) => adopt(ack.view),
         (e: unknown) => toast(errorText(e), true),
       );
     },
-    [enqueue, adopt, shown, toast],
+    [enqueue, adopt, shown, toast, session],
   );
   useEffect(() => trackDrags(window), []);
   const toggleMetronome = () => {

@@ -180,13 +180,32 @@ pub async fn project_edit(
     audio: State<'_, Audio>,
     edit: grooviq_project::session::Edit,
     generation: u64,
+    stamp: Option<grooviq_project::session::PatternStamp>,
 ) -> Result<ProjectView, String> {
     let (view, before) = {
         let mut session = session(&audio);
         let before = session.notes_revision();
-        let view = session
-            .apply_in(generation, edit, Instant::now())
-            .map_err(|e| e.to_string())?;
+        use grooviq_project::session::Edit;
+        let scoped = matches!(
+            edit,
+            Edit::ToggleStep { .. }
+                | Edit::SetStepVelocity { .. }
+                | Edit::ClearStep { .. }
+                | Edit::SetPatternLength { .. }
+                | Edit::SetSwing { .. }
+        );
+        let view = if generation != session.generation() {
+            Ok(session.view())
+        } else if scoped {
+            session.apply_stamped(
+                stamp.ok_or("A pattern gesture must name its origin.")?,
+                edit,
+                Instant::now(),
+            )
+        } else {
+            session.apply_in(generation, edit, Instant::now())
+        }
+        .map_err(|e| e.to_string())?;
         (view, before)
     };
     notes_changed(&app, before, view.notes_revision);
