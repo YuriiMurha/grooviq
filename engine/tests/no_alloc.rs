@@ -24,6 +24,8 @@ const SR: f32 = 48_000.0;
 
 #[path = "realtime/bitcrusher.rs"]
 mod bitcrusher;
+#[path = "realtime/fattener.rs"]
+mod fattener;
 #[path = "realtime/saturation.rs"]
 mod saturation;
 
