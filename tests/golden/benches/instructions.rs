@@ -106,11 +106,11 @@ mod counts {
     }
 
     #[library_benchmark]
-    #[bench::idle_initialized(super::synth_workload::setup(false, false))]
-    #[bench::idle_freerunning(super::synth_workload::setup(true, false))]
-    #[bench::active_modulated(super::synth_workload::setup(true, true))]
+    #[bench::idle_initialized(crate::synth_workload::setup(false, false))]
+    #[bench::idle_freerunning(crate::synth_workload::setup(true, false))]
+    #[bench::active_modulated(crate::synth_workload::setup(true, true))]
     fn synth_idle_blocks(s: Synth) -> Synth {
-        super::synth_workload::render(s)
+        crate::synth_workload::render(s)
     }
 
     /// An engine playing a reference scene, and a stereo buffer of one engine block.
