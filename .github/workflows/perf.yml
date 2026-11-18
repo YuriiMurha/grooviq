@@ -149,7 +149,11 @@ jobs:
             cargo bench -p grooviq-golden --bench instructions -- --save-baseline=base
             echo "BASELINE=--baseline=base" >> "$GITHUB_ENV"
             git restore tests/golden/benches/instructions.rs
-            rm tests/golden/benches/support/sampler_workload.rs
+            if git ls-files --error-unmatch tests/golden/benches/support/sampler_workload.rs > /dev/null 2>&1; then
+              git restore tests/golden/benches/support/sampler_workload.rs
+            else
+              rm tests/golden/benches/support/sampler_workload.rs
+            fi
           else
             echo "The base has no instruction benchmarks yet: no comparison."
           fi

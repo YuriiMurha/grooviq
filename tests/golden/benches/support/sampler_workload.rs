@@ -9,7 +9,7 @@ pub fn scenario(envelope: f32, velocity_mapping: bool) -> Sampler {
     build(envelope, velocity_mapping, 5_000.0)
 }
 
-fn build(envelope: f32, velocity_mapping: bool, attack: f32) -> Sampler {
+pub fn build(envelope: f32, velocity_mapping: bool, attack: f32) -> Sampler {
     let mut x = 0x2545_f491_u32;
     let mut next = || {
         x ^= x << 13;
@@ -57,33 +57,4 @@ fn build(envelope: f32, velocity_mapping: bool, attack: f32) -> Sampler {
     assert!(l.iter().chain(&r).all(|v| v.is_finite()));
     assert!(l.iter().chain(&r).any(|v| v.abs() > 1e-6));
     s
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn output(mut s: Sampler) -> Vec<u32> {
-        let mut bits = Vec::new();
-        let (mut l, mut r) = ([0.0; 64], [0.0; 64]);
-        for _ in 0..100 {
-            s.process(&mut l, &mut r, None, &[]);
-            assert_eq!(s.active_voices(), 16);
-            assert!(l.iter().chain(&r).all(|v| v.is_finite()));
-            bits.extend(l.iter().chain(&r).map(|v| v.to_bits()));
-        }
-        bits
-    }
-
-    #[test]
-    fn measured_region_responds_to_envelope_attack_and_velocity_mapping() {
-        let static_bits = output(scenario(0.0, false));
-        let envelope = output(scenario(0.7, false));
-        assert_ne!(static_bits, envelope);
-        // Changing attack duration changes this region: the long attack is still moving,
-        // rather than the envelope having already reached the same sustain plateau.
-        assert_ne!(envelope, output(build(0.7, false, 4_000.0)));
-        assert_ne!(envelope, output(scenario(0.7, true)));
-        assert_eq!(envelope, output(scenario(0.7, false)));
-    }
 }
