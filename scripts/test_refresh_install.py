@@ -10,6 +10,24 @@ if spec.loader and pathlib.Path(spec.origin).exists():
     spec.loader.exec_module(m)
 
 
+def suite_passed(result):
+    return (result.testsRun > 0 and result.wasSuccessful()
+            and not result.skipped and not result.expectedFailures)
+
+
+class RunnerAccountingTests(unittest.TestCase):
+    def test_expected_failure_is_not_a_passing_safety_guard(self):
+        class ExpectedFailure(unittest.TestCase):
+            @unittest.expectedFailure
+            def runTest(self):
+                self.fail("regression intentionally marked expected")
+        result = unittest.TestResult()
+        unittest.TestSuite([ExpectedFailure()]).run(result)
+        self.assertTrue(result.wasSuccessful())
+        self.assertEqual(len(result.expectedFailures), 1)
+        self.assertFalse(suite_passed(result))
+
+
 class InstallTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -382,4 +400,4 @@ if __name__ == '__main__':
     import sys
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    raise SystemExit(0 if result.testsRun > 0 and result.wasSuccessful() and not result.skipped else 1)
+    raise SystemExit(0 if suite_passed(result) else 1)
