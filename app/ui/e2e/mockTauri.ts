@@ -20,6 +20,8 @@ export interface MockProject {
   /** `nextNoteId`: the id the next note gets (model.rs `Pattern::next_note_id`); never lower than
    * one past the largest id. */
   pattern: { id: number; name: string; steps: number; swing: number; notes: MockNote[]; nextNoteId?: number };
+  patterns?: MockProject["pattern"][];
+  patternClips?: { id: number; pattern: number }[];
   nextId: number;
   key?: { root: number; scale: string } | null;
 }
@@ -66,6 +68,7 @@ interface NoteChange {
   after: MockNote[];
   id?: number;
   take?: number | null;
+  order?: number;
 }
 
 /** undo.rs `Growth`: a commit's latest note end, the length it grows the pattern to, and the
@@ -244,6 +247,24 @@ export function installMockTauri(seed: MockSeed): void {
     autosave: { disabled: seed.autosave?.disabled ?? null, failure: seed.autosave?.failure ?? null },
   };
 
+  type History = typeof s.history;
+  const emptyHistory = (): History => ({ undo: [], redo: [], notes: 0, base: 0, log: [], nextId: 0 });
+  const patternBank = new Map<number, { pattern: Project["pattern"]; revision: number; history: History }>();
+  let patternsRevision = 0;
+  let historyOrder = 0;
+  const initialisePatterns = () => {
+    // Session keeps its structural counter across replacement; generation fences its scope.
+    patternBank.clear();
+    for (const pattern of s.project.patterns ?? [s.project.pattern]) {
+      const normalized = normalise({ ...s.project, pattern: clone(pattern) }).pattern;
+      patternBank.set(pattern.id, { pattern: normalized, revision: s.notesRevision, history: emptyHistory() });
+    }
+    if (!patternBank.has(s.project.pattern.id)) patternBank.set(s.project.pattern.id, { pattern: s.project.pattern, revision: s.notesRevision, history: s.history });
+  };
+  initialisePatterns();
+  const saveActivePattern = () => patternBank.set(s.project.pattern.id, { pattern: s.project.pattern, revision: s.notesRevision, history: s.history });
+  const allPatterns = () => { saveActivePattern(); return [...patternBank.values()].map((entry) => clone(entry.pattern)); };
+
   // --- Events (the event plugin, as @tauri-apps/api/mocks implements it). ---
   const callbacks = new Map<number, (data: unknown) => void>();
   let nextCallback = 1;
@@ -331,6 +352,7 @@ export function installMockTauri(seed: MockSeed): void {
       canUndo: s.history.undo.length > 0,
       canRedo: s.history.redo.length > 0,
       generation: s.generation,
+      patternRevision: patternsRevision,
     };
   };
   const finite = (x: unknown, what: string): number => {
@@ -373,12 +395,12 @@ export function installMockTauri(seed: MockSeed): void {
       const step = noteChange(prev, next);
       if (take === null) pushHistory(step, prev.steps, growth);
       else recordHistory(step, take, prev.steps, growth);
-      notesChanged();
     } else if (growth && next.steps !== prev.steps) {
       // session.rs: notes resubmitted as they were, growing a pattern shortened by hand, are
       // a step holding only that growth.
       pushHistory({ before: [], after: [] }, prev.steps, growth);
     }
+    notesChanged();
     return true;
   };
   /** The growth the last `growToNotes` worked out, for the length log. */
@@ -421,9 +443,20 @@ export function installMockTauri(seed: MockSeed): void {
       h.notes -= sizeOf(old);
       dropped.add(old.id!);
     }
-    if (!dropped.size) return;
     for (const l of h.log) if ("owner" in l && l.owner !== null && dropped.has(l.owner)) l.owner = null;
-    compactLog();
+    if (dropped.size) compactLog();
+    const histories = [h, ...[...patternBank.entries()].filter(([id]) => id !== s.project.pattern.id).map(([,e]) => e.history)];
+    while (histories.reduce((n,h) => n+h.undo.length+h.redo.length,0) > MAX_UNDO || histories.reduce((n,h) => n+h.notes,0) > MAX_UNDO_NOTES) {
+      const choices = histories.flatMap((history) => [...history.undo, ...history.redo].map((step) => ({ history, step })));
+      choices.sort((a,b) => (a.step.order ?? 0)-(b.step.order ?? 0));
+      const oldest=choices[0]; if (!oldest) break;
+      const active=oldest.history.undo.includes(oldest.step);
+      const list=active ? oldest.history.undo : oldest.history.redo;
+      list.splice(list.indexOf(oldest.step),1); oldest.history.notes-=sizeOf(oldest.step);
+      if (active) { for (const entry of oldest.history.log) if ("owner" in entry && entry.owner===oldest.step.id) entry.owner=null; }
+      else oldest.history.log=oldest.history.log.filter((entry) => !("owner" in entry) || entry.owner!==oldest.step.id);
+      s.history=oldest.history; compactLog(); s.history=h;
+    }
   };
   /** undo.rs `append`: a length set by hand replaces one set right before it; a step's growth
    * after its own growth with the same bar keeps the one reaching further. */
@@ -476,6 +509,7 @@ export function installMockTauri(seed: MockSeed): void {
     }
     c.take = take;
     c.id = h.nextId++;
+    c.order = historyOrder++;
     h.notes += sizeOf(c);
     h.undo.push(c);
     trimHistory();
@@ -743,7 +777,7 @@ export function installMockTauri(seed: MockSeed): void {
     const path = target === null ? s.path : withExtension(target, "grooviq", false);
     if (path === null) throw "Choose where to save this project.";
     if (files.get(path)?.kind === "project") s.backups.set(path, (s.backups.get(path) ?? 0) + 1);
-    files.set(path, { kind: "project", project: clone(s.project) });
+    files.set(path, { kind: "project", project: clone({ ...s.project, patterns: allPatterns() }) });
     s.path = path;
     if (unconfirmNextSave) {
       unconfirmNextSave = false;
@@ -759,6 +793,7 @@ export function installMockTauri(seed: MockSeed): void {
     s.project = normalise(clone(p));
     clearHistory();
     notesChanged();
+    initialisePatterns();
     s.path = path;
     markClean();
     if (unsaved) changed();
@@ -889,13 +924,15 @@ export function installMockTauri(seed: MockSeed): void {
   const refusedAck = () => ({ revision: s.notesRevision, addedIds: [], ignoredIds: [], reload: true, view: view() });
   const editNotes = (e: {
     generation: number;
+    patternId: number;
     baseRevision: number;
     add: Omit<WireNote, "id">[];
     update: WireNote[];
     delete: number[];
   }) => {
-    if (e.generation !== s.generation) return refusedAck();
+    if (e.generation !== s.generation || e.patternId !== s.project.pattern.id) return refusedAck();
     const stale = e.baseRevision !== s.notesRevision;
+    if (stale) throw "The pattern changed before this note edit arrived. Reload its notes.";
     const ignored: number[] = [];
     const added: number[] = [];
     let clamped = false;
@@ -989,6 +1026,77 @@ export function installMockTauri(seed: MockSeed): void {
 
   // --- Commands. ---
   const LOOPS_MAX = 999;
+  const checkStamp = (origin: unknown) => {
+    const stamp = origin as { generation?: number; patternId?: number; revision?: number } | undefined;
+    if (!stamp || stamp.generation !== s.generation || stamp.patternId !== s.project.pattern.id || stamp.revision !== s.notesRevision) {
+      throw "The pattern changed before this gesture finished. Reload its notes.";
+    }
+  };
+  const patternsView = () => { saveActivePattern(); return { generation: s.generation, revision: patternsRevision,
+    selected: s.project.pattern.id, patterns: [...patternBank.entries()].map(([id, entry]) => ({ id, name: entry.pattern.name, revision: entry.revision })), view: view() }; };
+  const managePattern = (a: Record<string, unknown>) => {
+    type Request = { kind: string; pattern?: number; name?: string; clip?: number };
+    const edit = a.edit as Request;
+    const settlement = { recordingDisarmed: false, waiting: false };
+    const refuse = (reason: string, message: string) => ({ status: "refused", reason, message, state: patternsView(), settlement });
+    if (a.generation !== s.generation) return refuse("projectReplaced", "The project changed before this finished, so it was not applied.");
+    if (a.revision !== patternsRevision) return refuse("staleRevision", "Patterns changed. Reload the pattern list.");
+    saveActivePattern();
+    const disarmForSettlement = () => {
+      for (const press of [...s.recordOpen.keys()]) closeRecorded(press, ticksNow());
+      s.recording = false; settlement.recordingDisarmed = true; settlement.waiting = true;
+      return refuse("recordingSettling", "Recording is ending. Wait for its final notes, then retry.");
+    };
+    if (edit.kind === "settle") {
+      if (s.recording) return disarmForSettlement();
+      return { status: "applied", state: patternsView(), settlement };
+    }
+    const candidate = new Map([...patternBank].map(([id, entry]) => [id, { pattern: clone(entry.pattern), revision: entry.revision, history: entry.history }]));
+    let nextId = s.project.nextId;
+    const allocate = () => {
+      while (nextId < 0xffffffff && (candidate.has(nextId) || s.project.channels.some((c) => c.id === nextId) || s.project.patternClips?.some((c) => c.id === nextId))) nextId++;
+      if (nextId >= 0xffffffff) return null;
+      return nextId++;
+    };
+    let selected = s.project.pattern.id;
+    const clips = clone(s.project.patternClips ?? []);
+    if (["select", "delete", "rename", "duplicate"].includes(edit.kind) && !candidate.has(edit.pattern!)) return refuse("unknownPattern", `Pattern ${edit.pattern} no longer exists. Reload the pattern list.`);
+    if ((edit.kind === "select" && edit.pattern === selected) || (edit.kind === "rename" && candidate.get(edit.pattern!)!.pattern.name === edit.name)) return { status:"applied", state:patternsView(), settlement };
+    if (edit.kind === "create" || edit.kind === "duplicate" || edit.kind === "makeUnique") {
+      let source = edit.pattern;
+      let clip: { id: number; pattern: number } | undefined;
+      if (edit.kind === "makeUnique") { clip = clips.find((c) => c.id === edit.clip); if (!clip) return refuse("unknownClip", "Clip no longer exists."); source = clip.pattern; }
+      if (edit.kind !== "create" && !candidate.has(source!)) return refuse("unknownPattern", `Pattern ${source} no longer exists. Reload the pattern list.`);
+      const id = allocate(); if (id === null) return refuse("idExhausted", "Project ids are exhausted.");
+      const pattern = edit.kind === "create" ? { id, name: edit.name!, steps: 16, swing: 0, notes: [], nextNoteId: 1 } : { ...clone(candidate.get(source!)!.pattern), id };
+      candidate.set(id, { pattern, revision: 1, history: emptyHistory() });
+      if (clip) clip.pattern = id;
+    } else if (edit.kind === "rename") candidate.get(edit.pattern!)!.pattern.name = edit.name!;
+    else if (edit.kind === "select") selected = edit.pattern!;
+    else if (edit.kind === "delete") {
+      if (candidate.size === 1) return refuse("lastPattern", "Keep at least one pattern.");
+      if (clips.some((c) => c.pattern === edit.pattern)) return refuse("referencedPattern", "Remove this pattern's playlist clips before deleting it.");
+      candidate.delete(edit.pattern!);
+      if (selected === edit.pattern) selected = candidate.keys().next().value!;
+    } else return refuse("validation", "Unknown pattern operation.");
+    // Match writer admission before committing any candidate, including the allocator.
+    if (new TextEncoder().encode(JSON.stringify({ ...s.project, patterns: [...candidate.values()].map((e) => e.pattern) })).byteLength > 64 * 1024 * 1024) return refuse("fileBudget", "The project is too big to save.");
+    if (selected !== s.project.pattern.id && s.recording) return disarmForSettlement();
+    if (selected !== s.project.pattern.id) candidate.get(selected)!.revision++;
+    patternBank.clear(); for (const [id, entry] of candidate) patternBank.set(id, entry);
+    const current = patternBank.get(selected)!;
+    s.project.pattern = current.pattern; s.notesRevision = current.revision; s.history = current.history;
+    s.project.nextId = nextId; s.project.patternClips = clips;
+    patternsRevision++; changed();
+    return { status: "applied", state: patternsView(), settlement };
+  };
+
+  const nextChannelIdentity = () => {
+    let id=s.project.nextId;
+    while (id < 0xffffffff && (s.project.channels.some((c) => c.id===id) || patternBank.has(id) || s.project.patternClips?.some((c) => c.id===id))) id++;
+    if (id>=0xffffffff) throw "Project ids are exhausted.";
+    return id;
+  };
   const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
     // commands.rs
     audio_outputs: () => [SILENT_OUTPUT],
@@ -1012,10 +1120,14 @@ export function installMockTauri(seed: MockSeed): void {
       { id: 1, atMs: Date.now(), level: "warn", message: "Silent QA mode (mock engine): no audio device" },
     ],
     // project_cmds.rs
+    pattern_list: () => patternsView(),
+    pattern_edit: (a) => managePattern(a),
     project_view: () => view(),
     project_edit: (a) => {
       // session.rs `apply_in`: an edit made for a replaced project changes nothing.
       if (a.generation !== s.generation) return view();
+      const kind = (a.edit as Edit).kind;
+      if (["toggleStep", "setStepVelocity", "clearStep", "setPatternLength", "setSwing"].includes(kind)) checkStamp(a.stamp);
       if (applyEdit(a.edit as Edit)) changed();
       return view();
     },
@@ -1028,9 +1140,10 @@ export function installMockTauri(seed: MockSeed): void {
       if (p.channels.length >= MAX_CHANNELS) {
         throw `A project holds at most ${MAX_CHANNELS} channels; remove one to add another.`;
       }
+      const id = nextChannelIdentity();
       const last = p.channels[p.channels.length - 1];
       p.channels.push({
-        id: p.nextId,
+        id,
         name: stem(path) || "Sample",
         color: last ? (last.color + 1) % INKS : 0,
         sample: path,
@@ -1041,7 +1154,7 @@ export function installMockTauri(seed: MockSeed): void {
         solo: false,
         sampler: {},
       });
-      p.nextId += 1;
+      p.nextId = id + 1;
       changed();
       return view();
     },
@@ -1059,8 +1172,8 @@ export function installMockTauri(seed: MockSeed): void {
     },
     pattern_notes: () => encodeNotes(),
     notes_edit: (a) => editNotes(a.edit as Parameters<typeof editNotes>[0]),
-    notes_undo: (a) => (a.generation !== s.generation ? refusedAck() : stepHistory(true)),
-    notes_redo: (a) => (a.generation !== s.generation ? refusedAck() : stepHistory(false)),
+    notes_undo: (a) => { checkStamp(a.stamp); return stepHistory(true); },
+    notes_redo: (a) => { checkStamp(a.stamp); return stepHistory(false); },
     channel_add_synth: (a) => {
       sameProject(a.generation);
       const preset = String(a.preset);
@@ -1069,9 +1182,10 @@ export function installMockTauri(seed: MockSeed): void {
       if (p.channels.length >= MAX_CHANNELS) {
         throw `A project holds at most ${MAX_CHANNELS} channels; remove one to add another.`;
       }
+      const id = nextChannelIdentity();
       const last = p.channels[p.channels.length - 1];
       p.channels.push({
-        id: p.nextId,
+        id,
         name: preset,
         color: last ? (last.color + 1) % INKS : 0,
         sample: null,
@@ -1085,7 +1199,7 @@ export function installMockTauri(seed: MockSeed): void {
         preset,
         choke: 0,
       });
-      p.nextId += 1;
+      p.nextId = id + 1;
       changed();
       return view();
     },
@@ -1340,6 +1454,7 @@ export function installMockTauri(seed: MockSeed): void {
   const newNote = fields({ channel: u32, tick: u32, length: u32, key: u8, velocity: f32, slide: bool });
   const notesEditArg: Check = fields({
     generation: u64,
+    patternId: u32,
     baseRevision: u32,
     add: list(newNote),
     update: list(fields({ id: u32, channel: u32, tick: u32, length: u32, key: u8, velocity: f32, slide: bool })),
@@ -1360,13 +1475,14 @@ export function installMockTauri(seed: MockSeed): void {
     audio_set_guard: { on: bool },
     test_tone: { on: bool },
     synth_note: { key: u8, on: bool },
-    project_edit: { edit, generation: u64 },
+    pattern_edit: { generation: u64, revision: u64, edit: (v) => typeof (v as {kind?:unknown})?.kind === "string" ? null : "expected tagged pattern operation" },
+    project_edit: { edit, generation: u64, stamp: optional(fields({ generation: u64, patternId: u32, revision: u32 })) },
     channel_add: { path: str, generation: u64 },
     channel_set_sample: { channel: u32, path: str, generation: u64 },
     channel_preview: { channel: u32, on: bool, press: optional(u64) },
     notes_edit: { edit: notesEditArg },
-    notes_undo: { generation: u64 },
-    notes_redo: { generation: u64 },
+    notes_undo: { stamp: fields({ generation: u64, patternId: u32, revision: u32 }) },
+    notes_redo: { stamp: fields({ generation: u64, patternId: u32, revision: u32 }) },
     channel_add_synth: { preset: str, generation: u64 },
     channel_note: { channel: u32, key: u8, velocity: f32, on: bool, press: optional(u64) },
     channel_param_live: { channel: u32, param: str, value: f32 },
@@ -1397,6 +1513,8 @@ export function installMockTauri(seed: MockSeed): void {
     const refused = refusals.get(cmd);
     if (refused !== undefined) {
       refusals.delete(cmd);
+      if (cmd === "pattern_edit") return clone({ status: "refused", reason: "engineBusy", message: refused,
+        state: patternsView(), settlement: { recordingDisarmed: false, waiting: false } });
       throw refused;
     }
     const handler = commands[cmd];

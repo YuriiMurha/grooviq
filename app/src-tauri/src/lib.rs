@@ -21,6 +21,7 @@ mod midi_cmds;
 mod notes_cmds;
 mod output_mode;
 pub mod panic_hook;
+mod patterns_cmds;
 mod project_cmds;
 mod settings;
 
@@ -427,6 +428,8 @@ pub fn run() {
             project_cmds::recovery_restore,
             project_cmds::recovery_discard,
             project_cmds::app_exit,
+            patterns_cmds::pattern_list,
+            patterns_cmds::pattern_edit,
             notes_cmds::pattern_notes,
             notes_cmds::notes_edit,
             notes_cmds::notes_undo,

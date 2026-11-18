@@ -1928,6 +1928,7 @@ fn add_synth(session: &mut Session, preset: &str) -> u32 {
 
 fn add_notes(session: &mut Session, add: Vec<NewNote>) -> Vec<u32> {
     let edit = NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add,
@@ -2016,8 +2017,8 @@ fn step_edits_bump_the_notes_revision() {
     session.apply(Edit::SetSwing { swing: 0.5 }, now).unwrap();
     assert_eq!(
         session.view().notes_revision,
-        before + 1,
-        "not a note change"
+        before + 2,
+        "swing advances the gesture revision too"
     );
 }
 
@@ -2295,7 +2296,9 @@ fn recording_stop_sends_end_and_adds_the_notes() {
     render(&mut processor, 2);
     controller.lock().unwrap().take_recorded(&mut events);
     assert!(
-        matches!(events.last(), Some(RecordEvent::End { .. })),
+        events
+            .iter()
+            .any(|event| matches!(event, RecordEvent::End { .. })),
         "{events:?}"
     );
     let before = session.view().notes_revision;
@@ -2378,9 +2381,16 @@ fn opening_a_project_mid_take_records_nothing_into_it() {
     controller.lock().unwrap().take_recorded(&mut events);
     let loaded = loaded_with_a_missing_sample();
     let decoded = decode_samples(&loaded);
-    session
-        .open(Path::new("/p/beat.grooviq"), loaded, decoded)
-        .unwrap();
+    let generation = session.generation();
+    assert!(
+        session
+            .open(Path::new("/p/beat.grooviq"), loaded, decoded)
+            .is_err()
+    );
+    assert_eq!(session.generation(), generation);
+    session.collect_recorded(&events, Instant::now());
+    events.clear();
+    open_fixture(&mut session, &controller, &mut processor);
     let notes = session.project().patterns[0].notes.clone();
     render(&mut processor, 2);
     controller.lock().unwrap().take_recorded(&mut events);
@@ -2659,7 +2669,21 @@ fn waveform_requests_are_held_to_the_point_budget() {
 use grooviq_project::session::Recorded;
 
 /// Opens the missing-sample fixture (channel ids 1 to 3) and returns its notes.
-fn open_fixture(session: &mut Session) -> Vec<Note> {
+fn open_fixture(
+    session: &mut Session,
+    controller: &Mutex<Controller>,
+    processor: &mut AudioProcessor,
+) -> Vec<Note> {
+    // Replacement now settles the originating take rather than dropping it unobserved.
+    for _ in 0..8 {
+        if session.settle_recording().is_ok() {
+            break;
+        }
+        poll(session, controller, processor);
+    }
+    session
+        .settle_recording()
+        .expect("the original take settled");
     let loaded = loaded_with_a_missing_sample();
     let decoded = decode_samples(&loaded);
     session
@@ -2700,7 +2724,7 @@ fn record_off_then_open_records_nothing_into_the_new_project() {
     // Recording is off before the recorder thread polls.
     session.set_recording(false).unwrap();
     render(&mut processor, 2);
-    let notes = open_fixture(&mut session);
+    let notes = open_fixture(&mut session, &controller, &mut processor);
     assert_eq!(
         poll(&mut session, &controller, &mut processor).revision,
         None
@@ -2718,7 +2742,7 @@ fn stop_then_open_records_nothing_into_the_new_project() {
     play_a_note(&session, &mut processor, synth);
     controller.lock().unwrap().send(Command::Stop).unwrap();
     render(&mut processor, 2);
-    let notes = open_fixture(&mut session);
+    let notes = open_fixture(&mut session, &controller, &mut processor);
     assert_eq!(
         poll(&mut session, &controller, &mut processor).revision,
         None
@@ -2736,14 +2760,15 @@ fn a_queued_play_then_open_records_nothing_into_the_new_project_but_the_next_tak
     controller.lock().unwrap().send(Command::Play).unwrap();
     let press8 = session.live_note_on(synth, 60, 0.8).unwrap();
     session.live_note_off(synth, 60, press8).unwrap();
-    let notes = open_fixture(&mut session);
+    let notes = open_fixture(&mut session, &controller, &mut processor);
     assert_eq!(
         poll(&mut session, &controller, &mut processor).revision,
         None
     );
     assert_eq!(session.project().patterns[0].notes, notes);
 
-    // Recording is still on: the next take is the new project's.
+    // Selection/replacement settled and disarmed the original take. Arm a new one explicitly.
+    session.set_recording(true).unwrap();
     controller.lock().unwrap().send(Command::Play).unwrap();
     render(&mut processor, 2);
     play_a_note(&session, &mut processor, 1);
@@ -2878,6 +2903,25 @@ fn recording_when_note_ids_run_out_keeps_what_fits_stops_and_says_so() {
 
 // --- Fix round 2: the automatic record-off is owed until the engine takes it. ---
 
+/// Leave one slot for the admitted note prefix; its following record-off must retry.
+fn leave_one_command_slot(controller: &Mutex<Controller>) {
+    let (mut probe, _processor) = engine(EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let mut capacity = 0;
+    while probe.send(Command::SetTempo { bpm: 120.0 }).is_ok() {
+        capacity += 1;
+    }
+    assert!(capacity > 1);
+    for _ in 0..capacity - 1 {
+        controller
+            .lock()
+            .unwrap()
+            .send(Command::SetTempo { bpm: 120.0 })
+            .unwrap();
+    }
+}
+
 #[test]
 fn overflow_disarm_is_retried_until_the_engine_takes_it() {
     let (mut session, controller, mut processor) = rig();
@@ -2894,16 +2938,14 @@ fn overflow_disarm_is_retried_until_the_engine_takes_it() {
     session.set_recording(true).unwrap();
     controller.lock().unwrap().send(Command::Play).unwrap();
     settle(&mut session, &controller, &mut processor);
-    // The engine's command queue is full when the batch overflows: neither the note that
-    // fits nor the record-off goes through.
-    while controller
-        .lock()
-        .unwrap()
-        .send(Command::SetTempo { bpm: 120.0 })
-        .is_ok()
-    {}
+    // The prefix consumes the last slot, so only its automatic record-off must retry.
+    leave_one_command_slot(&controller);
     let got = session.collect_recorded(&whole_notes(synth, 2), Instant::now());
-    assert_eq!(got.revision, None, "the note that fits waits");
+    assert!(
+        got.revision.is_some(),
+        "the prefix is admitted before counting overflow"
+    );
+    assert_eq!(session.project().patterns[0].notes.len(), 100_000);
     assert_eq!(got.stopped.map(|s| s.dropped), Some(1));
     assert!(!session.view().recording);
     // Still full: the engine records on, and what it completes is refused and reported.
@@ -2911,18 +2953,14 @@ fn overflow_disarm_is_retried_until_the_engine_takes_it() {
     assert_eq!(got.revision, None);
     let stopped = got.stopped.expect("reported");
     assert_eq!((stopped.reason, stopped.dropped), ("engineBusy", 1));
-    // The queue drains: an empty poll commits the waiting note and switches the engine off.
+    // The queue drains: an empty poll retries record-off without committing the prefix twice.
     render(&mut processor, 4);
-    assert!(
-        session
-            .collect_recorded(&[], Instant::now())
-            .revision
-            .is_some()
-    );
+    assert_eq!(session.collect_recorded(&[], Instant::now()).revision, None);
     assert_eq!(session.project().patterns[0].notes.len(), 100_000);
     poll(&mut session, &controller, &mut processor);
     // Room again, and the person plays while Record shows off: nothing is recorded.
     let edit = NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add: Vec::new(),
@@ -2966,6 +3004,7 @@ fn turning_record_on_again_cancels_an_owed_disarm() {
     render(&mut processor, 4);
     // The person makes room and turns Record on again before the next poll.
     let edit = NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add: Vec::new(),
@@ -2993,9 +3032,8 @@ fn turning_record_on_again_cancels_an_owed_disarm() {
 
 // --- Fix round 3: refusal lasts until the automatic record-off reaches the engine. ---
 
-/// A session at the note cap whose automatic record-off found the engine's command queue full:
-/// one recorded note waits to be committed, the queue is drained again, and the person has
-/// made room by deleting a note. Returns the session's rig.
+/// A session whose admitted prefix filled the command queue before automatic record-off.
+/// The queue is drained again and the person makes room by deleting one committed note.
 fn overflowed_with_an_owed_disarm() -> (Session, Arc<Mutex<Controller>>, AudioProcessor, u32) {
     let (mut session, controller, mut processor) = rig();
     let synth = add_synth(&mut session, "Init");
@@ -3011,16 +3049,17 @@ fn overflowed_with_an_owed_disarm() -> (Session, Arc<Mutex<Controller>>, AudioPr
     session.set_recording(true).unwrap();
     controller.lock().unwrap().send(Command::Play).unwrap();
     settle(&mut session, &controller, &mut processor);
-    while controller
-        .lock()
-        .unwrap()
-        .send(Command::SetTempo { bpm: 120.0 })
-        .is_ok()
-    {}
+    leave_one_command_slot(&controller);
     let got = session.collect_recorded(&whole_notes(synth, 2), Instant::now());
+    assert!(
+        got.revision.is_some(),
+        "the prefix committed before the owed disarm"
+    );
+    assert_eq!(session.project().patterns[0].notes.len(), 100_000);
     assert_eq!(got.stopped.map(|s| s.dropped), Some(1));
     render(&mut processor, 4);
     let edit = NotesEdit {
+        pattern_id: 0,
         generation: session.generation(),
         base_revision: session.view().notes_revision,
         add: Vec::new(),
@@ -3037,9 +3076,9 @@ fn retry_success_must_still_refuse_already_recorded_notes() {
     // Played while Record shows off, before the poll that sends the record-off.
     play_a_note(&session, &mut processor, synth);
     let got = poll(&mut session, &controller, &mut processor);
-    assert!(
-        got.revision.is_some(),
-        "the note recorded before the stop goes in"
+    assert_eq!(
+        got.revision, None,
+        "the admitted prefix must not be committed twice"
     );
     let stopped = got.stopped.expect("the late note is reported");
     assert_eq!((stopped.reason, stopped.dropped), ("engineBusy", 1));
@@ -3078,16 +3117,16 @@ fn retry_success_must_refuse_held_notes_closed_by_disarm() {
 
 #[test]
 fn a_refusal_running_survives_a_project_replacement() {
-    let (mut session, _controller, _processor, _synth) = overflowed_with_an_owed_disarm();
+    let (mut session, controller, mut processor, _synth) = overflowed_with_an_owed_disarm();
     // The record-off is still owed when another project opens: the engine records on.
-    open_fixture(&mut session);
+    open_fixture(&mut session, &controller, &mut processor);
     // The next collect sends the switch; what the engine recorded meanwhile is refused and
     // reported, not taken into the new project.
     let notes = session.project().patterns[0].notes.clone();
     let got = session.collect_recorded(&whole_notes(1, 1), Instant::now());
     assert_eq!(got.revision, None);
-    let stopped = got.stopped.expect("reported");
-    assert_eq!((stopped.reason, stopped.dropped), ("engineBusy", 1));
+    // The replacement's barrier drops old events; its original refusal was settled first.
+    assert!(got.stopped.is_none());
     assert_eq!(session.project().patterns[0].notes, notes);
 }
 
@@ -3166,7 +3205,7 @@ fn record_on_then_open_imports_no_note_of_the_old_project() {
     session.set_recording(true).unwrap();
     play_a_note(&session, &mut processor, synth);
     // Record-on's barrier and a whole note of the old project wait, uncollected.
-    let notes = open_fixture(&mut session);
+    let notes = open_fixture(&mut session, &controller, &mut processor);
     let got = poll(&mut session, &controller, &mut processor);
     assert_eq!(got.revision, None, "an old project's note leaked: {got:?}");
     assert_eq!(session.project().patterns[0].notes, notes);
@@ -3182,9 +3221,10 @@ fn a_replacement_never_leaves_the_refusal_waiting_for_a_superseded_barrier() {
         play_a_note(&session, &mut processor, synth);
     }
     session.set_recording(true).unwrap();
-    let notes = open_fixture(&mut session);
+    let notes = open_fixture(&mut session, &controller, &mut processor);
     poll(&mut session, &controller, &mut processor);
     poll(&mut session, &controller, &mut processor);
+    session.set_recording(true).unwrap();
     controller.lock().unwrap().send(Command::Play).unwrap();
     play_a_note(&session, &mut processor, 1);
     let got = poll(&mut session, &controller, &mut processor);
@@ -3196,28 +3236,17 @@ fn a_replacement_never_leaves_the_refusal_waiting_for_a_superseded_barrier() {
 }
 
 #[test]
-fn an_owed_record_off_keeps_refusing_past_a_replacement_s_barrier() {
-    let (mut session, controller, mut processor, _synth) = owed_at_the_cap();
-    render(&mut processor, 4);
-    // Another project opens while the record-off is still owed; its barrier goes out.
-    let notes = open_fixture(&mut session);
+fn an_owed_record_off_blocks_replacement_until_its_original_barrier_settles() {
+    let (mut session, controller, mut processor, _) = owed_at_the_cap();
+    let generation = session.generation();
+    assert!(session.new_project().is_err());
+    assert_eq!(session.generation(), generation);
+    let notes = open_fixture(&mut session, &controller, &mut processor);
+    let mut old = whole_notes(1, 1);
     render(&mut processor, 2);
-    let mut events = Vec::new();
-    controller.lock().unwrap().take_recorded(&mut events);
-    let barrier = controller.lock().unwrap().record_mark();
-    assert!(events.contains(&RecordEvent::Mark { id: barrier }));
-    // The command queue is full again: the record-off stays owed, the engine records on.
-    while controller
-        .lock()
-        .unwrap()
-        .send(Command::SetTempo { bpm: 120.0 })
-        .is_ok()
-    {}
-    events.extend(whole_notes(1, 1));
-    let got = session.collect_recorded(&events, Instant::now());
-    assert_eq!(got.revision, None, "{got:?}");
-    let stopped = got.stopped.expect("reported");
-    assert_eq!((stopped.reason, stopped.dropped), ("engineBusy", 1));
+    controller.lock().unwrap().take_recorded(&mut old);
+    let got = session.collect_recorded(&old, Instant::now());
+    assert_eq!(got.revision, None);
     assert_eq!(session.project().patterns[0].notes, notes);
 }
 

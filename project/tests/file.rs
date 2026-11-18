@@ -1760,3 +1760,67 @@ fn preset_metadata_validation_leaves_sampler_metadata_alone() {
     assert!(p.validate().is_empty());
     assert_eq!(serde_json::to_value(&p).unwrap(), before);
 }
+
+#[test]
+fn warning_labels_are_bounded_but_names_roundtrip_losslessly() {
+    for name in [
+        "Kick".into(),
+        "a".repeat(10_000_000),
+        "🎹界".repeat(100_000),
+        format!("\n\r\t\0\u{202e}\u{2066}{}", "🎹".repeat(100_000)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("labels.grooviq");
+        let mut p = Project::new();
+        p.name = name.clone();
+        p.channels = vec![channel(42, &name, None)];
+        p.channels[0].volume = 50.0;
+        p.channels[0].pan = -50.0;
+        p.channels[0].choke = 255;
+        p.channels[0].sampler.insert("tune".into(), 10000.0);
+        p.channels.push(p.channels[0].clone());
+        p.patterns[0].name = name.clone();
+        p.patterns[0].steps = 0;
+        p.patterns[0].swing = 50.0;
+        p.patterns[0].notes = vec![note(0, 42, 0), note(2, 999, 0)];
+        p.patterns.push(p.patterns[0].clone());
+        p.current_pattern = 999;
+        let mut expected = p.clone();
+        expected.validate();
+        assert_eq!(expected.name, name);
+        assert_eq!(expected.channels[0].name, name);
+        assert!(expected.patterns.iter().all(|pattern| pattern.name == name));
+        save(&p, &SampleFiles::new(), &path).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.project, expected);
+        assert_eq!(loaded.project.channels.len(), 1);
+        assert_eq!(loaded.project.channels[0].volume, 2.0);
+        assert_eq!(loaded.project.channels[0].pan, -1.0);
+        assert_eq!(loaded.project.channels[0].choke, 16);
+        assert_eq!(loaded.project.patterns[0].steps, 1);
+        assert_eq!(loaded.project.patterns[0].swing, 1.0);
+        assert_eq!(loaded.project.patterns[0].notes.len(), 1);
+        assert_eq!(loaded.project.patterns[0].notes[0].channel, 42);
+        assert!(
+            loaded.warnings.len() == 16,
+            "repairs must remain reported: {}",
+            loaded.warnings.len()
+        );
+        for warning in &loaded.warnings {
+            assert!(warning.len() < 512, "warning has {} bytes", warning.len());
+            assert!(
+                !warning
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, '\u{202e}' | '\u{2066}'))
+            );
+        }
+        assert!(loaded.warnings.iter().any(|w| w.contains("42")));
+        if name == "Kick" {
+            assert!(loaded.warnings.iter().any(|w| w.contains(&name)));
+        }
+        save(&loaded.project, &loaded.samples, &path).unwrap();
+        let again = load(&path).unwrap();
+        assert_eq!(again.project, expected);
+        assert!(again.warnings.is_empty());
+    }
+}

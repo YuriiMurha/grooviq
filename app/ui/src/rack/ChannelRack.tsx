@@ -1,3 +1,4 @@
+import type { PatternStamp } from "../api/patterns";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type RefObject } from "react";
 import { channelAddSynth, onNotesChanged, patternNotes, type WireNote } from "../api/notes";
 import { channelAdd, errorText, projectView, type ChannelView } from "../api/project";
@@ -34,7 +35,9 @@ interface Props {
  * announces notes changed elsewhere (recording) with `notes-changed`: the view is fetched then,
  * since roll channels may have changed too. */
 function usePatternNotes(revision: number | undefined, onError: (message: string) => void): WireNote[] {
-  const { run } = useProject();
+  const { run, view } = useProject();
+  const patternId = view?.pattern.id;
+  const generation = view?.generation;
   const [notes, setNotes] = useState<WireNote[]>([]);
   const report = useRef(onError);
   const shown = useRef(revision);
@@ -55,7 +58,7 @@ function usePatternNotes(revision: number | undefined, onError: (message: string
     return () => {
       gone = true;
     };
-  }, [revision]);
+  }, [revision, patternId, generation]);
 
   useEffect(() => {
     // Outside the Tauri shell there is nothing to listen to. A revision the view already has
@@ -145,7 +148,7 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, onOpenRoll
         <span className="chip" data-hint="The pattern the rack shows and edits.">
           Pattern <b>{pattern.name}</b>
         </span>
-        <PatternLength steps={pattern.steps} onCommit={(steps) => void apply({ kind: "setPatternLength", steps })} />
+        <PatternLength key={`${view.generation}:${pattern.id}`} steps={pattern.steps} onCommit={(steps, origin) => void apply({ kind: "setPatternLength", steps }, undefined, origin)} />
       </header>
       {channels.length > 0 && (
         <div className="rack-body">
@@ -180,7 +183,7 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, onOpenRoll
       <footer className="rack-foot">
         <AddChannelMenu onSample={addSamples} onSynth={addSynth} />
         <span className="rack-drop">{EMPTY_RACK}</span>
-        <Swing swing={pattern.swing} onCommit={(swing) => apply({ kind: "setSwing", swing })} />
+        <Swing key={`${view.generation}:${pattern.id}`} swing={pattern.swing} onCommit={(swing, origin) => apply({ kind: "setSwing", swing }, undefined, origin)} />
       </footer>
       {removing && (
         <ConfirmDialog
@@ -204,7 +207,10 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, onOpenRoll
 
 /** The pattern's length in steps: type it, Enter or leaving the field sets it (clamped), and
  * Enter leaves the field so Space is play/stop again. */
-function PatternLength({ steps, onCommit }: { steps: number; onCommit: (steps: number) => void }) {
+function PatternLength({ steps, onCommit }: { steps: number; onCommit: (steps: number, origin: PatternStamp) => void }) {
+  const { view } = useProject();
+  const origin = useRef<PatternStamp | null>(null);
+  const capture = (): PatternStamp => ({ generation: view?.generation ?? 0, patternId: view?.pattern.id ?? 0, revision: view?.notesRevision ?? 1 });
   const [draft, setDraft] = useState<string | null>(null);
   // Set when Enter already committed: the blur that follows must not commit again.
   const committed = useRef(false);
@@ -213,7 +219,7 @@ function PatternLength({ steps, onCommit }: { steps: number; onCommit: (steps: n
     const n = Math.round(Number(text.trim()));
     if (text.trim() === "" || !Number.isFinite(n)) return;
     const next = Math.min(STEPS_MAX, Math.max(STEPS_MIN, n));
-    if (next !== steps) onCommit(next);
+    if (next !== steps && origin.current) onCommit(next, origin.current);
   };
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
@@ -230,7 +236,8 @@ function PatternLength({ steps, onCommit }: { steps: number; onCommit: (steps: n
         max={STEPS_MAX}
         aria-label="Pattern length"
         value={draft ?? String(steps)}
-        onChange={(e) => setDraft(e.target.value)}
+        onFocus={() => { origin.current = capture(); }}
+        onChange={(e) => { origin.current ??= capture(); setDraft(e.target.value); }}
         onKeyDown={onKeyDown}
         onBlur={(e) => {
           if (committed.current) committed.current = false;
@@ -243,7 +250,10 @@ function PatternLength({ steps, onCommit }: { steps: number; onCommit: (steps: n
 }
 
 /** Swing, 0..100 %: moved locally while dragging, sent on release. */
-function Swing({ swing, onCommit }: { swing: number; onCommit: (swing: number) => Promise<unknown> }) {
+function Swing({ swing, onCommit }: { swing: number; onCommit: (swing: number, origin: PatternStamp) => Promise<unknown> }) {
+  const { view } = useProject();
+  const origin = useRef<PatternStamp | null>(null);
+  const capture = (): PatternStamp => ({ generation: view?.generation ?? 0, patternId: view?.pattern.id ?? 0, revision: view?.notesRevision ?? 1 });
   const percent = Math.round(swing * 100);
   // The value being moved, and the swing it started from: a new swing from the engine wins.
   const [moving, setMoving] = useState<{ value: number; from: number } | null>(null);
@@ -251,7 +261,8 @@ function Swing({ swing, onCommit }: { swing: number; onCommit: (swing: number) =
   const commit = () => {
     if (moving && moving.from === percent && moving.value !== percent) {
       // Shown until the edit settles, so the slider does not jump back for a round trip.
-      void onCommit(moving.value / 100).finally(() => setMoving(null));
+      const sent = moving;
+      if (origin.current) void onCommit(moving.value / 100, origin.current).finally(() => setMoving((current) => current === sent ? null : current));
     } else {
       setMoving(null);
     }
@@ -267,7 +278,9 @@ function Swing({ swing, onCommit }: { swing: number; onCommit: (swing: number) =
         aria-label="Swing"
         value={shown}
         style={{ "--fill": `${shown}%` } as CSSProperties}
-        onChange={(e) => setMoving({ value: Number(e.target.value), from: percent })}
+        onPointerDown={() => { origin.current = capture(); }}
+        onKeyDown={() => { origin.current = capture(); }}
+        onChange={(e) => { origin.current ??= capture(); setMoving({ value: Number(e.target.value), from: percent }); }}
         onPointerUp={commit}
         onKeyUp={commit}
         onBlur={commit}
