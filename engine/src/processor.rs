@@ -495,8 +495,9 @@ impl AudioProcessor {
     fn play(&mut self, at: u64, loops: Option<u32>) {
         if self.transport.playing() {
             self.recorder.end(&self.transport, at, &self.live);
-            self.with_graph(Graph::transport_stopped);
         }
+        // A finish can leave a block-boundary release pending: force it before re-anchoring.
+        self.with_graph(Graph::transport_stopped);
         let cursor = self.transport.position_ticks(at);
         self.transport.start(at, loops);
         if self.graph.playback_mode == crate::PlaybackMode::Song {

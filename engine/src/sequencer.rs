@@ -805,3 +805,48 @@ mod release_timing_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod resize_tempo_regression {
+    use super::*;
+    fn pat(length: u32) -> PatternData {
+        PatternData {
+            length,
+            notes: vec![SeqNote {
+                tick: 0,
+                length: 1920,
+                channel: ChannelId(1),
+                key: 60,
+                velocity: 1.0,
+                slide: false,
+            }],
+        }
+    }
+    #[test]
+    fn resize_shift_then_tempo_change_keeps_musical_release() {
+        let (a, b) = (pat(3840), pat(2880));
+        let mut clock = TransportClock::new(48000.0, 120.0);
+        clock.start(0, None);
+        let mut seq = Sequencer::new();
+        let mut offs = Vec::new();
+        let mut resized = false;
+        for f in (0..250_000u64).step_by(BLOCK) {
+            if f == 120_000 {
+                clock.keep_position(f, 3840, 2880);
+                seq.reseek();
+                resized = true;
+            }
+            if f == 192_000 {
+                clock.set_bpm(f, 60.0);
+            }
+            seq.run(if resized { &b } else { &a }, &clock, f, |_, e| {
+                if !e.on {
+                    offs.push(f + u64::from(e.offset));
+                }
+                Delivery::Taken
+            });
+            clock.mark_covered(f + 64);
+        }
+        assert_eq!(offs, vec![48_000, 144_000, 240_000]);
+    }
+}
