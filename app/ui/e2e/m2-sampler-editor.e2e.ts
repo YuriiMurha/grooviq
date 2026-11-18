@@ -231,7 +231,7 @@ test.describe("the sampler editor", () => {
     expect((await stored(mock)).sampler.start).toBe(0);
   });
 
-  test("the_waveform_is_fetched_once_per_sample_and_redrawn_on_resize", async ({ app, mock }) => {
+  test("the_waveform_is_fetched_once_per_sample_and_redrawn_on_resize", async ({ app, mock }, info) => {
     await open(app);
     const canvas = waveform(app);
     await expect(canvas).toBeVisible();
@@ -248,7 +248,14 @@ test.describe("the sampler editor", () => {
       ]);
       return colourDistance(loud, quiet) > 60 && colourDistance(mid, quiet) > 60;
     };
-    await expect.poll(drawn).toBe(true);
+    // Screenshot capture and browser PNG decoding share the case's finite correctness budget.
+    // Playwright caps this poll at the remaining case deadline (including fixture time).
+    // A late healthy observation must not become a separate five-second performance failure.
+    const waitForDrawn = (phase: string) => expect.poll(drawn, {
+      message: `Sampler waveform pixels: ${phase}`,
+      timeout: info.timeout / 2,
+    }).toBe(true);
+    await waitForDrawn("initial draw");
     const backing = () => canvas.evaluate((c: HTMLCanvasElement) => c.width);
     const wide = await backing();
 
@@ -256,10 +263,10 @@ test.describe("the sampler editor", () => {
     // from the peaks it already has.
     await app.setViewportSize({ width: 760, height: 520 });
     await expect.poll(backing).toBeLessThan(wide);
-    await expect.poll(drawn).toBe(true);
+    await waitForDrawn("after shrinking to 760 x 520");
     await app.setViewportSize({ width: 1280, height: 800 });
     await expect.poll(backing).toBe(wide);
-    await expect.poll(drawn).toBe(true);
+    await waitForDrawn("after restoring to 1280 x 800");
 
     // Parameter changes redraw the markers, not the sample.
     await control(app, "reverse").click();
