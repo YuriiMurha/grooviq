@@ -93,6 +93,9 @@ pub(crate) struct TransportClock {
 }
 
 impl TransportClock {
+    pub(crate) fn bpm(&self) -> f32 {
+        self.bpm
+    }
     pub(crate) fn new(sample_rate: f32, bpm: f32) -> Self {
         Self {
             playing: false,
