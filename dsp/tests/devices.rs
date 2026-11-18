@@ -2,7 +2,7 @@
 
 use grooviq_dsp::{Device, NoteEvent, create, param_spec};
 
-const IDS: [&str; 10] = [
+const IDS: [&str; 15] = [
     "synth",
     "eq",
     "comp",
@@ -13,8 +13,13 @@ const IDS: [&str; 10] = [
     "ott",
     "utility",
     "drum_shaper",
+    "character_delay",
+    "saturation",
+    "fattener",
+    "bitcrusher",
+    "algorithmic_reverb",
 ];
-const EFFECTS: [&str; 9] = [
+const EFFECTS: [&str; 14] = [
     "eq",
     "comp",
     "limiter",
@@ -24,6 +29,11 @@ const EFFECTS: [&str; 9] = [
     "ott",
     "utility",
     "drum_shaper",
+    "character_delay",
+    "saturation",
+    "fattener",
+    "bitcrusher",
+    "algorithmic_reverb",
 ];
 const RATES: [f32; 5] = [22050.0, 44100.0, 48000.0, 96000.0, 192000.0];
 
@@ -772,6 +782,17 @@ fn random_parameter_sweeps_never_produce_nan() {
 /// A parameter set per effect that exercises its interesting paths.
 fn interesting(id: &str) -> Vec<(u32, f32)> {
     match id {
+        "algorithmic_reverb" => vec![(0, 1.0), (2, 0.0), (10, 0.7)],
+        "saturation" => vec![
+            (0, 1.),
+            (1, 18.),
+            (2, 0.5),
+            (3, 6.),
+            (4, 100.),
+            (5, 12000.),
+            (7, 0.7),
+        ],
+        "bitcrusher" => vec![(0, 5.7), (1, 23.3), (2, 0.6), (3, 0.4), (4, 1.0), (5, 0.8)],
         "eq" => vec![
             (2 * 6 + 3, 9.0),
             (3 * 6 + 5, 1.0),
@@ -783,9 +804,11 @@ fn interesting(id: &str) -> Vec<(u32, f32)> {
             (48, -3.0),
         ],
         "comp" => vec![(0, -30.0), (2, 1.0), (3, 50.0), (5, 6.0), (6, 0.7)],
+        "fattener" => vec![(0, 0.8), (1, 0.5)],
         "limiter" => vec![(0, 12.0), (1, -2.0), (2, 30.0)],
         "drive" => vec![(0, 3.0), (1, 18.0), (2, 0.4), (3, 0.8), (5, 2.0)],
         "reverb" => vec![(0, 0.8), (1, 3.0), (2, 35.0), (3, 0.3), (4, 0.7), (7, 0.5)],
+        "character_delay" => vec![(9, 2.0), (10, 0.8), (12, 0.4), (11, 0.5)],
         "delay" => vec![(1, 2.0), (3, 0.6), (4, 1.0), (7, 0.5)],
         "ott" => vec![(0, 0.8), (1, 0.3), (4, 3.0), (6, -2.0)],
         "drum_shaper" => vec![
@@ -805,6 +828,19 @@ fn interesting(id: &str) -> Vec<(u32, f32)> {
 /// Changes applied at sample 4736 (a multiple of both 128 and 37) to test smoothing paths.
 fn changes(id: &str) -> Vec<(u32, f32)> {
     match id {
+        "algorithmic_reverb" => vec![(0, 4.0), (1, 2.0), (4, 0.9), (10, 0.3)],
+        "saturation" => vec![
+            (0, 3.),
+            (1, 8.),
+            (2, -0.5),
+            (3, 0.),
+            (4, 300.),
+            (5, 6000.),
+            (6, 0.),
+            (7, 0.3),
+            (8, -3.),
+        ],
+        "bitcrusher" => vec![(0, 2.5), (1, 2.5), (2, 1.0), (3, 0.2), (4, 0.7), (5, 0.3)],
         "eq" => vec![
             (2 * 6 + 2, 2000.0),
             (2 * 6 + 3, -12.0),
@@ -812,9 +848,11 @@ fn changes(id: &str) -> Vec<(u32, f32)> {
             (48, 2.0),
         ],
         "comp" => vec![(0, -12.0), (5, 0.0), (6, 1.0)],
+        "fattener" => vec![(0, 0.2), (1, -0.9)],
         "limiter" => vec![(0, 3.0)],
         "drive" => vec![(1, 6.0), (2, -0.5), (3, 0.3)],
         "reverb" => vec![(0, 0.2), (2, 90.0), (5, 400.0), (7, 0.9)],
+        "character_delay" => vec![(9, 1.0), (10, 0.4), (12, 0.7), (11, 0.2), (1, 5.0)],
         "delay" => vec![(1, 5.0), (3, 0.2), (6, 3000.0)],
         "ott" => vec![(7, 300.0), (8, 5000.0), (0, 0.3)],
         "drum_shaper" => vec![

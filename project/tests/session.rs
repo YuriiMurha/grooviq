@@ -730,6 +730,9 @@ impl Disk for Ops {
     }
 
     fn sync(&mut self, file: &std::fs::File) -> std::io::Result<()> {
+        if file.metadata()?.is_dir() {
+            return file.sync_all();
+        }
         // What is synced is the whole zip: written before, not after.
         use std::io::{Read, Seek};
         let mut bytes = Vec::new();
