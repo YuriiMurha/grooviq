@@ -22,6 +22,9 @@ use std::time::{Duration, Instant};
 
 const SR: f32 = 48_000.0;
 
+#[path = "realtime/saturation.rs"]
+mod saturation;
+
 #[path = "realtime/drum_shaper.rs"]
 mod drum_shaper;
 
@@ -736,5 +739,5 @@ fn a_waiting_recording_barrier_never_allocates() {
     );
 }
 
-#[path = "realtime/saturation.rs"]
-mod saturation;
+#[path = "realtime/multiband.rs"]
+mod multiband;
