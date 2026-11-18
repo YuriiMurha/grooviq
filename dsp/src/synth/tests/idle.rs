@@ -75,13 +75,34 @@ fn idle_matches_original_preparation_and_next_note() {
                         s.set_param(AMP_R as u32, 1.0);
                     }
                     if step % 23 == 0 {
-                        // Also move ongoing recurrences directly: public idle parameter writes snap.
-                        s.s_cut.set(8.0 + (step % 5) as f32);
-                        s.s_lfo_amt.set(0.2 + (step % 3) as f32 * 0.3);
-                        s.route[1].set((step % 2) as f32);
-                        s.s_res.set((step % 7) as f32 / 7.0);
-                        s.s_drive.set((step % 9) as f32 / 9.0);
                         s.set_param(OSC1_FINE as u32, step as f32 % 90.0);
+                        // Idle public setters snap, so move every recurrence after the setter.
+                        for smoother in [
+                            &mut s.s_shape1,
+                            &mut s.s_shape2,
+                            &mut s.s_lvl1,
+                            &mut s.s_lvl2,
+                            &mut s.s_sub,
+                            &mut s.s_noise,
+                            &mut s.s_res,
+                            &mut s.s_drive,
+                            &mut s.s_lfo_amt,
+                            &mut s.s_master,
+                            &mut s.s_env,
+                            &mut s.s_kt,
+                        ] {
+                            smoother.set(smoother.cur * 0.37 + 0.01);
+                        }
+                        s.s_cut.set(8.0 + (step % 5) as f32);
+                        for ramp in s
+                            .route
+                            .iter_mut()
+                            .chain(&mut s.r_off)
+                            .chain(&mut s.uxf)
+                            .chain(&mut s.fw)
+                        {
+                            ramp.set(ramp.cur * 0.27 + 0.13);
+                        }
                     }
                     if step == 240 {
                         s.choke();
@@ -168,4 +189,150 @@ fn idle_recurrences_are_audible_on_the_next_note() {
         assert_eq!(al.map(f32::to_bits), bl.map(f32::to_bits), "onset {offset}");
         assert_eq!(ar.map(f32::to_bits), br.map(f32::to_bits));
     }
+}
+
+fn compare_audio_and_state(a: &mut Synth, b: &mut Synth, n: usize, events: &[NoteEvent]) {
+    let (mut al, mut ar, mut bl, mut br) = (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    a.process(&mut al, &mut ar, None, events);
+    b.process(&mut bl, &mut br, None, events);
+    assert_eq!(
+        al.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        bl.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ar.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        br.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+    same(a, b);
+}
+
+#[test]
+fn every_idle_recurrence_and_pending_boundary_matches_original() {
+    for sr in [8000.0, 44100.0, 48000.0, 96000.0, 384000.0] {
+        for shape in 0..5 {
+            let (mut a, mut b) = (Synth::new(sr), Synth::new(sr));
+            b.force_full_preparation = true;
+            for s in [&mut a, &mut b] {
+                s.set_param(LFO_SHAPE as u32, shape as f32);
+                s.set_param(LFO_RATE as u32, 20.0);
+                // Deliberately exercise every recurrence; public idle setters snap them.
+                for sm in [
+                    &mut s.s_shape1,
+                    &mut s.s_shape2,
+                    &mut s.s_lvl1,
+                    &mut s.s_lvl2,
+                    &mut s.s_sub,
+                    &mut s.s_noise,
+                    &mut s.s_res,
+                    &mut s.s_drive,
+                    &mut s.s_lfo_amt,
+                    &mut s.s_master,
+                    &mut s.s_env,
+                    &mut s.s_kt,
+                ] {
+                    sm.set(sm.cur * 0.37 + 0.01);
+                }
+                s.s_cut.set(9.0);
+                for r in s
+                    .route
+                    .iter_mut()
+                    .chain(&mut s.r_off)
+                    .chain(&mut s.uxf)
+                    .chain(&mut s.fw)
+                {
+                    r.set(r.cur * 0.27 + 0.13);
+                }
+            }
+            for n in [1, 63, 64, 127, 128, 129, 257, 4096] {
+                compare_audio_and_state(&mut a, &mut b, n, &[]);
+            }
+            // Changes to shape/route and signed-zero public values while idle.
+            for (parameter, spec) in SPEC.iter().enumerate() {
+                let value = if spec.0 <= 0.0 && spec.1 >= 0.0 {
+                    -0.0
+                } else {
+                    spec.0
+                };
+                a.set_param(parameter as u32, value);
+                b.set_param(parameter as u32, value);
+            }
+            compare_audio_and_state(&mut a, &mut b, 129, &[]);
+            for offset in [0, 1, 63, 64, 127, 128, 129, 256, 257, 999] {
+                a.reset();
+                b.reset();
+                compare_audio_and_state(
+                    &mut a,
+                    &mut b,
+                    257,
+                    &[NoteEvent {
+                        offset,
+                        key: 60,
+                        velocity: 0.9,
+                        on: true,
+                        slide: true,
+                        id: 3,
+                    }],
+                );
+                compare_audio_and_state(&mut a, &mut b, 257, &[]);
+            }
+        }
+    }
+}
+
+#[test]
+fn choke_preserves_audio_with_only_fade_slots_active() {
+    let (mut a, mut b) = (Synth::new(48000.0), Synth::new(48000.0));
+    b.force_full_preparation = true;
+    let note = NoteEvent {
+        offset: 0,
+        key: 60,
+        velocity: 1.0,
+        on: true,
+        slide: false,
+        id: 1,
+    };
+    compare_audio_and_state(&mut a, &mut b, 4096, &[note]);
+    for s in [&mut a, &mut b] {
+        s.set_param(MASTER as u32, -24.0);
+        s.set_param(LFO_AMOUNT as u32, 0.9);
+        s.choke();
+        assert!(s.voices[..NUM_VOICES].iter().all(|v| !v.active));
+        assert!(s.voices[NUM_VOICES..].iter().any(|v| v.active));
+    }
+    for n in [1, 63, 64, 127, 128, 129, 257] {
+        compare_audio_and_state(&mut a, &mut b, n, &[]);
+    }
+    assert!(a.voices.iter().all(|v| !v.active));
+    compare_audio_and_state(&mut a, &mut b, 257, &[note]);
+}
+
+#[test]
+fn master_smoothing_after_choke_matches_the_next_note() {
+    let (mut a, mut b) = (Synth::new(48000.0), Synth::new(48000.0));
+    b.force_full_preparation = true;
+    let note = NoteEvent {
+        offset: 0,
+        key: 60,
+        velocity: 1.0,
+        on: true,
+        slide: false,
+        id: 1,
+    };
+    compare_audio_and_state(&mut a, &mut b, 4096, &[note]);
+    for s in [&mut a, &mut b] {
+        s.set_param(MASTER as u32, -24.0);
+        s.choke();
+    }
+    let (mut l, mut r) = ([0.0; 64], [0.0; 64]);
+    for _ in 0..5 {
+        a.process(&mut l, &mut r, None, &[]);
+        b.process(&mut l, &mut r, None, &[]);
+    }
+    assert!(a.voices.iter().all(|v| !v.active));
+    let (mut al, mut ar, mut bl, mut br) = ([0.0; 128], [0.0; 128], [0.0; 128], [0.0; 128]);
+    a.process(&mut al, &mut ar, None, &[note]);
+    b.process(&mut bl, &mut br, None, &[note]);
+    assert!(bl.iter().any(|x| x.abs() > 0.001));
+    assert_eq!(al.map(f32::to_bits), bl.map(f32::to_bits));
+    assert_eq!(ar.map(f32::to_bits), br.map(f32::to_bits));
 }
