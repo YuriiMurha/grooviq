@@ -17,14 +17,20 @@ use rtrb::{Consumer, Producer};
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// What [`Controller::check_health`] found since its previous call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HealthEvent {
     /// The graph panicked and was rebuilt (by `check_health`, or by `reconfigure` if it came
-    /// first) from the controller's state, or with default parameters if replaying that state
-    /// panicked too; `faults` counts every panic so far.
+    /// first) from the exact controller state; `faults` counts every panic so far.
     Restarted { faults: u32 },
+    /// Automatic recovery exhausted its budget; explicit load or reconfigure can retry.
+    Stopped { faults: u32 },
+    /// A constructor failed. The mirrored state was preserved.
+    RecoveryFailed { faults: u32 },
+    /// Successful processing or an explicit recovery renewed the retry budget.
+    RecoveryReset,
     /// The NaN guard silenced and reset a node; `total` counts every such block so far.
     DeviceSilenced { total: u32 },
 }
@@ -34,6 +40,8 @@ pub enum HealthEvent {
 pub enum ControlError {
     /// A value was not finite, or a key, parameter index or pattern length is out of range.
     Rejected,
+    /// Valid state could not be built; the previous state is preserved.
+    BuildFailed,
     /// Fixed-second audio exceeds the admitted overlap budget.
     AudioVoiceLimit,
     /// The queue had no room.
@@ -54,6 +62,7 @@ impl std::fmt::Display for ControlError {
         f.write_str(match self {
             Self::AudioVoiceLimit => "audio needs more than 256 simultaneous instances at 400 BPM; shorten trims, remove overlaps or lengthen the loop",
             Self::Rejected => "a value is out of range or not a number",
+            Self::BuildFailed => "the sound engine could not build the project",
             Self::Full => "the engine's command queue is full",
             Self::UnknownChannel => "no channel has that id",
             Self::ChannelExists => "a channel with that id exists already",
@@ -119,12 +128,23 @@ pub struct Controller {
     /// A restart happened that `check_health` has not reported yet.
     restart_owed: bool,
     seen_guard_hits: u32,
+    attempts: u8,
+    retry_at: Option<Instant>,
+    stopped: bool,
+    stop_owed: bool,
+    recovery_stop_mark: Option<u32>,
+    reset_owed: bool,
     /// Test switch: this many replays of the state panic, as a device bug in `set_param` would.
     #[cfg(test)]
     replay_panics: std::cell::Cell<u32>,
 }
 
 impl Controller {
+    #[cfg(test)]
+    pub(crate) fn fail_replays(&self, count: u32) {
+        self.replay_panics.set(count);
+    }
+
     pub(crate) fn new(
         sample_rate: f32,
         (commands, trash, recorded): (Producer<Msg>, Consumer<Trash>, Consumer<RecordEvent>),
@@ -148,6 +168,12 @@ impl Controller {
             seen_faults: 0,
             restart_owed: false,
             seen_guard_hits: 0,
+            attempts: 0,
+            retry_at: None,
+            stopped: false,
+            stop_owed: false,
+            recovery_stop_mark: None,
+            reset_owed: false,
             #[cfg(test)]
             replay_panics: std::cell::Cell::new(0),
         };
@@ -185,6 +211,10 @@ impl Controller {
     /// API.
     #[doc(hidden)]
     pub fn send_at(&mut self, due: u64, cmd: Command) -> Result<(), ControlError> {
+        self.flush_recovery_stop();
+        if self.stop_owed {
+            return Err(ControlError::Full);
+        }
         let mut cmd = cmd.clamped().ok_or(ControlError::Rejected)?;
         if let Command::Seek { tick } = &mut cmd
             && let Some(r) = self.state.song_loop
@@ -363,19 +393,29 @@ impl Controller {
     /// settings). Checked
     /// like [`Self::add_channel`] and [`Self::set_pattern`], and refused as a whole
     /// (`ChannelExists` for two channels with one id, `TooManyChannels` for more than
-    /// [`MAX_CHANNELS`], `Rejected` for a value that is not finite).
+    /// [`MAX_CHANNELS`], `Rejected` for a value that is not finite, or `BuildFailed`
+    /// if constructing the graph fails; the previous state is preserved).
     pub fn load_state(&mut self, state: EngineState) -> Result<(), ControlError> {
         let state = state.checked()?;
         if self.commands.slots() < 5 {
             return Err(ControlError::Full);
         }
         // The old state (and the samples only it held) is freed here, on this thread.
-        let _old = std::mem::replace(&mut self.state, state);
+        let old = std::mem::replace(&mut self.state, state);
+        let graph = match self.try_build_graph() {
+            Some(graph) => graph,
+            None => {
+                self.state = old;
+                return Err(ControlError::BuildFailed);
+            }
+        };
         if self.state.playback_mode == crate::PlaybackMode::Song {
             self.recording_armed = false;
         }
+
         self.renew_instances();
-        let graph = self.build_graph();
+        self.reset_recovery();
+        self.seen_faults = self.live.recovery().0;
         // Only this thread pushes, and the queue had room for all five.
         let command = |cmd| Msg::Command { due: 0, cmd };
         let tempo = Command::SetTempo {
@@ -398,6 +438,7 @@ impl Controller {
     /// before [`crate::RecordEvent::Mark`] with the returned id (the End a `SetRecording { on:
     /// false }` makes included), and everything after it after.
     pub fn send_marked(&mut self, cmd: Command) -> Result<u32, ControlError> {
+        self.flush_recovery_stop();
         if self.commands.slots() < 2 {
             return Err(ControlError::Full);
         }
@@ -408,6 +449,11 @@ impl Controller {
         let queued = self.push(Msg::RecordMark(id));
         debug_assert!(queued.is_ok());
         Ok(id)
+    }
+
+    /// Barrier of the latest exhaustion Stop/disarm transaction, once queued.
+    pub fn recovery_stop_mark(&self) -> Option<u32> {
+        self.recovery_stop_mark
     }
 
     /// Accepted queued recording state, including disarm on a mode transition (even stopped).
@@ -507,17 +553,69 @@ impl Controller {
     /// Frees graphs the processor replaced, restarts the graph after a panic and reports what
     /// happened since the previous call. Call it every 250 ms from a control thread.
     pub fn check_health(&mut self) -> Vec<HealthEvent> {
+        self.check_health_at(Instant::now())
+    }
+
+    fn flush_recovery_stop(&mut self) {
+        if !self.stop_owed || self.commands.slots() < 3 {
+            return;
+        }
+        // Reserve the complete Stop/disarm/barrier transaction before publishing it.
+        self.record_mark = self.record_mark.wrapping_add(1);
+        for cmd in [Command::Stop, Command::SetRecording { on: false }] {
+            let queued = self.commands.push(Msg::Command { due: 0, cmd });
+            debug_assert!(queued.is_ok());
+        }
+        let queued = self.commands.push(Msg::RecordMark(self.record_mark));
+        debug_assert!(queued.is_ok());
+        self.recording_armed = false;
+        self.recovery_stop_mark = Some(self.record_mark);
+        self.stop_owed = false;
+    }
+
+    fn reset_recovery(&mut self) {
+        self.reset_owed |= self.attempts > 0 || self.stopped;
+        self.attempts = 0;
+        self.retry_at = None;
+        self.stopped = false;
+    }
+
+    fn check_health_at(&mut self, now: Instant) -> Vec<HealthEvent> {
         self.free_trash();
+        self.flush_recovery_stop();
         let live = self.live.snapshot();
+        let (faults, successful_blocks) = self.live.recovery();
         let mut events = Vec::new();
-        if live.faults != self.seen_faults {
-            // The processor stays silent until it gets a fresh graph. If the queue is full,
-            // the next call tries again.
-            let graph = self.build_graph();
-            if self.commands.push(Msg::ReplaceGraph(graph)).is_ok() {
-                self.seen_faults = live.faults;
-                self.restart_owed = true;
+        // Two seconds of actual uninterrupted graph processing, never silent callbacks.
+        if faults == self.seen_faults
+            && successful_blocks as f64 * crate::BLOCK as f64 >= self.sample_rate as f64 * 2.0
+        {
+            self.reset_recovery();
+        }
+        if faults != self.seen_faults && !self.stopped && self.retry_at.is_none_or(|at| now >= at) {
+            if self.attempts == 3 {
+                self.stopped = true;
+                self.stop_owed = true;
+                self.flush_recovery_stop();
+                events.push(HealthEvent::Stopped { faults });
+            } else if self.commands.slots() > 0 {
+                self.attempts += 1;
+                // Immediate first attempt; then 250, 500 and 1000 ms before another decision.
+                self.retry_at = Some(now + Duration::from_millis(250 << (self.attempts - 1)));
+                // The processor stays silent until it gets a fresh graph. If the queue is full,
+                // the next call tries again.
+                if let Some(graph) = self.try_build_graph() {
+                    if self.commands.push(Msg::ReplaceGraph(graph)).is_ok() {
+                        self.seen_faults = faults;
+                        self.restart_owed = true;
+                    }
+                } else {
+                    events.push(HealthEvent::RecoveryFailed { faults });
+                }
             }
+        }
+        if std::mem::take(&mut self.reset_owed) {
+            events.push(HealthEvent::RecoveryReset);
         }
         if std::mem::take(&mut self.restart_owed) {
             events.push(HealthEvent::Restarted {
@@ -536,8 +634,36 @@ impl Controller {
     /// Switches the engine to a new sample rate, rebuilding the graph from the controller's
     /// state (which also recovers a graph that panicked; the next `check_health` still reports
     /// the panic). Call it with the audio callback stopped (it needs the processor itself),
-    /// never on the audio thread.
-    pub fn reconfigure(&mut self, processor: &mut AudioProcessor, config: EngineConfig) {
+    /// never on the audio thread. Returns false if construction failed; the processor stays
+    /// silent and the previous rate, state and queued commands are retained.
+    pub fn reconfigure(&mut self, processor: &mut AudioProcessor, config: EngineConfig) -> bool {
+        // The consumer may have drained while the callback was detached. A retry must
+        // deliver retained take boundaries even if constructing the graph fails again.
+        processor.flush_recording_boundaries();
+        if self.stop_owed {
+            // The callback is stopped: settle directly even when its command FIFO is full.
+            // Earlier transport starts cannot overtake the exhaustion decision on rebuild.
+            for msg in processor.take_queued() {
+                if matches!(
+                    msg,
+                    Msg::Command {
+                        cmd: Command::Play
+                            | Command::PlayLoops { .. }
+                            | Command::SetRecording { on: true },
+                        ..
+                    }
+                ) {
+                    continue;
+                }
+                let queued = self.commands.push(msg);
+                debug_assert!(queued.is_ok());
+            }
+            self.record_mark = self.record_mark.wrapping_add(1);
+            processor.finish_recovery_stop(self.record_mark);
+            self.recording_armed = false;
+            self.recovery_stop_mark = Some(self.record_mark);
+            self.stop_owed = false;
+        }
         // The fresh graph is built from the state every queued message already updated, so a
         // message that only changes the graph would land in it a second time: a channel built
         // for the old rate, a removal of the rebuilt channel, a parameter for a project that
@@ -546,13 +672,21 @@ impl Controller {
         // other notes go back in the queue, in order (see `rebuilt_queue`). Holding both ends
         // of the queue (`&mut self` and the stopped processor), this sees every message, and
         // what goes back fits.
+        let old_rate = self.sample_rate;
+        self.sample_rate = config.rate();
+        self.generation += 1;
+        let Some(graph) = self.try_build_graph() else {
+            self.sample_rate = old_rate;
+            self.generation -= 1;
+            processor.stop_after_failed_rebuild();
+            return false;
+        };
+        self.reset_recovery();
         for msg in rebuilt_queue(processor.take_queued()) {
             let queued = self.commands.push(msg).is_ok();
             debug_assert!(queued, "the queue was just emptied");
         }
-        self.sample_rate = config.rate();
-        // Replacements queued before now are stale: the processor drops them.
-        self.generation += 1;
+
         // The fresh graph also recovers from every fault so far, so `check_health` must not
         // restart it again; a fault it has not reported yet is still owed. (The processor
         // publishes its count after every block, and its callback is stopped now.)
@@ -561,47 +695,27 @@ impl Controller {
             self.seen_faults = faults;
             self.restart_owed = true;
         }
-        let graph = self.build_graph();
         processor.restart(self.sample_rate, graph);
         self.free_trash();
+        true
     }
 
-    /// A graph for the current sample rate and generation, in the state the queued commands
-    /// lead to. If replaying that state panics (a device bug in `set_param`), it is replayed
-    /// again with every device parameter at its default (channels, samples, mix and pattern
-    /// kept); if that panics too, without the channels. The state is reset to match, so a
-    /// restart still happens, the panic stays off the caller (and any mutex it holds), and it
-    /// cannot recur.
+    /// Construction is transactional: a panic never changes the mirrored project or identities.
+    fn try_build_graph(&self) -> Option<Box<Graph>> {
+        catch_unwind(AssertUnwindSafe(|| self.replay())).ok()
+    }
+
     pub(crate) fn build_graph(&mut self) -> Box<Graph> {
-        if let Ok(graph) = catch_unwind(AssertUnwindSafe(|| self.replay())) {
-            return graph;
-        }
-        self.tone = ToneState::default();
-        self.synth = synth_defaults();
-        for channel in &mut self.state.channels {
-            channel.instrument.reset_params();
-        }
-        if let Ok(graph) = catch_unwind(AssertUnwindSafe(|| self.replay())) {
-            return graph;
-        }
-        self.state.channels.clear();
-        self.state.song.arrangement.notes.clear();
-        self.instances.clear();
-        let mut graph = Box::new(Graph::new(self.sample_rate, self.generation));
-        graph.set_pattern(Box::new(self.state.pattern.clone()));
-        graph.set_song(Box::new(self.state.song.clone()));
-        graph.playback_mode = self.state.playback_mode;
-        graph.song_loop = self.state.song_loop;
-        graph
+        self.replay()
     }
 
     fn replay(&self) -> Box<Graph> {
-        let mut graph = Box::new(Graph::new(self.sample_rate, self.generation));
         #[cfg(test)]
         if self.replay_panics.get() > 0 {
             self.replay_panics.set(self.replay_panics.get() - 1);
             panic!("replaying the controller's state panicked (test switch)");
         }
+        let mut graph = Box::new(Graph::new(self.sample_rate, self.generation));
         let ToneState { on, hz, gain_db } = self.tone;
         graph.set_tone(on, hz, gain_db);
         for (index, &value) in (0u32..).zip(&self.synth) {
@@ -719,6 +833,7 @@ mod tests {
     /// (the processor itself is never run, so nothing overwrites it).
     fn pretend(c: &Controller, faults: u32, guard_hits: u32) {
         c.live.publish([0.0; 2], false, 0, faults, guard_hits);
+        c.live.publish_recovery(faults, 0);
     }
 
     #[test]
@@ -815,6 +930,242 @@ mod tests {
         assert!(free > 39);
     }
 
+    #[cfg(feature = "test-hooks")]
+    fn fault(c: &mut Controller, p: &mut AudioProcessor) {
+        c.send(Command::InjectPanic).unwrap();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+    }
+
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn exhausted_recovery_stops_and_disarms_after_full_queue() {
+        let (mut c, mut p) = controller();
+        c.send(Command::Play).unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        c.attempts = 3;
+        fault(&mut c, &mut p);
+        while c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+        assert_eq!(
+            c.check_health_at(Instant::now()),
+            [HealthEvent::Stopped { faults: 1 }]
+        );
+        assert!(c.stop_owed);
+        assert!(c.check_health().is_empty());
+        c.replay_panics.set(1);
+        assert!(!c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 96_000.0
+            }
+        ));
+        assert!(!c.stop_owed, "the stopped callback settled the owed stop");
+        assert!(c.check_health().is_empty());
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        c.check_health();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        assert!(!c.live().playing);
+        assert!(!c.recording_armed());
+        let mut events = Vec::new();
+        c.take_recorded(&mut events);
+        assert!(events.iter().any(|e| matches!(e, RecordEvent::End { .. })));
+        assert!(events.iter().any(|e| matches!(e, RecordEvent::Mark { .. })));
+        assert!(c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 48_000.0
+            }
+        ));
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        assert!(!c.live().playing);
+    }
+
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn explicit_recovery_settles_full_queue_before_old_play_commands() {
+        let (mut c, mut p) = controller();
+        c.send(Command::Play).unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        c.attempts = 3;
+        fault(&mut c, &mut p);
+        while c.send(Command::PlayLoops { loops: 2 }).is_ok() {}
+        assert_eq!(c.check_health().len(), 1);
+        assert!(c.stop_owed);
+        assert!(c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 48_000.0
+            }
+        ));
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        assert!(!c.live().playing);
+        assert!(!c.recording_armed());
+        let mut events = Vec::new();
+        c.take_recorded(&mut events);
+        assert!(events.iter().any(|e| matches!(e, RecordEvent::End { .. })));
+        assert!(events.iter().any(|e| matches!(e, RecordEvent::Mark { .. })));
+    }
+
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn recovery_ceiling_backoff_and_explicit_load() {
+        let (mut c, mut p) = controller();
+        let start = Instant::now();
+        for (attempt, ms) in [0, 250, 750].into_iter().enumerate() {
+            fault(&mut c, &mut p);
+            let at = start + Duration::from_millis(ms);
+            if attempt > 0 {
+                let slots = c.commands.slots();
+                assert!(c.check_health_at(at - Duration::from_millis(1)).is_empty());
+                assert_eq!(c.commands.slots(), slots);
+            }
+            assert_eq!(
+                c.check_health_at(at),
+                [HealthEvent::Restarted {
+                    faults: attempt as u32 + 1
+                }]
+            );
+            p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        }
+        fault(&mut c, &mut p);
+        assert_eq!(
+            c.check_health_at(start + Duration::from_millis(1750)),
+            [HealthEvent::Stopped { faults: 4 }]
+        );
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        let slots = c.commands.slots();
+        for seconds in [3, 60, 86400] {
+            assert!(
+                c.check_health_at(start + Duration::from_secs(seconds))
+                    .is_empty()
+            );
+            assert_eq!(c.commands.slots(), slots);
+            let mut out = [1.0; crate::BLOCK * 2];
+            p.process(&mut out, 2);
+            assert_eq!(out, [0.0; crate::BLOCK * 2]);
+        }
+        c.load_state(c.state.clone()).unwrap();
+        assert_eq!(c.check_health_at(start), [HealthEvent::RecoveryReset]);
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        fault(&mut c, &mut p);
+        assert_eq!(
+            c.check_health_at(start),
+            [HealthEvent::Restarted { faults: 5 }]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn stable_processing_renews_budget_but_wall_time_and_silent_callbacks_do_not() {
+        let (mut c, mut p) = controller();
+        let now = Instant::now();
+        fault(&mut c, &mut p);
+        assert_eq!(
+            c.check_health_at(now),
+            [HealthEvent::Restarted { faults: 1 }]
+        );
+        assert!(c.check_health_at(now + Duration::from_secs(100)).is_empty());
+        assert_eq!(c.attempts, 1);
+        // Exactly two seconds of real graph renders at 48 kHz.
+        p.process(&mut vec![0.0; (96_000 - crate::BLOCK) * 2], 2);
+        assert!(c.check_health_at(now).is_empty());
+        assert_eq!(c.attempts, 1);
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        assert_eq!(c.check_health_at(now), [HealthEvent::RecoveryReset]);
+        assert_eq!(c.attempts, 0);
+        assert!(c.check_health_at(now).is_empty());
+        fault(&mut c, &mut p);
+        assert_eq!(
+            c.check_health_at(now),
+            [HealthEvent::Restarted { faults: 2 }]
+        );
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        fault(&mut c, &mut p);
+        p.process(&mut vec![0.0; 96_000 * 2], 2);
+        assert!(c.check_health_at(now).is_empty());
+        assert_eq!(c.attempts, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn constructor_panics_are_bounded_and_explicit_reconfigure_can_recover() {
+        let (mut c, mut p) = controller();
+        c.add_channel(setup(1)).unwrap();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        let state = c.state.clone();
+        let instances = c.instances.clone();
+        fault(&mut c, &mut p);
+        c.replay_panics.set(u32::MAX);
+        let now = Instant::now();
+        for ms in [0, 250, 750] {
+            assert_eq!(
+                c.check_health_at(now + Duration::from_millis(ms)),
+                [HealthEvent::RecoveryFailed { faults: 1 }]
+            );
+        }
+        assert_eq!(
+            c.check_health_at(now + Duration::from_millis(1750)),
+            [HealthEvent::Stopped { faults: 1 }]
+        );
+        assert_eq!(c.state, state);
+        assert_eq!(c.instances, instances);
+        let queued = c.commands.slots();
+        assert_eq!(
+            c.load_state(EngineState::default()),
+            Err(ControlError::BuildFailed)
+        );
+        assert_eq!(c.state, state);
+        assert_eq!(c.instances, instances);
+        assert_eq!(c.commands.slots(), queued);
+        let generation = c.generation;
+        c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 44_100.0,
+            },
+        );
+        assert_eq!(c.sample_rate, 48_000.0);
+        assert_eq!(c.generation, generation);
+        assert_eq!(c.state, state);
+        assert_eq!(c.commands.slots(), queued);
+        c.replay_panics.set(0);
+        c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 44_100.0,
+            },
+        );
+        assert_eq!(
+            c.check_health_at(now),
+            [
+                HealthEvent::RecoveryReset,
+                HealthEvent::Restarted { faults: 2 }
+            ]
+        );
+        assert_eq!(c.instances, instances);
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        fault(&mut c, &mut p);
+        assert_eq!(
+            c.check_health_at(now),
+            [HealthEvent::Restarted { faults: 3 }]
+        );
+    }
+
+    #[test]
+    fn failed_recovery_preserves_project_and_channel_identity() {
+        let (mut c, mut p) = controller();
+        c.add_channel(setup(1)).unwrap();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        let before = c.state.clone();
+        let instances = c.instances.clone();
+        c.replay_panics.set(u32::MAX);
+        pretend(&c, 1, 0);
+        c.check_health();
+        assert_eq!(c.state, before);
+        assert_eq!(c.instances, instances);
+    }
+
     #[test]
     fn each_health_event_is_reported_once_with_one_restart_per_fault() {
         let (mut c, _p) = controller();
@@ -830,31 +1181,6 @@ mod tests {
         assert_eq!(c.commands.slots(), free - 1, "one replacement queued");
         assert!(c.check_health().is_empty());
         assert_eq!(c.commands.slots(), free - 1, "and no second one");
-    }
-
-    #[test]
-    fn a_rebuild_that_panics_falls_back_to_defaults_and_still_restarts() {
-        let (mut c, mut p) = controller();
-        let tone = Command::TestTone {
-            on: true,
-            hz: 440.0,
-            gain_db: -12.0,
-        };
-        c.send(tone).unwrap();
-        let cutoff = Command::SetSynthParam {
-            index: 20,
-            value: 300.0,
-        };
-        c.send(cutoff).unwrap();
-        c.replay_panics.set(u32::MAX);
-        pretend(&c, 1, 0);
-        assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 1 }]);
-        // The replacement plays with default parameters, and the state now says so too.
-        p.process(&mut [0.0; crate::BLOCK * 2], 2);
-        assert!(!c.live().tone);
-        assert!(!c.tone.on);
-        let default_cutoff = grooviq_dsp::param_spec("synth").unwrap()[20].2;
-        assert_eq!(c.synth[20], default_cutoff);
     }
 
     #[test]
@@ -956,59 +1282,56 @@ mod tests {
     }
 
     #[test]
-    fn a_rebuild_that_panics_once_keeps_the_channels_with_default_sampler_params() {
+    fn song_load_construction_failure_keeps_recording_and_song_state_transactional() {
         let (mut c, mut p) = controller();
         c.add_channel(setup(1)).unwrap();
-        c.add_channel(setup(2)).unwrap();
-        let tune = Command::SetSamplerParam {
-            channel: ChannelId(2),
-            index: 1,
-            value: 5.0,
-        };
-        c.send(tune).unwrap();
-        c.set_pattern(PatternData {
-            length: 7,
-            notes: Vec::new(),
-        })
-        .unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
         p.process(&mut [0.0; crate::BLOCK * 2], 2);
-        c.replay_panics.set(1);
-        pretend(&c, 1, 0);
-        assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 1 }]);
-        p.process(&mut [0.0; crate::BLOCK * 2], 2);
-        let defaults: Vec<f32> = grooviq_dsp::sampler::SPEC.iter().map(|s| s.2).collect();
-        assert!(
-            c.state
-                .channels
-                .iter()
-                .all(|ch| ch.instrument.params() == defaults)
-        );
-        assert_eq!(c.state.channels.len(), 2);
-        // The graph the state builds holds both channels and the pattern.
-        let graph = c.build_graph();
-        assert_eq!(graph.channel_ids(), [ChannelId(1), ChannelId(2)]);
-        assert_eq!(graph.pattern().length, 7);
-
-        // Panicking twice leaves no channels, but keeps the pattern.
-        c.state.song.end_tick = 1;
-        c.state.song.arrangement.length = 1;
-        c.state.song.arrangement.notes = vec![crate::SongNote {
+        let before = c.state.clone();
+        let instances = c.instances.clone();
+        let mark = c.record_mark;
+        let slots = c.commands.slots();
+        let mut song = before.clone();
+        song.playback_mode = crate::PlaybackMode::Song;
+        song.song.end_tick = 960;
+        song.song.arrangement.length = 960;
+        song.song.arrangement.notes = vec![crate::SongNote {
             tick: 0,
-            length: 1,
-            channel: c.state.channels[0].id,
+            length: 120,
+            channel: ChannelId(1),
             key: 60,
-            velocity: 1.0,
+            velocity: 0.8,
             slide: false,
             clip_id: 1,
         }];
-        c.replay_panics.set(2);
-        pretend(&c, 2, 0);
-        assert_eq!(c.check_health(), [HealthEvent::Restarted { faults: 2 }]);
-        assert!(c.state.channels.is_empty());
-        assert!(c.state.song.arrangement.notes.is_empty());
-        assert!(c.instances.is_empty(), "no channel, no instance");
-        assert_eq!(c.state.pattern.length, 7);
-        assert!(c.send(tune).is_err());
+        c.fail_replays(1);
+        assert_eq!(c.load_state(song.clone()), Err(ControlError::BuildFailed));
+        assert_eq!(c.state, before);
+        assert_eq!(c.instances, instances);
+        assert_eq!(c.record_mark, mark);
+        assert_eq!(c.commands.slots(), slots);
+        assert!(c.recording_armed());
+
+        c.load_state(song.clone()).unwrap();
+        assert!(!c.recording_armed());
+        assert_eq!(c.state, song);
+        let graph = c.build_graph();
+        assert_eq!(graph.song(), &song.song);
+        assert_eq!(graph.playback_mode, crate::PlaybackMode::Song);
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        assert_eq!(c.state.song, song.song);
+        assert!(!c.live().playing);
+        let slots = c.commands.slots();
+        let instances = c.instances.clone();
+        c.fail_replays(1);
+        assert_eq!(
+            c.load_state(EngineState::default()),
+            Err(ControlError::BuildFailed)
+        );
+        assert_eq!(c.state, song);
+        assert_eq!(c.instances, instances);
+        assert_eq!(c.commands.slots(), slots);
+        assert!(!c.recording_armed());
     }
 
     #[test]
@@ -1025,5 +1348,32 @@ mod tests {
         assert!(!c.synth_preset("Reese"));
         assert_eq!(c.commands.slots(), 39);
         assert_eq!(c.synth, before);
+    }
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn direct_recovery_stop_publishes_before_failed_reconstruction() {
+        let (mut c, mut p) = controller();
+        c.send(Command::Play).unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
+        p.process(&mut [0.0; crate::BLOCK * 2], 2);
+        c.attempts = 3;
+        fault(&mut c, &mut p);
+        while c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+        assert_eq!(c.check_health().len(), 1);
+        assert!(c.stop_owed);
+        c.replay_panics.set(1);
+        assert!(!c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 96_000.0
+            }
+        ));
+        assert!(!c.recording_armed());
+        assert!(c.recovery_stop_mark().is_some());
+        // A failed output-rate rebuild keeps the callback detached indefinitely.
+        assert!(
+            !c.live().playing,
+            "R5: directly settled stop must publish stopped transport without another callback"
+        );
     }
 }

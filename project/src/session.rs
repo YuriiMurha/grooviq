@@ -521,6 +521,7 @@ pub struct Session {
     recorder: Recorder,
     /// Recording is switched on (it takes notes while the transport plays).
     recording: bool,
+    recovery_stop_mark: Option<u32>,
     /// Recorded notes completed but not in the pattern yet: the engine did not take the
     /// pattern (its queue was full). Retried on the next collect. Each with its take (see
     /// `grooviq_engine::RecordEvent::Note`).
@@ -668,6 +669,7 @@ impl Session {
             autosaved_at: None,
             recorder: Recorder::new(),
             recording: false,
+            recovery_stop_mark: None,
             pending: Vec::new(),
             owed_disarm: false,
             live_presses: Mutex::new(Vec::new()),
@@ -1894,6 +1896,21 @@ impl Session {
     /// recording is switched off, and [`Recorded::stopped`] says what was lost.
     pub fn collect_recorded(&mut self, events: &[RecordEvent], now: Instant) -> Recorded {
         self.retry_live_releases();
+        let mut recovery_stopped = false;
+        {
+            let controller = lock(&self.controller);
+            let mark = controller.recovery_stop_mark();
+            if mark != self.recovery_stop_mark {
+                self.recovery_stop_mark = mark;
+                // Controller health can end a take independently of the record switch.
+                // Consume all accepted notes through its End and barrier, without refusal.
+                if !controller.recording_armed() {
+                    recovery_stopped = self.recording;
+                    self.recording = false;
+                    self.record_settle = Some(controller.record_mark());
+                }
+            }
+        }
         if self.owed_disarm {
             self.send_disarm();
         }
@@ -1922,6 +1939,13 @@ impl Session {
         let overflow = self.pending.split_off(fits.min(self.pending.len()));
 
         let mut out = Recorded::default();
+        if recovery_stopped {
+            out.stopped = Some(RecordingStopped {
+                reason: "engineRecovery",
+                dropped: 0,
+                message: "Recording stopped because sound engine recovery was exhausted.".into(),
+            });
+        }
         let mut error = None;
         match self.commit_pending(now) {
             Ok(PendingCommit::Empty) => {}

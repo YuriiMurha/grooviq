@@ -99,6 +99,7 @@ pub struct AudioProcessor {
     transport: TransportClock,
     recorder: Recorder,
     metronome: Metronome,
+    successful_blocks: u32,
     faults: u32,
     guard_hits: u32,
     meter: [f32; 2],
@@ -135,6 +136,7 @@ impl AudioProcessor {
             transport,
             recorder: Recorder::new(recorded),
             metronome: Metronome::new(sample_rate, time_signature),
+            successful_blocks: 0,
             faults: 0,
             guard_hits: 0,
             meter: [0.0; 2],
@@ -198,6 +200,7 @@ impl AudioProcessor {
         }
         self.graph = graph;
         self.unsent = None;
+        self.successful_blocks = 0;
         self.faulted = false;
         // Leftover frames were rendered at the old rate.
         self.served = BLOCK;
@@ -266,6 +269,7 @@ impl AudioProcessor {
                 graph.render(block_l, block_r, &events[..count])
             })) {
                 Ok(silenced) => {
+                    self.successful_blocks = self.successful_blocks.saturating_add(1);
                     self.guard_hits = self.guard_hits.wrapping_add(silenced);
                     self.metronome.render(
                         &mut self.block_l,
@@ -304,6 +308,8 @@ impl AudioProcessor {
         self.update_meter();
         self.clock = end;
         self.served = 0;
+        self.live
+            .publish_recovery(self.faults, self.successful_blocks);
         let tone = !self.faulted && self.graph.tone_on();
         self.live
             .publish(self.meter, tone, self.clock, self.faults, self.guard_hits);
@@ -597,7 +603,33 @@ impl AudioProcessor {
         }
     }
 
+    pub(crate) fn flush_recording_boundaries(&mut self) {
+        self.recorder.flush_mark();
+    }
+
+    pub(crate) fn finish_recovery_stop(&mut self, mark: u32) {
+        self.stop(self.clock);
+        self.recorder
+            .set(false, &self.transport, self.clock, &self.live);
+        self.recorder.mark(mark);
+        // Rebuilding may fail while the callback remains detached.
+        self.live.publish_transport(
+            self.transport.playing(),
+            self.graph
+                .position(self.transport.position_ticks(self.clock)),
+        );
+    }
+
+    pub(crate) fn stop_after_failed_rebuild(&mut self) {
+        self.fault();
+        self.live.publish_recovery(self.faults, 0);
+        self.live
+            .publish(self.meter, false, self.clock, self.faults, self.guard_hits);
+        self.served = BLOCK;
+    }
+
     fn fault(&mut self) {
+        self.successful_blocks = 0;
         self.faulted = true;
         self.faults = self.faults.wrapping_add(1);
     }
@@ -608,6 +640,7 @@ impl AudioProcessor {
     fn replace_graph(&mut self, mut graph: Box<Graph>, at: u64) {
         self.host_last = None;
         let leaving = if graph.generation() == self.generation {
+            self.successful_blocks = 0;
             let new_len = graph.pattern_length();
             if !self.faulted {
                 graph.keep_audio(&self.graph);
@@ -1111,6 +1144,79 @@ mod transport_delivery_tests {
         let facts = seen.lock().unwrap();
         assert_eq!(facts[7].sample_rate, 44100.);
         assert_ne!(facts[6].stream_generation, facts[7].stream_generation);
+    }
+    #[test]
+    fn faulted_rebuild_preserves_automation_and_current_host_stop() {
+        let channel = ChannelSetup::sampler(ChannelId(1), None, vec![], ChannelMix::default());
+        let automated = SongData {
+            end_tick: 9600,
+            automation: AutomationSchedule::build(
+                vec![AutomationClip {
+                    target: AutomationTarget::ChannelVolume(channel.id),
+                    priority: 1,
+                    start_tick: 0,
+                    offset_tick: 0,
+                    length_ticks: 9600,
+                    points: vec![AutomationPoint {
+                        tick: 0,
+                        value: 0.5,
+                        segment: AutomationSegment::Hold,
+                    }],
+                }],
+                std::slice::from_ref(&channel),
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        let (mut control, mut processor) = engine_with(
+            EngineConfig {
+                sample_rate: 48000.0,
+            },
+            EngineState {
+                channels: vec![channel],
+                song: automated.clone(),
+                ..Default::default()
+            },
+        );
+        let mut block = [0.0; BLOCK * 2];
+        control
+            .send(Command::SetPlaybackMode {
+                mode: PlaybackMode::Song,
+            })
+            .unwrap();
+        control.send(Command::SetTempo { bpm: 137.0 }).unwrap();
+        control.send(Command::Play).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.5);
+        processor.fault();
+        assert!(control.reconfigure(
+            &mut processor,
+            EngineConfig {
+                sample_rate: 44100.0
+            }
+        ));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        processor.graph.observe_synth(Box::new(Observe {
+            pending: None,
+            seen: seen.clone(),
+        }));
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.5);
+        let running = *seen.lock().unwrap().last().unwrap();
+        assert!(running.playing);
+        assert_eq!(running.bpm, 137.0);
+        assert_eq!(running.sample_rate, 44100.0);
+        assert_eq!(running.domain, grooviq_dsp::HostDomain::Song);
+        // Exercise direct exhaustion settlement with no callback to publish Stop.
+        processor.finish_recovery_stop(71);
+        assert!(!control.live().playing);
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 1.0);
+        let stopped = *seen.lock().unwrap().last().unwrap();
+        assert!(!stopped.playing);
+        assert_ne!(running.discontinuity, stopped.discontinuity);
+        assert_eq!(stopped.bpm, running.bpm);
+        assert_eq!(stopped.domain, running.domain);
     }
     #[test]
     fn idle_automation_transitions_restore_and_resume_current_targets() {
