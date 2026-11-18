@@ -1099,6 +1099,8 @@ export function installMockTauri(seed: MockSeed): void {
     return id;
   };
   const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
+    // Native menu state has no platform menu in this headless fixture.
+    edit_history_enabled: () => null,
     // commands.rs
     audio_outputs: () => [SILENT_OUTPUT],
     audio_select: (a) => {

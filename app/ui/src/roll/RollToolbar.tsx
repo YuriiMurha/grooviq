@@ -1,3 +1,7 @@
+import { Knob } from "../devices/controls/Knob";
+import { useEffect, useRef } from "react";
+import { AMOUNT_RANGES, type TransformAmount } from "./transformAmounts";
+import type { useTransformAmounts } from "./useTransformAmounts";
 import type { ProjectKey } from "../api/project";
 import { CHORDS, CHORD_LABELS } from "./chords";
 import { NOTE_NAMES, SCALES, scaleLabel } from "./scales";
@@ -7,6 +11,7 @@ import { TOOL_BUTTONS, type Tool } from "./tools";
 const INVERSIONS = ["Root position", "1st inversion", "2nd inversion", "3rd inversion"];
 
 interface Props {
+  amounts: ReturnType<typeof useTransformAmounts>;
   tool: Tool;
   onTool: (tool: Tool) => void;
   gridIndex: number;
@@ -35,6 +40,28 @@ interface Props {
 /** The piano roll's controls: tools, snap grid, key and scale, slide, ghosts, velocity lane,
  * chord stamps and the whole-selection operations. */
 export function RollToolbar(p: Props) {
+  const feel = useRef<HTMLDetailsElement>(null);
+  const cancelAmounts = p.amounts.cancel;
+  useEffect(() => {
+    const close = (returnFocus: boolean) => {
+      if (!feel.current?.open) return;
+      cancelAmounts();
+      feel.current.open = false;
+      if (returnFocus) feel.current.querySelector("summary")?.focus();
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && feel.current?.open) { e.preventDefault(); close(true); }
+    };
+    const pointer = (e: PointerEvent) => {
+      if (e.target instanceof Node && !feel.current?.contains(e.target)) close(false);
+    };
+    window.addEventListener("keydown", key);
+    window.addEventListener("pointerdown", pointer, true);
+    return () => {
+      window.removeEventListener("keydown", key);
+      window.removeEventListener("pointerdown", pointer, true);
+    };
+  }, [cancelAmounts]);
   const toggle = (label: string, hint: string, on: boolean, set: (on: boolean) => void, disabled = false) => (
     <button type="button" className="roll-tool" aria-pressed={on} disabled={disabled} data-hint={hint} onClick={() => set(!on)}>
       {label}
@@ -129,6 +156,17 @@ export function RollToolbar(p: Props) {
       </div>
       <div className="roll-group">
         {act("Quantize", "Move the starts of the selected notes (all notes with none selected) onto the snap grid (Alt+Q).", p.onQuantize)}
+        <details ref={feel} className="roll-feel" onToggle={() => { if (!feel.current?.open) cancelAmounts(); }}>
+          <summary className="roll-tool">Feel</summary>
+          <div className="roll-feel-panel" role="group" aria-label="Transform amounts">
+            {([ ["spread", "Strum spread"], ["timing", "Humanize timing"], ["velocity", "Humanize velocity"] ] as [TransformAmount, string][]).map(([id, label]) => (
+              <Knob key={id} id={id} param={AMOUNT_RANGES[id]} value={p.amounts.values[id]}
+                control={p.amounts.control(id)} label={label} name={label} size={36}
+                format={v => v === 0 ? "Off" : `${Math.round(v / AMOUNT_RANGES[id].max * 100)}%`}
+                does="Adjust the feel of the next operation from low to high." />
+            ))}
+          </div>
+        </details>
         {act("Strum up", "Spread the notes of each chord in time, lowest note first.", () => p.onStrum("up"))}
         {act("Strum down", "Spread the notes of each chord in time, highest note first.", () => p.onStrum("down"))}
         {act("Humanize", "Nudge the timing and velocity of the selected notes (all notes with none selected) a little, at random.", p.onHumanize)}
