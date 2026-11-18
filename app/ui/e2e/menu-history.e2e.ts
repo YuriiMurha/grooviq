@@ -45,3 +45,28 @@ test("menu history changes grid and roll notes once, preserving browser text his
     await field.evaluate((el) => el.remove());
   }
 });
+
+for (const tag of ["input", "textarea", "div"]) {
+  test(`text focus survives an unrelated live render: ${tag}`, async ({ app, mock }) => {
+    await clickCell(app, 0, 0); await clickCell(app, 0, 4);
+    await mock.eval("m => m.pauseLive(true)");
+    await app.evaluate((tag) => {
+      const field=document.createElement(tag); field.id="render-history-field";
+      if(tag==="div") field.contentEditable="true";
+      field.style.cssText="position:fixed;top:0;left:0;z-index:99999";
+      document.body.append(field); field.focus();
+    },tag);
+    const field=app.locator("#render-history-field");
+    const value=()=>field.evaluate(el=>el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement?el.value:el.textContent);
+    await app.keyboard.type("hello");
+    for(const redo of [false,true]) {
+      await field.evaluate(el=>(el as HTMLElement).blur());
+      await mock.eval(`m => m.injectLive(${!redo})`);
+      await expect(app.getByRole("button",{name:"Play",exact:true})).toHaveAttribute("aria-pressed",String(!redo));
+      await app.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve()))));
+      await mock.eval(`m => m.emit("edit-history",${redo})`);
+      await expect.poll(value).toBe(redo?"hello":"");
+      await expect.poll(()=>sessionNotes(mock)).toHaveLength(2);
+    }
+  });
+}

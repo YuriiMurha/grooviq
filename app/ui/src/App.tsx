@@ -4,7 +4,7 @@ import { installMenuHistory } from "./project/menuHistory";
 import { isProjectReplacing } from "./project/replacement";
 import { settleProjectEdits } from "./project/pending";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   autosaveStatus,
   errorText,
@@ -199,6 +199,8 @@ export function App() {
     [enqueue, adopt, shown, toast, session],
   );
   useEffect(() => trackDrags(window), []);
+  const menuHistoryAction = useRef(stepHistory);
+  useLayoutEffect(() => { menuHistoryAction.current = stepHistory; }, [stepHistory]);
   useEffect(() => {
     const sync = () => {
       const text = isTypingTarget(document.activeElement);
@@ -218,7 +220,7 @@ export function App() {
     };
   }, [view?.canUndo, view?.canRedo]);
   useEffect(() => {
-    const router = installMenuHistory(document, stepHistory, () => modalIsOpen());
+    const router = installMenuHistory(document, (redo) => menuHistoryAction.current(redo), () => modalIsOpen());
     let disposed = false;
     const listening = listen<boolean>("edit-history", ({ payload }) => {
       if (!disposed && typeof payload === "boolean") router.dispatch(payload);
@@ -228,7 +230,7 @@ export function App() {
       router.dispose();
       void listening.then((stop) => stop());
     };
-  }, [stepHistory]);
+  }, []);
   const toggleMetronome = () => {
     const on = !metronome;
     metronomeSet(on).then(() => setMetronome(on), (e: unknown) => toast(errorText(e), true));
