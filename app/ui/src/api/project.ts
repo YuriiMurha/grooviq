@@ -1,3 +1,4 @@
+import type { PatternStamp } from "./patterns";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -72,6 +73,7 @@ export interface ProjectView {
   /** Counts projects: moves on with every New, Open and Restore. Edits carry the one they were
    * made in, and the engine refuses one made for a project that was replaced since. */
   generation: number;
+  patternRevision?: number;
 }
 
 /** The project's key: a root (0..11, 0 = C) and a scale id ("minor", "dorian", ...). */
@@ -147,8 +149,8 @@ export const BPM_MAX = 400;
 
 export const projectView = () => invoke<ProjectView>("project_view");
 /** Applies `edit`, made in the project of `generation`. */
-export const projectEdit = (edit: Edit, generation: number) =>
-  invoke<ProjectView>("project_edit", { edit, generation });
+export const projectEdit = (edit: Edit, generation: number, stamp?: PatternStamp) =>
+  invoke<ProjectView>("project_edit", { edit, generation, stamp });
 /** Adds a channel playing the file at `path` to the project of `generation`. */
 export const channelAdd = (path: string, generation: number) =>
   invoke<ProjectView>("channel_add", { path, generation });

@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   open: vi.fn(),
   save: vi.fn(),
   setTitle: vi.fn(),
+  currentView: null as ProjectView | null,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -21,7 +22,10 @@ vi.mock("@tauri-apps/api/core", () => ({
     mocks.calls.push({ cmd, args });
     const handler = mocks.handlers.get(cmd);
     if (!handler) throw new Error(`no mock for ${cmd}`);
-    return handler(args);
+    const result: unknown = await handler(args);
+    const candidate = result && typeof result === "object" && "view" in result ? result.view : result;
+    if (candidate && typeof candidate === "object" && "pattern" in candidate && "generation" in candidate) mocks.currentView = candidate as ProjectView;
+    return result;
   },
 }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -100,6 +104,17 @@ beforeEach(() => {
   mocks.open.mockReset();
   mocks.save.mockReset();
   mocks.setTitle.mockReset();
+  mocks.currentView = null;
+  const patterns = () => {
+    const view = mocks.currentView ?? VIEW;
+    return { generation: view.generation, revision: view.patternRevision ?? 0, selected: view.pattern.id,
+      patterns: [{ id: view.pattern.id, name: view.pattern.name, revision: view.notesRevision }], view };
+  };
+  reply("pattern_list", patterns);
+  reply("pattern_edit", (args: Args) => {
+    if ((args?.edit as {kind?:string})?.kind !== "settle") throw new Error("This flow fixture only settles patterns.");
+    return { status: "applied", state: patterns(), settlement: { recordingDisarmed: false, waiting: false } };
+  });
   reply("audio_outputs", []);
   reply("audio_log", []);
   reply("audio_settings", { output: "default", guard: true });
