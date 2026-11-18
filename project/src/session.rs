@@ -322,7 +322,7 @@ pub fn decode_samples(loaded: &Loaded) -> DecodedSamples {
                 out.missing.insert(channel.id);
                 out.warnings.push(format!(
                     "Channel \"{}\": its sample \"{}\" could not be decoded ({e}). Relink it to hear the channel.",
-                    channel.name, file.name
+                    crate::model::warning_label(&channel.name), crate::model::warning_label(&file.name)
                 ));
             }
         }
