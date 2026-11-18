@@ -418,11 +418,18 @@ fn real_socket_makes_bounded_progress_at_the_requested_rate() {
     // real handshake, socket delivery, and rate wiring without a shared-host speed budget.
     for hz in [30, 60] {
         let server = start_stream(Arc::new(LiveShared::default()), hz).unwrap();
-        let (mut ws, _) = tungstenite::connect(url(&server).as_str()).unwrap();
+        let buffered_connect = || {
+            let (ws, _) = tungstenite::connect(url(&server).as_str()).unwrap();
+            // Deliberately let frames buffer before returning control to the client.
+            std::thread::sleep(Duration::from_millis(200));
+            ws
+        };
+        // Include the handshake and a delayed client's setup in the measurement.
+        let start = Instant::now();
+        let mut ws = buffered_connect();
         raw(&mut ws)
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let start = Instant::now();
         for _ in 0..120 {
             assert!(
                 start.elapsed() < Duration::from_secs(15),
@@ -442,9 +449,21 @@ fn real_socket_makes_bounded_progress_at_the_requested_rate() {
 fn the_rate_is_clamped() {
     // A huge rate must not busy-loop: it is held to 240 frames per second.
     let server = start_stream(Arc::new(LiveShared::default()), u32::MAX).unwrap();
-    let (mut ws, _) = tungstenite::connect(url(&server).as_str()).unwrap();
+    let buffered_connect = || {
+        let (ws, _) = tungstenite::connect(url(&server).as_str()).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        ws
+    };
     let start = Instant::now();
+    let mut ws = buffered_connect();
+    raw(&mut ws)
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
     for _ in 0..241 {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "clamped stream stopped progressing"
+        );
         ws.read().unwrap();
     }
     assert!(
