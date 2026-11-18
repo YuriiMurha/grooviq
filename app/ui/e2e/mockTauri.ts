@@ -389,16 +389,17 @@ export function installMockTauri(seed: MockSeed): void {
     const was = new Map(old.notes.map((n) => [n.id, n]));
     const before: MockNote[] = [];
     const after: MockNote[] = [];
+    // Notes contain only scalar fields; copy each snapshot without a JSON round trip.
     for (const n of next.notes) {
       const o = was.get(n.id);
       was.delete(n.id);
-      if (!o) after.push(clone(n));
+      if (!o) after.push({ ...n });
       else if (!sameNote(o, n)) {
-        before.push(clone(o));
-        after.push(clone(n));
+        before.push({ ...o });
+        after.push({ ...n });
       }
     }
-    for (const o of was.values()) before.push(clone(o));
+    for (const o of was.values()) before.push({ ...o });
     return { before, after };
   };
   const sizeOf = (c: NoteChange) => c.before.length + c.after.length;
