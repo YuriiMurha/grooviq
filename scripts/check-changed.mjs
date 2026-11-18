@@ -156,6 +156,8 @@ if (ui) {
   step("ui typecheck", "npm", ["run", "typecheck"], uiDir);
   step("ui tests", "npm", ["test", "--", "--run"], uiDir);
 }
+if (ui || workspace || changed.includes("scripts/grid-budget.mjs"))
+  step("grid CPU budget", "node", ["scripts/grid-budget.mjs"]);
 // The app crate's build script embeds the built UI, so it needs app/ui/dist.
 if (ui || workspace || rustCrates.has("grooviq-app")) step("ui build", "npm", ["run", "build"], uiDir);
 
@@ -168,6 +170,10 @@ if (workspace || rustCrates.size > 0) {
 if (workspace || rustCrates.has("grooviq-project") || changed.some((path) => path.startsWith("scripts/notes-edit-budget."))) {
   step("notes budget runner tests", "node", ["--test", "scripts/notes-edit-budget.test.mjs"]);
   step("notes edit budget", "node", ["scripts/notes-edit-budget.mjs"]);
+}
+if (workspace || rustCrates.has("grooviq-engine") || changed.some((path) => path === "scripts/export-budget.mjs" || path.startsWith("scripts/notes-edit-budget."))) {
+  step("export budget runner tests", "node", ["--test", "scripts/notes-edit-budget.test.mjs"]);
+  step("export budget", "node", ["scripts/export-budget.mjs"]);
 }
 if (tooling) {
   step("tooling: check-changed plans", "node", ["scripts/check-changed.mjs", "--plan", "--base", base]);
