@@ -27,6 +27,8 @@ const SR: f32 = 48_000.0;
 
 #[path = "realtime/bitcrusher.rs"]
 mod bitcrusher;
+#[path = "realtime/character_delay.rs"]
+mod character_delay;
 #[path = "realtime/fattener.rs"]
 mod fattener;
 #[path = "realtime/saturation.rs"]
