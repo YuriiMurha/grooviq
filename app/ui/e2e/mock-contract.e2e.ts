@@ -248,3 +248,19 @@ test("play_while_playing_preserves_the_clock_and_held_position", async ({ app, m
   expect(await mock.eval("(m) => m.state.transport.held")).toBeNull();
   expect(await mock.eval("(m) => m.state.transport.startTicks")).toBe(0);
 });
+
+
+test.describe("autosave initialization failure", () => {
+  const disabled = "Autosave and recovery could not start: startup-probe. Your changes are not being backed up; save the project to keep them.";
+  test.use({ seed: { autosave: { disabled } } });
+
+  test("retains unavailable status and warns once at startup", async ({ app }) => {
+    const warnings = app.getByRole("status", { name: "Messages" }).locator(".toast.warn");
+    await expect(warnings).toHaveCount(1);
+    await expect(warnings).toContainText([disabled]);
+    for (let i = 0; i < 3; i++) {
+      expect(await call(app, "autosave_status")).toEqual({ disabled, failure: null });
+    }
+    await expect(warnings).toHaveCount(1);
+  });
+});
