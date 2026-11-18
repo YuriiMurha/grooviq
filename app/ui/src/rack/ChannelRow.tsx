@@ -36,6 +36,7 @@ const PREVIEW_KEY = 60;
 export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSelect, onRemove }: Props) {
   /** The preview sounding now (its press), while the name is held. */
   const previewing = useRef<Press | null>(null);
+  const pointer = useRef<number | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const menuItem = useRef<HTMLButtonElement>(null);
   const { id, name } = channel;
@@ -43,6 +44,7 @@ export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSele
 
   // A preview plays only while the person holds the name down: the sample, or the synth's C4.
   const preview = (on: boolean) => {
+    if (!on) pointer.current = null;
     const sounding = previewing.current;
     if ((sounding !== null) === on) return;
     if (on) {
@@ -99,13 +101,17 @@ export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSele
   };
 
   const onPointerDown = (e: PointerEvent<HTMLButtonElement>) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || !e.isPrimary || pointer.current !== null) return;
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
-      /* no pointer capture here */
+      return; // Without capture, an outside release cannot be guaranteed.
     }
+    pointer.current = e.pointerId;
     preview(true);
+  };
+  const onPointerEnd = (e: PointerEvent<HTMLButtonElement>) => {
+    if (e.pointerId === pointer.current) preview(false);
   };
   const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (e.key === "Enter") {
@@ -144,12 +150,17 @@ export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSele
         aria-current={selected ? "true" : undefined}
         data-hint={`Press and hold to hear ${name}. Release to stop. The typing keyboard plays the selected channel; Delete removes it.`}
         onPointerDown={onPointerDown}
-        onPointerUp={() => preview(false)}
-        onPointerCancel={() => preview(false)}
-        onLostPointerCapture={() => preview(false)}
+        onPointerUp={onPointerEnd}
+        onPointerCancel={onPointerEnd}
+        onLostPointerCapture={onPointerEnd}
         onKeyDown={onKeyDown}
         onKeyUp={onKeyUp}
-        onBlur={() => preview(false)}
+        onBlur={(e) => {
+          // WebKit blurs an already focused button after pointerdown. Its captured hold
+          // still owns the preview; keyboard previews continue to end on focus leaving.
+          if (pointer.current !== null && e.currentTarget.hasPointerCapture(pointer.current)) return;
+          preview(false);
+        }}
       >
         <span className="channel-title">{name}</span>
         <span className="channel-sample">{synth ? (channel.preset ?? "Synth") : (channel.sampleName ?? "No sample")}</span>

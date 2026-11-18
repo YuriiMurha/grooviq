@@ -204,6 +204,8 @@ pub fn notes_m2_project(samples_dir: &Path) -> (Project, SampleFiles) {
     let next_note_id = notes.len() as u32 + 1;
 
     let project = Project {
+        play_mode: Default::default(),
+        arrangement: Default::default(),
         name: "Notes M2".into(),
         bpm: 140.0,
         time_signature: TimeSignature { beats: 4, unit: 4 },
