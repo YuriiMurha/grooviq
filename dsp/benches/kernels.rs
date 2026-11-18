@@ -303,26 +303,6 @@ fn fattener_block<const N: usize>(bencher: Bencher, name: &str) {
     });
 }
 
-#[divan::bench(args = grooviq_dsp::shimmer_reverb::PRESETS, consts = [64, 128])]
-fn shimmer_reverb_block<const N: usize>(bencher: Bencher, name: &str) {
-    use grooviq_dsp::shimmer_reverb::{ShimmerReverb, preset};
-    let mut device = ShimmerReverb::new(SR);
-    for (index, value) in preset(name).unwrap() {
-        device.set_param(index, value);
-    }
-    let source_l: [f32; N] = std::array::from_fn(|i| libm::sinf(i as f32 * 0.137) * 0.6);
-    let source_r: [f32; N] = std::array::from_fn(|i| libm::cosf(i as f32 * 0.213) * 0.4);
-    for _ in 0..(SR as usize * 4 / N) {
-        let (mut l, mut r) = (source_l, source_r);
-        device.process(&mut l, &mut r, None, &[]);
-    }
-    bencher.bench_local(|| {
-        let (mut l, mut r) = (source_l, source_r);
-        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
-        black_box((l, r));
-    });
-}
-
 #[divan::bench(args = grooviq_dsp::saturation::PRESETS, consts = [64, 128])]
 fn saturation_block<const N: usize>(bencher: Bencher, patch: &str) {
     let mut d = grooviq_dsp::saturation::Saturation::new(SR);
@@ -349,4 +329,79 @@ fn saturation_block<const N: usize>(bencher: Bencher, patch: &str) {
     bencher
         .with_inputs(source)
         .bench_local_refs(|(l, r)| d.process(black_box(l), black_box(r), None, &[]));
+}
+
+fn algorithmic_reverb_block(bencher: Bencher, block: usize, model: usize) {
+    use grooviq_dsp::algorithmic_reverb::{AlgorithmicReverb, PRESETS, preset};
+    let mut d = AlgorithmicReverb::new(SR);
+    for (i, v) in preset(PRESETS[model]).unwrap() {
+        d.set_param(i, v);
+    }
+    let bank: Vec<([f32; 128], [f32; 128])> = (0..1024)
+        .map(|b| {
+            let l = std::array::from_fn(|i| libm::sinf((b * 128 + i) as f32 * 0.037) * 0.3);
+            let r = std::array::from_fn(|i| libm::sinf((b * 128 + i) as f32 * 0.053) * 0.2);
+            (l, r)
+        })
+        .collect();
+    for n in 0..(SR as usize * 4 / block) {
+        let (mut l, mut r) = bank[n % bank.len()];
+        d.process(&mut l[..block], &mut r[..block], None, &[]);
+    }
+    let mut cursor = 0;
+    bencher
+        .with_inputs(|| {
+            let source = bank[cursor];
+            cursor = (cursor + 1) % bank.len();
+            source
+        })
+        .bench_local_values(|(mut l, mut r)| {
+            d.process(
+                black_box(&mut l[..block]),
+                black_box(&mut r[..block]),
+                None,
+                &[],
+            );
+            black_box((l, r));
+        });
+}
+#[divan::bench(args = [64,128])]
+fn algorithmic_reverb_room(b: Bencher, block: usize) {
+    algorithmic_reverb_block(b, block, 0);
+}
+#[divan::bench(args = [64,128])]
+fn algorithmic_reverb_hall(b: Bencher, block: usize) {
+    algorithmic_reverb_block(b, block, 1);
+}
+#[divan::bench(args = [64,128])]
+fn algorithmic_reverb_plate(b: Bencher, block: usize) {
+    algorithmic_reverb_block(b, block, 2);
+}
+#[divan::bench(args = [64,128])]
+fn algorithmic_reverb_chamber(b: Bencher, block: usize) {
+    algorithmic_reverb_block(b, block, 3);
+}
+#[divan::bench(args = [64,128])]
+fn algorithmic_reverb_nonlinear(b: Bencher, block: usize) {
+    algorithmic_reverb_block(b, block, 4);
+}
+
+#[divan::bench(args = grooviq_dsp::shimmer_reverb::PRESETS, consts = [64, 128])]
+fn shimmer_reverb_block<const N: usize>(bencher: Bencher, name: &str) {
+    use grooviq_dsp::shimmer_reverb::{ShimmerReverb, preset};
+    let mut device = ShimmerReverb::new(SR);
+    for (index, value) in preset(name).unwrap() {
+        device.set_param(index, value);
+    }
+    let source_l: [f32; N] = std::array::from_fn(|i| libm::sinf(i as f32 * 0.137) * 0.6);
+    let source_r: [f32; N] = std::array::from_fn(|i| libm::cosf(i as f32 * 0.213) * 0.4);
+    for _ in 0..(SR as usize * 4 / N) {
+        let (mut l, mut r) = (source_l, source_r);
+        device.process(&mut l, &mut r, None, &[]);
+    }
+    bencher.bench_local(|| {
+        let (mut l, mut r) = (source_l, source_r);
+        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
+        black_box((l, r));
+    });
 }

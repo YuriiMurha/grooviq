@@ -16,6 +16,7 @@ pub mod saturation;
 mod util;
 mod wavetable;
 
+pub mod algorithmic_reverb;
 pub mod bitcrusher;
 pub mod character_delay;
 pub mod comp;
@@ -48,6 +49,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
         "drum_shaper" => &drum_shaper::SPEC,
         "reverb" => &reverb::SPEC,
         "shimmer_reverb" => &shimmer_reverb::SPEC,
+        "algorithmic_reverb" => &algorithmic_reverb::SPEC,
         "character_delay" => &character_delay::SPEC,
         "delay" => &delay::SPEC,
         "ott" => &ott::SPEC,
@@ -73,6 +75,7 @@ pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
         "drum_shaper" => Box::new(drum_shaper::DrumShaper::new(sample_rate)),
         "reverb" => Box::new(reverb::Reverb::new(sample_rate)),
         "shimmer_reverb" => Box::new(shimmer_reverb::ShimmerReverb::new(sample_rate)),
+        "algorithmic_reverb" => Box::new(algorithmic_reverb::AlgorithmicReverb::new(sample_rate)),
         "character_delay" => Box::new(character_delay::CharacterDelay::new(sample_rate)),
         "delay" => Box::new(delay::Delay::new(sample_rate)),
         "ott" => Box::new(ott::Ott::new(sample_rate)),
