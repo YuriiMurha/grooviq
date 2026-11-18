@@ -2,7 +2,7 @@
 
 use grooviq_dsp::{Device, NoteEvent, create, param_spec};
 
-const IDS: [&str; 15] = [
+const IDS: [&str; 16] = [
     "synth",
     "eq",
     "comp",
@@ -18,8 +18,9 @@ const IDS: [&str; 15] = [
     "fattener",
     "bitcrusher",
     "algorithmic_reverb",
+    "lofi_colour",
 ];
-const EFFECTS: [&str; 14] = [
+const EFFECTS: [&str; 15] = [
     "eq",
     "comp",
     "limiter",
@@ -34,6 +35,7 @@ const EFFECTS: [&str; 14] = [
     "fattener",
     "bitcrusher",
     "algorithmic_reverb",
+    "lofi_colour",
 ];
 const RATES: [f32; 5] = [22050.0, 44100.0, 48000.0, 96000.0, 192000.0];
 
@@ -782,6 +784,15 @@ fn random_parameter_sweeps_never_produce_nan() {
 /// A parameter set per effect that exercises its interesting paths.
 fn interesting(id: &str) -> Vec<(u32, f32)> {
     match id {
+        "lofi_colour" => vec![
+            (0, 0.8),
+            (1, 0.4),
+            (2, 0.6),
+            (3, 0.3),
+            (4, 0.7),
+            (5, 0.5),
+            (6, 0.4),
+        ],
         "algorithmic_reverb" => vec![(0, 1.0), (2, 0.0), (10, 0.7)],
         "saturation" => vec![
             (0, 1.),
@@ -828,6 +839,16 @@ fn interesting(id: &str) -> Vec<(u32, f32)> {
 /// Changes applied at sample 4736 (a multiple of both 128 and 37) to test smoothing paths.
 fn changes(id: &str) -> Vec<(u32, f32)> {
     match id {
+        "lofi_colour" => vec![
+            (0, 0.3),
+            (1, 0.8),
+            (2, 0.1),
+            (3, 0.9),
+            (4, 0.2),
+            (5, 0.7),
+            (6, 0.8),
+            (7, 2.0),
+        ],
         "algorithmic_reverb" => vec![(0, 4.0), (1, 2.0), (4, 0.9), (10, 0.3)],
         "saturation" => vec![
             (0, 3.),
