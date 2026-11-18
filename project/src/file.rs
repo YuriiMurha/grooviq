@@ -392,7 +392,7 @@ fn plan(
     {
         return Err(too_big(format!(
             "Pattern \"{}\" has {} notes, more than the {MAX_NOTES_PER_PATTERN} a pattern can hold, so the project was not saved.",
-            p.name,
+            crate::model::warning_label(&p.name),
             p.notes.len()
         )));
     }
