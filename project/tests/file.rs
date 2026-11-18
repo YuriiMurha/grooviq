@@ -1824,3 +1824,50 @@ fn warning_labels_are_bounded_but_names_roundtrip_losslessly() {
         assert!(again.warnings.is_empty());
     }
 }
+
+#[test]
+fn invalid_key_scale_zip_warning_is_bounded_and_preserves_other_data() {
+    for scale in [
+        "x".repeat(4_000_000),
+        "🎹界".repeat(100_000),
+        format!(
+            "\0\n\r\t\u{0085}\u{061c}\u{200e}\u{200f}\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\u{2066}\u{2067}\u{2068}\u{2069}{}",
+            "🎹".repeat(100_000)
+        ),
+        "major".into(),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("shared.grooviq");
+        let output = dir.path().join("normalized.grooviq");
+        let (mut p, samples) = project();
+        let valid = scale == "major";
+        p.key = Some(ProjectKey { root: 7, scale });
+        // Derive only the documented key repair, independently of validation.
+        // Saving fills embedded sample references; keep that disk representation.
+        save(&p, &samples, &input).unwrap();
+        let mut expected = saved_json(&input);
+        if !valid {
+            expected["key"] = serde_json::Value::Null;
+        }
+        let loaded = load(&input).unwrap();
+        assert_eq!(loaded.warnings.len(), usize::from(!valid));
+        for warning in &loaded.warnings {
+            assert!(warning.len() < 300, "warning has {} bytes", warning.len());
+            assert!(!warning.chars().any(|c| c.is_control()
+                || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')));
+        }
+        assert_eq!(loaded.project.key.is_some(), valid);
+        assert_eq!(loaded.samples.len(), samples.len());
+        for (id, sample) in &samples {
+            assert_eq!(loaded.samples[id].name, sample.name);
+            assert_eq!(loaded.samples[id].bytes, sample.bytes);
+        }
+        save(&loaded.project, &loaded.samples, &output).unwrap();
+        assert_eq!(saved_json(&output), expected);
+        let again = load(&output).unwrap();
+        assert_eq!(again.project, loaded.project);
+        assert!(again.warnings.is_empty());
+        save(&again.project, &again.samples, &input).unwrap();
+        assert_eq!(fs::read(&input).unwrap(), fs::read(&output).unwrap());
+    }
+}
