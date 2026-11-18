@@ -135,6 +135,8 @@ pub struct Saturation {
     models: [Smooth; 4],
     ch: [Channel; 2],
     fresh: bool,
+    compensation_db: [f32; 49],
+    compensation_at: usize,
 }
 impl Saturation {
     pub fn new(sample_rate: f32) -> Self {
@@ -149,6 +151,8 @@ impl Saturation {
             models: [Smooth::new(0., 10., sr); 4],
             ch: [Channel::new(), Channel::new()],
             fresh: true,
+            compensation_db: [0.; 49],
+            compensation_at: 0,
         };
         for (i, s) in SPEC.iter().enumerate() {
             d.set_param(i as u32, s.2);
@@ -162,6 +166,9 @@ impl Saturation {
         for s in self.controls.iter_mut().chain(self.models.iter_mut()) {
             s.snap();
         }
+        self.compensation_db
+            .fill(self.controls[0].target + self.controls[2].target);
+        self.compensation_at = 0;
     }
 }
 impl Device for Saturation {
@@ -197,10 +204,15 @@ impl Device for Saturation {
             let p = self.controls.each_mut().map(Smooth::next);
             let w = self.models.each_mut().map(Smooth::next);
             let gain = db_to_gain(p[0] + p[2]);
-            let compensation = db_to_gain(-(p[0] + p[2]) * p[5]);
+            // Align effective pre-gain with the fixed FIR latency, preserving static arithmetic.
+            let delayed_db = self.compensation_db[self.compensation_at];
+            self.compensation_db[self.compensation_at] = p[0] + p[2];
+            self.compensation_at = (self.compensation_at + 1) % 49;
+            let compensation = db_to_gain(-delayed_db * p[5]);
             let hp = onepole_gain(p[3].min(self.sr * 0.45), self.sr);
             let lp = onepole_gain(p[4].min(self.sr * 0.45), self.sr);
-            let tilt = onepole_gain(700., self.sr);
+            // Place the unity crossing at 700 Hz as shelf gains change.
+            let tilt = onepole_gain(700. * db_to_gain(6. * p[1]), self.sr);
             let lo = db_to_gain(-6. * p[1]);
             let hi = db_to_gain(6. * p[1]);
             let out = db_to_gain(p[7]);

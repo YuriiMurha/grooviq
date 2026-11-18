@@ -331,3 +331,187 @@ fn mixes_are_aligned_affine_combinations() {
         }
     }
 }
+
+// Linear-region reference isolates compensation timing from nonlinear loudness.
+#[test]
+fn automation_compensation_tracks_delayed_audio() {
+    for sr in [22050., 48000., 192000.] {
+        for (index, top) in [(1, 30.), (3, 18.)] {
+            for (from, to) in [(0., top), (top, 0.)] {
+                for block in [1, 47, 128] {
+                    let mut a = Saturation::new(sr);
+                    let mut b = Saturation::new(sr);
+                    a.set_param(index, from);
+                    let n = sr as usize / 2;
+                    let mut worst = 0f64;
+                    let mut actual = Vec::new();
+                    let mut reference = Vec::new();
+                    for at in (0..n * 2).step_by(block) {
+                        if at >= n && at < n + block {
+                            a.set_param(index, to);
+                        }
+                        let len = block.min(n * 2 - at);
+                        let mut l: Vec<_> = (at..at + len)
+                            .map(|i| {
+                                1e-6 * libm::sinf(i as f32 * std::f32::consts::TAU * 1000. / sr)
+                            })
+                            .collect();
+                        let mut r = l.clone();
+                        let mut x = l.clone();
+                        let mut y = l.clone();
+                        a.process(&mut l, &mut r, None, &[]);
+                        b.process(&mut x, &mut y, None, &[]);
+                        actual.extend(l);
+                        reference.extend(x);
+                    }
+                    let window = (sr / 1000.) as usize;
+                    for at in (n + 49..n * 2 - window).step_by(window) {
+                        let db = 10.
+                            * libm::log10(
+                                energy(&actual[at..at + window])
+                                    / energy(&reference[at..at + window]),
+                            );
+                        worst = worst.max(db.abs());
+                    }
+                    eprintln!("envelope {sr} {index} {from}->{to} block {block}: {worst} dB");
+                    assert!(worst < 0.3, "{sr} {index} {from}->{to}: {worst} dB");
+                }
+            }
+        }
+    }
+}
+
+fn linear_response(sr: f32, hz: f32, params: &[(u32, f32)]) -> f64 {
+    let mut d = Saturation::new(sr);
+    for &(i, v) in params {
+        d.set_param(i, v);
+    }
+    let n = sr as usize * 2;
+    let mut l: Vec<_> = (0..n)
+        .map(|i| 1e-6 * libm::sinf(std::f32::consts::TAU * hz * i as f32 / sr))
+        .collect();
+    let mut r = l.clone();
+    d.process(&mut l, &mut r, None, &[]);
+    energy(&l[n / 2..])
+}
+fn db_ratio(a: f64, b: f64) -> f64 {
+    10. * libm::log10(a / b)
+}
+#[test]
+fn physical_cut_tone_and_gain_response() {
+    for sr in [22050., 48000., 192000.] {
+        for (index, hz, neutral) in [(4, 400., 20.), (5, 2000., 20000.)] {
+            let db = db_ratio(
+                linear_response(sr, hz, &[(index, hz)]),
+                linear_response(sr, hz, &[(index, neutral)]),
+            );
+            assert!((db + 3.).abs() < 0.5, "cut {sr} {index}: {db}");
+        }
+        for (hz, expected) in [(100., -6.), (10000., 6.)] {
+            let db = db_ratio(
+                linear_response(sr, hz, &[(2, 1.)]),
+                linear_response(sr, hz, &[]),
+            );
+            assert!((db - expected).abs() < 0.5, "tone {sr} {hz}: {db}");
+        }
+        // The tilt pivot stays at unity while the shelves move in opposite directions.
+        let db = db_ratio(
+            linear_response(sr, 700., &[(2, 1.)]),
+            linear_response(sr, 700., &[]),
+        );
+        let expected = 0.;
+        assert!((db - expected).abs() < 0.1, "tilt {sr}: {db}");
+        let db = db_ratio(
+            linear_response(sr, 1000., &[(1, 12.), (3, 6.)]),
+            linear_response(sr, 1000., &[]),
+        );
+        assert!(db.abs() < 0.1, "auto {sr}: {db}");
+    }
+    let a = linear_response(22050., 7000., &[(5, 20000.)]);
+    let b = linear_response(22050., 7000., &[(5, 9922.5)]);
+    assert_eq!(a, b);
+    let reference = linear_response(22050., 7000., &[(5, 5000.)]);
+    let t = libm::tan(std::f64::consts::PI * 7000. / 22050.);
+    let response = |fc: f64| {
+        let g = libm::tan(std::f64::consts::PI * fc / 22050.);
+        g * g / (g * g + t * t)
+    };
+    let expected = 10. * libm::log10(response(9922.5) / response(5000.));
+    assert!(
+        (db_ratio(a, reference) - expected).abs() < 0.1,
+        "high-cut cap"
+    );
+}
+#[test]
+fn constructor_rate_bounds_and_fallback() {
+    for (given, effective) in [
+        (8000., 22050.),
+        (384000., 192000.),
+        (f32::NAN, 48000.),
+        (f32::INFINITY, 48000.),
+        (f32::NEG_INFINITY, 48000.),
+    ] {
+        assert_eq!(
+            render(given, 47, "Amber filament", true),
+            render(effective, 47, "Amber filament", true)
+        );
+    }
+}
+#[test]
+fn pre_gain_ramps_after_fir_latency_with_auto_gain_off() {
+    for sr in [22050., 48000., 192000.] {
+        for index in [1, 3] {
+            for phase in [0., 0.7, 2.] {
+                let mut a = Saturation::new(sr);
+                let mut b = Saturation::new(sr);
+                for d in [&mut a, &mut b] {
+                    d.set_param(6, 0.);
+                }
+                let input: Vec<_> = (0..2048)
+                    .map(|i| 1e-5 * libm::sinf(i as f32 * 0.13 + phase))
+                    .collect();
+                let mut l = input.clone();
+                let mut r = l.clone();
+                a.process(&mut l, &mut r, None, &[]);
+                let mut x = input.clone();
+                let mut y = x.clone();
+                b.process(&mut x, &mut y, None, &[]);
+                a.set_param(index, 18.);
+                let mut l = input.clone();
+                let mut r = l.clone();
+                let mut x = input.clone();
+                let mut y = x.clone();
+                a.process(&mut l, &mut r, None, &[]);
+                b.process(&mut x, &mut y, None, &[]);
+                for range in [49..61, 61..100] {
+                    let delta = l[range.clone()]
+                        .iter()
+                        .zip(&x[range])
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0f32, f32::max);
+                    assert!(
+                        delta < 5e-6,
+                        "pre-gain snapped {sr} {index} {phase}: {delta}"
+                    );
+                }
+                assert!(energy(&l[1024..]) > energy(&x[1024..]) * 1.2);
+            }
+        }
+    }
+}
+
+#[test]
+fn dc_corner_scales_with_rate() {
+    for sr in [22050., 48000., 192000.] {
+        let hz = 5f64;
+        let w = std::f64::consts::TAU * hz / sr as f64;
+        let r = 1. - std::f64::consts::TAU * 5. / sr as f64;
+        let dc = (2. - 2. * libm::cos(w)) / (1. + r * r - 2. * r * libm::cos(w));
+        let t = libm::tan(w / 2.);
+        let hp = t * t / (t * t + libm::pow(libm::tan(std::f64::consts::PI * 20. / sr as f64), 2.));
+        let expected = 0.5e-12 * dc * hp;
+        let measured = linear_response(sr, 5., &[]);
+        let db = db_ratio(measured, expected);
+        assert!(db.abs() < 0.08, "DC corner {sr}: {db}");
+    }
+}
