@@ -137,6 +137,8 @@ describe("ChannelRack", () => {
     const { user, engine } = setup(project([KICK, SNARE]));
     await rack();
     const name = screen.getByRole("button", { name: /^Snare/ });
+    // jsdom has no pointer capture; this test exercises the browser-supported path.
+    name.setPointerCapture = () => {};
     await user.pointer({ keys: "[MouseLeft>]", target: name });
     await waitFor(() => expect(engine.argsOf("channel_preview")).toEqual([{ channel: 2, on: true }]));
     await user.pointer({ keys: "[/MouseLeft]", target: name });
