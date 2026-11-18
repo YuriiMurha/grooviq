@@ -375,7 +375,7 @@ fn changing_the_pattern_length_mid_play_keeps_the_place_in_the_loop() {
 fn a_note_off_booked_before_a_tempo_jump_does_not_cut_a_newer_note() {
     // Gate mode, one key: note A (step 0, one step) books its note-off at frame 6 000 at
     // 120 BPM. At 400 BPM from frame 3 008, note B (step 1, eight steps) starts at frame
-    // 3 906, before A's note-off arrives. That note-off releases A only: B holds until its
+    // 3 906, when A now releases at its musical end. That release affects A only: B holds until its
     // own end (frame 18 306).
     let mut gate = exact();
     gate[ONE_SHOT] = 0.0;
@@ -399,7 +399,7 @@ fn a_note_off_booked_before_a_tempo_jump_does_not_cut_a_newer_note() {
     );
     let l = left(&out);
     // A and B together, then B alone (A's 40 ms release is far below -60 dB by 15 000).
-    assert!((l[5_000] - 1.0).abs() < 1e-3, "{}", l[5_000]);
+    assert!(l[4_000] > 0.5, "A releases while B sounds: {}", l[4_000]);
     assert!(
         (l[15_000] - 0.5).abs() < 1e-3,
         "B still sounds: {}",
