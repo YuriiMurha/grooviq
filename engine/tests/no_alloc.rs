@@ -20,8 +20,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "realtime/lofi_colour.rs"]
+mod lofi_colour;
+
 const SR: f32 = 48_000.0;
 
+#[path = "realtime/algorithmic_reverb.rs"]
+mod algorithmic_reverb;
 #[path = "realtime/bitcrusher.rs"]
 mod bitcrusher;
 #[path = "realtime/character_delay.rs"]

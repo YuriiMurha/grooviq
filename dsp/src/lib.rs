@@ -16,6 +16,7 @@ pub mod saturation;
 mod util;
 mod wavetable;
 
+pub mod algorithmic_reverb;
 pub mod bitcrusher;
 pub mod character_delay;
 pub mod comp;
@@ -25,6 +26,7 @@ pub mod drum_shaper;
 pub mod eq;
 pub mod fattener;
 pub mod limiter;
+pub mod lofi_colour;
 pub mod ott;
 pub mod reverb;
 pub mod sampler;
@@ -35,6 +37,7 @@ pub mod utility;
 /// (`SPEC` index order). Useful for clamping, defaults and UI ranges.
 pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
     Some(match id {
+        "lofi_colour" => &lofi_colour::SPEC,
         "bitcrusher" => &bitcrusher::SPEC,
         "synth" => &synth::SPEC,
         "sampler" => &sampler::SPEC,
@@ -46,6 +49,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
         "saturation" => &saturation::SPEC,
         "drum_shaper" => &drum_shaper::SPEC,
         "reverb" => &reverb::SPEC,
+        "algorithmic_reverb" => &algorithmic_reverb::SPEC,
         "character_delay" => &character_delay::SPEC,
         "delay" => &delay::SPEC,
         "ott" => &ott::SPEC,
@@ -59,6 +63,7 @@ pub fn param_spec(id: &str) -> Option<&'static [(f32, f32, f32)]> {
 /// until the owner of the concrete [`sampler::Sampler`] calls `set_sample`.
 pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
     Some(match id {
+        "lofi_colour" => Box::new(lofi_colour::LofiColour::new(sample_rate)),
         "bitcrusher" => Box::new(bitcrusher::Bitcrusher::new(sample_rate)),
         "synth" => Box::new(synth::Synth::new(sample_rate)),
         "sampler" => Box::new(sampler::Sampler::new(sample_rate)),
@@ -70,6 +75,7 @@ pub fn create(id: &str, sample_rate: f32) -> Option<Box<dyn Device>> {
         "saturation" => Box::new(saturation::Saturation::new(sample_rate)),
         "drum_shaper" => Box::new(drum_shaper::DrumShaper::new(sample_rate)),
         "reverb" => Box::new(reverb::Reverb::new(sample_rate)),
+        "algorithmic_reverb" => Box::new(algorithmic_reverb::AlgorithmicReverb::new(sample_rate)),
         "character_delay" => Box::new(character_delay::CharacterDelay::new(sample_rate)),
         "delay" => Box::new(delay::Delay::new(sample_rate)),
         "ott" => Box::new(ott::Ott::new(sample_rate)),
