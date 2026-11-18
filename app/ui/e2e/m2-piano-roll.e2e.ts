@@ -54,12 +54,23 @@ async function drag(page: Page, from: { x: number; y: number }, to: { x: number;
   await page.mouse.up({ button });
 }
 
+async function waitForInitialDraw(page: Page, timeout?: number) {
+  const info = test.info();
+  // Readiness is correctness, not a five-second performance gate. Reserve half the
+  // case budget for editing and its assertions; a stalled draw fails here.
+  const budget = timeout ?? Math.max(1, Math.floor(info.timeout / 2));
+  await expect.poll(async () => (await stats(page))?.draws ?? 0, {
+    timeout: budget,
+    message: "piano roll must draw before editing",
+  }).toBeGreaterThan(0);
+}
+
 /** F7 opens the roll on the selected channel; F6 hides the rack to give it the height. */
-async function openRoll(page: Page) {
+async function openRoll(page: Page, drawTimeout?: number) {
   await page.keyboard.press("F7");
   await page.keyboard.press("F6");
   await expect(canvas(page)).toBeVisible();
-  await expect.poll(async () => (await stats(page))?.draws ?? 0).toBeGreaterThan(0);
+  await waitForInitialDraw(page, drawTimeout);
   await settled(page);
 }
 
@@ -74,6 +85,57 @@ const ink = (page: Page) =>
     const hex = getComputedStyle(document.documentElement).getPropertyValue("--ink-4").trim();
     return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
   });
+
+test.describe("initial draw readiness", () => {
+  test.use({ seed: { project: bass([]) } });
+
+  for (const state of ["missing", "zero"] as const) {
+    test(`a_${state}_draw_observation_blocks_editing`, async ({ app, mock }) => {
+      await openRoll(app);
+      await app.keyboard.press("F7");
+      await app.keyboard.press("F6");
+      const restore = await app.evaluate((state) => {
+        const w = window as unknown as { __grooviqRoll?: RollStats; __savedRoll?: RollStats };
+        w.__savedRoll = w.__grooviqRoll;
+        w.__grooviqRoll = state === "missing" ? undefined : { ...w.__grooviqRoll!, draws: 0 };
+        return !!w.__savedRoll;
+      }, state);
+      expect(restore).toBe(true);
+      try {
+        await expect(openRoll(app, 300)).rejects.toThrow(/piano roll must draw before editing/);
+        expect(await mock.calls("notes_edit")).toHaveLength(0);
+      } finally {
+        await app.evaluate(() => {
+          const w = window as unknown as { __grooviqRoll?: RollStats; __savedRoll?: RollStats };
+          w.__grooviqRoll = w.__savedRoll;
+          delete w.__savedRoll;
+        });
+      }
+      await waitForInitialDraw(app);
+    });
+  }
+
+  test("a_ready_browser_result_can_arrive_after_the_default_poll_deadline", async ({ app }) => {
+    const evaluate = app.evaluate.bind(app);
+    let delayed = false;
+    const controlled = new Proxy(app, {
+      get(target, property) {
+        if (property !== "evaluate") return Reflect.get(target, property, target);
+        return async (...args: Parameters<Page["evaluate"]>) => {
+          const result = await evaluate(...args);
+          if (!delayed && String(args[0]).includes("__grooviqRoll") && ((result as RollStats | undefined)?.draws ?? 0) > 0) {
+            delayed = true;
+            await new Promise((resolve) => setTimeout(resolve, 5500));
+          }
+          return result;
+        };
+      },
+    });
+    await openRoll(controlled);
+    expect(delayed).toBe(true);
+    expect((await stats(app)).draws).toBeGreaterThan(0);
+  });
+});
 
 test.describe("ten thousand notes", () => {
   // A bounded correctness deadline, including fixture setup; not a performance gate.
