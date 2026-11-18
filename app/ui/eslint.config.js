@@ -1,3 +1,4 @@
+import deviceBoundary from "./lint/device-boundary.js";
 import js from "@eslint/js";
 import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
@@ -17,28 +18,9 @@ export default tseslint.config(
     },
   },
   {
-    // Device editors reach the project only through useDeviceParams, whose sink guards every edit
-    // against a project replacement (devices/paramSink.ts).
     files: ["src/devices/**/*.{ts,tsx}"],
-    ignores: ["src/devices/useDeviceParams.ts"],
-    rules: {
-      "no-restricted-imports": [
-        "error",
-        {
-          patterns: [
-            {
-              regex: "(^|/)project/(context|useSession)$",
-              message: "Device editors send edits through useDeviceParams (send, set, gestures), never apply.",
-            },
-            {
-              regex: "(^|/)api/project$",
-              importNames: ["projectEdit"],
-              message: "Device editors send edits through useDeviceParams, never projectEdit.",
-            },
-          ],
-        },
-      ],
-    },
+    plugins: { "device-boundary": { rules: { "guarded-edits": deviceBoundary } } },
+    rules: { "device-boundary/guarded-edits": "error" },
   },
   {
     // Run in Node, not the webview: build config and tests.
