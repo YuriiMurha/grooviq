@@ -524,6 +524,12 @@ pub struct Session {
     record_settle: Option<u32>,
 }
 
+enum PendingCommit {
+    Empty,
+    Deferred,
+    Applied(u32),
+}
+
 struct LivePress {
     channel: u32,
     key: u8,
@@ -1901,7 +1907,13 @@ impl Session {
         let mut out = Recorded::default();
         let mut error = None;
         match self.commit_pending(now) {
-            Ok(revision) => out.revision = revision,
+            Ok(PendingCommit::Empty) => {}
+            Ok(PendingCommit::Deferred) => {
+                // No prefix reached the engine: capacity overflow is still retryable too.
+                self.pending.extend(overflow);
+                return out;
+            }
+            Ok(PendingCommit::Applied(revision)) => out.revision = Some(revision),
             Err((e, lost, revision)) => {
                 out.revision = revision;
                 dropped += lost;
@@ -1995,9 +2007,9 @@ impl Session {
     fn commit_pending(
         &mut self,
         now: Instant,
-    ) -> Result<Option<u32>, (SessionError, usize, Option<u32>)> {
+    ) -> Result<PendingCommit, (SessionError, usize, Option<u32>)> {
         if self.pending.is_empty() {
-            return Ok(None);
+            return Ok(PendingCommit::Empty);
         }
         let channels: HashSet<u32> = self.project.channels.iter().map(|c| c.id).collect();
         let sig = self.project.time_signature;
@@ -2042,7 +2054,7 @@ impl Session {
             )
         })?;
         match self.keep_pattern(pattern) {
-            Err(SessionError::Engine(_)) => return Ok(None),
+            Err(SessionError::Engine(_)) => return Ok(PendingCommit::Deferred),
             Err(e) => return Err((e, 0, None)),
             Ok(()) => {}
         }
@@ -2052,7 +2064,7 @@ impl Session {
         self.trim_histories();
         self.pending.clear();
         self.changed(self.current().steps != old_steps, now);
-        Ok(Some(self.current().revision))
+        Ok(PendingCommit::Applied(self.current().revision))
     }
 
     /// The decoded sample of a sampler channel, if it has one.

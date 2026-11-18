@@ -2886,6 +2886,25 @@ fn recording_when_note_ids_run_out_keeps_what_fits_stops_and_says_so() {
 
 // --- Fix round 2: the automatic record-off is owed until the engine takes it. ---
 
+/// Leave one slot for the admitted note prefix; its following record-off must retry.
+fn leave_one_command_slot(controller: &Mutex<Controller>) {
+    let (mut probe, _processor) = engine(EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let mut capacity = 0;
+    while probe.send(Command::SetTempo { bpm: 120.0 }).is_ok() {
+        capacity += 1;
+    }
+    assert!(capacity > 1);
+    for _ in 0..capacity - 1 {
+        controller
+            .lock()
+            .unwrap()
+            .send(Command::SetTempo { bpm: 120.0 })
+            .unwrap();
+    }
+}
+
 #[test]
 fn overflow_disarm_is_retried_until_the_engine_takes_it() {
     let (mut session, controller, mut processor) = rig();
@@ -2902,16 +2921,14 @@ fn overflow_disarm_is_retried_until_the_engine_takes_it() {
     session.set_recording(true).unwrap();
     controller.lock().unwrap().send(Command::Play).unwrap();
     settle(&mut session, &controller, &mut processor);
-    // The engine's command queue is full when the batch overflows: neither the note that
-    // fits nor the record-off goes through.
-    while controller
-        .lock()
-        .unwrap()
-        .send(Command::SetTempo { bpm: 120.0 })
-        .is_ok()
-    {}
+    // The prefix consumes the last slot, so only its automatic record-off must retry.
+    leave_one_command_slot(&controller);
     let got = session.collect_recorded(&whole_notes(synth, 2), Instant::now());
-    assert_eq!(got.revision, None, "the note that fits waits");
+    assert!(
+        got.revision.is_some(),
+        "the prefix is admitted before counting overflow"
+    );
+    assert_eq!(session.project().patterns[0].notes.len(), 100_000);
     assert_eq!(got.stopped.map(|s| s.dropped), Some(1));
     assert!(!session.view().recording);
     // Still full: the engine records on, and what it completes is refused and reported.
@@ -2919,14 +2936,9 @@ fn overflow_disarm_is_retried_until_the_engine_takes_it() {
     assert_eq!(got.revision, None);
     let stopped = got.stopped.expect("reported");
     assert_eq!((stopped.reason, stopped.dropped), ("engineBusy", 1));
-    // The queue drains: an empty poll commits the waiting note and switches the engine off.
+    // The queue drains: an empty poll retries record-off without committing the prefix twice.
     render(&mut processor, 4);
-    assert!(
-        session
-            .collect_recorded(&[], Instant::now())
-            .revision
-            .is_some()
-    );
+    assert_eq!(session.collect_recorded(&[], Instant::now()).revision, None);
     assert_eq!(session.project().patterns[0].notes.len(), 100_000);
     poll(&mut session, &controller, &mut processor);
     // Room again, and the person plays while Record shows off: nothing is recorded.
@@ -3003,9 +3015,8 @@ fn turning_record_on_again_cancels_an_owed_disarm() {
 
 // --- Fix round 3: refusal lasts until the automatic record-off reaches the engine. ---
 
-/// A session at the note cap whose automatic record-off found the engine's command queue full:
-/// one recorded note waits to be committed, the queue is drained again, and the person has
-/// made room by deleting a note. Returns the session's rig.
+/// A session whose admitted prefix filled the command queue before automatic record-off.
+/// The queue is drained again and the person makes room by deleting one committed note.
 fn overflowed_with_an_owed_disarm() -> (Session, Arc<Mutex<Controller>>, AudioProcessor, u32) {
     let (mut session, controller, mut processor) = rig();
     let synth = add_synth(&mut session, "Init");
@@ -3021,13 +3032,13 @@ fn overflowed_with_an_owed_disarm() -> (Session, Arc<Mutex<Controller>>, AudioPr
     session.set_recording(true).unwrap();
     controller.lock().unwrap().send(Command::Play).unwrap();
     settle(&mut session, &controller, &mut processor);
-    while controller
-        .lock()
-        .unwrap()
-        .send(Command::SetTempo { bpm: 120.0 })
-        .is_ok()
-    {}
+    leave_one_command_slot(&controller);
     let got = session.collect_recorded(&whole_notes(synth, 2), Instant::now());
+    assert!(
+        got.revision.is_some(),
+        "the prefix committed before the owed disarm"
+    );
+    assert_eq!(session.project().patterns[0].notes.len(), 100_000);
     assert_eq!(got.stopped.map(|s| s.dropped), Some(1));
     render(&mut processor, 4);
     let edit = NotesEdit {
@@ -3048,9 +3059,9 @@ fn retry_success_must_still_refuse_already_recorded_notes() {
     // Played while Record shows off, before the poll that sends the record-off.
     play_a_note(&session, &mut processor, synth);
     let got = poll(&mut session, &controller, &mut processor);
-    assert!(
-        got.revision.is_some(),
-        "the note recorded before the stop goes in"
+    assert_eq!(
+        got.revision, None,
+        "the admitted prefix must not be committed twice"
     );
     let stopped = got.stopped.expect("the late note is reported");
     assert_eq!((stopped.reason, stopped.dropped), ("engineBusy", 1));

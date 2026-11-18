@@ -104,6 +104,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
   const saveAs = useCallback(async (): Promise<boolean> => {
     const current = viewRef.current;
     if (!current) return false;
+    const finish = beginProjectTransition();
     try {
       const path = await saveDialog({
         title: "Save project as",
@@ -120,7 +121,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
       await enqueue(projectView).then(adopt).catch(() => {});
       fail(e);
       return false;
-    }
+    } finally { finish(); }
   }, [adopt, enqueue, fail, settled]);
 
   /** Saves in place (an untitled project asks for a path); `true` only if it is saved. */
@@ -128,6 +129,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
     const current = viewRef.current;
     if (!current) return false;
     if (current.path === null) return saveAs();
+    const finish = beginProjectTransition();
     try {
       if (!(await settled())) return false;
       adopt(await enqueue(projectSave));
@@ -137,7 +139,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
       await enqueue(projectView).then(adopt).catch(() => {});
       fail(e);
       return false;
-    }
+    } finally { finish(); }
   }, [adopt, enqueue, fail, saveAs, settled]);
 
   /** Sends a command that replaces the project (New, Open, Restore), telling what is keyed by
