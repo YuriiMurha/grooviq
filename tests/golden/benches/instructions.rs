@@ -11,6 +11,10 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
+#[path = "support/synth_workload.rs"]
+mod synth_workload;
+
+#[cfg(target_os = "linux")]
 mod counts {
     use std::hint::black_box;
     use std::sync::Arc;
@@ -101,6 +105,14 @@ mod counts {
         render(&mut s)
     }
 
+    #[library_benchmark]
+    #[bench::idle_initialized(super::synth_workload::setup(false, false))]
+    #[bench::idle_freerunning(super::synth_workload::setup(true, false))]
+    #[bench::active_modulated(super::synth_workload::setup(true, true))]
+    fn synth_idle_blocks(s: Synth) -> Synth {
+        super::synth_workload::render(s)
+    }
+
     /// An engine playing a reference scene, and a stereo buffer of one engine block.
     fn scene(name: &str) -> (Controller, AudioProcessor, Vec<f32>) {
         let scene = perf_scenes()
@@ -132,7 +144,7 @@ mod counts {
         (controller, processor, buf)
     }
 
-    library_benchmark_group!(name = dsp; benchmarks = sampler_blocks, synth_blocks);
+    library_benchmark_group!(name = dsp; benchmarks = sampler_blocks, synth_blocks, synth_idle_blocks);
     library_benchmark_group!(name = engine; benchmarks = scene_second);
 }
 
