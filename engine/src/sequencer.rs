@@ -37,6 +37,8 @@ pub(crate) enum Delivery {
 #[derive(Clone, Copy, Debug)]
 struct PendingOff {
     frame: u64,
+    played_tick: u64,
+    forced: bool,
     channel: ChannelId,
     key: u8,
     /// The id its note-on carried.
@@ -45,6 +47,8 @@ struct PendingOff {
 
 const NO_OFF: PendingOff = PendingOff {
     frame: 0,
+    played_tick: 0,
+    forced: false,
     channel: ChannelId(0),
     key: 0,
     id: 0,
@@ -60,6 +64,7 @@ pub(crate) struct Sequencer {
     count: usize,
     /// No pending note-off is due before this frame (`u64::MAX` when none waits).
     earliest: u64,
+    release_map: Option<(u64, u64, u32, u32)>,
     /// Numbers the notes played: each note-on and its note-off carry the id it makes, so a
     /// note-off ends its own note, not another one on its key (a short note inside a long one,
     /// a live note). Ids have [`NoteId::SEQUENCED`] set, which a live note never has.
@@ -75,6 +80,7 @@ impl Sequencer {
             pending: [NO_OFF; PENDING],
             count: 0,
             earliest: u64::MAX,
+            release_map: None,
             played: 0,
         }
     }
@@ -90,6 +96,7 @@ impl Sequencer {
     pub(crate) fn stop(&mut self) {
         for off in &mut self.pending[..self.count] {
             off.frame = 0;
+            off.forced = true;
         }
         if self.count > 0 {
             self.earliest = 0;
@@ -126,7 +133,7 @@ impl Sequencer {
         mut sink: impl FnMut(ChannelId, NoteEvent) -> Delivery,
     ) {
         let f1 = f0 + BLOCK as u64;
-        self.flush(f0, f1 - 1, &mut sink);
+        self.flush(clock, f0, f1 - 1, &mut sink);
         if !clock.playing() {
             return;
         }
@@ -160,7 +167,7 @@ impl Sequencer {
             // change moved it before the block, or the block was full) starts at offset 0.
             let frame = frame.max(f0);
             // A note-off at this frame goes first, so a retriggered key is not cut.
-            self.flush(f0, frame, &mut sink);
+            self.flush(clock, f0, frame, &mut sink);
             self.start(note, tick, frame - f0, clock, &mut sink);
             self.next += 1;
             if self.next == notes.len() {
@@ -169,7 +176,7 @@ impl Sequencer {
             }
         }
         // Note-offs of notes that started and end within this block.
-        self.flush(f0, f1 - 1, &mut sink);
+        self.flush(clock, f0, f1 - 1, &mut sink);
     }
 
     /// Sends `note`'s note-on at `offset` and books its note-off, if the table has room and the
@@ -203,6 +210,8 @@ impl Sequencer {
         let frame = clock.frame_of(end as f64);
         self.pending[self.count] = PendingOff {
             frame,
+            played_tick: clock.played_tick_of(end),
+            forced: false,
             channel: note.channel,
             key: note.key,
             id,
@@ -213,12 +222,24 @@ impl Sequencer {
 
     /// Sends every pending note-off due at or before frame `through` (late ones at offset 0).
     /// One whose channel is full waits for the next block.
-    fn flush(
+    pub(crate) fn flush(
         &mut self,
+        clock: &TransportClock,
         f0: u64,
         through: u64,
         sink: &mut impl FnMut(ChannelId, NoteEvent) -> Delivery,
     ) {
+        let map = clock.release_map();
+        if self.release_map != Some(map) {
+            self.earliest = u64::MAX;
+            for off in &mut self.pending[..self.count] {
+                if !off.forced {
+                    off.frame = clock.frame_of_played_tick(off.played_tick);
+                }
+                self.earliest = self.earliest.min(off.frame);
+            }
+            self.release_map = Some(map);
+        }
         if self.earliest > through {
             return;
         }
@@ -736,5 +757,96 @@ mod tests {
             notes: vec![note(0, 1, 60, 10)],
         };
         assert!(record(&mut seq, &pattern, &mut stopped, 0, 100).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod release_timing_tests {
+    use super::*;
+    #[test]
+    fn musical_releases_follow_tempo_rate_but_not_pattern_shift() {
+        for change in 0..4 {
+            let bpm = if change == 1 { 60.0 } else { 120.0 };
+            let at = if change == 1 { 48000 } else { 24000 };
+            let expected = if change == 3 { 48000 } else { 72000 };
+            let p = PatternData {
+                length: 3840,
+                notes: vec![SeqNote {
+                    tick: 0,
+                    length: 1920,
+                    channel: ChannelId(1),
+                    key: 60,
+                    velocity: 1.0,
+                    slide: false,
+                }],
+            };
+            let mut clock = TransportClock::new(48000.0, bpm);
+            clock.start(0, Some(1));
+            let mut seq = Sequencer::new();
+            let mut offs = Vec::new();
+            for f in (0..80000).step_by(BLOCK) {
+                if f == at {
+                    match change {
+                        0 => clock.set_bpm(f, 60.0),
+                        1 => clock.set_bpm(f, 120.0),
+                        2 => clock.set_sample_rate(f, 96000.0),
+                        _ => clock.keep_position(f, 3840, 960),
+                    }
+                }
+                seq.run(&p, &clock, f, |_, e| {
+                    if !e.on {
+                        offs.push(f + u64::from(e.offset));
+                    }
+                    Delivery::Taken
+                });
+                clock.mark_covered(f + 64);
+            }
+            assert_eq!(offs, vec![expected], "change {change}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod resize_tempo_regression {
+    use super::*;
+    fn pat(length: u32) -> PatternData {
+        PatternData {
+            length,
+            notes: vec![SeqNote {
+                tick: 0,
+                length: 1920,
+                channel: ChannelId(1),
+                key: 60,
+                velocity: 1.0,
+                slide: false,
+            }],
+        }
+    }
+    #[test]
+    fn resize_shift_then_tempo_change_keeps_musical_release() {
+        let (a, b) = (pat(3840), pat(2880));
+        let mut clock = TransportClock::new(48000.0, 120.0);
+        clock.start(0, None);
+        let mut seq = Sequencer::new();
+        let mut offs = Vec::new();
+        let mut resized = false;
+        for f in (0..250_000u64).step_by(BLOCK) {
+            if f == 120_000 {
+                clock.keep_position(f, 3840, 2880);
+                seq.reseek();
+                resized = true;
+            }
+            if f == 192_000 {
+                clock.set_bpm(f, 60.0);
+            }
+            seq.run(if resized { &b } else { &a }, &clock, f, |_, e| {
+                if !e.on {
+                    offs.push(f + u64::from(e.offset));
+                }
+                Delivery::Taken
+            });
+            clock.mark_covered(f + 64);
+        }
+        assert_eq!(offs, vec![48_000, 144_000, 240_000]);
     }
 }

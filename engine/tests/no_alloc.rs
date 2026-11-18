@@ -750,6 +750,146 @@ fn a_waiting_recording_barrier_never_allocates() {
     );
 }
 
+#[test]
+fn song_swaps_loop_seek_and_full_trash_remain_realtime_safe() {
+    use grooviq_engine::{ArrangementData, PlaybackMode, SongData, SongLoop};
+    let (mut c, mut p) = engine(EngineConfig {
+        sample_rate: 8000.0,
+    });
+    let song = SongData {
+        arrangement: ArrangementData {
+            length: 1,
+            notes: vec![],
+        },
+        end_tick: 1,
+        end_frame: 0,
+        frame_rate: 48000.0,
+    };
+    c.set_song(song.clone()).unwrap();
+    c.send(Command::SetPlaybackMode {
+        mode: PlaybackMode::Song,
+    })
+    .unwrap();
+    c.send(Command::SetSongLoop {
+        region: Some(SongLoop {
+            start_tick: 0,
+            end_tick: 1,
+        }),
+    })
+    .unwrap();
+    c.send(Command::Play).unwrap();
+    let mut out = [0.0; 128];
+    for _ in 0..200 {
+        c.set_song(song.clone()).unwrap();
+        realtime(|| p.process(&mut out, 2));
+    }
+    for _ in 0..1200 {
+        let _ = c.set_song(song.clone());
+    }
+    for _ in 0..32 {
+        realtime(|| p.process(&mut out, 2));
+    }
+    let _ = c.check_health();
+    for _ in 0..32 {
+        realtime(|| p.process(&mut out, 2));
+        let _ = c.check_health();
+    }
+    c.send(Command::Seek { tick: 0 }).unwrap();
+    c.send(Command::SetPlaybackMode {
+        mode: PlaybackMode::Pattern,
+    })
+    .unwrap();
+    realtime(|| p.process(&mut out, 2));
+}
+
+#[test]
+fn review_probe_active_song_transitions_never_allocate() {
+    use grooviq_engine::{ArrangementData, PlaybackMode, SongData, SongLoop, SongNote};
+    let (mut c, mut p) = engine(EngineConfig {
+        sample_rate: 48000.0,
+    });
+    let mut params: Vec<_> = grooviq_dsp::sampler::SPEC.iter().map(|s| s.2).collect();
+    params[14] = 0.0;
+    c.add_channel(ChannelSetup::sampler(
+        ChannelId(7),
+        Some(tone_sample(48000)),
+        params,
+        ChannelMix::default(),
+    ))
+    .unwrap();
+    let notes: Vec<SongNote> = (0..2000u64)
+        .map(|i| SongNote {
+            tick: i * 4,
+            length: 200,
+            channel: ChannelId(7),
+            key: (i % 100) as u8,
+            velocity: 1.0,
+            slide: false,
+            clip_id: 1,
+        })
+        .collect();
+    let song = SongData {
+        arrangement: ArrangementData {
+            length: 8200,
+            notes,
+        },
+        end_tick: 8200,
+        end_frame: 500_000,
+        frame_rate: 44100.0,
+    };
+    c.set_song(song.clone()).unwrap();
+    c.send(Command::SetPlaybackMode {
+        mode: PlaybackMode::Song,
+    })
+    .unwrap();
+    c.send(Command::Play).unwrap();
+    let mut out = [0.0; 128];
+    for i in 0..3000u64 {
+        match i % 300 {
+            50 => {
+                c.send(Command::SetSongLoop {
+                    region: Some(SongLoop {
+                        start_tick: 400,
+                        end_tick: 900,
+                    }),
+                })
+                .unwrap();
+            }
+            100 => {
+                c.send(Command::Seek { tick: 700 }).unwrap();
+            }
+            150 => {
+                c.set_song(song.clone()).unwrap();
+            }
+            175 => {
+                c.send(Command::SetTempo { bpm: 300.0 }).unwrap();
+            }
+            200 => {
+                c.send(Command::SetSongLoop { region: None }).unwrap();
+            }
+            230 => {
+                c.send(Command::SetPlaybackMode {
+                    mode: PlaybackMode::Pattern,
+                })
+                .unwrap();
+                c.send(Command::Play).unwrap();
+            }
+            260 => {
+                c.send(Command::SetPlaybackMode {
+                    mode: PlaybackMode::Song,
+                })
+                .unwrap();
+                c.send(Command::SetTempo { bpm: 120.0 }).unwrap();
+                c.send(Command::Play).unwrap();
+            }
+            _ => {}
+        }
+        realtime(|| p.process(&mut out, 2));
+        if i % 64 == 0 {
+            let _ = c.check_health();
+        }
+    }
+}
 #[path = "realtime/multiband.rs"]
 mod multiband;
 

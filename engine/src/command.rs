@@ -62,32 +62,56 @@ pub enum Command {
     /// Plays the pattern from tick 0, looping forever, from the start of its block. A no-op
     /// while playing.
     Play,
+    SetPlaybackMode {
+        mode: crate::PlaybackMode,
+    },
+    SetSongLoop {
+        region: Option<crate::SongLoop>,
+    },
+    Seek {
+        tick: u64,
+    },
     /// Plays the pattern from tick 0 (also while playing) for `loops` loops: no note starts at
     /// or after tick `loops * length`; the transport keeps running so their note-offs land.
     /// `loops` 0 is rejected.
-    PlayLoops { loops: u32 },
+    PlayLoops {
+        loops: u32,
+    },
     /// Stops the transport: every pending sequenced note-off goes out at the start of its
     /// block, and the position rewinds to tick 0.
     Stop,
     /// Sets the tempo, clamped to [`BPM_RANGE`]. Applies at the start of its block: the tick
     /// reached there stays put and later steps follow the new tempo.
-    SetTempo { bpm: f32 },
+    SetTempo {
+        bpm: f32,
+    },
     /// Fades the tone and every synth voice out over 5 ms (each resets after the fade), chokes
     /// every channel (its sounding notes fade over 3 ms; a note after the command plays in
     /// full) and stops the transport.
     AllSoundOff,
     /// Switches recording: while it is on and the transport plays, every channel note that
     /// lands is queued for [`crate::Controller::take_recorded`]. Off by default.
-    SetRecording { on: bool },
+    SetRecording {
+        on: bool,
+    },
     /// Switches the metronome, which clicks on every beat while the transport plays. Off by
     /// default; an export never has it.
-    SetMetronome { on: bool },
+    SetMetronome {
+        on: bool,
+    },
     /// Sets the time signature: `beats` 1..=16 in a bar, of note value `unit` 2, 4, 8 or 16
     /// (anything else is rejected). Applies at the start of its block.
-    SetTimeSignature { beats: u8, unit: u8 },
+    SetTimeSignature {
+        beats: u8,
+        unit: u8,
+    },
     /// Switches the sine test tone; `hz` is clamped to 20..=20000 and `gain_db` to -60..=0.
     /// Every change ramps over 5 ms.
-    TestTone { on: bool, hz: f32, gain_db: f32 },
+    TestTone {
+        on: bool,
+        hz: f32,
+        gain_db: f32,
+    },
     /// Starts or releases a synth note: `key` 0..=127, `velocity` clamped to 0..=1. A release
     /// ends the note `id` names.
     Note {
@@ -97,10 +121,16 @@ pub enum Command {
         id: NoteId,
     },
     /// Sets a synth parameter by its index in `grooviq_dsp::synth::SPEC`, clamped to its range.
-    SetSynthParam { index: u32, value: f32 },
+    SetSynthParam {
+        index: u32,
+        value: f32,
+    },
     /// Sets a channel's mix: `volume` clamped to 0..=2, `pan` to -1..=1. The gains ramp over
     /// 5 ms.
-    SetChannelMix { channel: ChannelId, mix: ChannelMix },
+    SetChannelMix {
+        channel: ChannelId,
+        mix: ChannelMix,
+    },
     /// Sets a sampler channel's parameter by its index in `grooviq_dsp::sampler::SPEC`,
     /// clamped to its range. Refused for a synth channel.
     SetSamplerParam {
@@ -117,7 +147,10 @@ pub enum Command {
     },
     /// Puts a channel in a choke group, 0..=[`MAX_CHOKE_GROUP`] (0: none; more is refused).
     /// Applies at the start of its block.
-    SetChoke { channel: ChannelId, group: u8 },
+    SetChoke {
+        channel: ChannelId,
+        group: u8,
+    },
     /// Starts or releases a note on a channel (a preview): `key` 0..=127, `velocity` clamped to
     /// 0..=1. Lands on its exact frame, like [`Command::Note`]. A release ends the note `id`
     /// names.
@@ -227,7 +260,10 @@ impl Command {
 /// What travels through the command queue to the processor.
 pub(crate) enum Msg {
     /// A clamped command for the block that contains frame `due` (0: the next block).
-    Command { due: u64, cmd: Command },
+    Command {
+        due: u64,
+        cmd: Command,
+    },
     /// A fresh graph to swap in (after a panic, or for a new state); the old one goes back
     /// through the trash queue.
     ReplaceGraph(Box<Graph>),
@@ -242,6 +278,7 @@ pub(crate) enum Msg {
     },
     /// The pattern to play; the old one goes back through the trash queue.
     SetPattern(Box<PatternData>),
+    SetSong(Box<crate::SongData>),
     /// Queues [`crate::RecordEvent::Mark`] with this id in the recording queue.
     RecordMark(u32),
 }
@@ -282,7 +319,7 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
                 cut.push(id);
                 continue;
             }
-            Msg::AddChannel(_) | Msg::SetPattern(_) => continue,
+            Msg::AddChannel(_) | Msg::SetPattern(_) | Msg::SetSong(_) => continue,
             Msg::RecordMark(id) => {
                 kept.push(Msg::RecordMark(id));
                 continue;
@@ -306,6 +343,9 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
             } if all_cut || cut.contains(&channel) => continue,
             Command::Note { .. }
             | Command::ChannelNote { .. }
+            | Command::SetPlaybackMode { .. }
+            | Command::SetSongLoop { .. }
+            | Command::Seek { .. }
             | Command::Play
             | Command::PlayLoops { .. }
             | Command::Stop
@@ -333,6 +373,7 @@ pub(crate) enum Trash {
     Channel(Box<ChannelNode>),
     Sample(Arc<SampleBuf>),
     Pattern(Box<PatternData>),
+    Song(Box<crate::SongData>),
 }
 
 #[cfg(test)]
