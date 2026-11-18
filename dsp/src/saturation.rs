@@ -211,10 +211,10 @@ impl Device for Saturation {
             let compensation = db_to_gain(-delayed_db * p[5]);
             let hp = onepole_gain(p[3].min(self.sr * 0.45), self.sr);
             let lp = onepole_gain(p[4].min(self.sr * 0.45), self.sr);
-            // Place the unity crossing at 700 Hz as shelf gains change.
-            let tilt = onepole_gain(700. * db_to_gain(6. * p[1]), self.sr);
             let lo = db_to_gain(-6. * p[1]);
             let hi = db_to_gain(6. * p[1]);
+            // Place the unity crossing at 700 Hz as shelf gains change.
+            let tilt = onepole_gain(700. * hi, self.sr);
             let out = db_to_gain(p[7]);
             for (ch, x) in self.ch.iter_mut().zip([&mut l[i], &mut r[i]]) {
                 // Bound finite hostile input before gains and FIR accumulation can overflow.

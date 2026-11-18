@@ -374,7 +374,7 @@ fn automation_compensation_tracks_delayed_audio() {
                         worst = worst.max(db.abs());
                     }
                     eprintln!("envelope {sr} {index} {from}->{to} block {block}: {worst} dB");
-                    assert!(worst < 0.3, "{sr} {index} {from}->{to}: {worst} dB");
+                    assert!(worst < 0.07, "{sr} {index} {from}->{to}: {worst} dB");
                 }
             }
         }
@@ -407,20 +407,25 @@ fn physical_cut_tone_and_gain_response() {
             );
             assert!((db + 3.).abs() < 0.5, "cut {sr} {index}: {db}");
         }
-        for (hz, expected) in [(100., -6.), (10000., 6.)] {
+        for tone in [-1., 1.] {
+            for (hz, expected) in [(100., -6.), (10000., 6.)] {
+                let db = db_ratio(
+                    linear_response(sr, hz, &[(2, tone)]),
+                    linear_response(sr, hz, &[]),
+                );
+                assert!(
+                    (db - expected * tone as f64).abs() < 0.5,
+                    "tone {tone} {sr} {hz}: {db}"
+                );
+            }
+            // The tilt pivot stays at unity while the shelves move in opposite directions.
             let db = db_ratio(
-                linear_response(sr, hz, &[(2, 1.)]),
-                linear_response(sr, hz, &[]),
+                linear_response(sr, 700., &[(2, tone)]),
+                linear_response(sr, 700., &[]),
             );
-            assert!((db - expected).abs() < 0.5, "tone {sr} {hz}: {db}");
+            let expected = 0.;
+            assert!((db - expected).abs() < 0.1, "tilt {tone} {sr}: {db}");
         }
-        // The tilt pivot stays at unity while the shelves move in opposite directions.
-        let db = db_ratio(
-            linear_response(sr, 700., &[(2, 1.)]),
-            linear_response(sr, 700., &[]),
-        );
-        let expected = 0.;
-        assert!((db - expected).abs() < 0.1, "tilt {sr}: {db}");
         let db = db_ratio(
             linear_response(sr, 1000., &[(1, 12.), (3, 6.)]),
             linear_response(sr, 1000., &[]),
