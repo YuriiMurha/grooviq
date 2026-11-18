@@ -35,8 +35,9 @@ const PREVIEW_KEY = 60;
  * or its context menu asks to remove it. */
 export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSelect, onRemove }: Props) {
   /** The preview sounding now (its press), while the name is held. */
-  const previewing = useRef<Press | null>(null);
+  const previewing = useRef<{ press: Press; off: (press: number) => Promise<unknown> } | null>(null);
   const pointer = useRef<number | null>(null);
+  const keyboard = useRef(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const menuItem = useRef<HTMLButtonElement>(null);
   const { id, name } = channel;
@@ -44,26 +45,30 @@ export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSele
 
   // A preview plays only while the person holds the name down: the sample, or the synth's C4.
   const preview = (on: boolean) => {
-    if (!on) pointer.current = null;
     const sounding = previewing.current;
     if ((sounding !== null) === on) return;
     if (on) {
       const sent = synth ? channelNoteOn(id, PREVIEW_KEY, TYPING_VELOCITY) : channelPreviewOn(id);
-      previewing.current = new Press(sent, (e: unknown) => onError(errorText(e)));
+      previewing.current = {
+        press: new Press(sent, (e: unknown) => onError(errorText(e))),
+        off: (press) => synth ? channelNoteOff(id, PREVIEW_KEY, press) : channelPreviewOff(id, press),
+      };
       return;
     }
     previewing.current = null;
     // Stopping names this preview's own press; best effort: the channel may just have gone.
-    void sounding?.release((press) =>
-      synth ? channelNoteOff(id, PREVIEW_KEY, press) : channelPreviewOff(id, press),
-    );
+    if (sounding) void sounding.press.release(sounding.off);
   };
 
   // A preview held while the row goes away (F6 hides the rack, the channel is removed) or the
   // window loses focus gets no keyup or pointerup: stop it then.
   const stopPreview = useRef(() => {});
   useEffect(() => {
-    stopPreview.current = () => preview(false);
+    stopPreview.current = () => {
+      keyboard.current = false;
+      pointer.current = null;
+      preview(false);
+    };
   });
   useEffect(() => {
     const stop = () => stopPreview.current();
@@ -111,16 +116,24 @@ export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSele
     preview(true);
   };
   const onPointerEnd = (e: PointerEvent<HTMLButtonElement>) => {
-    if (e.pointerId === pointer.current) preview(false);
+    if (e.pointerId !== pointer.current) return;
+    pointer.current = null;
+    if (!keyboard.current) preview(false);
   };
   const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      if (!e.repeat) preview(true);
+      if (!e.repeat) {
+        keyboard.current = true;
+        preview(true);
+      }
     }
   };
   const onKeyUp = (e: KeyboardEvent<HTMLButtonElement>) => {
-    if (e.key === "Enter") preview(false);
+    if (e.key === "Enter") {
+      keyboard.current = false;
+      if (pointer.current === null) preview(false);
+    }
   };
 
   return (
@@ -156,9 +169,11 @@ export function ChannelRow({ channel, onMix, onRelink, onError, selected, onSele
         onKeyDown={onKeyDown}
         onKeyUp={onKeyUp}
         onBlur={(e) => {
-          // WebKit blurs an already focused button after pointerdown. Its captured hold
-          // still owns the preview; keyboard previews continue to end on focus leaving.
+          // Focus loss releases Enter, but WebKit may blur after pointerdown while
+          // the captured pointer still holds this same press.
+          keyboard.current = false;
           if (pointer.current !== null && e.currentTarget.hasPointerCapture(pointer.current)) return;
+          pointer.current = null;
           preview(false);
         }}
       >
