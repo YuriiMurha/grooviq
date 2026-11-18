@@ -3636,3 +3636,54 @@ fn overlapping_save_cannot_borrow_a_backup_that_may_roll_back() {
     assert_eq!(load(&path).unwrap().project.bpm, 130.0);
     assert_eq!(backup_tempos(&path, &backups), [100.0, 110.0]);
 }
+
+#[test]
+fn overlapping_failed_save_does_not_spend_retention_history() {
+    struct Interleave<'a> {
+        other: &'a mut Session,
+        backups: &'a Path,
+    }
+    impl Disk for Interleave<'_> {
+        fn rename(&mut self, _: &Path, _: &Path) -> std::io::Result<()> {
+            self.other.save(None, self.backups).unwrap();
+            Err(std::io::Error::other("first publisher refused"))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (mut first, path, backups) = saved_twice(dir.path());
+    for bpm in 111..125 {
+        first
+            .apply(Edit::SetTempo { bpm: bpm as f32 }, Instant::now())
+            .unwrap();
+        first.save(None, &backups).unwrap();
+    }
+    let before = backup_tempos(&path, &backups);
+    assert_eq!(before.len(), 10);
+    let (mut second, _, _) = rig();
+    let loaded = load(&path).unwrap();
+    let decoded = decode_samples(&loaded);
+    second.open(&path, loaded, decoded).unwrap();
+    first
+        .apply(Edit::SetTempo { bpm: 125.0 }, Instant::now())
+        .unwrap();
+    second
+        .apply(Edit::SetTempo { bpm: 130.0 }, Instant::now())
+        .unwrap();
+    let error = first
+        .save_on(
+            None,
+            &backups,
+            &mut Interleave {
+                other: &mut second,
+                backups: &backups,
+            },
+        )
+        .unwrap_err();
+    assert!(!error.directory_unconfirmed());
+    assert!(first.view().dirty);
+    assert!(!second.view().dirty);
+    assert_eq!(load(&path).unwrap().project.bpm, 130.0);
+    let mut expected = before[1..].to_vec();
+    expected.push(124.0);
+    assert_eq!(backup_tempos(&path, &backups), expected);
+}

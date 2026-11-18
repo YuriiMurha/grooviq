@@ -77,9 +77,19 @@ impl PreparedBackup {
         // Publication has succeeded. Cleanup must not turn that into an untouched-target
         // error; retaining extra copies on failure is safer than failing the save.
         for path in self.prune {
+            let Some(_file) = lock_backup(&path) else {
+                // Another save may have protected the copy since preparation.
+                continue;
+            };
             let _ = fs::remove_file(path);
         }
     }
+}
+
+fn lock_backup(path: &Path) -> Option<fs::File> {
+    let file = fs::File::open(path).ok()?;
+    file.try_lock().ok()?;
+    Some(file)
 }
 
 pub(crate) fn prepare_backup(
@@ -100,8 +110,7 @@ pub(crate) fn prepare_backup(
     fs::create_dir_all(&folder)?;
     let found = existing(&folder, &stem)?;
     prepared._file = found.last().and_then(|(_, newest)| {
-        let file = fs::File::open(newest).ok()?;
-        file.try_lock().ok()?;
+        let file = lock_backup(newest)?;
         same_bytes(target, &file).then_some(file)
     });
     let duplicate = prepared._file.is_some();
@@ -162,8 +171,15 @@ pub(crate) fn prepare_backup(
             }
         }
     }
-    let excess = (found.len() + usize::from(prepared.candidate.is_some())).saturating_sub(keep);
-    prepared.prune = found
+    // Other saves' active copies may still roll back. Only settled history counts;
+    // our own locked copy is counted once, whether newly created or reused.
+    let settled: Vec<_> = found
+        .into_iter()
+        .filter(|(_, path)| lock_backup(path).is_some())
+        .collect();
+    let retained = settled.len() + usize::from(prepared._file.is_some());
+    let excess = retained.saturating_sub(keep);
+    prepared.prune = settled
         .into_iter()
         .take(excess)
         .map(|(_, path)| path)
@@ -240,6 +256,24 @@ fn existing(folder: &Path, stem: &str) -> io::Result<Vec<(u64, PathBuf)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retention_rechecks_a_copy_that_became_active_after_preparation() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("song.grooviq");
+        let backups = dir.path().join("backups");
+        fs::write(&target, b"first revision").unwrap();
+        let old = backup_before_save(&target, &backups, 1).unwrap().unwrap();
+        fs::write(&target, b"second revision").unwrap();
+        let prepared = prepare_backup(&target, &backups, 1).unwrap();
+        let candidate = prepared.candidate.clone().unwrap();
+        let held = fs::File::open(&old).unwrap();
+        held.try_lock().unwrap();
+        prepared.confirm();
+        drop(held);
+        assert_eq!(fs::read(&old).unwrap(), b"first revision");
+        assert_eq!(fs::read(&candidate).unwrap(), b"second revision");
+    }
 
     #[test]
     fn duplicate_rollback_does_not_own_the_existing_copy() {
