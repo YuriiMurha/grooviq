@@ -188,8 +188,18 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           git checkout --quiet "$BASE_SHA"
           if [ -f tests/golden/benches/instructions.rs ]; then
+            # Use identical workloads on BASE and HEAD, including new cases.
+            git show "$HEAD_SHA:tests/golden/benches/instructions.rs" > tests/golden/benches/instructions.rs
+            mkdir -p tests/golden/benches/support
+            git show "$HEAD_SHA:tests/golden/benches/support/sampler_workload.rs" > tests/golden/benches/support/sampler_workload.rs
             cargo bench -p grooviq-golden --bench instructions -- --save-baseline=base
             echo "BASELINE=--baseline=base" >> "$GITHUB_ENV"
+            git restore tests/golden/benches/instructions.rs
+            if git ls-files --error-unmatch tests/golden/benches/support/sampler_workload.rs > /dev/null 2>&1; then
+              git restore tests/golden/benches/support/sampler_workload.rs
+            else
+              rm tests/golden/benches/support/sampler_workload.rs
+            fi
           else
             echo "The base has no instruction benchmarks yet: no comparison."
           fi
