@@ -77,6 +77,8 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test -- --run
+      - name: E2e diagnostic safety tests
+        run: node --test ../../scripts/e2e-diagnostics.test.mjs
       - name: Largest grid CPU budget
         run: node ../../scripts/grid-budget.mjs
       - run: npm run build
@@ -113,5 +115,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: e2e-results
-          path: app/ui/e2e-results
+          path: |
+            app/ui/e2e-results
+            app/ui/playwright-report/diagnostics-*
           retention-days: 7

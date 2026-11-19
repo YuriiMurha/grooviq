@@ -9,6 +9,7 @@
 //! and `midi_cmds`. Started with `GROOVIQ_AUDIO=null` it opens no audio device at all (see
 //! [`output_mode`]): the silent mode for QA runs.
 
+mod arrangement_cmds;
 mod audio_log;
 mod autosave_notice;
 mod commands;
@@ -72,6 +73,7 @@ pub(crate) struct Audio {
     stream: Option<StreamServer>,
     /// The open project.
     session: Arc<Mutex<Session>>,
+    assets: Arc<grooviq_project::audio_assets::AudioAssets>,
     /// The recovery folder; `None` if it could not be taken (no autosave then). Taken out by a
     /// clean exit.
     recovery: Arc<Mutex<Option<RecoveryDir>>>,
@@ -221,7 +223,11 @@ fn start_audio(app: &AppHandle) -> Audio {
         });
     }
 
+    let assets = Arc::new(grooviq_project::audio_assets::AudioAssets::with_budget(
+        lock(&session).media_budget(),
+    ));
     Audio {
+        assets,
         controller,
         output,
         log,
@@ -403,6 +409,17 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            arrangement_cmds::arrangement_view,
+            arrangement_cmds::arrangement_edit,
+            arrangement_cmds::arrangement_history,
+            arrangement_cmds::arrangement_curve,
+            arrangement_cmds::audio_import,
+            arrangement_cmds::audio_relink,
+            arrangement_cmds::audio_cancel,
+            arrangement_cmds::arrangement_waveform,
+            arrangement_cmds::arrangement_mode,
+            arrangement_cmds::arrangement_loop,
+            arrangement_cmds::arrangement_seek,
             menu::edit_history_enabled,
             commands::audio_outputs,
             commands::audio_select,
@@ -439,6 +456,7 @@ pub fn run() {
             notes_cmds::channel_add_synth,
             notes_cmds::channel_note,
             notes_cmds::channel_param_live,
+            notes_cmds::synth_meter,
             notes_cmds::channel_select,
             notes_cmds::channel_waveform,
             notes_cmds::record_set,

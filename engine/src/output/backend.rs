@@ -405,7 +405,12 @@ impl State {
         }
         match target {
             None => self.close(slot),
-            Some(target) if self.open.as_ref().is_some_and(|o| o.info.id == target.id) => {}
+            Some(mut target) if self.open.as_ref().is_some_and(|o| o.info.id == target.id) => {
+                let open = self.open.as_mut().expect("matching open stream");
+                // Enumeration describes the route; only opening determines the actual rate.
+                target.sample_rate = open.info.sample_rate;
+                open.info = target;
+            }
             Some(target) => {
                 self.close(slot);
                 if self.retry.due(now) {
@@ -502,12 +507,16 @@ impl State {
         // Failures of earlier streams no longer matter.
         slot.failed.store(false, Ordering::Release);
         let rate = self.backend.open(target, Arc::clone(slot))?;
-        let Some(mut processor) = self.processor.take() else {
-            // Cannot happen: every close takes the processor back.
-            return Err("the output has no processor to play".into());
-        };
         let config = EngineConfig {
             sample_rate: rate as f32,
+        };
+        // A physical stream cannot follow the config's clamping: reject it while the slot
+        // is still silent, before taking or rebuilding the parked processor.
+        if config.rate() != config.sample_rate {
+            return Err(format!("unsupported actual output sample rate: {rate} Hz"));
+        }
+        let Some(mut processor) = self.processor.take() else {
+            return Err("the output has no processor to play".into());
         };
         {
             let mut controller = lock(&self.controller);

@@ -765,6 +765,7 @@ fn song_swaps_loop_seek_and_full_trash_remain_realtime_safe() {
         end_tick: 1,
         end_frame: 0,
         frame_rate: 48000.0,
+        frame_extent: None,
         audio: grooviq_engine::AudioSchedule::default(),
     };
     c.set_song(song.clone()).unwrap();
@@ -839,6 +840,7 @@ fn review_probe_active_song_transitions_never_allocate() {
         end_tick: 8200,
         end_frame: 500_000,
         frame_rate: 44100.0,
+        frame_extent: None,
         audio: grooviq_engine::AudioSchedule::default(),
     };
     c.set_song(song.clone()).unwrap();
@@ -1075,4 +1077,85 @@ fn automation_targets_restoration_and_retirement_are_realtime_safe() {
         let _ = c.send(cmd);
         realtime(|| p.process(&mut out, 2));
     }
+}
+
+#[test]
+fn compound_timeline_retirement_and_fault_refusal_are_realtime_safe() {
+    let (mut c, mut p) = engine(EngineConfig { sample_rate: SR });
+    for i in 0..32 {
+        c.set_timeline(grooviq_engine::TimelineUpdate {
+            pattern: Box::new(PatternData {
+                length: 240 + i,
+                notes: vec![],
+            }),
+            song: Box::new(grooviq_engine::SongData {
+                frame_extent: Some(Arc::new(grooviq_engine::SongFrameExtent {
+                    musical_end_tick: 0,
+                    audio: Vec::with_capacity(1),
+                })),
+                ..Default::default()
+            }),
+            bpm: 120.0,
+            mode: grooviq_engine::PlaybackMode::Pattern,
+            region: None,
+            remove_channel: None,
+        })
+        .unwrap();
+    }
+    realtime(|| p.process(&mut [0.0; 128], 2));
+    let _ = c.check_health();
+    c.send(Command::InjectPanic).unwrap();
+    // The injected panic deliberately allocates its unwind payload, as existing fault
+    // tests do; only ordinary publication and refusal belong inside the RT guard.
+    p.process(&mut [0.0; 128], 2);
+    c.set_timeline(grooviq_engine::TimelineUpdate {
+        pattern: Box::default(),
+        song: Box::new(grooviq_engine::SongData {
+            frame_extent: Some(Arc::new(grooviq_engine::SongFrameExtent {
+                musical_end_tick: 0,
+                audio: Vec::with_capacity(1),
+            })),
+            ..Default::default()
+        }),
+        bpm: 130.0,
+        mode: grooviq_engine::PlaybackMode::Pattern,
+        region: None,
+        remove_channel: None,
+    })
+    .unwrap();
+    realtime(|| p.process(&mut [0.0; 128], 2));
+}
+
+#[test]
+fn leased_synth_scope_capture_never_allocates() {
+    let setup = ChannelSetup::synth(ChannelId(1), Vec::new(), ChannelMix::default());
+    let (mut c, mut p) = engine_with(
+        EngineConfig { sample_rate: SR },
+        EngineState {
+            channels: vec![setup],
+            ..EngineState::default()
+        },
+    );
+    let instance = c.channel_instance(ChannelId(1)).unwrap();
+    let live = c.live_shared();
+    c.send(Command::ChannelNote {
+        channel: ChannelId(1),
+        key: 60,
+        velocity: 0.8,
+        on: true,
+        id: NoteId(1),
+    })
+    .unwrap();
+    let mut output = [0.0; 2048];
+    for _ in 0..100 {
+        live.synth_meter(instance);
+        realtime(|| p.process(&mut output, 2));
+    }
+    assert!(
+        live.synth_meter(instance)
+            .unwrap()
+            .scope
+            .iter()
+            .any(|v| v.abs() > 0.001)
+    );
 }
