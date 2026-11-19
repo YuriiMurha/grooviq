@@ -2962,6 +2962,7 @@ impl Session {
         self.history.clear();
         self.pattern_histories.clear();
         self.arrangement_history.clear();
+        self.trim_history = Default::default();
         self.record_settle = None;
         self.project = project;
         self.compiled_song = song;
