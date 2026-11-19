@@ -10,12 +10,11 @@ use crate::autosave_notice::AutosaveStatus;
 use crate::notes_cmds::notes_changed;
 use crate::{Audio, lock};
 use grooviq_engine::{
-    Command, ExportOptions, MAX_SAMPLE_SECONDS, NoteId, SampleBuf, WavFormat, decode_sample,
-    export_wav,
+    Command, ExportOptions, MAX_SAMPLE_SECONDS, NoteId, SampleBuf, WavFormat, export_wav,
 };
+use grooviq_project::SampleFile;
 use grooviq_project::recovery::Recovery;
 use grooviq_project::session::{OpenReport, ProjectView, SaveJob, Session};
-use grooviq_project::{SampleFile, decode_samples, load, read_sample_file};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,6 +53,8 @@ pub struct ExportRequest {
     sample_rate: u32,
     format: ExportFormat,
     loops: u32,
+    #[serde(default)]
+    song_region: bool,
 }
 
 /// `"pcm24"` or `"float32"`.
@@ -151,16 +152,21 @@ async fn blocking<T: Send + 'static>(
 }
 
 /// Reads and decodes a sample file the person picked.
-fn read_and_decode(path: &Path) -> Result<(SampleFile, Arc<SampleBuf>), String> {
+fn read_and_decode(
+    path: &Path,
+    budget: &grooviq_engine::media_budget::MediaBudget,
+) -> Result<(SampleFile, Arc<SampleBuf>), String> {
     let name = path.file_name().map_or_else(
         || path.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
-    let file = read_sample_file(path).map_err(|e| format!("\"{name}\" could not be read: {e}."))?;
+    let file = grooviq_project::read_sample_file_budgeted(path, budget)
+        .map_err(|e| format!("\"{name}\" could not be read: {e}."))?;
     let extension = path.extension().and_then(|e| e.to_str());
-    let buf = decode_sample(&file.bytes, extension, MAX_SAMPLE_SECONDS)
-        .map_err(|e| format!("\"{name}\": {e}"))?;
-    Ok((file, Arc::new(buf)))
+    let buf =
+        grooviq_engine::decode_sample_budgeted(&file.bytes, extension, MAX_SAMPLE_SECONDS, budget)
+            .map_err(|e| format!("\"{name}\": {e}"))?;
+    Ok((file, buf))
 }
 
 fn session(audio: &Audio) -> std::sync::MutexGuard<'_, Session> {
@@ -240,7 +246,8 @@ pub async fn channel_add(
     let path = PathBuf::from(path);
     let (file, buf) = blocking({
         let path = path.clone();
-        move || read_and_decode(&path)
+        let budget = session(&audio).media_budget();
+        move || read_and_decode(&path, &budget)
     })
     .await?;
     session(&audio)
@@ -260,7 +267,8 @@ pub async fn channel_set_sample(
     let path = PathBuf::from(path);
     let (file, buf) = blocking({
         let path = path.clone();
-        move || read_and_decode(&path)
+        let budget = session(&audio).media_budget();
+        move || read_and_decode(&path, &budget)
     })
     .await?;
     session(&audio)
@@ -299,7 +307,7 @@ fn transport(audio: &Audio, cmd: Command) -> Result<(), String> {
 /// Plays the pattern from its start, looping.
 #[tauri::command]
 pub async fn transport_play(audio: State<'_, Audio>) -> Result<(), String> {
-    transport(&audio, Command::Play)
+    session(&audio).play().map_err(|e| e.to_string())
 }
 
 /// Stops and rewinds.
@@ -340,9 +348,11 @@ pub async fn project_open(
     let path = PathBuf::from(path);
     let (loaded, decoded) = blocking({
         let path = path.clone();
+        let budget = session(&audio).media_budget();
         move || {
-            let loaded = load(&path).map_err(|e| e.to_string())?;
-            let decoded = decode_samples(&loaded);
+            let loaded =
+                grooviq_project::load_budgeted(&path, &budget).map_err(|e| e.to_string())?;
+            let decoded = grooviq_project::decode_samples_budgeted_checked(&loaded, &budget)?;
             Ok((loaded, decoded))
         }
     })
@@ -404,13 +414,14 @@ pub async fn project_export(
     path: String,
     options: ExportRequest,
 ) -> Result<ExportResult, String> {
-    let options = options.options()?;
+    let loop_region = options.song_region;
+    let mut options = options.options()?;
     let path = with_extension(Path::new(&path), "wav");
+    let state = select_export(&session(&audio), loop_region, &mut options)?;
     if audio.export_running.swap(true, Ordering::AcqRel) {
         return Err("An export is already running.".into());
     }
     audio.export_cancel.store(false, Ordering::Release);
-    let state = session(&audio).export_state();
     let cancel = Arc::clone(&audio.export_cancel);
     let result = blocking(move || {
         let mut throttle = Throttle { last: -1.0 };
@@ -431,6 +442,18 @@ pub async fn project_export(
         peak_db: peak_db(report.peak),
         clipped: report.clipped,
     })
+}
+
+fn select_export(
+    session: &Session,
+    loop_region: bool,
+    options: &mut ExportOptions,
+) -> Result<grooviq_engine::EngineState, String> {
+    let (state, region) = session
+        .export_selection(loop_region)
+        .map_err(|e| e.to_string())?;
+    options.song_region = region;
+    Ok(state)
 }
 
 /// Asks a running export to stop (it removes its partial file).
@@ -473,9 +496,11 @@ pub async fn recovery_restore(
         .ok_or("There is no project to recover.")?;
     let (loaded, decoded) = blocking({
         let file = recovery.file.clone();
+        let budget = session(&audio).media_budget();
         move || {
-            let loaded = load(&file).map_err(|e| e.to_string())?;
-            let decoded = decode_samples(&loaded);
+            let loaded =
+                grooviq_project::load_budgeted(&file, &budget).map_err(|e| e.to_string())?;
+            let decoded = grooviq_project::decode_samples_budgeted_checked(&loaded, &budget)?;
             Ok((loaded, decoded))
         }
     })
@@ -560,6 +585,7 @@ mod tests {
             sample_rate,
             format: ExportFormat::Pcm24,
             loops,
+            song_region: false,
         };
         assert!(req(7_999, 1).options().is_err());
         assert!(req(384_001, 1).options().is_err());
@@ -624,5 +650,77 @@ mod tests {
             .filter(|&p| t.pass(p))
             .collect();
         assert_eq!(passed, vec![0.0, 0.0101, 0.5, 0.999, 1.0]);
+    }
+}
+
+#[cfg(test)]
+mod arrangement_export_tests {
+    use super::*;
+    use grooviq_project::{
+        Clip, ClipContent, DecodedSamples, Loaded, LoopRegion, PlayMode, PlaylistTrack, Project,
+    };
+    use std::collections::HashMap;
+    #[test]
+    fn native_export_selection_reaches_actual_exporter_whole_and_region() {
+        let (c, _p) = grooviq_engine::engine(grooviq_engine::EngineConfig {
+            sample_rate: 48000.0,
+        });
+        let mut s = Session::new(Arc::new(std::sync::Mutex::new(c)));
+        let mut p = Project::new();
+        p.bpm = 120.0;
+        p.play_mode = PlayMode::Song;
+        p.arrangement.tracks.push(PlaylistTrack {
+            id: 1,
+            name: "T".into(),
+            color: 0,
+            mute: false,
+        });
+        p.arrangement.clips.push(Clip {
+            id: 2,
+            track: 1,
+            name: "Empty".into(),
+            start_tick: 0,
+            muted: true,
+            content: ClipContent::Pattern {
+                pattern: 0,
+                offset_tick: 0,
+                length_ticks: 960,
+            },
+        });
+        p.arrangement.loop_region = Some(LoopRegion {
+            start_tick: 240,
+            end_tick: 720,
+            enabled: true,
+        });
+        p.next_id = 3;
+        let d = tempfile::tempdir().unwrap();
+        s.open(
+            &d.path().join("song.grooviq"),
+            Loaded {
+                project: p,
+                samples: HashMap::new(),
+                warnings: vec![],
+            },
+            DecodedSamples::default(),
+        )
+        .unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        for (region, frames) in [(false, 24000), (true, 12000)] {
+            let mut options = ExportOptions {
+                max_tail_seconds: 0.0,
+                ..Default::default()
+            };
+            let state = select_export(&s, region, &mut options).unwrap();
+            let result = export_wav(
+                state,
+                &options,
+                &d.path()
+                    .join(if region { "region.wav" } else { "whole.wav" }),
+                &mut |_| {},
+                &cancel,
+            )
+            .unwrap();
+            assert_eq!(result.frames, frames);
+        }
     }
 }

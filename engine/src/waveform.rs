@@ -75,6 +75,43 @@ impl PeakPyramid {
         }
         Ok(Self { sample, levels })
     }
+    pub fn allocated_peak_bytes(&self) -> usize {
+        self.levels.capacity() * std::mem::size_of::<Vec<Peak>>()
+            + self
+                .levels
+                .iter()
+                .map(|l| l.capacity() * std::mem::size_of::<Peak>())
+                .sum::<usize>()
+    }
+    pub fn budgeted(
+        sample: Arc<SampleBuf>,
+        budget: &crate::media_budget::MediaBudget,
+    ) -> Result<Arc<Self>, String> {
+        budget.sample(&sample).map_err(|e| e.to_string())?;
+        let mut count = sample.len().div_ceil(BASE);
+        let mut bins = 0usize;
+        let mut levels = 0usize;
+        loop {
+            bins = bins.checked_add(count).ok_or("Peak size overflow")?;
+            levels += 1;
+            if count <= 1 {
+                break;
+            }
+            count = count.div_ceil(2);
+        }
+        // Vec level-list growth doubles; per-level exact-size iterators allocate exact bins.
+        let reserved = bins * 16
+            + (if levels > 1 {
+                levels.next_power_of_two().max(4)
+            } else {
+                1
+            }) * std::mem::size_of::<Vec<Peak>>();
+        let hold = budget.reserve(reserved).map_err(|e| e.to_string())?;
+        let pyramid = Arc::new(Self::new(sample).map_err(|_| "Invalid waveform")?);
+        hold.bind(2, &pyramid, pyramid.allocated_peak_bytes())
+            .map_err(|e| e.to_string())?;
+        Ok(pyramid)
+    }
     pub fn sample(&self) -> &Arc<SampleBuf> {
         &self.sample
     }
