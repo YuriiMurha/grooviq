@@ -22,6 +22,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+      - name: Python for local refresh safety tests
+        if: matrix.os == 'macos-latest'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Local refresh safety tests
+        if: matrix.os == 'macos-latest'
+        run: make test-refresh-app
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       # `tauri-build` needs the built UI (`frontendDist`) to compile the app crate.
