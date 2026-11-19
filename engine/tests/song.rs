@@ -596,3 +596,113 @@ fn unrounded_extent_admission_refuses_invalid_geometry() {
         assert!(c.set_song(song).is_err());
     }
 }
+
+#[test]
+fn explicit_extent_cannot_shorten_admitted_musical_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    for source in ["arrangement", "note", "automation"] {
+        let mut initial = state();
+        initial.song.arrangement.length = 0;
+        initial.song.arrangement.notes.clear();
+        let minimum = match source {
+            "arrangement" => {
+                initial.song.arrangement.length = 960;
+                960
+            }
+            "note" => {
+                // Engine callers may provide a note beyond arrangement.length. The note's
+                // release is independently mandatory; the UI end_tick is not its substitute.
+                initial.song.arrangement.notes = state().song.arrangement.notes;
+                360
+            }
+            _ => {
+                initial.song.automation = AutomationSchedule::build(
+                    vec![AutomationClip {
+                        target: AutomationTarget::ChannelVolume(ChannelId(1)),
+                        priority: 1,
+                        start_tick: 240,
+                        offset_tick: 0,
+                        length_ticks: 720,
+                        points: vec![AutomationPoint {
+                            tick: 0,
+                            value: 0.5,
+                            segment: AutomationSegment::Hold,
+                        }],
+                    }],
+                    &initial.channels,
+                )
+                .unwrap();
+                960
+            }
+        };
+        initial.song.frame_extent = Some(Arc::new(SongFrameExtent {
+            musical_end_tick: minimum,
+            audio: Vec::new(),
+        }));
+        let (mut c, mut p) = engine_with(
+            EngineConfig {
+                sample_rate: 48000.0,
+            },
+            initial.clone(),
+        );
+        let options = ExportOptions {
+            format: WavFormat::Float32,
+            max_tail_seconds: 0.0,
+            ..Default::default()
+        };
+        let file = dir.path().join("valid.wav");
+        let expected = ticks_to_frames(minimum as f64, 120.0, 48000.0);
+        assert_eq!(
+            export_wav(c.state().clone(), &options, &file, &mut |_| {}, &cancel)
+                .unwrap()
+                .frames,
+            expected
+        );
+        if source == "note" {
+            assert!(
+                hound::WavReader::open(&file)
+                    .unwrap()
+                    .into_samples::<f32>()
+                    .any(|s| s.unwrap() != 0.0)
+            );
+        }
+        for endpoint in [0, minimum - 1] {
+            let mut contradictory = initial.song.clone();
+            contradictory.frame_extent = Some(Arc::new(SongFrameExtent {
+                musical_end_tick: endpoint,
+                audio: Vec::new(),
+            }));
+            let before = c.state().clone();
+            assert_eq!(
+                c.set_song(contradictory.clone()),
+                Err(ControlError::Rejected),
+                "{source} endpoint {endpoint}"
+            );
+            assert_eq!(c.state(), &before);
+            assert_eq!(
+                c.set_timeline(TimelineUpdate {
+                    pattern: Box::new(before.pattern.clone()),
+                    song: Box::new(contradictory),
+                    bpm: before.bpm,
+                    mode: before.playback_mode,
+                    region: None,
+                    remove_channel: None,
+                }),
+                Err(ControlError::Rejected)
+            );
+            assert_eq!(c.state(), &before);
+            assert_eq!(
+                export_wav(c.state().clone(), &options, &file, &mut |_| {}, &cancel)
+                    .unwrap()
+                    .frames,
+                expected
+            );
+        }
+        c.set_song(initial.song).unwrap();
+        c.send(Command::Play).unwrap();
+        p.process(&mut [0.0; 128], 2);
+        let mut reader = hound::WavReader::open(file).unwrap();
+        assert_eq!(reader.samples::<f32>().count() as u64, expected * 2);
+    }
+}

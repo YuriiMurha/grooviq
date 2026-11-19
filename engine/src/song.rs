@@ -42,6 +42,8 @@ impl SongData {
             || self.end_frame > 46_080_000_000
             || self.frame_extent.as_ref().is_some_and(|e| {
                 e.musical_end_tick > self.end_tick
+                    || e.musical_end_tick < self.arrangement.length
+                    || e.musical_end_tick < self.automation.end_tick()
                     || e.audio.len() > 100_000
                     || e.audio.iter().any(|&(tick, frames, rate)| {
                         tick >= self.end_tick
@@ -64,9 +66,13 @@ impl SongData {
             if previous.is_some_and(|p| p > order)
                 || n.tick >= self.end_tick
                 || n.length == 0
-                || n.tick
-                    .checked_add(n.length)
-                    .is_none_or(|end| end > self.end_tick)
+                || n.tick.checked_add(n.length).is_none_or(|end| {
+                    end > self.end_tick
+                        || self
+                            .frame_extent
+                            .as_ref()
+                            .is_some_and(|extent| end > extent.musical_end_tick)
+                })
                 || n.key > 127
                 || !n.velocity.is_finite()
                 || !(0.0..=1.0).contains(&n.velocity)
