@@ -1,0 +1,26 @@
+.pattern-workspace { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.pattern-workspace-content { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.pattern-rail { flex: 0 0 188px; min-width: 0; min-height: 0; overflow: auto; padding: 12px; background: var(--panel); border-right: 1px solid var(--line); color: var(--text); font: 12px var(--font); scrollbar-color: var(--line) var(--panel); }
+.pattern-rail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.pattern-rail-head h2 { margin: 0; font-size: 13px; }
+.pattern-rail button, .pattern-rail input, .pattern-mode-controls select { font: inherit; color: var(--text); background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 6px 8px; min-height: 30px; }
+.pattern-rail button:hover:not(:disabled), .pattern-mode-controls select:hover:not(:disabled) { background: var(--line-soft); }
+.pattern-rail button:active:not(:disabled) { background: var(--line); }
+.pattern-rail button:disabled, .pattern-rail input:disabled, .pattern-mode-controls select:disabled { color: var(--faint); cursor: default; }
+.pattern-rail :focus-visible, .pattern-mode-controls :focus-visible { outline: 2px solid var(--select); outline-offset: 2px; }
+.pattern-rail ::selection { background: var(--select); color: var(--bg); }
+.pattern-rail input { width: 100%; box-sizing: border-box; caret-color: var(--accent); margin: 6px 0; }
+.pattern-rail-list { list-style: none; padding: 0; margin: 0 0 16px; display: grid; gap: 4px; }
+.pattern-rail-list button { width: 100%; text-align: left; overflow-wrap: anywhere; }
+.pattern-rail-list button[aria-current="true"] { border-color: var(--select); color: var(--select); }
+.pattern-rail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.pattern-rail-rename { margin: 16px 0; }
+.pattern-rail p { color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+.pattern-rail p[role="alert"] { color: var(--text); }
+.pattern-mode-controls { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11px; }
+.pattern-mode-controls label { display: grid; gap: 2px; color: var(--muted); }
+.pattern-current { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pattern-playlist-shell { padding: 16px; border-bottom: 1px solid var(--line); color: var(--muted); background: var(--bg); }
+.pattern-playlist-shell h2 { color: var(--text); font-size: 14px; margin: 0 0 8px; }
+.pattern-playlist-shell p { margin: 0; font-size: 12px; }
+@media (max-width: 960px) { .pattern-rail { flex-basis: 150px; padding: 8px; } .pattern-current { max-width: 72px; } }

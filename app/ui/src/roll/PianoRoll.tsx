@@ -115,7 +115,10 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     });
   }, [queue]);
   // Undo and redo wait their turn behind this roll's edits; the queue fetches the notes after.
-  useEffect(() => setRollHistory({ run: (command) => queue.run(command) }), [queue]);
+  useEffect(() => setRollHistory({ run: (command) => queue.run(command),
+    barrier: (command, activeDrag, accepted) => queue.barrier(command, activeDrag, accepted),
+    detachBarriers: () => queue.detachBarriers(),
+    invalidateHistory: (stamp) => queue.invalidateHistory(stamp) }), [queue]);
   const pointerTick = useRef<number | null>(null);
   const humanizeSeed = useRef(1);
   const amounts = useTransformAmounts();
