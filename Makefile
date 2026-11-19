@@ -21,7 +21,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: test-instruction-profiles e2e-diagnostics-test ui-install ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles e2e-browser-results-test e2e-diagnostics-test ui-install ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
@@ -104,3 +104,7 @@ test-instruction-profiles: ## Safe profile capture tests (no Rust build or measu
 .PHONY: e2e-diagnostics-test
 e2e-diagnostics-test: ## Test bounded timeout-surviving e2e diagnostics (Node only)
 	node --test scripts/e2e-diagnostics.test.mjs
+
+.PHONY: e2e-browser-results-test
+e2e-browser-results-test: ## Test complete browser CI accounting (Node only)
+	node --test scripts/e2e-browser-results.test.mjs
