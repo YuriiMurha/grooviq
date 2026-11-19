@@ -85,8 +85,37 @@ pub fn compile_pattern(project: &Project, pattern: &Pattern) -> PatternData {
 /// takes one. Values are clamped so the engine never refuses the state, even for a project
 /// nobody validated.
 pub fn engine_state(project: &Project, samples: &HashMap<u32, Arc<SampleBuf>>) -> EngineState {
+    let channels = compile_channels(project, samples);
+
+    let pattern = project
+        .patterns
+        .iter()
+        .find(|p| p.id == project.current_pattern)
+        .or_else(|| project.patterns.first())
+        .map_or_else(
+            || PatternData {
+                length: DEFAULT_STEPS * STEP_TICKS,
+                notes: Vec::new(),
+            },
+            |p| compile_pattern(project, p),
+        );
+
+    EngineState {
+        bpm: finite_or(project.bpm, BPM.2).clamp(BPM.0, BPM.1),
+        channels,
+        pattern,
+        time_signature: time_signature(project),
+        ..EngineState::default()
+    }
+}
+
+/// Channel-only adapter; deliberately does not compile or call the song adapter.
+pub fn compile_channels(
+    project: &Project,
+    samples: &HashMap<u32, Arc<SampleBuf>>,
+) -> Vec<ChannelSetup> {
     let mut seen = HashSet::new();
-    let channels = project
+    project
         .channels
         .iter()
         .filter(|c| seen.insert(c.id))
@@ -110,28 +139,7 @@ pub fn engine_state(project: &Project, samples: &HashMap<u32, Arc<SampleBuf>>) -
                 ..setup
             }
         })
-        .collect();
-
-    let pattern = project
-        .patterns
-        .iter()
-        .find(|p| p.id == project.current_pattern)
-        .or_else(|| project.patterns.first())
-        .map_or_else(
-            || PatternData {
-                length: DEFAULT_STEPS * STEP_TICKS,
-                notes: Vec::new(),
-            },
-            |p| compile_pattern(project, p),
-        );
-
-    EngineState {
-        bpm: finite_or(project.bpm, BPM.2).clamp(BPM.0, BPM.1),
-        channels,
-        pattern,
-        time_signature: time_signature(project),
-        ..EngineState::default()
-    }
+        .collect()
 }
 
 /// The project's time signature, or 4/4 if it is not one the engine takes.
