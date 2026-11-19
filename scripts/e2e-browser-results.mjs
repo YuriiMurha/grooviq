@@ -62,7 +62,7 @@ export function validate(receipts, meta, dependency) {
       requireThat(Array.isArray(t.results) && t.results.length === 1 && t.results[0].retry === 0, 'missing/retried result');
       requireThat(!t.annotations?.some(a => a.type === 'fixme' || a.type === 'fail'), 'fixme/expected failure');
       const skip = project === 'webkit' && spec.file === 'm2-panels.e2e.ts' && spec.title === 'a_dpr_change_redraws_sharp' && t.expectedStatus === 'skipped' && t.annotations?.filter(a => a.type === 'skip').length === 1 && t.annotations.some(a => a.type === 'skip' && a.description === 'changes the ratio through the Chrome DevTools Protocol');
-      requireThat(t.status === 'expected' && ((t.expectedStatus === 'passed' && t.results[0].status === 'passed') || (skip && t.results[0].status === 'skipped')), 'non-passing case');
+      requireThat((t.status === 'expected' && t.expectedStatus === 'passed' && t.results[0].status === 'passed') || (skip && t.status === 'skipped' && t.results[0].status === 'skipped'), 'non-passing case');
     }
     requireThat(expected.size === 0, 'missing cases');
   }

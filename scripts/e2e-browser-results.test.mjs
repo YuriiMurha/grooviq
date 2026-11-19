@@ -38,8 +38,9 @@ test('only exact WebKit CDP skip is accepted', () => {
  const x=fixture(); const spec=x[0].report.suites[0].specs[0];
  spec.file='m2-panels.e2e.ts'; spec.title='a_dpr_change_redraws_sharp';
  x.forEach(r=> {r.inventory.suites[0].specs[0].file=spec.file;r.inventory.suites[0].specs[0].title=spec.title;});
- const t=spec.tests[0];t.expectedStatus='skipped'; t.results[0].status='skipped';t.annotations=[{type:'skip',description:'changes the ratio through the Chrome DevTools Protocol'}];
+ const t=spec.tests[0];t.expectedStatus='skipped'; t.status='skipped'; t.results[0].status='skipped';t.annotations=[{type:'skip',description:'changes the ratio through the Chrome DevTools Protocol'}];
  assert.doesNotThrow(()=>validate(x,meta,'success'));
+ t.status='expected';assert.throws(()=>validate(x,meta,'success'));t.status='skipped';
  t.annotations[0].description='other';assert.throws(()=>validate(x,meta,'success'));
 });
 test('one passing case cannot cover two discovered cases', () => {
