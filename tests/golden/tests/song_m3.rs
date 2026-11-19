@@ -36,9 +36,51 @@ fn equal(a: &[u8], b: &[u8]) {
         );
     }
 }
+fn update_reference(dir: &std::path::Path, bytes: &[u8], requested: Option<&std::ffi::OsStr>) {
+    if requested == Some(std::ffi::OsStr::new("1")) {
+        storage::store(dir, bytes);
+    }
+}
+fn verify_update_guard(dir: &std::path::Path) {
+    let frozen = dir.join("frozen-ref");
+    fs::create_dir_all(&frozen).unwrap();
+    let sentinel = b"read-only reference sentinel";
+    fs::write(frozen.join("manifest.json"), sentinel).unwrap();
+    for value in [
+        None,
+        Some(""),
+        Some("0"),
+        Some("no"),
+        Some("true"),
+        Some("01"),
+        Some(" 1"),
+        Some("1 "),
+    ] {
+        update_reference(
+            &frozen,
+            b"candidate payload",
+            value.map(std::ffi::OsStr::new),
+        );
+        assert_eq!(
+            fs::read(frozen.join("manifest.json")).unwrap(),
+            sentinel,
+            "update value {value:?} wrote the reference"
+        );
+        assert!(!frozen.join("000.zlib").exists());
+    }
+    update_reference(
+        &frozen,
+        b"candidate payload",
+        Some(std::ffi::OsStr::new("1")),
+    );
+    assert_ne!(fs::read(frozen.join("manifest.json")).unwrap(), sentinel);
+    assert!(frozen.join("000.zlib").is_file());
+}
+
 #[test]
 fn complete_song_bytes_roundtrip_and_full_callback_partitions() {
     let d = tempfile::tempdir().unwrap();
+    verify_update_guard(d.path());
     let mut s = setup(d.path());
     let path = d.path().join("actual.wav");
     let report = song::export(&s, &path);
@@ -64,9 +106,11 @@ fn complete_song_bytes_roundtrip_and_full_callback_partitions() {
     assert_eq!(report.frames, song::FRAMES as u64);
     assert_eq!(r.duration() as usize, song::FRAMES);
     assert_eq!(r.spec().sample_format, hound::SampleFormat::Float);
-    if std::env::var_os("SONG_M3_UPDATE").is_some() {
-        storage::store(&refs(), &bytes);
-    }
+    update_reference(
+        &refs(),
+        &bytes,
+        std::env::var_os("SONG_M3_UPDATE").as_deref(),
+    );
     equal(&bytes, &storage::load(&refs()).unwrap());
     s.save(
         Some(&d.path().join("saved.grooviq")),
