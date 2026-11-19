@@ -555,8 +555,10 @@ impl AudioProcessor {
                             self.stop(start);
                             let len = self.graph.pattern_length();
                             self.transport.keep_position(start, len, len);
-                            self.with_graph(|g| g.playback_mode = mode);
                         }
+                        // Rebuild starts at the final mirrored mode; replay even an accepted
+                        // no-op in queue order, without introducing transition effects.
+                        self.with_graph(|g| g.playback_mode = mode);
                     }
                     Command::SetSongLoop { region } => {
                         let tick = self.graph.position(self.transport.position_ticks(start));
