@@ -263,6 +263,7 @@ pub(crate) enum Msg {
     Command {
         due: u64,
         cmd: Command,
+        mode_changed: bool,
     },
     /// A fresh graph to swap in (after a panic, or for a new state); the old one goes back
     /// through the trash queue.
@@ -333,7 +334,7 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
     let mut cut: Vec<ChannelId> = Vec::new();
     let mut kept = Vec::with_capacity(queued.len());
     for msg in queued.into_iter().rev() {
-        let (due, cmd) = match msg {
+        let (due, cmd, mode_changed) = match msg {
             Msg::ReplaceGraph(_) => {
                 all_cut = true;
                 continue;
@@ -364,7 +365,11 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
                 kept.push(Msg::RecordMark(id));
                 continue;
             }
-            Msg::Command { due, cmd } => (due, cmd),
+            Msg::Command {
+                due,
+                cmd,
+                mode_changed,
+            } => (due, cmd, mode_changed),
         };
         let cmd = match cmd {
             Command::TestTone { .. }
@@ -396,7 +401,11 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
             #[cfg(feature = "test-hooks")]
             Command::InjectNaN | Command::InjectPanic => cmd,
         };
-        kept.push(Msg::Command { due, cmd });
+        kept.push(Msg::Command {
+            due,
+            cmd,
+            mode_changed,
+        });
     }
     kept.reverse();
     kept

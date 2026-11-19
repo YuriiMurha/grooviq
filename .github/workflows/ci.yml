@@ -79,6 +79,8 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test -- --run
+      - name: E2e browser accounting safety tests
+        run: node --test ../../scripts/e2e-browser-results.test.mjs
       - name: E2e diagnostic safety tests
         run: node --test ../../scripts/e2e-diagnostics.test.mjs
       - name: Real Session / mock semantic replay
@@ -89,7 +91,12 @@ jobs:
 
   # Not a required check: Playwright against the web build with the mock engine
   # (app/ui/e2e). WebKit stands in for the macOS app, Chromium for Windows' WebView2.
-  e2e:
+  e2e-browser:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        browser: [webkit, chromium]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
@@ -111,15 +118,69 @@ jobs:
       - run: npm ci
         timeout-minutes: 2
       # Leave room for diagnostics; container initialization also uses the job budget.
-      - run: npm run e2e
+      - name: Discover full inventory and run browser
+        id: suite
         timeout-minutes: 7
+        env:
+          GROOVIQ_E2E_JSON: ${{ github.workspace }}/app/ui/browser-accounting/report.json
+        run: |
+          mkdir browser-accounting
+          npm run --silent e2e -- --list --project=webkit --project=chromium --reporter=json > browser-accounting/inventory.json
+          npm run e2e -- --project=${{ matrix.browser }} --workers=2
+      - name: Record external step outcome
+        if: always()
+        timeout-minutes: 1
+        env:
+          SUITE_OUTCOME: ${{ steps.suite.outcome }}
+        run: |
+          mkdir -p browser-accounting
+          node ../../scripts/e2e-browser-results.mjs receipt browser-accounting ${{ matrix.browser }}
+      - name: Upload browser accounting
+        if: always()
+        timeout-minutes: 1
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-accounting-${{ matrix.browser }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: app/ui/browser-accounting/receipt.json
+          if-no-files-found: error
+          retention-days: 7
       # Best effort on cancellation: a runner/job kill can still prevent delivery.
       - if: failure() || cancelled()
         timeout-minutes: 1
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-results
+          name: e2e-results-${{ matrix.browser }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             app/ui/e2e-results
             app/ui/playwright-report/diagnostics-*
           retention-days: 7
+
+  # Four workers across two hosts, plus setup and aggregation cost (previously two).
+  # A runner hard kill can prevent artifact delivery; absence must fail this gate.
+  e2e:
+    if: ${{ always() }}
+    needs: [e2e-browser]
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+      - uses: actions/setup-node@v5
+        timeout-minutes: 1
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        timeout-minutes: 1
+        with:
+          name: e2e-accounting-webkit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: browser-accounting/webkit
+      - uses: actions/download-artifact@v4
+        timeout-minutes: 1
+        with:
+          name: e2e-accounting-chromium-${{ github.run_id }}-${{ github.run_attempt }}
+          path: browser-accounting/chromium
+      - name: Require both complete successful browser projects
+        timeout-minutes: 1
+        env:
+          BROWSER_RESULT: ${{ needs.e2e-browser.result }}
+        run: node scripts/e2e-browser-results.mjs aggregate browser-accounting
