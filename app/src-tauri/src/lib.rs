@@ -24,6 +24,7 @@ mod output_mode;
 pub mod panic_hook;
 mod patterns_cmds;
 mod project_cmds;
+mod sampler_trim_cmds;
 mod settings;
 
 use audio_log::{AudioLog, Level};
@@ -409,6 +410,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            sampler_trim_cmds::sampler_trim_view,
+            sampler_trim_cmds::sampler_trim_reset,
+            sampler_trim_cmds::sampler_trim_undo,
             arrangement_cmds::arrangement_view,
             arrangement_cmds::arrangement_edit,
             arrangement_cmds::arrangement_history,

@@ -204,6 +204,7 @@ pub(crate) struct Histories {
     pub current: crate::undo::NoteHistory,
     pub patterns: HashMap<u32, crate::undo::NoteHistory>,
     pub arrangement: ArrangementHistory,
+    pub trim: crate::session::sampler_trim::TrimHistory,
     pub floors: HashMap<u32, (u32, u32)>,
     pub protected: std::collections::HashSet<u64>,
 }
@@ -214,6 +215,7 @@ impl Histories {
             h.clear_redo();
         }
         self.arrangement.redo.clear();
+        self.trim.redo.clear();
     }
     pub fn usage(&self) -> (usize, usize, usize) {
         Self::usage_of(
@@ -221,6 +223,7 @@ impl Histories {
             &self.patterns,
             &self.arrangement,
             &self.floors,
+            &self.trim,
         )
     }
     pub fn usage_of(
@@ -228,6 +231,7 @@ impl Histories {
         patterns: &HashMap<u32, crate::undo::NoteHistory>,
         arrangement: &ArrangementHistory,
         floors: &HashMap<u32, (u32, u32)>,
+        trim: &crate::session::sampler_trim::TrimHistory,
     ) -> (usize, usize, usize) {
         let (mut steps, mut notes) = current.retained();
         let mut bytes = current.bytes()
@@ -253,6 +257,8 @@ impl Histories {
             bytes += c.bytes(&mut curves);
         }
         bytes += curves.values().sum::<usize>();
+        steps += trim.undo.len() + trim.redo.len();
+        bytes += trim.bytes();
         (steps, notes, bytes)
     }
     fn prune_floors(&mut self) {
@@ -290,6 +296,15 @@ impl Histories {
                 return Err("One arrangement gesture exceeds the shared history budget".into());
             }
         }
+        if self
+            .trim
+            .undo
+            .iter()
+            .chain(&self.trim.redo)
+            .any(|c| self.protected.contains(&c.order) && std::mem::size_of_val(c) > limits.bytes)
+        {
+            return Err("One trim step exceeds shared history budget".into());
+        }
         if limits.steps == 0 && self.usage().0 > 0 {
             return Err("History step budget exhausted".into());
         }
@@ -314,9 +329,21 @@ impl Histories {
                         .min()
                         .map(|o| (o, None)),
                 )
+                .chain(
+                    self.trim
+                        .undo
+                        .iter()
+                        .chain(&self.trim.redo)
+                        .filter(|c| !self.protected.contains(&c.order))
+                        .map(|c| (c.order, None)),
+                )
                 .min_by_key(|(o, _)| *o);
             match oldest {
                 Some((order, None)) => {
+                    self.trim.undo.retain(|c| c.order != order);
+                    self.trim.redo.retain(|c| c.order != order);
+                    self.trim.undo.shrink_to_fit();
+                    self.trim.redo.shrink_to_fit();
                     self.arrangement.undo.retain(|s| s.order != order);
                     self.arrangement.redo.retain(|s| s.order != order);
                     self.arrangement.undo.shrink_to_fit();
