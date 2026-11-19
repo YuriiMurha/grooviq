@@ -593,7 +593,7 @@ fn choke_never_allocates() {
                 }
             }
         }
-        assert_no_alloc(|| p.process(&mut buf, 2));
+        realtime(|| p.process(&mut buf, 2));
         c.check_health();
     }
     assert!(c.live().peak[0] > 0.05, "it sounded");
