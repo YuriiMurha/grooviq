@@ -601,6 +601,9 @@ pub struct Session {
     pattern_histories: HashMap<u32, NoteHistory>,
     precommit: Option<PrecommitValidator>,
     arrangement_history: crate::arrangement_history::ArrangementHistory,
+    trim_history: sampler_trim::TrimHistory,
+    trim_identities: HashMap<u32, (u64, u64)>,
+    trim_epoch: u64,
     history_limits: crate::HistoryLimits,
     arrangement_revision: u64,
     pattern_note_floors: HashMap<u32, (u32, u32)>,
@@ -749,6 +752,9 @@ impl Session {
             pattern_histories: HashMap::new(),
             precommit: None,
             arrangement_history: Default::default(),
+            trim_history: Default::default(),
+            trim_identities: Default::default(),
+            trim_epoch: 0,
             history_limits: Default::default(),
             arrangement_revision: 0,
             pattern_note_floors: HashMap::new(),
@@ -854,6 +860,7 @@ impl Session {
             current,
             patterns,
             arrangement: self.arrangement_history.clone(),
+            trim: self.trim_history.clone(),
             floors: self.pattern_note_floors.clone(),
             protected: Default::default(),
         }
@@ -866,6 +873,7 @@ impl Session {
         self.history = h.current;
         self.pattern_histories = h.patterns;
         self.arrangement_history = h.arrangement;
+        self.trim_history = h.trim;
         self.pattern_note_floors = h.floors;
     }
     fn admit_histories(
@@ -890,6 +898,7 @@ impl Session {
             &self.pattern_histories,
             &self.arrangement_history,
             &self.pattern_note_floors,
+            &self.trim_history,
         )
     }
 
@@ -1059,6 +1068,25 @@ impl Session {
             } else {
                 choices.first()
             };
+            let trim = if undo {
+                self.trim_history.undo.last()
+            } else {
+                self.trim_history.redo.last()
+            };
+            if let Some(trim) = trim
+                && chosen.is_none_or(|(order, _)| {
+                    if undo {
+                        trim.order > *order
+                    } else {
+                        trim.order < *order
+                    }
+                })
+            {
+                let channel = trim.channel;
+                self.step_trim_history(channel, trim.order, undo, now)
+                    .map_err(|e| e.to_string())?;
+                return Ok(HistoryEffect::SamplerTrim { channel });
+            }
             let Some((_, target)) = chosen else {
                 return Ok(HistoryEffect::Empty);
             };
@@ -1456,6 +1484,7 @@ impl Session {
         self.project = candidate;
         if invalidates_arrangement_history {
             self.arrangement_history.clear();
+            self.trim_history = Default::default();
         }
         self.patterns_revision += 1;
         self.changed(true, now);
@@ -1658,8 +1687,27 @@ impl Session {
     pub fn apply(&mut self, edit: Edit, now: Instant) -> Result<ProjectView, SessionError> {
         self.arrangement_stamp(self.generation, self.arrangement_revision)
             .map_err(SessionError::InvalidValue)?;
+        let invalidates = match &edit {
+            Edit::SetSamplerParam { channel, param, .. }
+            | Edit::SetInstrumentParam { channel, param, .. }
+                if param == "start" || param == "end" =>
+            {
+                Some(*channel)
+            }
+            Edit::RemoveChannel { channel } => Some(*channel),
+            _ => None,
+        };
+        if invalidates.is_some() {
+            self.next_trim_epoch()?;
+        }
         let structural = edit.structural();
         if self.apply_inner(edit)? {
+            if let Some(channel) = invalidates {
+                self.invalidate_trim(channel, false);
+                if self.channel_index(channel).is_err() {
+                    self.trim_identities.remove(&channel);
+                }
+            }
             self.changed(structural, now);
         }
         Ok(self.view())
@@ -2181,6 +2229,7 @@ impl Session {
         self.history.clear();
         self.pattern_histories.clear();
         self.arrangement_history.clear();
+        self.trim_history = Default::default();
         Ok(())
     }
 
@@ -2501,15 +2550,28 @@ impl Session {
 
     /// Sets an instrument parameter in the engine only, while a control moves: the project
     /// changes when the UI commits the value with [`Edit::SetInstrumentParam`].
-    pub fn param_live(&self, channel: u32, param: &str, value: f32) -> Result<(), SessionError> {
+    pub fn param_live(
+        &mut self,
+        channel: u32,
+        param: &str,
+        value: f32,
+    ) -> Result<(), SessionError> {
         let (kind, at) = self.param_target(channel, param)?;
         let (min, max, _) = kind.spec()[at];
         let value = finite(value, &format!("{} value", device(kind)))?.clamp(min, max);
+        let trim = kind == InstrumentKind::Sampler && (param == "start" || param == "end");
+        if trim {
+            self.next_trim_epoch()?;
+        }
         self.send(Command::SetChannelParam {
             channel: ChannelId(channel),
             index: at as u32,
             value,
-        })
+        })?;
+        if trim {
+            self.invalidate_trim(channel, false);
+        }
+        Ok(())
     }
 
     /// Switches recording: while it is on and the transport plays, live notes are recorded
@@ -2789,6 +2851,7 @@ impl Session {
         now: Instant,
     ) -> Result<ProjectView, SessionError> {
         let index = self.channel_index(channel)?;
+        self.next_trim_epoch()?;
         let mut candidate = self.project.clone();
         candidate.channels[index].sample = Some(SampleRef {
             path: path.to_path_buf(),
@@ -2814,6 +2877,7 @@ impl Session {
         });
         self.files.insert(channel, file);
         self.decoded.insert(channel, sample);
+        self.invalidate_trim(channel, true);
         self.changed(true, now);
         Ok(self.view())
     }
@@ -2915,6 +2979,7 @@ impl Session {
         self.revision += 1;
         self.saved_revision = self.revision;
         self.generation += 1;
+        self.trim_identities.clear();
         self.arrangement_revision = 0;
         self.pattern_note_floors.clear();
         self.pending_since = None;
@@ -3408,3 +3473,5 @@ mod release_progress_tests {
 
 mod media;
 pub use media::{MediaIntent, MediaTarget};
+
+pub mod sampler_trim;
