@@ -46,6 +46,19 @@ impl AudioSchedule {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
+    /// Future onsets are excluded from a region export; existing sources retain fixed seconds.
+    pub(crate) fn before_tick(&self, end: u64) -> Result<Self, ControlError> {
+        Self::build(
+            self.0.assets.clone(),
+            self.0
+                .entries
+                .iter()
+                .filter(|e| e.clip.start_tick < end)
+                .map(|e| e.clip)
+                .collect(),
+        )
+        .map(|(schedule, _)| schedule)
+    }
     pub fn is_empty(&self) -> bool {
         self.0.entries.is_empty()
     }

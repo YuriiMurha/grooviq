@@ -563,3 +563,310 @@ fn older_file_read_cannot_supersede_a_newer_accepted_request_even_after_failure_
     assert!(s.check_media_intent(&older).is_err());
     drop(request);
 }
+
+fn float_wav(path: &std::path::Path) -> Vec<f32> {
+    let bytes = std::fs::read(path).unwrap();
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        let n = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        if &bytes[at..at + 4] == b"data" {
+            return bytes[at + 8..at + 8 + n]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c))
+                .collect();
+        }
+        at += 8 + n + (n & 1);
+    }
+    panic!("missing WAV data")
+}
+#[test]
+fn final_generated_song_native_media_history_automation_export_and_crash_recovery() {
+    use grooviq_project::{
+        autosave::{AutosaveTick, autosave_tick},
+        pattern_edit::PatternEdit,
+        recovery::RecoveryDir,
+        session::Edit,
+    };
+    let (mut s, assets, mut processor, c) = rig(8 << 20);
+    let track = s.project().arrangement.tracks[0].id;
+    let (intent, prepared) = prepare(&mut s, &assets, import(track), file(4800));
+    let imported = s.publish_media(&intent, prepared, Instant::now()).unwrap();
+    let asset = imported.created_ids[0];
+    s.apply(Edit::SetTempo { bpm: 120.0 }, Instant::now())
+        .unwrap();
+    let channel = s
+        .add_synth_channel("Init", Instant::now())
+        .unwrap()
+        .channels[0]
+        .id;
+    s.apply(Edit::ToggleStep { channel, step: 0 }, Instant::now())
+        .unwrap();
+    let patterns = s.patterns();
+    s.edit_patterns(
+        patterns.generation,
+        patterns.revision,
+        PatternEdit::Duplicate { pattern: 0 },
+        Instant::now(),
+    )
+    .unwrap();
+    let second = s.project().patterns[1].id;
+    let v = s.arrangement_view();
+    let ack = s
+        .edit_arrangement(
+            v.generation,
+            v.revision,
+            vec![
+                ArrangementEdit::CreateClip {
+                    track,
+                    name: "Linked1".into(),
+                    start_tick: 0,
+                    muted: false,
+                    content: ClipContent::Pattern {
+                        pattern: 0,
+                        offset_tick: 0,
+                        length_ticks: 1920,
+                    },
+                },
+                ArrangementEdit::CreateClip {
+                    track,
+                    name: "Linked2".into(),
+                    start_tick: 1920,
+                    muted: false,
+                    content: ClipContent::Pattern {
+                        pattern: 0,
+                        offset_tick: 0,
+                        length_ticks: 1920,
+                    },
+                },
+                ArrangementEdit::CreateClip {
+                    track,
+                    name: "Independent".into(),
+                    start_tick: 0,
+                    muted: false,
+                    content: ClipContent::Pattern {
+                        pattern: second,
+                        offset_tick: 0,
+                        length_ticks: 960,
+                    },
+                },
+                ArrangementEdit::CreateClip {
+                    track,
+                    name: "Audible pan".into(),
+                    start_tick: 0,
+                    muted: false,
+                    content: ClipContent::Automation {
+                        target: AutomationTarget::ChannelPan { channel },
+                        priority: 0,
+                        offset_tick: 0,
+                        length_ticks: 3840,
+                        points: vec![AutomationPoint {
+                            tick: 0,
+                            value: 1.0,
+                            mode: SegmentMode::Hold,
+                        }]
+                        .into(),
+                    },
+                },
+                ArrangementEdit::SetLoop {
+                    region: Some(LoopRegion {
+                        start_tick: 480,
+                        end_tick: 1920,
+                        enabled: true,
+                    }),
+                },
+            ],
+            Instant::now(),
+        )
+        .unwrap();
+    let automation = *ack.created_ids.last().unwrap();
+    s.set_play_mode(PlayMode::Song, Instant::now()).unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("acceptance.grooviq");
+    let job = s.begin_save(Some(&path)).unwrap();
+    let mut project = job.project.clone();
+    project.arrangement.audio_assets[0].original_tempo = Some(123.0);
+    project.arrangement.audio_assets[0].original_key = Some(ProjectKey {
+        root: 3,
+        scale: "minor".into(),
+    });
+    let samples = job.samples.clone();
+    s.end_save(&job, job.write(&d.path().join("backups")))
+        .unwrap();
+    save(&project, &samples, &path).unwrap();
+    let loaded = load_budgeted(&path, &s.media_budget()).unwrap();
+    let decoded = decode_samples_budgeted_checked(&loaded, &s.media_budget()).unwrap();
+    s.open(&path, loaded, decoded).unwrap();
+    let expected_project = s.project().clone();
+    let state = s.checked_export_state().unwrap();
+    let mut whole = state.clone();
+    whole.song_loop = None;
+    let expected = e::render_offline_with(
+        e::EngineConfig {
+            sample_rate: 48000.0,
+        },
+        whole,
+        &[(0, e::Command::Play)],
+        96000,
+        127,
+    );
+    assert!(expected.iter().any(|v| *v != 0.0));
+    // With audio finished and a sustained synth note still sounding, full pan changes
+    // the intended channel's actual left/right samples, not just its compiled target.
+    let energy = |data: &[f32], ch: usize| {
+        data[12000..24000]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|f| f[ch].abs() as f64)
+            .sum::<f64>()
+    };
+    assert!(energy(&expected, 1) > energy(&expected, 0) * 1.2);
+    let v = s.arrangement_view();
+    s.edit_arrangement(
+        v.generation,
+        v.revision,
+        vec![ArrangementEdit::SetClip {
+            clip: automation,
+            name: "Audible pan".into(),
+            muted: true,
+        }],
+        Instant::now(),
+    )
+    .unwrap();
+    let muted = sound(&s);
+    let v = s.arrangement_view();
+    s.step_project_history(v.generation, v.revision, true, Instant::now())
+        .unwrap();
+    let mut restored = s.checked_export_state().unwrap();
+    restored.song_loop = None;
+    assert_eq!(
+        e::render_offline_with(
+            e::EngineConfig {
+                sample_rate: 48000.0
+            },
+            restored,
+            &[(0, e::Command::Play)],
+            96000,
+            64
+        ),
+        expected
+    );
+    assert_ne!(muted[..2000], expected[..2000]);
+    let (whole, region) = s.export_selection(false).unwrap();
+    assert!(region.is_none());
+    let options = e::ExportOptions {
+        format: e::WavFormat::Float32,
+        max_tail_seconds: 0.0,
+        ..Default::default()
+    };
+    let whole_path = d.path().join("whole.wav");
+    e::export_wav(
+        whole,
+        &options,
+        &whole_path,
+        &mut |_| {},
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(float_wav(&whole_path), expected);
+    let (mut region_state, region) = s.export_selection(true).unwrap();
+    let region = region.unwrap();
+    region_state.song_loop = None;
+    let region_expected = e::render_offline_with(
+        e::EngineConfig {
+            sample_rate: 48000.0,
+        },
+        region_state,
+        &[
+            (0, e::Command::Play),
+            (
+                0,
+                e::Command::Seek {
+                    tick: region.start_tick,
+                },
+            ),
+        ],
+        36000,
+        64,
+    );
+    let (state, region) = s.export_selection(true).unwrap();
+    let region_path = d.path().join("region.wav");
+    e::export_wav(
+        state,
+        &e::ExportOptions {
+            song_region: region,
+            ..options
+        },
+        &region_path,
+        &mut |_| {},
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(float_wav(&region_path), region_expected);
+    // Structural edit schedules autosave; simulate a crash after the actual tick, then
+    // recover the generated project and compare original bytes/metadata/mode/sound.
+    let now = Instant::now();
+    let v = s.arrangement_view();
+    s.edit_arrangement(
+        v.generation,
+        v.revision,
+        vec![ArrangementEdit::SetTrack {
+            track,
+            name: "Recovered".into(),
+            color: 2,
+            mute: false,
+        }],
+        now,
+    )
+    .unwrap();
+    let expected_arrangement = s.project().arrangement.clone();
+    processor.process(&mut [0.0; 128], 2);
+    c.lock().unwrap().check_health();
+    let session = Mutex::new(s);
+    let root = d.path().join("recovery");
+    let (dir, old) = RecoveryDir::start(&root).unwrap();
+    assert!(old.is_empty());
+    let recovery = Mutex::new(Some(dir));
+    assert!(matches!(
+        autosave_tick(&session, &recovery, now + std::time::Duration::from_secs(3)),
+        AutosaveTick::Written(_)
+    ));
+    drop(recovery);
+    let (dir, found) = RecoveryDir::start(&root).unwrap();
+    assert_eq!(found.len(), 1);
+    let found = &found[0];
+    let loaded = load_budgeted(&found.file, &session.lock().unwrap().media_budget()).unwrap();
+    assert_eq!(*loaded.samples[&asset].bytes, wav(4800));
+    assert_eq!(
+        loaded.project.arrangement.audio_assets[0].original_tempo,
+        Some(123.0)
+    );
+    assert_eq!(
+        loaded.project.arrangement.audio_assets[0].original_key,
+        expected_project.arrangement.audio_assets[0].original_key
+    );
+    let mut s = session.lock().unwrap();
+    let decoded = decode_samples_budgeted_checked(&loaded, &s.media_budget()).unwrap();
+    s.open_recovered(found.original.as_deref(), loaded, decoded, Instant::now())
+        .unwrap();
+    assert_eq!(s.project().arrangement, expected_arrangement);
+    assert_eq!(s.project().play_mode, PlayMode::Song);
+    let mut state = s.checked_export_state().unwrap();
+    state.song_loop = None;
+    assert_eq!(
+        e::render_offline_with(
+            e::EngineConfig {
+                sample_rate: 48000.0
+            },
+            state,
+            &[(0, e::Command::Play)],
+            96000,
+            64
+        ),
+        expected
+    );
+    drop(s);
+    dir.clean_exit().unwrap();
+}

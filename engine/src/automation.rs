@@ -89,6 +89,26 @@ impl AutomationSchedule {
         self.0.lanes.is_empty()
     }
 
+    /// Export prefix: preserve source-local points/priority while ending activity at cut.
+    pub(crate) fn before_tick(
+        &self,
+        end: u64,
+        channels: &[ChannelSetup],
+    ) -> Result<Self, ControlError> {
+        let clips = self
+            .0
+            .clips
+            .iter()
+            .filter(|c| c.start_tick < end)
+            .cloned()
+            .map(|mut c| {
+                c.length_ticks = c.length_ticks.min(end - c.start_tick);
+                c
+            })
+            .collect();
+        Self::build(clips, channels)
+    }
+
     pub fn build(
         mut clips: Vec<AutomationClip>,
         channels: &[ChannelSetup],

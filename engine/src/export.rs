@@ -251,6 +251,16 @@ fn write_part(
         0
     };
     if is_song && options.song_region.is_some() {
+        state.song.automation = state
+            .song
+            .automation
+            .before_tick(song_end, &state.channels)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        state.song.audio = state
+            .song
+            .audio
+            .before_tick(song_end)
+            .map_err(|e| io::Error::other(e.to_string()))?;
         state.song.arrangement.notes.retain(|n| n.tick < song_end);
         for n in &mut state.song.arrangement.notes {
             n.length = n.length.min(song_end - n.tick);

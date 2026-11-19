@@ -407,3 +407,73 @@ fn queued_compound_mode_change_still_stops_transport_after_reconfigure() {
     assert!(!c.live().playing);
     assert_eq!(c.state().playback_mode, PlaybackMode::Song);
 }
+
+#[test]
+fn region_export_crops_future_audio_and_automation_without_invalid_horizon() {
+    let mut state = state();
+    state.song.end_tick = 1920;
+    state.song.audio = AudioSchedule::build(
+        vec![AudioAsset {
+            id: 2,
+            source_rate: 48000,
+            source_frames: 128,
+            decoded: Some(Arc::new(SampleBuf {
+                rate: 48000.0,
+                l: vec![0.25; 128],
+                r: vec![0.25; 128],
+            })),
+        }],
+        vec![AudioClip {
+            id: 3,
+            asset: 2,
+            start_tick: 1440,
+            source_start: 0,
+            source_end: 128,
+            gain: 1.0,
+            reverse: false,
+            fade_in: 0,
+            fade_out: 0,
+        }],
+    )
+    .unwrap()
+    .0;
+    state.song.automation = AutomationSchedule::build(
+        vec![AutomationClip {
+            target: AutomationTarget::ChannelVolume(ChannelId(1)),
+            priority: 4,
+            start_tick: 0,
+            offset_tick: 0,
+            length_ticks: 1920,
+            points: vec![AutomationPoint {
+                tick: 0,
+                value: 0.5,
+                segment: AutomationSegment::Hold,
+            }],
+        }],
+        &state.channels,
+    )
+    .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let options = ExportOptions {
+        song_region: Some(SongLoop {
+            start_tick: 240,
+            end_tick: 720,
+        }),
+        max_tail_seconds: 0.0,
+        ..Default::default()
+    };
+    let result = std::panic::catch_unwind(|| {
+        export_wav(
+            state,
+            &options,
+            &d.path().join("region.wav"),
+            &mut |_| {},
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    });
+    assert!(
+        result.is_ok(),
+        "region preparation must never construct an invalid engine state"
+    );
+    assert_eq!(result.unwrap().unwrap().frames, 12000);
+}
