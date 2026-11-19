@@ -97,6 +97,13 @@ const reasons = [];
 const inert = [];
 
 for (const path of changed) {
+  if (path === "scripts/semantic-replay.mjs") {
+    for (const name of withDependents("grooviq-project")) rustCrates.add(name);
+    ui = true;
+    tooling = true;
+    reasons.push(`${path}: real Session and browser replay`);
+    continue;
+  }
   if (RUST_WIDE.includes(path) || CI.some((dir) => path.startsWith(dir))) {
     workspace = true;
     ui = true;
@@ -140,6 +147,10 @@ for (const path of changed) {
 
 const steps = [];
 const step = (name, cmd, args, cwd = root) => steps.push({ name, cmd, args, cwd });
+if (tooling || workspace) step("instruction capture safety tests", "make", ["test-instruction-profiles"]);
+if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
+    "scripts/refresh_install.py", "scripts/test_refresh_install.py"].includes(path)))
+  step("local refresh safety tests", "make", ["test-refresh-app"]);
 const uiDir = join(root, "app", "ui");
 const needsUi = ui || workspace || rustCrates.has("grooviq-app");
 
@@ -159,6 +170,8 @@ if (ui) {
   step("ui lint", "npm", ["run", "lint"], uiDir);
   step("ui typecheck", "npm", ["run", "typecheck"], uiDir);
   step("ui tests", "npm", ["test", "--", "--run"], uiDir);
+  step("semantic replay browser", "npx", ["playwright", "install", "chromium"], uiDir);
+  step("semantic replay", "npm", ["run", "e2e", "--", "--config", "playwright.replay.config.ts", "--project", "chromium"], uiDir);
 }
 if (ui || workspace || changed.includes("scripts/grid-budget.mjs"))
   step("grid CPU budget", "node", ["scripts/grid-budget.mjs"]);
@@ -175,6 +188,8 @@ if (workspace || rustCrates.has("grooviq-project") || changed.some((path) => pat
   step("notes budget runner tests", "node", ["--test", "scripts/notes-edit-budget.test.mjs"]);
   step("notes edit budget", "node", ["scripts/notes-edit-budget.mjs"]);
 }
+if (workspace || rustCrates.has("grooviq-project") || changed.some((path) => path.startsWith("scripts/notes-edit-budget.")))
+  step("real Session replay", "node", ["scripts/semantic-replay.mjs"]);
 if (workspace || rustCrates.has("grooviq-engine") || changed.some((path) => path === "scripts/export-budget.mjs" || path.startsWith("scripts/notes-edit-budget."))) {
   step("export budget runner tests", "node", ["--test", "scripts/notes-edit-budget.test.mjs"]);
   step("export budget", "node", ["scripts/export-budget.mjs"]);
