@@ -88,6 +88,21 @@ refresh-app: ## Quality only: build merged origin/main in the stable cache and r
 test-refresh-app: ## Exercise install failures with owned fake apps; never builds or launches
 	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_refresh_install.py
 
+.PHONY: qa-driver-build qa-driver
+qa-driver-build: ui-install ## Build the optional macOS QA driver app
+	npm --prefix $(UI) run tauri build -- --bundles app --features qa-driver
+
+qa-driver: ## Control QA_HOME's silent automation app; SCRIPT=<trusted JS file>
+	python3 scripts/qa-driver.py --home "$(QA_HOME)" $(if $(SCRIPT),--script "$(SCRIPT)",)
+
+.PHONY: qa-driver-stop
+qa-driver-stop: ## Stop QA_HOME's automation app without a native dialog
+	python3 scripts/qa-driver.py --home "$(QA_HOME)" --shutdown
+
+.PHONY: qa-driver-app
+qa-driver-app: ## Launch the qa-driver build hidden; use QA_HOME=<private temporary directory>
+	$(MAKE) qa-app QA_AUTOMATION=1
+
 .PHONY: grid-budget
 grid-budget: ## Largest step-grid build: original 50 ms budget on standalone V8 CPU time
 	node scripts/grid-budget.mjs
