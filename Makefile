@@ -103,6 +103,11 @@ qa-driver-stop: ## Stop QA_HOME's automation app without a native dialog
 qa-driver-app: ## Launch the qa-driver build hidden; use QA_HOME=<private temporary directory>
 	$(MAKE) qa-app QA_AUTOMATION=1
 
+.PHONY: qa-fixture
+export QA_HOME
+qa-fixture: ## Generate a persistent offline QA home (optional QA_HOME=<empty directory>; macOS launcher layout)
+	$(CARGO) run --quiet -p grooviq-qa-fixture
+
 .PHONY: grid-budget
 grid-budget: ## Largest step-grid build: original 50 ms budget on standalone V8 CPU time
 	node scripts/grid-budget.mjs
