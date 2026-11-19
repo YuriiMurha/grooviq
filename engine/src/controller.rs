@@ -175,6 +175,8 @@ impl Controller {
     /// Queues `cmd` for the next block, with its values clamped into range. Gives it back if
     /// it is rejected (a value not finite, an unknown key, parameter index or channel) or the
     /// queue is full.
+    // The bounded inline sampler snapshot avoids allocation/free on the callback.
+    #[allow(clippy::result_large_err)]
     pub fn send(&mut self, cmd: Command) -> Result<(), Command> {
         self.send_at(0, cmd).map_err(|_| cmd)
     }
@@ -222,6 +224,12 @@ impl Controller {
                 .instrument
                 .kind();
             match &mut cmd {
+                Command::SetSamplerTrim { instance, .. }
+                    if kind != InstrumentKind::Sampler
+                        || self.instances.get(&id) != Some(instance) =>
+                {
+                    return Err(ControlError::Rejected);
+                }
                 Command::SetSamplerParam { .. } if kind != InstrumentKind::Sampler => {
                     return Err(ControlError::WrongInstrument);
                 }
@@ -704,6 +712,13 @@ impl Controller {
                     c.mix = mix;
                 }
             }
+            Command::SetSamplerTrim {
+                channel, params, ..
+            } => {
+                if let Some(c) = self.state.channel_mut(channel) {
+                    c.instrument.params_mut().copy_from_slice(&params);
+                }
+            }
             // `send_at` let these through for a channel whose instrument has the parameter.
             Command::SetSamplerParam {
                 channel,
@@ -1075,5 +1090,42 @@ mod tests {
         assert!(!c.synth_preset("Reese"));
         assert_eq!(c.commands.slots(), 39);
         assert_eq!(c.synth, before);
+    }
+}
+
+#[cfg(test)]
+mod sampler_trim_tests {
+    use super::*;
+    #[test]
+    fn pair_publication_uses_exactly_one_queue_slot() {
+        let (mut c, _p) = crate::engine(crate::EngineConfig {
+            sample_rate: 48000.0,
+        });
+        let setup = crate::ChannelSetup::sampler(
+            ChannelId(1),
+            None,
+            Vec::new(),
+            crate::ChannelMix::default(),
+        );
+        c.add_channel(setup).unwrap();
+        let instance = c.channel_instance(ChannelId(1)).unwrap();
+        let before = c.commands.slots();
+        let mut params = grooviq_dsp::sampler::SPEC.map(|(_, _, d)| d);
+        params[3] = 0.2;
+        params[4] = 0.7;
+        c.send_at(
+            0,
+            Command::SetSamplerTrim {
+                channel: ChannelId(1),
+                instance,
+                params,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            c.commands.slots(),
+            before - 1,
+            "a multi-message prefix must never become callback-visible"
+        );
     }
 }

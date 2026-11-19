@@ -133,6 +133,12 @@ pub enum Command {
     },
     /// Sets a sampler channel's parameter by its index in `grooviq_dsp::sampler::SPEC`,
     /// clamped to its range. Refused for a synth channel.
+    /// A complete sampler parameter snapshot, published as one callback-visible operation.
+    SetSamplerTrim {
+        channel: ChannelId,
+        instance: u64,
+        params: [f32; grooviq_dsp::sampler::SPEC.len()],
+    },
     SetSamplerParam {
         channel: ChannelId,
         index: u32,
@@ -221,6 +227,11 @@ impl Command {
                     value: value.clamp(min, max),
                 })
             }
+            Self::SetSamplerTrim { params, .. } => params
+                .iter()
+                .zip(grooviq_dsp::sampler::SPEC)
+                .all(|(v, (lo, hi, _))| v.is_finite() && *v >= lo && *v <= hi)
+                .then_some(self),
             // The range depends on the channel's instrument: the controller clamps it.
             Self::SetChannelParam { value, .. } => value.is_finite().then_some(self),
             Self::SetChoke { group, .. } => (group <= MAX_CHOKE_GROUP).then_some(self),
@@ -248,6 +259,7 @@ impl Command {
     pub(crate) fn channel(self) -> Option<ChannelId> {
         match self {
             Self::SetChannelMix { channel, .. }
+            | Self::SetSamplerTrim { channel, .. }
             | Self::SetSamplerParam { channel, .. }
             | Self::SetChannelParam { channel, .. }
             | Self::SetChoke { channel, .. }
@@ -370,6 +382,7 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
             Command::TestTone { .. }
             | Command::SetSynthParam { .. }
             | Command::SetChannelMix { .. }
+            | Command::SetSamplerTrim { .. }
             | Command::SetSamplerParam { .. }
             | Command::SetChannelParam { .. }
             | Command::SetChoke { .. } => continue,

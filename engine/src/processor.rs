@@ -517,6 +517,13 @@ impl AudioProcessor {
                     Command::SetChannelMix { channel, mix } => {
                         self.with_graph(|g| g.set_channel_mix(channel, mix));
                     }
+                    Command::SetSamplerTrim {
+                        channel,
+                        instance,
+                        params,
+                    } => {
+                        self.with_graph(|g| g.set_sampler_trim(channel, instance, &params));
+                    }
                     Command::SetSamplerParam {
                         channel,
                         index,

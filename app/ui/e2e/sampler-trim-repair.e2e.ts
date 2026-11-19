@@ -22,6 +22,10 @@ for (const [frames, start, end] of [[1, 0.2, 0.7], [2, 0.6, 0.4]]) {
           const marker = editor.locator(`[data-param="${id}"]`);
           await marker.focus();
           for (const key of ["Home", "End", "ArrowLeft", "ArrowRight"]) await app.keyboard.press(key);
+          await expect.poll(async () => {
+            const b = (await marker.boundingBox())!;
+            return app.evaluate(({x,y,id}) => document.elementFromPoint(x,y)?.closest("[data-param]")?.getAttribute("data-param") === id, {x:b.x+b.width/2,y:b.y+b.height/2,id});
+          }).toBe(true);
           const box = (await marker.boundingBox())!;
           const well = (await wave.boundingBox())!;
           const x = box.x + box.width / 2;

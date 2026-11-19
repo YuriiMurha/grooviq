@@ -1,3 +1,4 @@
+import { samplerTrim, type TrimAction } from "../api/samplerTrim";
 import { PatternRevisionChain, ProjectCommandQueue, registerSettlement } from "./pending";
 import type { PatternStamp } from "../api/patterns";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -92,6 +93,23 @@ export function useSession(onError: (message: string) => void) {
     enqueue(projectView).then(adopt, (e: unknown) => onError(errorText(e)));
   }, [adopt, enqueue, onError]);
 
-  const context: ProjectContextValue = { view: state.view, apply, run, setView: adopt, stamp, runFor };
+  const trim = useCallback(async (channel: number, action: TrimAction, still: () => boolean) => {
+    if (action.kind !== "view") unanswered.current++;
+    try {
+      return await (action.kind === "view" ? enqueue : enqueueMutation)(async () => {
+        if (!still()) return null;
+        const reply = await samplerTrim(channel, action);
+        if (!still()) return null;
+        if (action.kind !== "view" && reply.status === "applied" && reply.changed) {
+          const view = await projectView();
+          if (!still()) return null;
+          adopt(view);
+        }
+        return reply;
+      });
+    } finally { if (action.kind !== "view") unanswered.current--; }
+  }, [enqueue, enqueueMutation, adopt]);
+
+  const context: ProjectContextValue = { view: state.view, apply, run, setView: adopt, stamp, runFor, trim };
   return { view: state.view, cleanSince: state.cleanSince, latest, adopt, enqueue, enqueueMutation, resolvePatternStamp: (origin: PatternStamp) => revisions.current.resolve(origin), acceptPatternStamp: (origin: PatternStamp, revision: number) => revisions.current.accepted(origin, revision), apply, unsettled, context };
 }

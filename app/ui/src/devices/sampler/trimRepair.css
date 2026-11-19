@@ -1,0 +1,12 @@
+.sampler-trim-repair {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  color: var(--text);
+  font-size: 11px;
+}
+.sampler-trim-repair > span { flex: 1 1 260px; }
+.sampler-trim-repair .dbutton { min-height: 28px; padding: 4px 10px; }
+.sample-wave .wmark[aria-disabled="true"] { cursor: default; }

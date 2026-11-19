@@ -1159,3 +1159,34 @@ fn leased_synth_scope_capture_never_allocates() {
             .any(|v| v.abs() > 0.001)
     );
 }
+
+#[test]
+fn sampler_trim_pair_never_allocates_or_frees_on_the_callback() {
+    let params: [f32; grooviq_dsp::sampler::SPEC.len()] =
+        grooviq_dsp::sampler::SPEC.map(|(_, _, default)| default);
+    let setup = ChannelSetup::sampler(ChannelId(1), None, params.to_vec(), ChannelMix::default());
+    let (mut c, mut p) = engine_with(
+        EngineConfig { sample_rate: SR },
+        EngineState {
+            channels: vec![setup],
+            ..Default::default()
+        },
+    );
+    let instance = c.channel_instance(ChannelId(1)).unwrap();
+    let mut buf = [0.0; 128];
+    for i in 0..20 {
+        let mut params = params;
+        params[3] = if i % 2 == 0 { 0.2 } else { 0.0 };
+        params[4] = if i % 2 == 0 { 0.7 } else { 1.0 };
+        c.send_at(
+            0,
+            Command::SetSamplerTrim {
+                channel: ChannelId(1),
+                instance,
+                params,
+            },
+        )
+        .unwrap();
+        assert_no_alloc(|| p.process(&mut buf, 2));
+    }
+}

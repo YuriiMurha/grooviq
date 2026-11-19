@@ -603,6 +603,7 @@ pub struct ArrangementAck {
 )]
 pub enum HistoryEffect {
     Arrangement,
+    SamplerTrim { channel: u32 },
     Notes { pattern: u32 },
     Empty,
 }
