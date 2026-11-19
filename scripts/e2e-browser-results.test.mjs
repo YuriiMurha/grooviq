@@ -8,6 +8,7 @@ test('both projects complete', () => assert.doesNotThrow(() => validate(fixture(
 for (const [name, mutate] of Object.entries({
  missing: x => x.pop(), empty: x => x[0].report.suites = [], duplicate: x => x[0].report.suites.push(x[0].report.suites[0]), extra: x => x[0].report.suites[0].specs.push({...x[0].report.suites[0].specs[0], id:'extra'}),
  filtered: x => x[0].inventory.suites.pop(), stale: x => x[0].attempt='2', source: x => x[0].head='c'.repeat(40),
+ staleRun: x => x[0].run='124', staleWorkflow: x => x[0].workflow='d'.repeat(40),
  failed: x => x[0].outcome='failure', cancelled: x => x[0].outcome='cancelled', skipped: x => x[0].outcome='skipped', missingReport: x => delete x[0].report,
  reporterIO: x => x[0].outcome='failure', error: x => x[0].report.errors.push({message:'error'}),
  failure: x => x[0].report.suites[0].specs[0].tests[0].results[0].status='failed',
