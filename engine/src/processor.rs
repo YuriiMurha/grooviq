@@ -468,7 +468,11 @@ impl AudioProcessor {
                     };
                     self.discard(Trash::Pattern(leaving));
                 }
-                Msg::Command { due, cmd } => match cmd {
+                Msg::Command {
+                    due,
+                    cmd,
+                    mode_changed,
+                } => match cmd {
                     Command::Note {
                         key,
                         velocity,
@@ -539,7 +543,7 @@ impl AudioProcessor {
                         self.transport.seek(start, tick);
                     }
                     Command::SetPlaybackMode { mode } => {
-                        if mode != self.graph.playback_mode {
+                        if mode_changed {
                             self.recorder.set(false, &self.transport, start, &self.live);
                             self.stop(start);
                             let len = self.graph.pattern_length();
@@ -860,7 +864,11 @@ mod tests {
     }
 
     fn cmd(cmd: Command) -> Msg {
-        Msg::Command { due: 0, cmd }
+        Msg::Command {
+            due: 0,
+            cmd,
+            mode_changed: matches!(cmd, Command::SetPlaybackMode { .. }),
+        }
     }
 
     #[test]
