@@ -79,6 +79,8 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test -- --run
+      - name: E2e diagnostic safety tests
+        run: node --test ../../scripts/e2e-diagnostics.test.mjs
       - name: Real Session / mock semantic replay
         run: npm run e2e -- --config playwright.replay.config.ts --project chromium
       - name: Largest grid CPU budget
@@ -117,5 +119,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: e2e-results
-          path: app/ui/e2e-results
+          path: |
+            app/ui/e2e-results
+            app/ui/playwright-report/diagnostics-*
           retention-days: 7
