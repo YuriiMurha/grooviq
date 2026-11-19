@@ -97,6 +97,12 @@ impl Graph {
         }
     }
 
+    pub(crate) fn synth_meter(&self, instance: u64) -> Option<crate::SynthMeter> {
+        self.present()
+            .find(|c| c.instance == instance)?
+            .synth_meter()
+    }
+
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }

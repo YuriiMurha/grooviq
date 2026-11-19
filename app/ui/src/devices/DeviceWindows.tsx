@@ -8,6 +8,7 @@ import { closeDevice, raiseDevice, useOpenDevices } from "./windows";
 
 interface Props {
   channels: ChannelView[];
+  generation: number;
   onError: (message: string) => void;
   /** Asks for a file for a sampler channel's sample (missing, or none yet). */
   onRelink: (channel: ChannelView) => void;
@@ -16,7 +17,7 @@ interface Props {
 /** The open instrument editors, one floating window per channel, above the workspace: the synth
  * editor or the sampler editor by the channel's kind. A window whose channel is gone (removed,
  * another project) closes. Focusing or pressing a window selects its channel. */
-export function DeviceWindows({ channels, onError, onRelink }: Props) {
+export function DeviceWindows({ generation, channels, onError, onRelink }: Props) {
   const open = useOpenDevices();
   const { channel: selected, select } = useSelection();
 
@@ -43,7 +44,7 @@ export function DeviceWindows({ channels, onError, onRelink }: Props) {
           onError,
         };
         return channel.kind === "synth" ? (
-          <SynthEditor key={w.channel} {...common} />
+          <SynthEditor key={w.channel} {...common} active={selected === channel.id} generation={generation} />
         ) : (
           <SamplerEditor key={w.channel} {...common} onRelink={onRelink} />
         );

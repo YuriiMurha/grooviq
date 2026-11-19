@@ -1076,3 +1076,37 @@ fn automation_targets_restoration_and_retirement_are_realtime_safe() {
         realtime(|| p.process(&mut out, 2));
     }
 }
+
+#[test]
+fn leased_synth_scope_capture_never_allocates() {
+    let setup = ChannelSetup::synth(ChannelId(1), Vec::new(), ChannelMix::default());
+    let (mut c, mut p) = engine_with(
+        EngineConfig { sample_rate: SR },
+        EngineState {
+            channels: vec![setup],
+            ..EngineState::default()
+        },
+    );
+    let instance = c.channel_instance(ChannelId(1)).unwrap();
+    let live = c.live_shared();
+    c.send(Command::ChannelNote {
+        channel: ChannelId(1),
+        key: 60,
+        velocity: 0.8,
+        on: true,
+        id: NoteId(1),
+    })
+    .unwrap();
+    let mut output = [0.0; 2048];
+    for _ in 0..100 {
+        live.synth_meter(instance);
+        realtime(|| p.process(&mut output, 2));
+    }
+    assert!(
+        live.synth_meter(instance)
+            .unwrap()
+            .scope
+            .iter()
+            .any(|v| v.abs() > 0.001)
+    );
+}
