@@ -15,7 +15,12 @@ fn main() {
 mod synth_workload;
 
 #[cfg(target_os = "linux")]
+#[path = "support/sampler_workload.rs"]
+mod sampler_workload;
+
+#[cfg(target_os = "linux")]
 mod counts {
+    use super::sampler_workload::scenario;
     use std::hint::black_box;
     use std::sync::Arc;
 
@@ -93,6 +98,9 @@ mod counts {
     // 100 blocks of 64 frames. (Plain comments: the macro rejects doc attributes.)
     #[library_benchmark]
     #[bench::voices_16(sampler(16))]
+    #[bench::filter_static_16(scenario(0.0, false))]
+    #[bench::filter_envelope_16(scenario(0.7, false))]
+    #[bench::filter_velocity_16(scenario(0.7, true))]
     fn sampler_blocks(mut s: Sampler) -> f32 {
         render(&mut s)
     }

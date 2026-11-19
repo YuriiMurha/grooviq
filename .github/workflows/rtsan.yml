@@ -4,7 +4,7 @@ name: rtsan
 # device as the cpal callback drives it. Any allocation, free, lock, sleep, file or network
 # access or other blocking call on that path fails the job with a stack trace. macOS only:
 # RTSan has no Windows runtime, and the same tests keep `assert_no_alloc` on every platform.
-# Not a required check. Known violations wait in `engine/tests/rtsan.supp`, each with its issue.
+# No suppressions: callback violations must fail the job.
 
 on:
   push:
@@ -19,7 +19,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  optional-inputs:
+    name: Optional Rust inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.select.outputs.result }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: make optional-rust-policy-test
+      - uses: actions/github-script@v8
+        id: select
+        with:
+          script: |
+            const { shouldRun } = require('./scripts/optional-rust-checks.cjs');
+            return await shouldRun({
+              eventName: context.eventName,
+              pullRequest: context.payload.pull_request,
+              repo: context.repo,
+              rest: github.rest,
+              paginate: github.paginate,
+            });
+
   rtsan:
+    needs: optional-inputs
+    # A failed selector must retain coverage; only an explicit false skips work.
+    if: ${{ always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
     name: rtsan (macos-latest)
     runs-on: macos-latest
     timeout-minutes: 30

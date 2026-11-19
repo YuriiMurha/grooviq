@@ -13,6 +13,9 @@ import { FILTER_BP, FILTER_HP, FILTER_LP12 } from "../synth/waveShapes";
 import { useDeviceParams } from "../useDeviceParams";
 import { CHOKE_GROUPS, formatValue, samplerParam, section, type Placement, type SectionId, type Slot } from "./samplerLayout";
 import { WaveformView, type MarkerInfo } from "./WaveformView";
+import { trimRepairState } from "./trimRepair";
+import { useTrimRepair } from "./useTrimRepair";
+import "./trimRepair.css";
 import { WAVEFORM_POINTS, decodePeaks, type Marker } from "./waveform";
 
 interface Props {
@@ -62,6 +65,9 @@ function usePeaks(channel: number, sample: string | null, missing: boolean): Flo
 export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onError, onRelink }: Props) {
   const params = useDeviceParams(channel.id, channel.sampler, (id) => samplerParam(id).default, onError);
   const v = params.value;
+  const revision = useSampleRevision(channel.id);
+  const repair = useTrimRepair(`${channel.id}:${channel.sampleName}:${channel.missing}:${revision}`, channel.sampler.start ?? 0, channel.sampler.end ?? 1, channel.sampler, params.trim, onError);
+  const diagnosis = trimRepairState({ start:v("start"), end:v("end"), frames:channel.missing || !channel.sampleName ? null : channel.sampleFrames, loopStart:v("loop_start"), reverse:v("reverse") >= 0.5 });
   const ctl = (id: string): ParamControl => ({ begin: () => params.begin(id), set: (x) => params.set(id, x) });
   const peaks = usePeaks(channel.id, channel.sampleName, channel.missing);
   // A picked choke group shows at once, until the project has it.
@@ -158,6 +164,8 @@ export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onE
       region={{ start: v("start"), end: v("end"), loopStart: v("loop_start"), reverse: v("reverse") >= 0.5, frames: channel.sampleFrames }}
       loop={v("loop") >= 0.5}
       markers={markers}
+      busy={repair.busy}
+      onTrimIntent={repair.invalidate}
       begin={(id) => params.begin(id)}
       set={(id, x) => params.set(id, x)}
     >
@@ -206,7 +214,22 @@ export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onE
           {card(
             "sample",
             "sample",
-            wave,
+            <>
+              {wave}
+              {(diagnosis.damaged || diagnosis.wholeFrame || repair.offer || repair.busy) && <div className="sampler-trim-repair">
+                <span role="status">{repair.busy ? "Updating trim…" : diagnosis.stuck ? "This saved trim needs repair. Neither marker can leave a full frame." : diagnosis.damaged ? "This saved trim is shorter than a frame or crossed. Move a legal marker or use the whole sample." : diagnosis.wholeFrame ? "Whole sample selected. A one-frame sample cannot be trimmed smaller." : "Whole sample selected."}</span>
+                {diagnosis.damaged && <button type="button" className="dbutton" disabled={repair.busy || !repair.ready} onClick={repair.reset}>Use whole sample</button>}
+                {repair.offer && <button type="button" className="dbutton" disabled={repair.busy} onClick={repair.undo}>Undo reset</button>}
+              </div>}
+              <details className="sample-file-details">
+                <summary tabIndex={0}>File details</summary>
+                <dl>
+                  <dt>{channel.missing ? "Stored reference" : "File"}</dt><dd>{channel.sampleName ?? "No sample"}</dd>
+                  <dt>Status</dt><dd>{channel.missing ? "Missing — locate the file to restore playback." : channel.sampleName ? "Loaded" : "No sample yet"}</dd>
+                  {channel.sampleFrames !== null && <><dt>Length</dt><dd>{channel.sampleFrames.toLocaleString()} frames</dd></>}
+                </dl>
+              </details>
+            </>,
             <div className="sample-toggles">{slot("sample", "head")}</div>,
             <span className="sample-name">{channel.sampleName ?? ""}</span>,
           )}
