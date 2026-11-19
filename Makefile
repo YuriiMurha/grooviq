@@ -21,7 +21,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: e2e-browser-results-test e2e-diagnostics-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles e2e-browser-results-test e2e-diagnostics-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
@@ -107,6 +107,13 @@ qa-stability: ## Opt-in: twenty full Linux WebKit + Chromium suites at HEAD in D
 
 qa-stability-smoke: ## Tiny real Playwright fixtures exercising stability accounting in Docker
 	sh scripts/stability/container.sh smoke
+
+.PHONY: capture-instruction-profiles test-instruction-profiles
+capture-instruction-profiles: ## Historical Linux capture; ARGS must give --repo and a new external --output
+	python3 scripts/capture-instruction-profiles.py $(ARGS)
+
+test-instruction-profiles: ## Safe profile capture tests (no Rust build or measurement)
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_capture_instruction_profiles.py
 
 .PHONY: e2e-diagnostics-test
 e2e-diagnostics-test: ## Test bounded timeout-surviving e2e diagnostics (Node only)
