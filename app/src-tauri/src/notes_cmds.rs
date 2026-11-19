@@ -299,3 +299,38 @@ mod tests {
         assert_eq!(bytes, lock(&session).notes());
     }
 }
+
+/// Read-only display request, fenced to the project and channel incarnation.
+#[tauri::command]
+pub async fn synth_meter(
+    audio: State<'_, Audio>,
+    channel: u32,
+    generation: u64,
+    instance: Option<u64>,
+) -> Result<Option<Vec<f64>>, String> {
+    let session = lock(&audio.session);
+    if session.generation() != generation {
+        return Ok(None);
+    }
+    let controller = lock(&audio.controller);
+    let Some(current) = controller.channel_instance(grooviq_engine::ChannelId(channel)) else {
+        return Ok(None);
+    };
+    if instance.is_some_and(|i| i != current) {
+        return Ok(None);
+    }
+    let live = controller.live_shared();
+    let meter = live.synth_meter(current);
+    // Identity is returned even before the audio thread has answered the first request.
+    let mut result = vec![current as f64, controller.live().frames as f64];
+    if let Some(meter) = meter {
+        result.extend(
+            meter
+                .levels
+                .iter()
+                .chain(meter.scope.iter())
+                .map(|v| f64::from(*v)),
+        );
+    }
+    Ok(Some(result))
+}
