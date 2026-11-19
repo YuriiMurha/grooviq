@@ -21,7 +21,11 @@ function readMetric(path: string) {
 export function resources() {
   return {
     process: { scope: "reporter-process-only", available: true, cpuMicroseconds: process.cpuUsage(), rssBytes: process.memoryUsage().rss },
-    host: { scope: "os-host-view-not-container", available: true, totalBytes: totalmem(), freeBytes: freemem(), loadAverage: loadavg() },
+    host: {
+      scope: "os-host-view-not-container",
+      memory: { available: true, totalBytes: totalmem(), freeBytes: freemem() },
+      loadAverage: process.platform === "win32" ? { available: false } : { available: true, values: loadavg() },
+    },
     cgroup: { scope: "cgroup-v2-mounted-root-not-attributed-to-browser", cpu: readMetric("/sys/fs/cgroup/cpu.stat"), memory: readMetric("/sys/fs/cgroup/memory.current") },
   };
 }
@@ -45,7 +49,7 @@ export default class DiagnosticsReporter {
   private stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    if (this.fd !== undefined) { const fd = this.fd; this.fd = undefined; try { closeSync(fd); } catch { this.failed = true; } }
+    if (this.fd !== undefined) { const fd = this.fd; this.fd = undefined; try { closeSync(fd); } catch { this.failure(); } }
   }
   private record(kind: string, fields: object = {}) {
     if (this.failed || this.ended) return;
@@ -79,7 +83,8 @@ export default class DiagnosticsReporter {
       mkdirSync(directory, { mode: 0o700 }); // Exclusive ownership; never reuse or delete.
       this.fd = openSync(join(directory, "events.jsonl"), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
       const cases = suite.allTests();
-      this.record("selection", { selected: cases.length, schema: 1, runtime: { node: process.version, platform: process.platform, arch: process.arch } });
+      // Callback observations cannot certify final I/O or runner success; require its exit receipt.
+      this.record("selection", { selected: cases.length, schema: 2, requiresRunnerExitStatus: true, runtime: { node: process.version, platform: process.platform, arch: process.arch } });
       for (const test of cases) this.record("inventory", this.identity(test));
       this.sample();
       if (!this.failed) { this.timer = setInterval(() => this.sample(), 5000); this.timer.unref(); }
@@ -89,7 +94,7 @@ export default class DiagnosticsReporter {
   onTestBegin(test: Case, result: Result) { this.record("begin", { ...this.identity(test), retry: result.retry, workerIndex: result.workerIndex, parallelIndex: result.parallelIndex }); }
   onTestEnd(test: Case, result: Result) { this.record("end", { ...this.identity(test), retry: result.retry, workerIndex: result.workerIndex, parallelIndex: result.parallelIndex, status: result.status, durationMs: result.duration }); }
   async onEnd(result: { status: string }): Promise<{ status: "failed" } | undefined> {
-    if (!this.ended) this.record("terminal", { status: result.status });
+    if (!this.ended) this.record("framework-end", { frameworkStatus: result.status });
     this.ended = true;
     this.stop();
     if (this.failed) return { status: "failed" };
