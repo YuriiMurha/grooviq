@@ -655,11 +655,13 @@ impl AudioProcessor {
         loop_changed: bool,
     ) {
         self.transport.set_bpm(start, bpm);
-        if mode_changed || self.graph.playback_mode != mode {
+        if mode_changed {
             self.recorder.set(false, &self.transport, start, &self.live);
             self.stop(start);
-            self.graph.playback_mode = mode;
         }
+        // Rebuild starts at the final mirrored mode. Restore this message's mode in
+        // queue order without inventing a transition before its accepted barrier.
+        self.graph.playback_mode = mode;
         if loop_changed || self.graph.song_loop != region {
             let tick = self.graph.position(self.transport.position_ticks(start));
             self.graph.transport_stopped();

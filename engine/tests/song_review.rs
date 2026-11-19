@@ -1058,3 +1058,70 @@ fn direct_mode_round_trip_and_refusal_keep_take_order() {
         );
     }
 }
+
+#[test]
+fn noop_timeline_restores_mode_without_ending_take_before_its_barrier() {
+    for rebuilds in 0..=2 {
+        for transition_is_timeline in [false, true] {
+            let mut s = song_state(vec![], 96000);
+            s.playback_mode = PlaybackMode::Pattern;
+            let (mut c, mut p) = engine_with(CFG, s);
+            c.send(Command::SetRecording { on: true }).unwrap();
+            c.send(Command::Play).unwrap();
+            p.process(&mut [0.0; 128], 2);
+            let snapshot = c.state().clone();
+            c.set_timeline(TimelineUpdate {
+                pattern: Box::new(snapshot.pattern.clone()),
+                song: Box::new(snapshot.song.clone()),
+                bpm: snapshot.bpm,
+                mode: PlaybackMode::Pattern,
+                region: snapshot.song_loop,
+                remove_channel: None,
+            })
+            .unwrap();
+            for on in [true, false] {
+                c.send(Command::ChannelNote {
+                    channel: ChannelId(1),
+                    key: 60,
+                    velocity: 1.0,
+                    on,
+                    id: NoteId(408),
+                })
+                .unwrap();
+            }
+            let before = c.send_marked(Command::SetTempo { bpm: 120.0 }).unwrap();
+            let after = if transition_is_timeline {
+                c.set_timeline(TimelineUpdate {
+                    pattern: Box::new(snapshot.pattern),
+                    song: Box::new(snapshot.song),
+                    bpm: snapshot.bpm,
+                    mode: PlaybackMode::Song,
+                    region: snapshot.song_loop,
+                    remove_channel: None,
+                })
+                .unwrap();
+                c.send_marked(Command::SetTempo { bpm: 120.0 }).unwrap()
+            } else {
+                c.send_marked(Command::SetPlaybackMode {
+                    mode: PlaybackMode::Song,
+                })
+                .unwrap()
+            };
+            for rate in [44100.0, 96000.0].into_iter().take(rebuilds) {
+                c.reconfigure(&mut p, EngineConfig { sample_rate: rate });
+            }
+            p.process(&mut [0.0; 128], 2);
+            let mut events = Vec::new();
+            c.take_recorded(&mut events);
+            assert!(
+                matches!(events.as_slice(), [
+                RecordEvent::Note { on: true, .. }, RecordEvent::Note { on: false, .. },
+                RecordEvent::Mark { id: a }, RecordEvent::End { .. }, RecordEvent::Mark { id: b }
+            ] if *a==before && *b==after),
+                "rebuilds={rebuilds},timeline={transition_is_timeline}: {events:?}"
+            );
+            assert!(!c.live().playing);
+            assert!(!c.recording_armed());
+        }
+    }
+}

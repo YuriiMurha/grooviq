@@ -1199,6 +1199,17 @@ fn admitted_mode_transition_replay_never_allocates() {
         c.set_pattern(PatternData::default()).unwrap();
         realtime(|| p.process(&mut out, 2));
     }
+    let snapshot = c.state().clone();
+    c.set_timeline(grooviq_engine::TimelineUpdate {
+        pattern: Box::new(snapshot.pattern),
+        song: Box::new(snapshot.song),
+        bpm: snapshot.bpm,
+        mode: snapshot.playback_mode,
+        region: snapshot.song_loop,
+        remove_channel: None,
+    })
+    .unwrap();
+    let before = c.send_marked(Command::SetTempo { bpm: 120.0 }).unwrap();
     let mark = c
         .send_marked(Command::SetPlaybackMode {
             mode: grooviq_engine::PlaybackMode::Song,
@@ -1216,6 +1227,10 @@ fn admitted_mode_transition_replay_never_allocates() {
     assert!(!c.recording_armed());
     let mut events = Vec::new();
     c.take_recorded(&mut events);
+    let before = events
+        .iter()
+        .position(|e| matches!(e, grooviq_engine::RecordEvent::Mark { id } if *id == before))
+        .unwrap();
     let end = events
         .iter()
         .position(|e| matches!(e, RecordEvent::End { .. }))
@@ -1224,5 +1239,5 @@ fn admitted_mode_transition_replay_never_allocates() {
         .iter()
         .position(|e| matches!(e, RecordEvent::Mark { id } if *id == mark))
         .unwrap();
-    assert!(end < barrier);
+    assert!(before < end && end < barrier);
 }
