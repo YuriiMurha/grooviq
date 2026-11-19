@@ -21,7 +21,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: test-instruction-profiles e2e-browser-results-test e2e-diagnostics-test ui-install ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles e2e-browser-results-test e2e-diagnostics-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
@@ -40,6 +40,16 @@ notes-edit-budget: ## Optimized 10,000-note edit budget, including undo bookkeep
 
 check-changed: ## Only the checks the changes against origin/main need (ARGS=--plan prints the plan)
 	node scripts/check-changed.mjs $(ARGS)
+
+.PHONY: replay replay-update
+replay: ui-install ## Compare the real offline Session and both browser mocks against the shared command transcript
+	node scripts/semantic-replay.mjs
+	npm --prefix $(UI) exec -- playwright install chromium webkit
+	npm --prefix $(UI) run e2e -- --config playwright.replay.config.ts
+
+replay-update: ## Regenerate the real-Session transcript intentionally, then verify both browser mocks
+	GROOVIQ_UPDATE_REPLAY=1 node scripts/semantic-replay.mjs
+	$(MAKE) replay
 
 qa-ui: ui-install ## Playwright on the web build with the mock engine (WebKit and Chromium); shots in app/ui/e2e-results
 	cd $(UI) && npx playwright install chromium webkit && npm run e2e
@@ -69,10 +79,14 @@ build-app: ui-install ## Build the release Grooviq.app (no .dmg) into target/rel
 qa-app: ## Run the built app silently (GROOVIQ_AUDIO=null) with a throwaway home folder (QA_HOME=<dir> reuses one)
 	sh scripts/qa-app.sh
 
-install-app: ## Copy the built Grooviq.app into /Applications (run build-app first)
-	@test -d $(APP_BUNDLE) || { echo "No $(APP_BUNDLE). Run make build-app first."; exit 1; }
-	rm -rf /Applications/Grooviq.app
-	ditto $(APP_BUNDLE) /Applications/Grooviq.app
+install-app: refresh-app ## Alias for the verified merged-main refresh
+
+.PHONY: refresh-app test-refresh-app
+refresh-app: ## Quality only: build merged origin/main in the stable cache and replace safely
+	python3 scripts/refresh_install.py
+
+test-refresh-app: ## Exercise install failures with owned fake apps; never builds or launches
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_refresh_install.py
 
 .PHONY: grid-budget
 grid-budget: ## Largest step-grid build: original 50 ms budget on standalone V8 CPU time
