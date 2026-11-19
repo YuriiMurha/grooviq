@@ -36,3 +36,12 @@ export function clampPlacement(p: Placement, viewW: number, viewH: number, scale
   const y = Math.min(viewH - KEEP * scale, Math.max(0, p.y));
   return { x: Math.round(x), y: Math.round(y) };
 }
+
+/** Resize keeps every control visible. Below the minimum scale's physical size, anchor
+ * at the top left so the title bar stays reachable even when full containment is impossible. */
+export function containPlacement(p: Placement, viewW: number, viewH: number, scale: number): Placement {
+  return {
+    x: Math.max(0, Math.min(p.x, Math.floor(viewW - DESIGN_W * scale))),
+    y: Math.max(0, Math.min(p.y, Math.floor(viewH - DESIGN_H * scale))),
+  };
+}

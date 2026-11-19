@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { DeviceScale } from "./deviceScale";
-import { DESIGN_H, DESIGN_W, clampPlacement, fitScale, initialPlacement, type Placement } from "./windowPlacement";
+import { DESIGN_H, DESIGN_W, clampPlacement, containPlacement, fitScale, initialPlacement, type Placement } from "./windowPlacement";
 
 const FOCUSABLE = "button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
@@ -36,7 +36,15 @@ export function DeviceWindow({ title, device, color, index, z, toolbar, opener, 
   const shown = clampPlacement(place, view.w, view.h, scale);
 
   useEffect(() => {
-    const onResize = () => setView({ w: window.innerWidth, h: window.innerHeight });
+    const onResize = () => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      // A captured drag's origin belongs to the old viewport. Cancel before moving the
+      // window so subsequent pointer moves cannot restore that stale placement.
+      drag.current = null;
+      setPlace((previous) => containPlacement(previous, w, h, fitScale(w, h)));
+      setView({ w, h });
+    };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);

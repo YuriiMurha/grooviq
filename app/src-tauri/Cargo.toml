@@ -7,6 +7,9 @@ rust-version.workspace = true
 repository.workspace = true
 description = "The Grooviq desktop app: the Tauri shell around the engine"
 
+[features]
+qa-driver = []
+
 [lib]
 name = "grooviq_app"
 
@@ -31,6 +34,7 @@ midir = "0.11"
 # WebKit's 60 fps cap (src/display.rs): the Objective-C runtime bindings Tauri itself uses (MIT).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

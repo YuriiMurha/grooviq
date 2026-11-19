@@ -1,6 +1,6 @@
 // Shared by the piano roll's specs that read the roll's own counters and pixels.
 import type { Page, TestInfo } from "@playwright/test";
-import { expect, project, workspaceReady } from "./fixture";
+import { expect, project, test, workspaceReady } from "./fixture";
 import type { MockNote, MockProject } from "./mockTauri";
 
 export interface RollStats {
@@ -58,13 +58,16 @@ export async function drag(page: Page, from: { x: number; y: number }, to: { x: 
 
 /** Waits until the roll's view has taken the canvas's size (it recentres when the roll is resized,
  * so a view read before that is stale). */
-export async function settled(page: Page) {
+export async function settled(page: Page, timeout?: number) {
+  // Reserve half the case budget for gestures and assertions. Playwright also clamps
+  // this finite correctness wait to the remaining test deadline.
+  const budget = timeout ?? Math.max(1, Math.floor(test.info().timeout / 2));
   await expect
     .poll(async () => {
       const box = await canvas(page).boundingBox();
       const view = (await stats(page))?.view as { height?: number; width?: number } | undefined;
       return !!box && !!view && Math.abs((view.height ?? 0) - box.height) < 1 && Math.abs((view.width ?? 0) - box.width) < 1;
-    })
+    }, { timeout: budget, message: "roll geometry must match the canvas before editing" })
     .toBe(true);
   await nextFrame(page);
   await nextFrame(page);

@@ -11,16 +11,58 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      capture_only:
+        description: 'Historical Linux profile capture only (trusted maintainer)'
+        type: boolean
+        default: false
+      capture_base:
+        description: 'Verified historical base, full SHA'
+        type: string
+        default: '014db45a96789bce99a27b1661d5a5204950ca6c'
+      capture_head:
+        description: 'Verified measured synthetic head, full SHA'
+        type: string
+        default: 'bab875e7063ca5cc3427f4fa54c4f4b698758ac7'
 
 permissions:
   contents: read
 
 concurrency:
-  group: "perf-${{ github.event.pull_request.number || github.ref }}"
+  group: "perf-${{ inputs.capture_only && github.run_id || github.event.pull_request.number || github.ref }}"
   cancel-in-progress: true
 
 jobs:
+  optional-inputs:
+    if: ${{ !inputs.capture_only }}
+    name: Optional Rust inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.select.outputs.result }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: make optional-rust-policy-test
+      - uses: actions/github-script@v8
+        id: select
+        with:
+          script: |
+            const { shouldRun } = require('./scripts/optional-rust-checks.cjs');
+            return await shouldRun({
+              eventName: context.eventName,
+              pullRequest: context.payload.pull_request,
+              repo: context.repo,
+              rest: github.rest,
+              paginate: github.paginate,
+            });
+
   bench:
+    needs: optional-inputs
+    # A failed selector must retain coverage; only an explicit false skips work.
+    if: ${{ !inputs.capture_only && always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
     name: bench (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -72,6 +114,7 @@ jobs:
 
   # The same scene must render the same bits on every platform (the export rule).
   determinism:
+    if: ${{ !inputs.capture_only }}
     name: determinism (macOS vs Windows)
     needs: bench
     runs-on: ubuntu-latest
@@ -111,6 +154,9 @@ jobs:
           PY
 
   instructions:
+    needs: optional-inputs
+    # A failed selector must retain coverage; only an explicit false skips work.
+    if: ${{ !inputs.capture_only && always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
     name: instructions (ubuntu-latest)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -180,3 +226,63 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit $status
+
+  capture:
+    if: github.event_name == 'workflow_dispatch' && inputs.capture_only
+    name: historical profiles (Linux only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        timeout-minutes: 1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Instruction capture safety tests
+        timeout-minutes: 2
+        run: make test-instruction-profiles
+      - name: Validate before provisioning or fetching selected revisions
+        env:
+          CAPTURE_BASE: ${{ inputs.capture_base }}
+          CAPTURE_HEAD: ${{ inputs.capture_head }}
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          if (os.environ['CAPTURE_BASE'], os.environ['CAPTURE_HEAD']) != (
+              '014db45a96789bce99a27b1661d5a5204950ca6c',
+              'bab875e7063ca5cc3427f4fa54c4f4b698758ac7'):
+              raise SystemExit('only the verified first historical pair is supported')
+          PYTHON
+          cp scripts/capture-instruction-profiles.py "$RUNNER_TEMP/capture-instruction-profiles.py"
+      # Keep the eight-minute setup budget, with a visible failure boundary per tool.
+      - name: Refresh historical tool package indexes
+        timeout-minutes: 2
+        run: sudo apt-get update -qq
+      - name: Install historical Valgrind and system tools
+        timeout-minutes: 2
+        run: sudo apt-get install -y -qq --no-install-recommends valgrind libasound2-dev binutils
+      - name: Install historical Rust toolchain
+        timeout-minutes: 1
+        run: rustup toolchain install 1.100.0 --profile minimal
+      - name: Install historical gungraun runner
+        timeout-minutes: 3
+        run: cargo +1.100.0 install gungraun-runner --version 0.20.0 --locked
+        env:
+          CARGO_BUILD_JOBS: '2'
+          CARGO_INCREMENTAL: '0'
+      - name: Fetch verified commits and capture once each
+        timeout-minutes: 17
+        env:
+          CAPTURE_BASE: ${{ inputs.capture_base }}
+          CAPTURE_HEAD: ${{ inputs.capture_head }}
+        run: |
+          git fetch --no-tags origin "$CAPTURE_BASE" "$CAPTURE_HEAD"
+          python3 "$RUNNER_TEMP/capture-instruction-profiles.py" --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/instruction-profiles" --base "$CAPTURE_BASE" --head "$CAPTURE_HEAD"
+      - uses: actions/upload-artifact@v4
+        timeout-minutes: 1
+        if: always()
+        with:
+          name: instruction-profiles-${{ github.run_id }}
+          path: ${{ runner.temp }}/instruction-profiles/
+          retention-days: 7
+          if-no-files-found: warn

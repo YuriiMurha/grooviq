@@ -44,6 +44,7 @@ fn render(update: Update) -> (Vec<f32>, bool) {
             end_tick: 3840,
             end_frame: 96_000,
             frame_rate: 48_000.0,
+            frame_extent: None,
             ..SongData::default()
         },
         ..EngineState::default()
