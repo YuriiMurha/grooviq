@@ -243,8 +243,16 @@ impl Controller {
                 _ => {}
             }
         }
+        // Capture the accepted transition before the mirror moves; rebuilt graphs already
+        // contain the final mode, but queued stop/disarm effects still belong in order.
+        let mode_changed =
+            matches!(cmd, Command::SetPlaybackMode { mode } if mode != self.state.playback_mode);
         self.commands
-            .push(Msg::Command { due, cmd })
+            .push(Msg::Command {
+                due,
+                cmd,
+                mode_changed,
+            })
             .map_err(|_| ControlError::Full)?;
         self.mirror(cmd);
         Ok(())
@@ -433,7 +441,11 @@ impl Controller {
         self.renew_instances();
         let graph = self.build_graph();
         // Only this thread pushes, and the queue had room for all five.
-        let command = |cmd| Msg::Command { due: 0, cmd };
+        let command = |cmd| Msg::Command {
+            due: 0,
+            cmd,
+            mode_changed: false,
+        };
         let tempo = Command::SetTempo {
             bpm: self.state.bpm,
         };

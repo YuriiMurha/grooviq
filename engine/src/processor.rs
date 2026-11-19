@@ -468,7 +468,11 @@ impl AudioProcessor {
                     };
                     self.discard(Trash::Pattern(leaving));
                 }
-                Msg::Command { due, cmd } => match cmd {
+                Msg::Command {
+                    due,
+                    cmd,
+                    mode_changed,
+                } => match cmd {
                     Command::Note {
                         key,
                         velocity,
@@ -546,7 +550,7 @@ impl AudioProcessor {
                         self.transport.seek(start, tick);
                     }
                     Command::SetPlaybackMode { mode } => {
-                        if mode != self.graph.playback_mode {
+                        if mode_changed {
                             self.recorder.set(false, &self.transport, start, &self.live);
                             self.stop(start);
                             let len = self.graph.pattern_length();
@@ -658,11 +662,13 @@ impl AudioProcessor {
         loop_changed: bool,
     ) {
         self.transport.set_bpm(start, bpm);
-        if mode_changed || self.graph.playback_mode != mode {
+        if mode_changed {
             self.recorder.set(false, &self.transport, start, &self.live);
             self.stop(start);
-            self.graph.playback_mode = mode;
         }
+        // Rebuild starts at the final mirrored mode. Restore this message's mode in
+        // queue order without inventing a transition before its accepted barrier.
+        self.graph.playback_mode = mode;
         if loop_changed || self.graph.song_loop != region {
             let tick = self.graph.position(self.transport.position_ticks(start));
             self.graph.transport_stopped();
@@ -867,7 +873,11 @@ mod tests {
     }
 
     fn cmd(cmd: Command) -> Msg {
-        Msg::Command { due: 0, cmd }
+        Msg::Command {
+            due: 0,
+            cmd,
+            mode_changed: matches!(cmd, Command::SetPlaybackMode { .. }),
+        }
     }
 
     #[test]

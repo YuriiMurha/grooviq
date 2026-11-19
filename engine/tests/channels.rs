@@ -1056,3 +1056,84 @@ fn queued_trim_cannot_leak_into_reused_channel_after_load_or_rate_rebuild() {
         assert!(actual.iter().any(|v| v.abs() > 0.01));
     }
 }
+
+#[test]
+fn trim_pair_and_mode_stop_keep_their_effects_through_rebuild() {
+    use grooviq_engine::{PlaybackMode, RecordEvent, SongData, TimelineUpdate};
+    for timeline in [false, true] {
+        let sample = click();
+        let mut initial = state(vec![channel(1, &sample, ChannelMix::default())]);
+        initial.song = SongData {
+            end_tick: 96000,
+            ..Default::default()
+        };
+        let (mut c, mut p) = engine_with(cfg(), initial);
+        c.send(Command::SetRecording { on: true }).unwrap();
+        c.send(Command::Play).unwrap();
+        c.send(note(1, true)).unwrap();
+        p.process(&mut [0.0; 128], 2);
+        assert!(c.live().playing);
+        let mut params: [f32; SPEC.len()] = exact().try_into().unwrap();
+        params[3] = 0.2;
+        params[4] = 0.7;
+        c.send(Command::SetSamplerTrim {
+            channel: ChannelId(1),
+            instance: c.channel_instance(ChannelId(1)).unwrap(),
+            params,
+        })
+        .unwrap();
+        let barrier = if timeline {
+            let snapshot = c.state().clone();
+            c.set_timeline(TimelineUpdate {
+                pattern: Box::new(snapshot.pattern),
+                song: Box::new(snapshot.song),
+                bpm: snapshot.bpm,
+                mode: PlaybackMode::Song,
+                region: snapshot.song_loop,
+                remove_channel: None,
+            })
+            .unwrap();
+            c.send_marked(Command::SetTempo { bpm: 120.0 }).unwrap()
+        } else {
+            c.send_marked(Command::SetPlaybackMode {
+                mode: PlaybackMode::Song,
+            })
+            .unwrap()
+        };
+        for rate in [44100.0, 96000.0] {
+            c.reconfigure(&mut p, EngineConfig { sample_rate: rate });
+        }
+        p.process(&mut [0.0; 128], 2);
+        assert!(!c.live().playing, "timeline={timeline}");
+        assert!(!c.recording_armed());
+        assert_eq!(c.state().channels[0].instrument.params(), params);
+        let mut events = Vec::new();
+        c.take_recorded(&mut events);
+        let end = events
+            .iter()
+            .position(|e| matches!(e, RecordEvent::End { .. }))
+            .unwrap();
+        let mark = events
+            .iter()
+            .position(|e| matches!(e, RecordEvent::Mark { id } if *id == barrier))
+            .unwrap();
+        assert!(end < mark);
+        let (mut reference, mut rp) = engine_with(
+            EngineConfig {
+                sample_rate: 96000.0,
+            },
+            c.state().clone(),
+        );
+        c.send(note(1, true)).unwrap();
+        reference.send(note(1, true)).unwrap();
+        let mut actual = [0.0; 512];
+        let mut expected = [0.0; 512];
+        p.process(&mut actual, 2);
+        rp.process(&mut expected, 2);
+        assert_eq!(
+            actual, expected,
+            "the rebuilt callback retains the whole trim vector"
+        );
+        assert!(actual.iter().any(|v| v.abs() > 0.001));
+    }
+}
