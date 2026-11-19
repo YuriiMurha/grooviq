@@ -56,7 +56,8 @@ impl Growth {
 }
 
 impl NoteChange {
-    pub(crate) fn added(notes: Vec<Note>) -> Self {
+    pub(crate) fn added(mut notes: Vec<Note>) -> Self {
+        notes.shrink_to_fit();
         Self {
             before: Vec::new(),
             after: notes,
@@ -105,6 +106,8 @@ impl NoteChange {
         }
         before.sort_unstable_by_key(|n| n.id);
         after.sort_unstable_by_key(|n| n.id);
+        before.shrink_to_fit();
+        after.shrink_to_fit();
         Some(Self { before, after })
     }
 
@@ -122,6 +125,7 @@ impl NoteChange {
         }
         // Ids rise as notes are added: `after` stays sorted.
         self.after.extend(next.after);
+        self.after.shrink_to_fit();
         Ok(())
     }
 
@@ -159,9 +163,9 @@ impl NoteChange {
 
 /// One undo step: its change, its id in the length log, and the recorded take it holds while
 /// it is open to that take's later notes.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Step {
-    change: NoteChange,
+    change: std::sync::Arc<NoteChange>,
     id: u64,
     take: Option<u32>,
     order: u64,
@@ -185,7 +189,7 @@ enum Length {
 /// undo, a redo or a clear closes every open step. Newer steps above an open one are then only
 /// other takes' additions, which never touch its notes, so folding into it keeps every inverse
 /// exact.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct NoteHistory {
     undo: VecDeque<Step>,
     redo: Vec<Step>,
@@ -196,19 +200,83 @@ pub struct NoteHistory {
     base: u32,
     log: Vec<Length>,
     next_id: u64,
+    pub(crate) staged: bool,
+}
+
+pub(crate) fn next_order() -> u64 {
+    static ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl NoteHistory {
+    pub(crate) fn next_order(&self, undo: bool) -> Option<u64> {
+        if undo {
+            self.undo.back().map(|s| s.order)
+        } else {
+            self.redo.last().map(|s| s.order)
+        }
+    }
+    pub(crate) fn clear_redo(&mut self) {
+        self.notes -= self.redo.iter().map(|s| s.change.size()).sum::<usize>();
+        let gone: HashSet<_> = self.redo.drain(..).map(|s| s.id).collect();
+        self.log
+            .retain(|l| !matches!(l,Length::Grew{owner:Some(id),..} if gone.contains(id)));
+        self.compact();
+        self.close();
+    }
+    pub(crate) fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + (self.undo.capacity() + self.redo.capacity()) * std::mem::size_of::<Step>()
+            + self.log.capacity() * std::mem::size_of::<Length>()
+            + self
+                .undo
+                .iter()
+                .chain(&self.redo)
+                .map(|s| {
+                    std::mem::size_of::<NoteChange>()
+                        + 2 * std::mem::size_of::<usize>()
+                        + (s.change.before.capacity() + s.change.after.capacity())
+                            * std::mem::size_of::<Note>()
+                })
+                .sum::<usize>()
+    }
+    pub(crate) fn largest(&self, protected: &HashSet<u64>) -> (usize, usize) {
+        self.undo
+            .iter()
+            .chain(&self.redo)
+            .filter(|s| protected.contains(&s.order))
+            .fold((0, 0), |(n, b), s| {
+                (
+                    n.max(s.change.size()),
+                    b.max(
+                        (std::mem::size_of::<Step>()
+                            + std::mem::size_of::<NoteChange>()
+                            + 2 * std::mem::size_of::<usize>())
+                            + (s.change.before.capacity() + s.change.after.capacity())
+                                * std::mem::size_of::<Note>(),
+                    ),
+                )
+            })
+    }
     pub(crate) fn retained(&self) -> (usize, usize) {
         (self.undo.len() + self.redo.len(), self.notes)
     }
-    pub(crate) fn oldest(&self) -> Option<u64> {
-        self.undo.iter().chain(&self.redo).map(|s| s.order).min()
+    pub(crate) fn take_order(&self, take: u32) -> Option<u64> {
+        self.undo
+            .iter()
+            .rev()
+            .find(|s| s.take == Some(take))
+            .map(|s| s.order)
     }
-    pub(crate) fn evict_oldest(&mut self) {
-        let Some(order) = self.oldest() else {
-            return;
-        };
+    pub(crate) fn oldest_excluding(&self, protected: &HashSet<u64>) -> Option<u64> {
+        self.undo
+            .iter()
+            .chain(&self.redo)
+            .map(|s| s.order)
+            .filter(|o| !protected.contains(o))
+            .min()
+    }
+    pub(crate) fn evict_order(&mut self, order: u64) {
         let active = self.undo.iter().any(|s| s.order == order);
         let list = if active {
             None
@@ -218,7 +286,8 @@ impl NoteHistory {
         let step = if let Some(i) = list {
             self.redo.remove(i)
         } else {
-            self.undo.pop_front().unwrap()
+            let index = self.undo.iter().position(|s| s.order == order).unwrap();
+            self.undo.remove(index).unwrap()
         };
         self.notes -= step.change.size();
         if active {
@@ -234,6 +303,9 @@ impl NoteHistory {
                 .retain(|l| !matches!(l, Length::Grew { owner: Some(id), .. } if *id == step.id));
         }
         self.compact();
+        self.undo.shrink_to_fit();
+        self.redo.shrink_to_fit();
+        self.log.shrink_to_fit();
     }
 
     pub fn can_undo(&self) -> bool {
@@ -280,7 +352,7 @@ impl NoteHistory {
     ) {
         if let Some(step) = self.undo.iter_mut().rev().find(|s| s.take == Some(take)) {
             let size = change.size();
-            match step.change.absorb(change) {
+            match std::sync::Arc::make_mut(&mut step.change).absorb(change) {
                 Ok(()) => {
                     let id = step.id;
                     self.notes += size;
@@ -356,10 +428,9 @@ impl NoteHistory {
         let id = self.next_id;
         self.next_id += 1;
         self.notes += change.size();
-        static ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let order = ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let order = next_order();
         self.undo.push_back(Step {
-            change,
+            change: std::sync::Arc::new(change),
             id,
             take,
             order,
@@ -369,7 +440,7 @@ impl NoteHistory {
     }
 
     /// Closes every open take step: a take's later notes start a new step.
-    fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         for step in &mut self.undo {
             step.take = None;
         }
@@ -378,6 +449,9 @@ impl NoteHistory {
     /// Drops the oldest changes past [`MAX_UNDO`] or [`MAX_UNDO_NOTES`] (the newest stays):
     /// their growth stays for good, folded into the log's start.
     fn trim(&mut self) {
+        if self.staged {
+            return;
+        }
         let mut dropped = HashSet::new();
         while self.undo.len() > MAX_UNDO || (self.notes > MAX_UNDO_NOTES && self.undo.len() > 1) {
             if let Some(old) = self.undo.pop_front() {
@@ -400,12 +474,12 @@ impl NoteHistory {
 
     /// The change undo would take back.
     pub(crate) fn next_undo(&self) -> Option<&NoteChange> {
-        self.undo.back().map(|s| &s.change)
+        self.undo.back().map(|s| s.change.as_ref())
     }
 
     /// The change redo would make again.
     pub(crate) fn next_redo(&self) -> Option<&NoteChange> {
-        self.redo.last().map(|s| &s.change)
+        self.redo.last().map(|s| s.change.as_ref())
     }
 
     /// The pattern's length once [`Self::next_undo`] is undone (`undo`), or [`Self::next_redo`]

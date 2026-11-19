@@ -1100,7 +1100,21 @@ export function installMockTauri(seed: MockSeed): void {
     if (id>=0xffffffff) throw "Project ids are exhausted.";
     return id;
   };
+  // T7 region lease: these native-only workflows have real Session/IPC acceptance.
+  // Explicit refusal avoids pretending that this UI fixture implements media/history.
+  const nativeArrangementOnly = () => { throw "Arrangement/media commands are not simulated by this browser fixture; use native offline acceptance."; };
   const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
+    arrangement_view: nativeArrangementOnly,
+    arrangement_edit: nativeArrangementOnly,
+    arrangement_history: nativeArrangementOnly,
+    arrangement_curve: nativeArrangementOnly,
+    audio_import: nativeArrangementOnly,
+    audio_relink: nativeArrangementOnly,
+    audio_cancel: nativeArrangementOnly,
+    arrangement_waveform: nativeArrangementOnly,
+    arrangement_mode: nativeArrangementOnly,
+    arrangement_loop: nativeArrangementOnly,
+    arrangement_seek: nativeArrangementOnly,
     // Native menu state has no platform menu in this headless fixture.
     edit_history_enabled: () => null,
     // commands.rs

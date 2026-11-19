@@ -120,6 +120,8 @@ export interface ExportOptions {
   format: ExportFormat;
   /** 1..=999. */
   loops: number;
+  /** Song only: export the enabled loop region; false/default exports the whole song. */
+  songRegion?: boolean;
 }
 
 export interface ExportResult {

@@ -281,6 +281,18 @@ pub struct DecodedSamples {
 /// extension) are decoded once and share one buffer: a kick used on four channels costs one
 /// decode and one copy in memory. Each channel still gets its own warning if they fail.
 pub fn decode_samples(loaded: &Loaded) -> DecodedSamples {
+    decode_samples_inner(loaded, None)
+}
+pub fn decode_samples_budgeted(
+    loaded: &Loaded,
+    budget: &grooviq_engine::media_budget::MediaBudget,
+) -> DecodedSamples {
+    decode_samples_inner(loaded, Some(budget))
+}
+fn decode_samples_inner(
+    loaded: &Loaded,
+    budget: Option<&grooviq_engine::media_budget::MediaBudget>,
+) -> DecodedSamples {
     /// One distinct sound seen so far, and what decoding it gave.
     struct Seen<'a> {
         bytes: &'a Arc<Vec<u8>>,
@@ -289,13 +301,29 @@ pub fn decode_samples(loaded: &Loaded) -> DecodedSamples {
     }
     let mut out = DecodedSamples::default();
     let mut seen: Vec<Seen<'_>> = Vec::new();
-    for channel in &loaded.project.channels {
-        if channel.sample.is_none() {
-            continue;
-        }
-        let Some(file) = loaded.samples.get(&channel.id) else {
+    let sources = loaded
+        .project
+        .channels
+        .iter()
+        .filter(|c| c.sample.is_some())
+        .map(|c| {
+            (
+                c.id,
+                format!("Channel \"{}\"", crate::model::warning_label(&c.name)),
+            )
+        })
+        .chain(
+            loaded
+                .project
+                .arrangement
+                .audio_assets
+                .iter()
+                .map(|a| (a.id, format!("Audio asset {}", a.id))),
+        );
+    for (id, label) in sources {
+        let Some(file) = loaded.samples.get(&id) else {
             // The loader already said why.
-            out.missing.insert(channel.id);
+            out.missing.insert(id);
             continue;
         };
         let extension = Path::new(&file.name).extension().and_then(|e| e.to_str());
@@ -304,9 +332,24 @@ pub fn decode_samples(loaded: &Loaded) -> DecodedSamples {
                 && (Arc::ptr_eq(s.bytes, &file.bytes) || **s.bytes == *file.bytes)
         });
         let at = known.unwrap_or_else(|| {
-            let result = decode_sample(&file.bytes, extension, MAX_SAMPLE_SECONDS)
-                .map(Arc::new)
-                .map_err(|e| e.to_string());
+            let result = if let Some(budget) = budget {
+                budget
+                    .original(&file.bytes)
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| {
+                        grooviq_engine::decode_sample_budgeted(
+                            &file.bytes,
+                            extension,
+                            MAX_SAMPLE_SECONDS,
+                            budget,
+                        )
+                        .map_err(|e| e.to_string())
+                    })
+            } else {
+                decode_sample(&file.bytes, extension, MAX_SAMPLE_SECONDS)
+                    .map(Arc::new)
+                    .map_err(|e| e.to_string())
+            };
             seen.push(Seen {
                 bytes: &file.bytes,
                 extension,
@@ -316,18 +359,34 @@ pub fn decode_samples(loaded: &Loaded) -> DecodedSamples {
         });
         match &seen[at].result {
             Ok(buf) => {
-                out.samples.insert(channel.id, Arc::clone(buf));
+                out.samples.insert(id, Arc::clone(buf));
             }
             Err(e) => {
-                out.missing.insert(channel.id);
+                out.missing.insert(id);
                 out.warnings.push(format!(
-                    "Channel \"{}\": its sample \"{}\" could not be decoded ({e}). Relink it to hear the channel.",
-                    crate::model::warning_label(&channel.name), crate::model::warning_label(&file.name)
+                    "{}: its sample \"{}\" could not be decoded ({e}). Relink it to hear the channel.",
+                    label, crate::model::warning_label(&file.name)
                 ));
             }
         }
     }
     out
+}
+
+/// Budget exhaustion is an admission refusal, not a silently missing decoder result.
+pub fn decode_samples_budgeted_checked(
+    loaded: &Loaded,
+    budget: &grooviq_engine::media_budget::MediaBudget,
+) -> Result<DecodedSamples, String> {
+    let decoded = decode_samples_budgeted(loaded, budget);
+    if let Some(error) = decoded
+        .warnings
+        .iter()
+        .find(|s| s.contains("Retained media exceeds"))
+    {
+        return Err(error.clone());
+    }
+    Ok(decoded)
 }
 
 /// Why an edit, open or save did not happen. `Display` is a sentence for the person.
@@ -499,6 +558,10 @@ impl SaveJob {
 /// The open project. See the module docs.
 pub struct Session {
     controller: Arc<Mutex<Controller>>,
+    media_budget: grooviq_engine::media_budget::MediaBudget,
+    media_requests: HashMap<u32, MediaIntent>,
+    latest_media_requests: HashMap<u32, u64>,
+    media_peaks: HashMap<u32, Arc<grooviq_engine::waveform::PeakPyramid>>,
     project: Project,
     /// Each channel's sample bytes, saved with the project.
     files: SampleFiles,
@@ -537,6 +600,13 @@ pub struct Session {
     history: NoteHistory,
     pattern_histories: HashMap<u32, NoteHistory>,
     precommit: Option<PrecommitValidator>,
+    arrangement_history: crate::arrangement_history::ArrangementHistory,
+    history_limits: crate::HistoryLimits,
+    arrangement_revision: u64,
+    pattern_note_floors: HashMap<u32, (u32, u32)>,
+    compiled_song: grooviq_engine::SongData,
+    song_error: Option<String>,
+    song_note_limit: usize,
     patterns_revision: u64,
     record_settle: Option<u32>,
 }
@@ -656,6 +726,10 @@ impl Session {
         let session = Self {
             controller,
             project: Project::new(),
+            media_budget: Default::default(),
+            media_requests: Default::default(),
+            latest_media_requests: Default::default(),
+            media_peaks: Default::default(),
             files: SampleFiles::new(),
             decoded: HashMap::new(),
             path: None,
@@ -674,6 +748,13 @@ impl Session {
             history: NoteHistory::default(),
             pattern_histories: HashMap::new(),
             precommit: None,
+            arrangement_history: Default::default(),
+            history_limits: Default::default(),
+            arrangement_revision: 0,
+            pattern_note_floors: HashMap::new(),
+            compiled_song: Default::default(),
+            song_error: None,
+            song_note_limit: grooviq_engine::MAX_SONG_NOTES,
             patterns_revision: 0,
             record_settle: None,
         };
@@ -762,38 +843,56 @@ impl Session {
         }
     }
 
-    fn trim_histories(&mut self) {
-        loop {
-            let (mut steps, mut notes) = self.history.retained();
-            for h in self.pattern_histories.values() {
-                let (s, n) = h.retained();
-                steps += s;
-                notes += n;
-            }
-            if steps <= crate::undo::MAX_UNDO && notes <= crate::undo::MAX_UNDO_NOTES {
-                break;
-            }
-            let oldest = self
-                .pattern_histories
-                .iter()
-                .filter_map(|(id, h)| h.oldest().map(|o| (*id, o)))
-                .chain(
-                    self.history
-                        .oldest()
-                        .map(|o| (self.project.current_pattern, o)),
-                )
-                .min_by_key(|(_, o)| *o);
-            let Some((id, _)) = oldest else {
-                break;
-            };
-            if id == self.project.current_pattern {
-                self.history.evict_oldest();
-            } else {
-                self.pattern_histories.get_mut(&id).unwrap().evict_oldest();
-            }
+    fn staged_histories(&self) -> crate::arrangement_history::Histories {
+        let mut current = self.history.clone();
+        current.staged = true;
+        let mut patterns = self.pattern_histories.clone();
+        for h in patterns.values_mut() {
+            h.staged = true;
         }
-        self.pattern_histories.retain(|_, h| h.retained().0 != 0);
+        crate::arrangement_history::Histories {
+            current,
+            patterns,
+            arrangement: self.arrangement_history.clone(),
+            floors: self.pattern_note_floors.clone(),
+            protected: Default::default(),
+        }
     }
+    fn install_histories(&mut self, mut h: crate::arrangement_history::Histories) {
+        h.current.staged = false;
+        for p in h.patterns.values_mut() {
+            p.staged = false;
+        }
+        self.history = h.current;
+        self.pattern_histories = h.patterns;
+        self.arrangement_history = h.arrangement;
+        self.pattern_note_floors = h.floors;
+    }
+    fn admit_histories(
+        &self,
+        h: &mut crate::arrangement_history::Histories,
+    ) -> Result<(), SessionError> {
+        h.admit(self.history_limits, self.project.current_pattern)
+            .map_err(SessionError::InvalidValue)
+    }
+    #[doc(hidden)]
+    pub fn set_history_limits(&mut self, limits: crate::HistoryLimits) {
+        self.history_limits = crate::HistoryLimits {
+            steps: limits.steps.min(200),
+            notes: limits.notes.min(2_000_000),
+            bytes: limits.bytes.min(64 * 1024 * 1024),
+        };
+    }
+    #[doc(hidden)]
+    pub fn history_usage(&self) -> (usize, usize, usize) {
+        crate::arrangement_history::Histories::usage_of(
+            &self.history,
+            &self.pattern_histories,
+            &self.arrangement_history,
+            &self.pattern_note_floors,
+        )
+    }
+
     #[doc(hidden)]
     pub fn retained_note_history(&self) -> (usize, usize) {
         self.pattern_histories
@@ -808,12 +907,473 @@ impl Session {
         self.precommit = validator;
     }
 
-    fn admit(&self, project: &Project) -> Result<(), SessionError> {
+    pub fn media_budget(&self) -> grooviq_engine::media_budget::MediaBudget {
+        self.media_budget.clone()
+    }
+    #[doc(hidden)]
+    pub fn set_media_budget(&mut self, budget: grooviq_engine::media_budget::MediaBudget) {
+        self.media_budget = budget;
+    }
+    fn admit_media(
+        &self,
+        files: &SampleFiles,
+        decoded: &HashMap<u32, Arc<SampleBuf>>,
+    ) -> Result<(), SessionError> {
+        for file in files.values() {
+            self.media_budget
+                .original(&file.bytes)
+                .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
+        }
+        for sample in decoded.values() {
+            self.media_budget
+                .sample(sample)
+                .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
+        }
+        Ok(())
+    }
+    pub fn arrangement_view(&self) -> crate::arrangement_edit::ArrangementView {
+        crate::arrangement_edit::ArrangementView {
+            generation: self.generation,
+            revision: self.arrangement_revision,
+            arrangement: self.project.arrangement.clone(),
+            next_id: self.project.next_id,
+        }
+    }
+    fn arrangement_stamp(&self, generation: u64, revision: u64) -> Result<(), String> {
+        if generation != self.generation {
+            return Err("Project replaced; reload arrangement".into());
+        }
+        if revision != self.arrangement_revision {
+            return Err("Stale arrangement revision; reload arrangement".into());
+        }
+        if revision >= 9_007_199_254_740_991 {
+            return Err("Arrangement revisions exhausted; reopen project".into());
+        }
+        Ok(())
+    }
+    pub fn edit_arrangement(
+        &mut self,
+        generation: u64,
+        revision: u64,
+        ops: Vec<crate::arrangement_edit::ArrangementEdit>,
+        now: Instant,
+    ) -> Result<crate::arrangement_edit::ArrangementAck, crate::arrangement_edit::ArrangementRefusal>
+    {
+        let result = (|| -> Result<_, String> {
+            self.arrangement_stamp(generation, revision)?;
+            if ops.len() > crate::MAX_CLIPS {
+                return Err("Arrangement operation limit exceeded".into());
+            }
+            let mut candidate = self.project.clone();
+            let ids = crate::arrangement_edit::apply(&mut candidate, ops)?;
+            if candidate == self.project {
+                return Ok((vec![], false));
+            }
+            let mut change = crate::arrangement_history::Change::between(&self.project, &candidate);
+            let mut files = self.files.clone();
+            let mut decoded = self.decoded.clone();
+            let mut peaks = self.media_peaks.clone();
+            for asset in self.project.arrangement.audio_assets.iter().filter(|a| {
+                !candidate
+                    .arrangement
+                    .audio_assets
+                    .iter()
+                    .any(|b| b.id == a.id)
+            }) {
+                change.media.push((
+                    self.media_version(asset.id),
+                    crate::arrangement_history::MediaVersion {
+                        id: asset.id,
+                        file: None,
+                        decoded: None,
+                        peaks: None,
+                    },
+                ));
+                files.remove(&asset.id);
+                decoded.remove(&asset.id);
+                peaks.remove(&asset.id);
+            }
+            let media_changed = !change.media.is_empty();
+            let mut histories = self.staged_histories();
+            histories.clear_redo();
+            histories.protected.insert(change.order);
+            histories.arrangement.undo.push(change);
+            self.admit_histories(&mut histories)
+                .map_err(|e| e.to_string())?;
+            if media_changed {
+                self.publish_media_candidate(&candidate, &files, &decoded)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                self.publish_candidate(&candidate)
+                    .map_err(|e| e.to_string())?;
+            }
+            self.files = files;
+            self.decoded = decoded;
+            self.media_peaks = peaks;
+            let patterns_changed = self.project.patterns != candidate.patterns;
+            self.project = candidate;
+            self.install_histories(histories);
+            if patterns_changed {
+                self.patterns_revision += 1;
+            }
+            self.changed(true, now);
+            Ok((ids, true))
+        })();
+        match result {
+            Ok((created_ids, changed)) => Ok(crate::arrangement_edit::ArrangementAck {
+                state: self.arrangement_view(),
+                created_ids,
+                changed,
+            }),
+            Err(message) => Err(crate::arrangement_edit::ArrangementRefusal {
+                message,
+                reload: true,
+                state: Box::new(self.arrangement_view()),
+            }),
+        }
+    }
+    /// Typed project-wide dispatch; legacy notes_undo remains restricted to selected pattern.
+    pub fn step_project_history(
+        &mut self,
+        generation: u64,
+        revision: u64,
+        undo: bool,
+        now: Instant,
+    ) -> Result<crate::arrangement_edit::HistoryAck, crate::arrangement_edit::ArrangementRefusal>
+    {
+        use crate::arrangement_edit::{ArrangementRefusal, HistoryAck, HistoryEffect};
+        let result = (|| -> Result<HistoryEffect, String> {
+            self.arrangement_stamp(generation, revision)?;
+            let note = std::iter::once((self.project.current_pattern, &self.history))
+                .chain(self.pattern_histories.iter().map(|(id, h)| (*id, h)))
+                .filter_map(|(id, h)| h.next_order(undo).map(|o| (o, Some(id))));
+            let arr = if undo {
+                self.arrangement_history.undo.last()
+            } else {
+                self.arrangement_history.redo.last()
+            };
+            let mut choices: Vec<_> = note.chain(arr.map(|s| (s.order, None))).collect();
+            choices.sort_by_key(|x| x.0);
+            let chosen = if undo {
+                choices.last()
+            } else {
+                choices.first()
+            };
+            let Some((_, target)) = chosen else {
+                return Ok(HistoryEffect::Empty);
+            };
+            if let Some(id) = *target {
+                if id == self.project.current_pattern {
+                    self.step_history(undo, now).map_err(|e| e.to_string())?;
+                } else {
+                    let h = self
+                        .pattern_histories
+                        .get(&id)
+                        .ok_or("Missing pattern history")?;
+                    let mut candidate = self.project.clone();
+                    let p = candidate
+                        .patterns
+                        .iter_mut()
+                        .find(|p| p.id == id)
+                        .ok_or("Pattern removed")?;
+                    let change =
+                        if undo { h.next_undo() } else { h.next_redo() }.ok_or("History empty")?;
+                    change.apply(p, undo).map_err(|e| e.to_string())?;
+                    p.steps = h.length_after(undo);
+                    p.revision = p
+                        .revision
+                        .checked_add(1)
+                        .ok_or("Pattern revision exhausted")?;
+                    let mut histories = self.staged_histories();
+                    let h = histories.patterns.get_mut(&id).unwrap();
+                    if undo {
+                        h.undone()
+                    } else {
+                        h.redone()
+                    };
+                    histories.current.close();
+                    for h in histories.patterns.values_mut() {
+                        h.close();
+                    }
+                    self.admit_histories(&mut histories)
+                        .map_err(|e| e.to_string())?;
+                    self.publish_candidate(&candidate)
+                        .map_err(|e| e.to_string())?;
+                    self.project = candidate;
+                    self.install_histories(histories);
+                    self.changed(true, now);
+                }
+                Ok(HistoryEffect::Notes { pattern: id })
+            } else {
+                let mut histories = self.staged_histories();
+                histories.current.close();
+                for h in histories.patterns.values_mut() {
+                    h.close();
+                }
+                let change = if undo {
+                    histories.arrangement.undo.pop()
+                } else {
+                    histories.arrangement.redo.pop()
+                }
+                .ok_or("History empty")?;
+                let mut candidate = self.project.clone();
+                let mut floors = self.pattern_note_floors.clone();
+                for p in &self.project.patterns {
+                    floors
+                        .entry(p.id)
+                        .and_modify(|n| {
+                            n.0 = n.0.max(p.next_note_id);
+                            n.1 = n.1.max(p.revision);
+                        })
+                        .or_insert((p.next_note_id, p.revision));
+                }
+                change.apply(&mut candidate, undo);
+                for p in &mut candidate.patterns {
+                    if let Some(floor) = floors.get(&p.id) {
+                        p.next_note_id = p.next_note_id.max(floor.0);
+                        if change.patterns.iter().any(|d| {
+                            d.before.as_ref().is_some_and(|(_, old)| old.id == p.id)
+                                || d.after.as_ref().is_some_and(|(_, new)| new.id == p.id)
+                        }) {
+                            p.revision = p
+                                .revision
+                                .max(floor.1)
+                                .checked_add(1)
+                                .ok_or("Pattern revisions exhausted")?;
+                        }
+                    }
+                }
+                if !candidate
+                    .patterns
+                    .iter()
+                    .any(|p| p.id == candidate.current_pattern)
+                {
+                    candidate.current_pattern = candidate.patterns[0].id;
+                }
+                let selection_changed = candidate.current_pattern != self.project.current_pattern;
+                if selection_changed {
+                    let selected = histories
+                        .patterns
+                        .remove(&candidate.current_pattern)
+                        .unwrap_or_default();
+                    let previous = std::mem::replace(&mut histories.current, selected);
+                    if previous.can_undo() || previous.can_redo() {
+                        histories
+                            .patterns
+                            .insert(self.project.current_pattern, previous);
+                    }
+                }
+                let patterns_changed = !change.patterns.is_empty() || selection_changed;
+                let media = change.media.clone();
+                let mut files = self.files.clone();
+                let mut decoded = self.decoded.clone();
+                let mut peaks = self.media_peaks.clone();
+                for (a, b) in &media {
+                    let v = if undo { a } else { b };
+                    if let Some(file) = &v.file {
+                        files.insert(v.id, file.clone());
+                    } else {
+                        files.remove(&v.id);
+                    }
+                    if let Some(sample) = &v.decoded {
+                        decoded.insert(v.id, sample.clone());
+                    } else {
+                        decoded.remove(&v.id);
+                    }
+                    if let Some(p) = &v.peaks {
+                        peaks.insert(v.id, p.clone());
+                    } else {
+                        peaks.remove(&v.id);
+                    }
+                }
+
+                // Shared allocators never rewind. A restored pattern's note allocator is
+                // bounded by retained note identities; new pattern IDs never alias old ones.
+                if undo {
+                    histories.arrangement.redo.push(change)
+                } else {
+                    histories.arrangement.undo.push(change)
+                };
+                histories.floors = floors;
+                self.admit_histories(&mut histories)
+                    .map_err(|e| e.to_string())?;
+                if media.is_empty() {
+                    self.publish_candidate(&candidate)
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    self.publish_media_candidate(&candidate, &files, &decoded)
+                        .map_err(|e| e.to_string())?;
+                }
+                self.project = candidate;
+                self.files = files;
+                self.decoded = decoded;
+                self.media_peaks = peaks;
+                self.install_histories(histories);
+                if patterns_changed {
+                    self.patterns_revision += 1;
+                }
+                self.changed(true, now);
+                Ok(HistoryEffect::Arrangement)
+            }
+        })();
+        result
+            .map(|effect| HistoryAck {
+                effect,
+                state: self.arrangement_view(),
+            })
+            .map_err(|message| ArrangementRefusal {
+                message,
+                reload: true,
+                state: Box::new(self.arrangement_view()),
+            })
+    }
+
+    /// Persistent compilation diagnostic for editable but unplayable loaded songs.
+    pub fn song_error(&self) -> Option<&str> {
+        self.song_error.as_deref()
+    }
+
+    #[doc(hidden)]
+    pub fn set_song_note_limit(&mut self, limit: usize) {
+        self.song_note_limit = limit.min(grooviq_engine::MAX_SONG_NOTES);
+    }
+
+    fn same_audio(&self, project: &Project) -> bool {
+        fn runtime(p: &Project) -> Vec<(u32, u64, &crate::ClipContent, u32, u64)> {
+            let tracks: HashMap<_, _> = p
+                .arrangement
+                .tracks
+                .iter()
+                .map(|t| (t.id, t.mute))
+                .collect();
+            let assets: HashMap<_, _> = p
+                .arrangement
+                .audio_assets
+                .iter()
+                .map(|a| (a.id, a))
+                .collect();
+            let mut clips: Vec<_> = p
+                .arrangement
+                .clips
+                .iter()
+                .filter_map(|c| {
+                    if let crate::ClipContent::Audio { asset, .. } = &c.content
+                        && !c.muted
+                        && tracks.get(&c.track) == Some(&false)
+                        && let Some(a) = assets.get(asset)
+                    {
+                        Some((
+                            c.id,
+                            c.start_tick,
+                            &c.content,
+                            a.source_rate,
+                            a.source_frames,
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            clips.sort_unstable_by_key(|c| c.0);
+            clips
+        }
+        // Metadata and equivalent track organization do not affect the runtime bank.
+        // Decoded owners cannot change within this exclusive borrow; media publication
+        // uses a separate path which always rebuilds the bank.
+        runtime(&self.project) == runtime(project)
+    }
+
+    fn prepare_song(&self, project: &Project) -> Result<grooviq_engine::SongData, SessionError> {
+        crate::compile_song::compile_song(
+            project,
+            &self.decoded,
+            (self.song_error.is_none() && self.same_audio(project))
+                .then_some(&self.compiled_song.audio),
+            self.song_note_limit,
+        )
+        .map_err(SessionError::InvalidValue)
+    }
+
+    fn timeline(
+        project: &Project,
+        song: grooviq_engine::SongData,
+    ) -> grooviq_engine::TimelineUpdate {
+        let pattern = project
+            .patterns
+            .iter()
+            .find(|p| p.id == project.current_pattern)
+            .or_else(|| project.patterns.first())
+            .map(|p| compile_pattern(project, p))
+            .unwrap_or_default();
+        grooviq_engine::TimelineUpdate {
+            remove_channel: None,
+            pattern: Box::new(pattern),
+            song: Box::new(song),
+            bpm: project.bpm,
+            mode: match project.play_mode {
+                crate::PlayMode::Pattern => grooviq_engine::PlaybackMode::Pattern,
+                crate::PlayMode::Song => grooviq_engine::PlaybackMode::Song,
+            },
+            region: project
+                .arrangement
+                .loop_region
+                .as_ref()
+                .filter(|r| r.enabled)
+                .map(|r| grooviq_engine::SongLoop {
+                    start_tick: r.start_tick,
+                    end_tick: r.end_tick,
+                }),
+        }
+    }
+
+    fn publish_candidate(&mut self, project: &Project) -> Result<(), SessionError> {
+        self.arrangement_stamp(self.generation, self.arrangement_revision)
+            .map_err(SessionError::InvalidValue)?;
+        let song = self.admit(project)?;
+        lock(&self.controller).set_timeline(Self::timeline(project, song.clone()))?;
+        self.compiled_song = song;
+        self.song_error = None;
+        Ok(())
+    }
+
+    pub fn set_play_mode(
+        &mut self,
+        mode: crate::PlayMode,
+        now: Instant,
+    ) -> Result<(), SessionError> {
+        if self.project.play_mode == mode {
+            return Ok(());
+        }
+        let mut candidate = self.project.clone();
+        candidate.play_mode = mode;
+        if mode == crate::PlayMode::Pattern && self.song_error.is_some() {
+            crate::validate_save(&candidate, &self.files).map_err(SessionError::Save)?;
+            let mut update = Self::timeline(&candidate, self.compiled_song.clone());
+            update.region = None;
+            lock(&self.controller).set_timeline(update)?;
+        } else {
+            self.publish_candidate(&candidate)?;
+        }
+        self.project = candidate;
+        self.changed(true, now);
+        Ok(())
+    }
+
+    pub fn play(&self) -> Result<(), SessionError> {
+        if self.project.play_mode == crate::PlayMode::Song
+            && let Some(error) = &self.song_error
+        {
+            return Err(SessionError::InvalidValue(error.clone()));
+        }
+        self.send(Command::Play)
+    }
+
+    fn admit(&self, project: &Project) -> Result<grooviq_engine::SongData, SessionError> {
         crate::validate_save(project, &self.files).map_err(SessionError::Save)?;
         if let Some(validate) = &self.precommit {
             validate(project).map_err(SessionError::InvalidValue)?;
         }
-        Ok(())
+        self.prepare_song(project)
     }
 
     pub fn patterns(&self) -> PatternsView {
@@ -852,6 +1412,11 @@ impl Session {
             self.settle_recording()?;
             return Ok(self.patterns());
         }
+        let invalidates_arrangement_history = matches!(
+            edit,
+            crate::pattern_edit::PatternEdit::Delete { .. }
+                | crate::pattern_edit::PatternEdit::MakeUnique { .. }
+        );
         let mut candidate = self.project.clone();
         crate::pattern_edit::apply(&mut candidate, edit).map_err(SessionError::Pattern)?;
         if candidate == self.project {
@@ -877,10 +1442,9 @@ impl Session {
                         "Pattern revisions exhausted. Reopen the project.".into(),
                     )
                 })?;
-            let p = &candidate.patterns[index];
-            let compiled = compile_pattern(&candidate, p);
-            self.admit(&candidate)?;
-            lock(&self.controller).set_pattern(compiled)?;
+        }
+        self.publish_candidate(&candidate)?;
+        if old != selected {
             let history = self.pattern_histories.remove(&selected).unwrap_or_default();
             let previous = std::mem::replace(&mut self.history, history);
             if previous.can_undo() || previous.can_redo() {
@@ -890,6 +1454,9 @@ impl Session {
         self.pattern_histories
             .retain(|id, _| candidate.patterns.iter().any(|p| p.id == *id));
         self.project = candidate;
+        if invalidates_arrangement_history {
+            self.arrangement_history.clear();
+        }
         self.patterns_revision += 1;
         self.changed(true, now);
         Ok(self.patterns())
@@ -1062,6 +1629,7 @@ impl Session {
     /// Records a change made at `now`.
     fn changed(&mut self, structural: bool, now: Instant) {
         self.revision += 1;
+        self.arrangement_revision += 1;
         self.pending_since.get_or_insert(now);
         if structural {
             self.structural_since.get_or_insert(now);
@@ -1088,6 +1656,8 @@ impl Session {
     /// parameter, a value that is not a number, or the engine's queue full) changes nothing.
     /// An edit that leaves everything as it was does not make the project dirty.
     pub fn apply(&mut self, edit: Edit, now: Instant) -> Result<ProjectView, SessionError> {
+        self.arrangement_stamp(self.generation, self.arrangement_revision)
+            .map_err(SessionError::InvalidValue)?;
         let structural = edit.structural();
         if self.apply_inner(edit)? {
             self.changed(structural, now);
@@ -1117,6 +1687,10 @@ impl Session {
                 if (c.volume, c.pan, c.mute, c.solo) == (mix.volume, mix.pan, mute, solo) {
                     return Ok(false);
                 }
+                let mut candidate = self.project.clone();
+                let c = &mut candidate.channels[index];
+                (c.volume, c.pan, c.mute, c.solo) = (mix.volume, mix.pan, mute, solo);
+                self.admit(&candidate)?;
                 self.send(Command::SetChannelMix {
                     channel: ChannelId(channel),
                     mix,
@@ -1142,6 +1716,11 @@ impl Session {
                 if self.project.channels[index].sampler.get(&param) == Some(&value) {
                     return Ok(false);
                 }
+                let mut candidate = self.project.clone();
+                candidate.channels[index]
+                    .sampler
+                    .insert(param.clone(), value);
+                self.admit(&candidate)?;
                 self.send(Command::SetSamplerParam {
                     channel: ChannelId(channel),
                     index: at as u32,
@@ -1193,13 +1772,17 @@ impl Session {
             }
             Edit::SetPatternLength { steps } => {
                 let steps = steps.clamp(1, MAX_STEPS);
-                let changed = self.edit_pattern(|p| {
+                if self.current().steps == steps {
+                    let mut histories = self.staged_histories();
+                    histories.current.set_length(steps);
+                    self.admit_histories(&mut histories)?;
+                    self.install_histories(histories);
+                    return Ok(false);
+                }
+                self.edit_pattern(|p| {
                     p.steps = steps;
                     Ok(())
-                })?;
-                // Set by hand, even to the length it has: undo never takes it back.
-                self.history.set_length(steps);
-                Ok(changed)
+                })
             }
             Edit::SetSwing { swing } => {
                 let swing = finite(swing, "swing")?.clamp(0.0, 1.0);
@@ -1213,8 +1796,18 @@ impl Session {
                 if self.project.bpm == bpm {
                     return Ok(false);
                 }
-                self.send(Command::SetTempo { bpm })?;
-                self.project.bpm = bpm;
+                let mut candidate = self.project.clone();
+                candidate.bpm = bpm;
+                crate::file::validate_scalar_edit(&candidate, &self.files)
+                    .map_err(SessionError::Save)?;
+                if let Some(validate) = &self.precommit {
+                    validate(&candidate).map_err(SessionError::InvalidValue)?;
+                }
+                let song = self.prepare_song(&candidate)?;
+                lock(&self.controller).set_timeline(Self::timeline(&candidate, song.clone()))?;
+                self.compiled_song = song;
+                self.song_error = None;
+                self.project = candidate;
                 Ok(true)
             }
             Edit::SetTimeSignature { beats, unit } => {
@@ -1227,6 +1820,9 @@ impl Session {
                 if self.project.time_signature == signature {
                     return Ok(false);
                 }
+                let mut candidate = self.project.clone();
+                candidate.time_signature = signature;
+                self.admit(&candidate)?;
                 // The metronome counts the beats; the bars are drawn by the UI.
                 self.send(Command::SetTimeSignature { beats, unit })?;
                 self.project.time_signature = signature;
@@ -1250,6 +1846,16 @@ impl Session {
                 if values.get(&param) == Some(&value) {
                     return Ok(false);
                 }
+                let mut candidate = self.project.clone();
+                match kind {
+                    InstrumentKind::Sampler => candidate.channels[index]
+                        .sampler
+                        .insert(param.clone(), value),
+                    InstrumentKind::Synth => {
+                        candidate.channels[index].synth.insert(param.clone(), value)
+                    }
+                };
+                self.admit(&candidate)?;
                 self.send(Command::SetChannelParam {
                     channel: ChannelId(channel),
                     index: at as u32,
@@ -1272,6 +1878,10 @@ impl Session {
                     )));
                 }
                 let values = synth_preset(&preset)?;
+                let mut candidate = self.project.clone();
+                candidate.channels[index].synth = by_param_id(&values);
+                candidate.channels[index].preset = Some(preset.clone());
+                self.admit(&candidate)?;
                 lock(&self.controller).set_channel_params(ChannelId(channel), &values)?;
                 let c = &mut self.project.channels[index];
                 c.synth = by_param_id(&values);
@@ -1284,6 +1894,9 @@ impl Session {
                 if self.project.channels[index].choke == group {
                     return Ok(false);
                 }
+                let mut candidate = self.project.clone();
+                candidate.channels[index].choke = group;
+                self.admit(&candidate)?;
                 self.send(Command::SetChoke {
                     channel: ChannelId(channel),
                     group,
@@ -1303,6 +1916,9 @@ impl Session {
                 if self.project.key == key {
                     return Ok(false);
                 }
+                let mut candidate = self.project.clone();
+                candidate.key = key.clone();
+                self.admit(&candidate)?;
                 self.project.key = key;
                 Ok(true)
             }
@@ -1353,23 +1969,46 @@ impl Session {
         pattern.revision = pattern.revision.checked_add(1).ok_or_else(|| {
             SessionError::InvalidValue("Pattern revisions exhausted. Reopen the project.".into())
         })?;
-        self.keep_pattern(pattern)?;
+        let new_steps = pattern.steps;
+        let mut histories = self.staged_histories();
+        histories.arrangement.redo.clear();
+        for h in histories.patterns.values_mut() {
+            h.clear_redo();
+        }
+        if take.is_none() && (notes.is_some() || growth.is_some()) {
+            histories.current.clear_redo();
+        }
+        let undoable = notes.is_some() || growth.is_some();
+        if growth.is_none() && new_steps != steps {
+            histories.current.set_length(new_steps);
+        }
         match (notes, take) {
-            (Some(notes), Some(take)) => self.history.record(notes, take, steps, growth),
-            (Some(notes), None) => self.history.push(notes, steps, growth),
+            (Some(notes), Some(take)) => histories.current.record(notes, take, steps, growth),
+            (Some(notes), None) => histories.current.push(notes, steps, growth),
             // Notes resubmitted as they were, growing a pattern shortened by hand: a step
             // that holds only that growth, so undo and redo play the length it gave.
-            (None, _) if growth.is_some() && self.current().steps != steps => {
-                self.history.push(NoteChange::none(), steps, growth);
+            (None, _) if growth.is_some() && new_steps != steps => {
+                histories.current.push(NoteChange::none(), steps, growth);
             }
             (None, _) => {}
         }
-        self.trim_histories();
+        if undoable
+            && let Some(order) = take
+                .and_then(|t| histories.current.take_order(t))
+                .or_else(|| histories.current.next_order(true))
+        {
+            histories.protected.insert(order);
+        }
+        self.admit_histories(&mut histories)?;
+        self.keep_pattern(pattern)?;
+        self.install_histories(histories);
         Ok(true)
     }
 
     /// Sends `pattern` to the engine (which goes on playing), then makes it the current one.
     fn keep_pattern(&mut self, mut pattern: Pattern) -> Result<(), SessionError> {
+        self.arrangement_stamp(self.generation, self.arrangement_revision)
+            .map_err(SessionError::InvalidValue)?;
         // A borrowed candidate avoids cloning every other pattern for each note gesture.
         // Drop restores the live model on validation error AND unwinding.
         struct Candidate<'a> {
@@ -1398,9 +2037,20 @@ impl Session {
         if let Some(validate) = &self.precommit {
             validate(candidate.project).map_err(SessionError::InvalidValue)?;
         }
-        let compiled = compile_pattern(candidate.project, &candidate.project.patterns[index]);
+        let song = crate::compile_song::compile_song(
+            candidate.project,
+            &self.decoded,
+            self.song_error
+                .is_none()
+                .then_some(&self.compiled_song.audio),
+            self.song_note_limit,
+        )
+        .map_err(SessionError::InvalidValue)?;
+        let update = Self::timeline(candidate.project, song.clone());
         drop(candidate);
-        lock(&self.controller).set_pattern(compiled)?;
+        lock(&self.controller).set_timeline(update)?;
+        self.compiled_song = song;
+        self.song_error = None;
         *self.current_mut() = pattern;
         Ok(())
     }
@@ -1464,12 +2114,18 @@ impl Session {
         pattern.revision = pattern.revision.checked_add(1).ok_or_else(|| {
             SessionError::InvalidValue("Pattern revisions exhausted. Reopen the project.".into())
         })?;
-        self.keep_pattern(pattern)?;
+        let mut histories = self.staged_histories();
         if undo {
-            self.history.undone();
+            histories.current.undone()
         } else {
-            self.history.redone();
+            histories.current.redone()
+        };
+        for h in histories.patterns.values_mut() {
+            h.close();
         }
+        self.admit_histories(&mut histories)?;
+        self.keep_pattern(pattern)?;
+        self.install_histories(histories);
         self.changed(self.current().steps != steps, now);
         Ok(Some(NotesAck {
             revision: self.current().revision,
@@ -1488,6 +2144,19 @@ impl Session {
 
     fn remove_channel(&mut self, channel: u32) -> Result<(), SessionError> {
         let index = self.channel_index(channel)?;
+        // Persisted automation must remain valid even while Song mode is inactive.
+        if self.project.arrangement.clips.iter().any(|clip| {
+            matches!(&clip.content, crate::ClipContent::Automation { target, .. }
+                if match target {
+                    crate::AutomationTarget::ChannelVolume { channel: target }
+                    | crate::AutomationTarget::ChannelPan { channel: target }
+                    | crate::AutomationTarget::InstrumentParam { channel: target, .. } => *target == channel,
+                })
+        }) {
+            return Err(SessionError::InvalidValue(
+                "Remove this channel's automation clips before removing the channel.".into(),
+            ));
+        }
         let mut patterns = self.project.patterns.clone();
         for p in &mut patterns {
             let before = p.notes.len();
@@ -1496,26 +2165,22 @@ impl Session {
                 p.revision = p.revision.wrapping_add(1);
             }
         }
-        {
-            let mut controller = lock(&self.controller);
-            controller.remove_channel(ChannelId(channel))?;
-            // The engine skips notes of a channel it lacks; the pattern is sent anyway so its
-            // state matches the project's.
-            let mut rest = self.project.clone();
-            rest.channels.remove(index);
-            let current = patterns
-                .iter()
-                .find(|p| p.id == rest.current_pattern)
-                .unwrap_or(&patterns[0]);
-            let _ = controller.set_pattern(compile_pattern(&rest, current));
-        }
-        self.project.channels.remove(index);
-        self.project.patterns = patterns;
+        let mut candidate = self.project.clone();
+        candidate.channels.remove(index);
+        candidate.patterns = patterns;
+        let song = self.admit(&candidate)?;
+        let mut timeline = Self::timeline(&candidate, song.clone());
+        timeline.remove_channel = Some(ChannelId(channel));
+        lock(&self.controller).set_timeline(timeline)?;
+        self.project = candidate;
+        self.compiled_song = song;
+        self.song_error = None;
         self.files.remove(&channel);
         self.decoded.remove(&channel);
         // Undo cannot bring a channel back (structural undo is M6), nor its notes.
         self.history.clear();
         self.pattern_histories.clear();
+        self.arrangement_history.clear();
         Ok(())
     }
 
@@ -1610,10 +2275,17 @@ impl Session {
         candidate.channels.push(channel.clone());
         let mut candidate_files = self.files.clone();
         candidate_files.insert(id, file.clone());
+        self.media_budget
+            .original(&file.bytes)
+            .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
+        self.media_budget
+            .sample(&sample)
+            .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
         crate::validate_save(&candidate, &candidate_files).map_err(SessionError::Save)?;
         if let Some(validate) = &self.precommit {
             validate(&candidate).map_err(SessionError::InvalidValue)?;
         }
+        self.prepare_song(&candidate)?;
         lock(&self.controller).add_channel(ChannelSetup::sampler(
             ChannelId(id),
             Some(Arc::clone(&sample)),
@@ -2070,15 +2742,26 @@ impl Session {
                 None,
             )
         })?;
+        let mut histories = self.staged_histories();
+        // A recording continuation preserves its open take; other domains' redo expires.
+        histories.arrangement.redo.clear();
+        for h in histories.patterns.values_mut() {
+            h.clear_redo();
+        }
+        for (take, steps, change, growth) in staged {
+            histories.current.record(change, take, steps, growth);
+            if let Some(order) = histories.current.take_order(take) {
+                histories.protected.insert(order);
+            }
+        }
+        self.admit_histories(&mut histories)
+            .map_err(|e| (e, 0, None))?;
         match self.keep_pattern(pattern) {
             Err(SessionError::Engine(_)) => return Ok(PendingCommit::Deferred),
             Err(e) => return Err((e, 0, None)),
             Ok(()) => {}
         }
-        for (take, steps, change, growth) in staged {
-            self.history.record(change, take, steps, growth);
-        }
-        self.trim_histories();
+        self.install_histories(histories);
         self.pending.clear();
         self.changed(self.current().steps != old_steps, now);
         Ok(PendingCommit::Applied(self.current().revision))
@@ -2106,6 +2789,24 @@ impl Session {
         now: Instant,
     ) -> Result<ProjectView, SessionError> {
         let index = self.channel_index(channel)?;
+        let mut candidate = self.project.clone();
+        candidate.channels[index].sample = Some(SampleRef {
+            path: path.to_path_buf(),
+            file: None,
+        });
+        let mut files = self.files.clone();
+        files.insert(channel, file.clone());
+        self.media_budget
+            .original(&file.bytes)
+            .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
+        self.media_budget
+            .sample(&sample)
+            .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
+        crate::validate_save(&candidate, &files).map_err(SessionError::Save)?;
+        if let Some(validate) = &self.precommit {
+            validate(&candidate).map_err(SessionError::InvalidValue)?;
+        }
+        self.prepare_song(&candidate)?;
         lock(&self.controller).set_channel_sample(ChannelId(channel), Some(Arc::clone(&sample)))?;
         self.project.channels[index].sample = Some(SampleRef {
             path: path.to_path_buf(),
@@ -2130,7 +2831,7 @@ impl Session {
 
     /// Replaces the engine's state with the project's (stopping the transport first).
     fn sync_engine(&self) -> Result<(), SessionError> {
-        let state = engine_state(&self.project, &self.decoded);
+        let state = self.export_state();
         lock(&self.controller).load_state(state)?;
         Ok(())
     }
@@ -2143,7 +2844,25 @@ impl Session {
         decoded: HashMap<u32, Arc<SampleBuf>>,
     ) -> Result<(), SessionError> {
         self.settle_recording()?;
-        let state = engine_state(&project, &decoded);
+        self.admit_media(&files, &decoded)?;
+        let mut state = engine_state(&project, &decoded);
+        let (song, error) =
+            match crate::compile_song::compile_song(&project, &decoded, None, self.song_note_limit)
+            {
+                Ok(song) => (song, None),
+                Err(error) => (Default::default(), Some(error)),
+            };
+        state.song = song.clone();
+        state.playback_mode = if error.is_some() {
+            grooviq_engine::PlaybackMode::Pattern
+        } else {
+            Self::timeline(&project, song.clone()).mode
+        };
+        state.song_loop = if error.is_some() {
+            None
+        } else {
+            Self::timeline(&project, song.clone()).region
+        };
         let mark = {
             let mut controller = lock(&self.controller);
             // `load_state` stops the transport, then swaps the graph: opening never plays.
@@ -2178,13 +2897,26 @@ impl Session {
             .clear();
         self.history.clear();
         self.pattern_histories.clear();
+        self.arrangement_history.clear();
         self.record_settle = None;
         self.project = project;
+        self.compiled_song = song;
+        self.song_error = error;
         self.files = files;
         self.decoded = decoded;
+        for token in self.media_requests.values() {
+            token
+                .cancellation()
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.media_requests.clear();
+        self.latest_media_requests.clear();
+        self.media_peaks.clear();
         self.revision += 1;
         self.saved_revision = self.revision;
         self.generation += 1;
+        self.arrangement_revision = 0;
+        self.pattern_note_floors.clear();
         self.pending_since = None;
         self.structural_since = None;
         self.autosaved_at = None;
@@ -2213,7 +2945,18 @@ impl Session {
         } = loaded;
         warnings.extend(project.validate());
         warnings.extend(decoded.warnings);
+        for asset in &project.arrangement.audio_assets {
+            if let Some(sample) = decoded.samples.get(&asset.id)
+                && (sample.rate != asset.source_rate as f32
+                    || sample.l.len() as u64 != asset.source_frames)
+            {
+                warnings.push(format!("Audio asset {}: decoded geometry differs from saved source metadata; saved trim duration is preserved.", asset.id));
+            }
+        }
         self.replace(project, samples, decoded.samples)?;
+        if let Some(error) = &self.song_error {
+            warnings.push(error.clone());
+        }
         self.path = Some(path.to_path_buf());
         Ok(OpenReport {
             view: self.view(),
@@ -2349,7 +3092,46 @@ impl Session {
 
     /// The engine's state for an export: the project as it plays now.
     pub fn export_state(&self) -> EngineState {
-        engine_state(&self.project, &self.decoded)
+        let mut state = engine_state(&self.project, &self.decoded);
+        state.song = self.compiled_song.clone();
+        state.playback_mode = Self::timeline(&self.project, state.song.clone()).mode;
+        state.song_loop = if self.song_error.is_none() {
+            Self::timeline(&self.project, state.song.clone()).region
+        } else {
+            None
+        };
+        state
+    }
+
+    pub fn checked_export_state(&self) -> Result<EngineState, SessionError> {
+        if self.project.play_mode == crate::PlayMode::Song
+            && let Some(error) = &self.song_error
+        {
+            return Err(SessionError::InvalidValue(error.clone()));
+        }
+        Ok(self.export_state())
+    }
+
+    /// Explicit backend export selection. Whole Song ignores transport looping; a region
+    /// is returned only when requested and a valid enabled Song loop exists.
+    pub fn export_selection(
+        &self,
+        loop_region: bool,
+    ) -> Result<(EngineState, Option<grooviq_engine::SongLoop>), SessionError> {
+        let state = self.checked_export_state()?;
+        let region = if loop_region {
+            if state.playback_mode != grooviq_engine::PlaybackMode::Song {
+                return Err(SessionError::InvalidValue(
+                    "Loop-region export requires Song mode.".into(),
+                ));
+            }
+            Some(state.song_loop.ok_or_else(|| {
+                SessionError::InvalidValue("Enable a Song loop region before exporting it.".into())
+            })?)
+        } else {
+            None
+        };
+        Ok((state, region))
     }
 
     /// Whether closing would lose changes.
@@ -2623,3 +3405,6 @@ mod release_progress_tests {
         assert!(s.live_presses.lock().unwrap().is_empty());
     }
 }
+
+mod media;
+pub use media::{MediaIntent, MediaTarget};
