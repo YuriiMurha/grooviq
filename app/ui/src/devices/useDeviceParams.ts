@@ -74,7 +74,7 @@ export function useDeviceParams(channel: number, stored: Record<string, number>,
     return (await sendRef.current?.(edit)) ?? false;
   }, []);
   const trim = useCallback(async (action: Parameters<GuardedTrim>[0]) => {
-    owner.current?.cancelAll();
+    if (action.kind !== "view") owner.current?.cancelAll();
     return (await trimRef.current?.(action)) ?? null;
   }, []);
   return { value, begin, group, set, cancelAll, trim: trim as GuardedTrim, send: send as GuardedEdit };

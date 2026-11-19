@@ -100,3 +100,33 @@ test.describe("sampler native-shaped capability contract",()=>{
     expect((await call<View>("sampler_trim_view",{channel:1})).undo).toBeNull();
   });
 });
+
+
+test.describe("read-only repair observation during a legal gesture", () => {
+  const p = project(["Tiny"]);
+  p.channels[0].frames = 48_000;
+  p.channels[0].sampler = { start: 0.1, end: 0.9 };
+  test.use({ seed: { project: p, files: soundsFor(["Tiny"]) } });
+  test("an unrelated accepted edit and trim refresh preserve a held marker drag", async ({ app, mock }) => {
+    await app.getByRole("button", { name: "Edit the Tiny sampler" }).click();
+    const dialog = app.getByRole("dialog", { name: "Tiny sampler" });
+    const marker = dialog.locator('[data-param="start"]');
+    await expect.poll(async () => (await mock.calls("sampler_trim_view")).length).toBeGreaterThan(0);
+    const box = (await marker.boundingBox())!;
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await app.mouse.move(x, y);
+    await app.mouse.down();
+    await app.mouse.move(x + 20, y, { steps: 4 });
+    await expect.poll(async () => (await mock.calls("channel_param_live")).length).toBeGreaterThan(0);
+    await dialog.locator('[data-param="reverse"]').focus();
+    await app.keyboard.press("Enter");
+    await expect.poll(() => mock.eval("m=>m.view().channels[0].sampler.reverse")).toBe(1);
+    await expect.poll(async () => (await mock.calls("sampler_trim_view")).length).toBeGreaterThan(1);
+    await app.mouse.move(x + 80, y, { steps: 4 });
+    await app.mouse.up();
+    await expect.poll(() => mock.eval("m=>m.view().channels[0].sampler.start")).toBeGreaterThan(0.15);
+    expect(await mock.eval("m=>m.view().channels[0].sampler.end")).toBe(0.9);
+    expect(await mock.eval("m=>m.view().channels[0].sampler.reverse")).toBe(1);
+  });
+});
