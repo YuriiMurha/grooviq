@@ -87,7 +87,7 @@ pub enum OutputEvent {
     NoDevice,
     /// [`AudioOutput`] could not open `output`, so nothing plays. It keeps trying the same
     /// device (after 0.5 s, then doubling up to 8 s) and never falls back to another one.
-    /// Reported once per device until it opens or the choice changes.
+    /// Reported once until the output opens, the target changes, or the choice changes.
     OpenFailed { output: OutputInfo, error: String },
 }
 
@@ -192,7 +192,11 @@ impl OutputMonitor {
         let by_itself = !(by_user && as_chosen);
         match self.current.take() {
             // The same device: keep it, with its fresh details.
-            Some(current) if current.id == target.id => {}
+            Some(current) if current.id == target.id => {
+                if current.kind == OutputKind::Headphones && self.guard_stops(by_itself, &target) {
+                    events.push(OutputEvent::GuardStopped { to: target.clone() });
+                }
+            }
             Some(current) => {
                 if self.guard_stops(by_itself, &target) {
                     events.push(OutputEvent::GuardStopped { to: target.clone() });

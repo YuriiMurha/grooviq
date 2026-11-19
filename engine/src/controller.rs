@@ -285,6 +285,8 @@ impl Controller {
             ))
         }))
         .map_err(|_| ControlError::Rejected)?;
+        let mut node = node;
+        node.instance = self.next_instance + 1;
         self.push(Msg::AddChannel(node))?;
         self.next_instance += 1;
         self.instances.insert(setup.id, self.next_instance);
@@ -302,6 +304,7 @@ impl Controller {
             .notes
             .iter()
             .any(|n| n.channel == id)
+            || self.state.song.automation.references(id)
         {
             return Err(ControlError::Rejected);
         }
@@ -339,12 +342,59 @@ impl Controller {
     pub fn set_song(&mut self, song: crate::SongData) -> Result<(), ControlError> {
         let ids: Vec<_> = self.state.channels.iter().map(|c| c.id).collect();
         let song = song.checked(&ids)?;
+        song.automation.validate(&self.state.channels)?;
         song.audio.validate_loop(self.state.song_loop)?;
         if !song.valid_loop(self.state.song_loop) {
             return Err(ControlError::Rejected);
         }
         self.push(Msg::SetSong(Box::new(song.clone())))?;
         self.state.song = song;
+        Ok(())
+    }
+
+    /// Publishes a complete musical candidate through one queue admission.
+    pub fn set_timeline(&mut self, update: crate::TimelineUpdate) -> Result<(), ControlError> {
+        if let Some(id) = update.remove_channel {
+            self.channel_index(id)?;
+        }
+        let channels: Vec<_> = self
+            .state
+            .channels
+            .iter()
+            .filter(|c| Some(c.id) != update.remove_channel)
+            .cloned()
+            .collect();
+        let ids: Vec<_> = channels.iter().map(|c| c.id).collect();
+        let pattern = (*update.pattern).clone().checked()?;
+        let song = (*update.song).clone().checked(&ids)?;
+        song.automation.validate(&channels)?;
+        if !update.bpm.is_finite()
+            || !(20.0..=400.0).contains(&update.bpm)
+            || !song.valid_loop(update.region)
+        {
+            return Err(ControlError::Rejected);
+        }
+        self.push(Msg::Timeline(
+            Box::new(crate::TimelineUpdate {
+                pattern: Box::new(pattern.clone()),
+                song: Box::new(song.clone()),
+                ..update.clone()
+            }),
+            self.state.playback_mode != update.mode,
+            self.state.song_loop != update.region,
+        ))?;
+        if let Some(id) = update.remove_channel {
+            self.state.channels.retain(|c| c.id != id);
+            self.instances.remove(&id);
+        }
+        self.state.pattern = pattern;
+        self.state.song = song;
+        self.state.bpm = update.bpm;
+        if self.state.playback_mode != update.mode {
+            self.recording_armed = false;
+        }
+        self.state.playback_mode = update.mode;
+        self.state.song_loop = update.region;
         Ok(())
     }
 
@@ -614,6 +664,8 @@ impl Controller {
                 setup,
                 any_solo,
             ));
+            let mut node = node;
+            node.instance = self.instances.get(&setup.id).copied().unwrap_or(0);
             let refused = graph.add_channel(node);
             debug_assert!(refused.is_none(), "the state holds valid channels only");
         }

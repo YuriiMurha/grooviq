@@ -12,6 +12,8 @@ export interface ParamRange {
   curve: Curve;
   /** Whole numbers only (octaves, unison voices, enums). */
   stepped: boolean;
+  /** Optional full-range pointer travel, independent of integer value quantization. */
+  dragPixels?: number;
 }
 
 /** Pixels of vertical drag for a continuous parameter's whole range. */
@@ -61,6 +63,7 @@ export function roundHalfAway(x: number): number {
 
 /** Pixels of drag for the whole range. */
 function travel(p: ParamRange): number {
+  if (p.dragPixels !== undefined && Number.isFinite(p.dragPixels) && p.dragPixels > 0) return p.dragPixels;
   return p.stepped ? Math.max(DRAG_PX, (p.max - p.min) * STEP_PX) : DRAG_PX;
 }
 

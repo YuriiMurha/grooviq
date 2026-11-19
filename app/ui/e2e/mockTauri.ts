@@ -226,6 +226,8 @@ export function installMockTauri(seed: MockSeed): void {
     presses: new Map<number, string>(),
     /** The presses `channel_preview` made, of those. */
     previewPresses: new Set<number>(),
+    /** One logical MIDI input, without sustain: repeated note-ons each owe a release. */
+    midiPresses: new Map<number, { channel: number; presses: number[] }>(),
     nextPress: 1,
     /** Notes being recorded, by press: where and how hard they started (recorder.rs pairs a
      * note-off with its own press's note-on). */
@@ -840,6 +842,7 @@ export function installMockTauri(seed: MockSeed): void {
 
   // --- The live stream: a fake WebSocket that sends v2 frames at 60 Hz. ---
   const LIVE_PORT = 47999;
+  let synthObservation: number[] | null = null;
   const encodeLive = () => {
     const buf = new ArrayBuffer(40);
     const v = new DataView(buf);
@@ -1096,7 +1099,23 @@ export function installMockTauri(seed: MockSeed): void {
     if (id>=0xffffffff) throw "Project ids are exhausted.";
     return id;
   };
+  // T7 region lease: these native-only workflows have real Session/IPC acceptance.
+  // Explicit refusal avoids pretending that this UI fixture implements media/history.
+  const nativeArrangementOnly = () => { throw "Arrangement/media commands are not simulated by this browser fixture; use native offline acceptance."; };
   const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
+    arrangement_view: nativeArrangementOnly,
+    arrangement_edit: nativeArrangementOnly,
+    arrangement_history: nativeArrangementOnly,
+    arrangement_curve: nativeArrangementOnly,
+    audio_import: nativeArrangementOnly,
+    audio_relink: nativeArrangementOnly,
+    audio_cancel: nativeArrangementOnly,
+    arrangement_waveform: nativeArrangementOnly,
+    arrangement_mode: nativeArrangementOnly,
+    arrangement_loop: nativeArrangementOnly,
+    arrangement_seek: nativeArrangementOnly,
+    // Native menu state has no platform menu in this headless fixture.
+    edit_history_enabled: () => null,
     // commands.rs
     audio_outputs: () => [SILENT_OUTPUT],
     audio_select: (a) => {
@@ -1203,6 +1222,18 @@ export function installMockTauri(seed: MockSeed): void {
       return view();
     },
     channel_note: (a) => (a.on ? liveOn(a.channel, a.key, a.velocity) : liveOff(a.channel, a.key, a.press)),
+    synth_meter: (a) => {
+      if (a.generation !== s.generation) return null;
+      const channel = s.project.channels.find((c) => c.id === a.channel && c.kind === "synth");
+      if (!channel) return null;
+      const instance = (s.generation + 1) * 100000 + channel.id;
+      if (a.instance != null && a.instance !== instance) return null;
+      if (s.livePaused) return synthObservation?.[0] === instance ? synthObservation : null;
+      const sounding = [...s.live.keys()].some((key) => key.startsWith(`${channel.id}:`));
+      const t = performance.now() / 1000;
+      synthObservation = [instance, Math.floor(performance.now() * 48), sounding ? 0.5 : 0, sounding ? 0.5 : 0, sounding ? 1 : 0, sounding ? Math.sin(t) : 0, sounding ? 0.7 : 0, sounding ? 0.4 : 0, ...Array.from({ length: 256 }, (_, i) => sounding ? Math.sin(i / 10 + t * 9) * 0.4 : 0)];
+      return synthObservation;
+    },
     channel_param_live: (a) => {
       const c = s.project.channels[channelIndex(a.channel)];
       const { spec, value } = instrumentParam(c, a.param, a.value);
@@ -1211,6 +1242,12 @@ export function installMockTauri(seed: MockSeed): void {
     },
     channel_select: (a) => {
       if (a.channel !== null) channelIndex(a.channel);
+      if (s.selected !== a.channel) {
+        for (const [key, held] of s.midiPresses) {
+          for (const press of held.presses) liveOff(held.channel, key, press);
+        }
+        s.midiPresses.clear();
+      }
       s.selected = a.channel as number | null;
       return null;
     },
@@ -1484,6 +1521,7 @@ export function installMockTauri(seed: MockSeed): void {
     notes_redo: { stamp: fields({ generation: u64, patternId: u32, revision: u32 }) },
     channel_add_synth: { preset: str, generation: u64 },
     channel_note: { channel: u32, key: u8, velocity: f32, on: bool, press: optional(u64) },
+    synth_meter: { channel: u32, generation: u64, instance: optional(u64) },
     channel_param_live: { channel: u32, param: str, value: f32 },
     channel_select: { channel: optional(u32) },
     midi_set_enabled: { id: str, enabled: bool },
@@ -1619,6 +1657,26 @@ export function installMockTauri(seed: MockSeed): void {
     midiUnplug: (name: string) => {
       s.midi.present = s.midi.present.filter((n) => n !== name);
       emit("midi-inputs-changed", null);
+    },
+    /** One logical MIDI producer, independent of typing/preview ownership. Velocity uses
+     * decoded MIDI bytes, like Player::handle_in; zero-velocity NoteOn is a release.
+     * Port, pedal, multi-input and project/channel-instance invalidation remain #247. */
+    midiNote: (key: number, velocity: number, on: boolean) => {
+      if (!Number.isInteger(key) || key < 0 || key > 127 || !Number.isInteger(velocity) || velocity < 0 || velocity > 127) {
+        throw "MIDI key and velocity must be bytes in 0..127.";
+      }
+      if (on && velocity > 0) {
+        if (s.selected === null) return null;
+        const press = liveOn(s.selected, key, velocity / 127);
+        const held = s.midiPresses.get(key) ?? { channel: s.selected, presses: [] };
+        held.presses.push(press);
+        s.midiPresses.set(key, held);
+        return press;
+      }
+      const held = s.midiPresses.get(key);
+      if (held) for (const press of held.presses) liveOff(held.channel, key, press);
+      s.midiPresses.delete(key);
+      return null;
     },
     /** The names of the MIDI inputs switched off. */
     midiDisabled: () => [...s.midi.disabled],

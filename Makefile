@@ -21,7 +21,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: e2e-diagnostics-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
@@ -87,9 +87,17 @@ export-budget: ## Optimized 8-second PCM24 export with the original 4-second bud
 	node --test scripts/notes-edit-budget.test.mjs
 	node scripts/export-budget.mjs
 
+.PHONY: optional-rust-policy-test
+optional-rust-policy-test: ## Test optional Rust CI selection and conservative failure fallback
+	node --test scripts/optional-rust-checks.test.cjs
+
 .PHONY: qa-stability qa-stability-smoke
 qa-stability: ## Opt-in: twenty full Linux WebKit + Chromium suites at HEAD in Docker (2 CPUs)
 	sh scripts/stability/container.sh proof
 
 qa-stability-smoke: ## Tiny real Playwright fixtures exercising stability accounting in Docker
 	sh scripts/stability/container.sh smoke
+
+.PHONY: e2e-diagnostics-test
+e2e-diagnostics-test: ## Test bounded timeout-surviving e2e diagnostics (Node only)
+	node --test scripts/e2e-diagnostics.test.mjs
