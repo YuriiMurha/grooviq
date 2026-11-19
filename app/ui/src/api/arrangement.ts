@@ -37,7 +37,7 @@ export type ArrangementReply = ArrangementStamp & {
   changed: boolean; reload: boolean; message: string | null; warnings: readonly string[];
 };
 export type ProjectHistoryReply = ArrangementStamp & (
-  | { status: "applied"; effect: { kind: "arrangement" | "empty" } | { kind: "notes"; pattern: number } }
+  | { status: "applied"; effect: { kind: "arrangement" | "empty" } | { kind: "notes"; pattern: number } | { kind: "samplerTrim"; channel: number } }
   | { status: "refused"; message: string; reload: true }
 );
 const integer = (value: number) => Number.isSafeInteger(value) && value >= 0;

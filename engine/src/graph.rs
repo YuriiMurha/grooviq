@@ -204,6 +204,21 @@ impl Graph {
         }
     }
 
+    pub(crate) fn set_sampler_trim(
+        &mut self,
+        id: ChannelId,
+        instance: u64,
+        params: &[f32; grooviq_dsp::sampler::SPEC.len()],
+    ) {
+        if let Some(channel) = self.channel(id)
+            && channel.instance == instance
+        {
+            for (index, value) in params.iter().enumerate() {
+                channel.set_param(index as u32, *value);
+            }
+        }
+    }
+
     pub(crate) fn set_sampler_param(&mut self, id: ChannelId, index: u32, value: f32) {
         if let Some(channel) = self.channel(id) {
             channel.set_sampler_param(index, value);
