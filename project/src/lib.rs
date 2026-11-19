@@ -55,3 +55,9 @@ pub mod arrangement_edit;
 
 mod arrangement_history;
 pub use arrangement_history::HistoryLimits;
+
+pub use file::{load_budgeted, read_sample_file_budgeted};
+
+pub use session::decode_samples_budgeted;
+
+pub use session::decode_samples_budgeted_checked;

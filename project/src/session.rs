@@ -281,6 +281,18 @@ pub struct DecodedSamples {
 /// extension) are decoded once and share one buffer: a kick used on four channels costs one
 /// decode and one copy in memory. Each channel still gets its own warning if they fail.
 pub fn decode_samples(loaded: &Loaded) -> DecodedSamples {
+    decode_samples_inner(loaded, None)
+}
+pub fn decode_samples_budgeted(
+    loaded: &Loaded,
+    budget: &grooviq_engine::media_budget::MediaBudget,
+) -> DecodedSamples {
+    decode_samples_inner(loaded, Some(budget))
+}
+fn decode_samples_inner(
+    loaded: &Loaded,
+    budget: Option<&grooviq_engine::media_budget::MediaBudget>,
+) -> DecodedSamples {
     /// One distinct sound seen so far, and what decoding it gave.
     struct Seen<'a> {
         bytes: &'a Arc<Vec<u8>>,
@@ -320,9 +332,24 @@ pub fn decode_samples(loaded: &Loaded) -> DecodedSamples {
                 && (Arc::ptr_eq(s.bytes, &file.bytes) || **s.bytes == *file.bytes)
         });
         let at = known.unwrap_or_else(|| {
-            let result = decode_sample(&file.bytes, extension, MAX_SAMPLE_SECONDS)
-                .map(Arc::new)
-                .map_err(|e| e.to_string());
+            let result = if let Some(budget) = budget {
+                budget
+                    .original(&file.bytes)
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| {
+                        grooviq_engine::decode_sample_budgeted(
+                            &file.bytes,
+                            extension,
+                            MAX_SAMPLE_SECONDS,
+                            budget,
+                        )
+                        .map_err(|e| e.to_string())
+                    })
+            } else {
+                decode_sample(&file.bytes, extension, MAX_SAMPLE_SECONDS)
+                    .map(Arc::new)
+                    .map_err(|e| e.to_string())
+            };
             seen.push(Seen {
                 bytes: &file.bytes,
                 extension,
@@ -344,6 +371,22 @@ pub fn decode_samples(loaded: &Loaded) -> DecodedSamples {
         }
     }
     out
+}
+
+/// Budget exhaustion is an admission refusal, not a silently missing decoder result.
+pub fn decode_samples_budgeted_checked(
+    loaded: &Loaded,
+    budget: &grooviq_engine::media_budget::MediaBudget,
+) -> Result<DecodedSamples, String> {
+    let decoded = decode_samples_budgeted(loaded, budget);
+    if let Some(error) = decoded
+        .warnings
+        .iter()
+        .find(|s| s.contains("Retained media exceeds"))
+    {
+        return Err(error.clone());
+    }
+    Ok(decoded)
 }
 
 /// Why an edit, open or save did not happen. `Display` is a sentence for the person.
@@ -515,6 +558,10 @@ impl SaveJob {
 /// The open project. See the module docs.
 pub struct Session {
     controller: Arc<Mutex<Controller>>,
+    media_budget: grooviq_engine::media_budget::MediaBudget,
+    media_requests: HashMap<u32, MediaIntent>,
+    latest_media_requests: HashMap<u32, u64>,
+    media_peaks: HashMap<u32, Arc<grooviq_engine::waveform::PeakPyramid>>,
     project: Project,
     /// Each channel's sample bytes, saved with the project.
     files: SampleFiles,
@@ -679,6 +726,10 @@ impl Session {
         let session = Self {
             controller,
             project: Project::new(),
+            media_budget: Default::default(),
+            media_requests: Default::default(),
+            latest_media_requests: Default::default(),
+            media_peaks: Default::default(),
             files: SampleFiles::new(),
             decoded: HashMap::new(),
             path: None,
@@ -856,6 +907,30 @@ impl Session {
         self.precommit = validator;
     }
 
+    pub fn media_budget(&self) -> grooviq_engine::media_budget::MediaBudget {
+        self.media_budget.clone()
+    }
+    #[doc(hidden)]
+    pub fn set_media_budget(&mut self, budget: grooviq_engine::media_budget::MediaBudget) {
+        self.media_budget = budget;
+    }
+    fn admit_media(
+        &self,
+        files: &SampleFiles,
+        decoded: &HashMap<u32, Arc<SampleBuf>>,
+    ) -> Result<(), SessionError> {
+        for file in files.values() {
+            self.media_budget
+                .original(&file.bytes)
+                .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
+        }
+        for sample in decoded.values() {
+            self.media_budget
+                .sample(sample)
+                .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
+        }
+        Ok(())
+    }
     pub fn arrangement_view(&self) -> crate::arrangement_edit::ArrangementView {
         crate::arrangement_edit::ArrangementView {
             generation: self.generation,
@@ -894,15 +969,47 @@ impl Session {
             if candidate == self.project {
                 return Ok((vec![], false));
             }
-            let change = crate::arrangement_history::Change::between(&self.project, &candidate);
+            let mut change = crate::arrangement_history::Change::between(&self.project, &candidate);
+            let mut files = self.files.clone();
+            let mut decoded = self.decoded.clone();
+            let mut peaks = self.media_peaks.clone();
+            for asset in self.project.arrangement.audio_assets.iter().filter(|a| {
+                !candidate
+                    .arrangement
+                    .audio_assets
+                    .iter()
+                    .any(|b| b.id == a.id)
+            }) {
+                change.media.push((
+                    self.media_version(asset.id),
+                    crate::arrangement_history::MediaVersion {
+                        id: asset.id,
+                        file: None,
+                        decoded: None,
+                        peaks: None,
+                    },
+                ));
+                files.remove(&asset.id);
+                decoded.remove(&asset.id);
+                peaks.remove(&asset.id);
+            }
+            let media_changed = !change.media.is_empty();
             let mut histories = self.staged_histories();
             histories.clear_redo();
             histories.protected.insert(change.order);
             histories.arrangement.undo.push(change);
             self.admit_histories(&mut histories)
                 .map_err(|e| e.to_string())?;
-            self.publish_candidate(&candidate)
-                .map_err(|e| e.to_string())?;
+            if media_changed {
+                self.publish_media_candidate(&candidate, &files, &decoded)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                self.publish_candidate(&candidate)
+                    .map_err(|e| e.to_string())?;
+            }
+            self.files = files;
+            self.decoded = decoded;
+            self.media_peaks = peaks;
             let patterns_changed = self.project.patterns != candidate.patterns;
             self.project = candidate;
             self.install_histories(histories);
@@ -1057,6 +1164,29 @@ impl Session {
                     }
                 }
                 let patterns_changed = !change.patterns.is_empty() || selection_changed;
+                let media = change.media.clone();
+                let mut files = self.files.clone();
+                let mut decoded = self.decoded.clone();
+                let mut peaks = self.media_peaks.clone();
+                for (a, b) in &media {
+                    let v = if undo { a } else { b };
+                    if let Some(file) = &v.file {
+                        files.insert(v.id, file.clone());
+                    } else {
+                        files.remove(&v.id);
+                    }
+                    if let Some(sample) = &v.decoded {
+                        decoded.insert(v.id, sample.clone());
+                    } else {
+                        decoded.remove(&v.id);
+                    }
+                    if let Some(p) = &v.peaks {
+                        peaks.insert(v.id, p.clone());
+                    } else {
+                        peaks.remove(&v.id);
+                    }
+                }
+
                 // Shared allocators never rewind. A restored pattern's note allocator is
                 // bounded by retained note identities; new pattern IDs never alias old ones.
                 if undo {
@@ -1067,9 +1197,17 @@ impl Session {
                 histories.floors = floors;
                 self.admit_histories(&mut histories)
                     .map_err(|e| e.to_string())?;
-                self.publish_candidate(&candidate)
-                    .map_err(|e| e.to_string())?;
+                if media.is_empty() {
+                    self.publish_candidate(&candidate)
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    self.publish_media_candidate(&candidate, &files, &decoded)
+                        .map_err(|e| e.to_string())?;
+                }
                 self.project = candidate;
+                self.files = files;
+                self.decoded = decoded;
+                self.media_peaks = peaks;
                 self.install_histories(histories);
                 if patterns_changed {
                     self.patterns_revision += 1;
@@ -2115,6 +2253,12 @@ impl Session {
         candidate.channels.push(channel.clone());
         let mut candidate_files = self.files.clone();
         candidate_files.insert(id, file.clone());
+        self.media_budget
+            .original(&file.bytes)
+            .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
+        self.media_budget
+            .sample(&sample)
+            .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
         crate::validate_save(&candidate, &candidate_files).map_err(SessionError::Save)?;
         if let Some(validate) = &self.precommit {
             validate(&candidate).map_err(SessionError::InvalidValue)?;
@@ -2630,6 +2774,12 @@ impl Session {
         });
         let mut files = self.files.clone();
         files.insert(channel, file.clone());
+        self.media_budget
+            .original(&file.bytes)
+            .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
+        self.media_budget
+            .sample(&sample)
+            .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
         crate::validate_save(&candidate, &files).map_err(SessionError::Save)?;
         if let Some(validate) = &self.precommit {
             validate(&candidate).map_err(SessionError::InvalidValue)?;
@@ -2672,6 +2822,7 @@ impl Session {
         decoded: HashMap<u32, Arc<SampleBuf>>,
     ) -> Result<(), SessionError> {
         self.settle_recording()?;
+        self.admit_media(&files, &decoded)?;
         let mut state = engine_state(&project, &decoded);
         let (song, error) =
             match crate::compile_song::compile_song(&project, &decoded, None, self.song_note_limit)
@@ -2731,6 +2882,14 @@ impl Session {
         self.song_error = error;
         self.files = files;
         self.decoded = decoded;
+        for token in self.media_requests.values() {
+            token
+                .cancellation()
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.media_requests.clear();
+        self.latest_media_requests.clear();
+        self.media_peaks.clear();
         self.revision += 1;
         self.saved_revision = self.revision;
         self.generation += 1;
@@ -3220,3 +3379,6 @@ mod release_progress_tests {
         assert!(s.live_presses.lock().unwrap().is_empty());
     }
 }
+
+mod media;
+pub use media::{MediaIntent, MediaTarget};

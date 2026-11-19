@@ -236,6 +236,51 @@ pub fn read_sample_file(path: &Path) -> io::Result<SampleFile> {
     read_limited(path, MAX_SAMPLE_BYTES)
 }
 
+/// Reserve retained original storage before reading, including a growing file.
+pub fn read_sample_file_budgeted(
+    path: &Path,
+    budget: &grooviq_engine::media_budget::MediaBudget,
+) -> io::Result<SampleFile> {
+    if !fs::metadata(path)?.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    let mut file = File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    let mut hold = budget.reserve(0).map_err(io::Error::other)?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 65536];
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        let wanted = bytes
+            .len()
+            .checked_add(n)
+            .ok_or_else(|| io::Error::other("Original too large"))?;
+        if wanted > MAX_SAMPLE_BYTES as usize {
+            return Err(io::Error::other("Original exceeds 512 MiB"));
+        }
+        if wanted > bytes.capacity() {
+            let capacity = wanted.next_power_of_two();
+            hold.resize(capacity).map_err(io::Error::other)?;
+            bytes.reserve_exact(capacity - bytes.len());
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+    let bytes = Arc::new(bytes);
+    hold.bind(0, &bytes, bytes.capacity())
+        .map_err(io::Error::other)?;
+    Ok(SampleFile {
+        name: path
+            .file_name()
+            .map_or_else(|| "sample".into(), |n| n.to_string_lossy().into_owned()),
+        bytes,
+    })
+}
+
 /// [`read_sample_file`] with a lower limit. The limit is enforced on the bytes read, not on the
 /// size the file system reported, so a file that grows while it is read cannot get past it.
 fn read_limited(path: &Path, limit: u64) -> io::Result<SampleFile> {
@@ -661,6 +706,19 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
 /// limit is not loaded: the warning says it is too big, and the channel keeps its entry name (a
 /// later save refuses rather than drop it).
 fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
+    load_inner(path, limits, None)
+}
+pub fn load_budgeted(
+    path: &Path,
+    budget: &grooviq_engine::media_budget::MediaBudget,
+) -> Result<Loaded, LoadError> {
+    load_inner(path, LIMITS, Some(budget))
+}
+fn load_inner(
+    path: &Path,
+    limits: Limits,
+    budget: Option<&grooviq_engine::media_budget::MediaBudget>,
+) -> Result<Loaded, LoadError> {
     let mut left = limits.total;
     let mut file = File::open(path)?;
     // A zip starts with "PK"; anything else is not one of ours, and says so plainly instead of
@@ -753,10 +811,17 @@ fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
         let embedded = sample_ref.file.as_deref().map(|name| {
             entries
                 .entry(name.to_string())
-                .or_insert_with(|| read_entry(&mut zip, name, limits.sample, &mut left))
+                .or_insert_with(|| {
+                    read_entry_budgeted(&mut zip, name, limits.sample, &mut left, budget)
+                })
                 .clone()
         });
         match embedded {
+            Some(EntryRead::MediaLimit) => {
+                return Err(LoadError::Io(io::Error::other(
+                    "Shared retained-media budget exhausted",
+                )));
+            }
             Some(EntryRead::Found(found)) => {
                 samples.insert(id, found);
                 continue;
@@ -881,6 +946,7 @@ pub fn migrate(project: &mut Project, version: u32) -> Result<(), LoadError> {
 /// What reading a sample's zip entry gave.
 #[derive(Clone)]
 enum EntryRead {
+    MediaLimit,
     Found(SampleFile),
     /// Not in the zip, or unreadable (a checksum mismatch is an unreadable entry).
     Missing,
@@ -893,11 +959,12 @@ enum EntryRead {
 /// A sample's bytes from its entry (see [`EntryRead`]); a sample read reduces `left`. At most
 /// the declared size is ever decompressed (one byte more is read to catch a header that lies),
 /// so a compressed entry cannot grow past what was budgeted.
-fn read_entry<R: Read + Seek>(
+fn read_entry_budgeted<R: Read + Seek>(
     zip: &mut ZipArchive<R>,
     name: &str,
     sample_limit: u64,
     left: &mut u64,
+    budget: Option<&grooviq_engine::media_budget::MediaBudget>,
 ) -> EntryRead {
     if !name.starts_with(SAMPLES_DIR) || name[SAMPLES_DIR.len()..].contains(['/', '\\']) {
         return EntryRead::Missing;
@@ -912,14 +979,26 @@ fn read_entry<R: Read + Seek>(
     if size > *left {
         return EntryRead::TooBig { over_total: true };
     }
-    let mut bytes = Vec::new();
-    if entry.take(size + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 != size {
+    let reserve = match budget.map(|b| b.reserve(size as usize)) {
+        Some(Ok(r)) => Some(r),
+        Some(Err(_)) => return EntryRead::MediaLimit,
+        None => None,
+    };
+    let mut bytes = vec![0u8; size as usize];
+    let mut entry = entry;
+    if entry.read_exact(&mut bytes).is_err() || entry.read(&mut [0u8; 1]).ok() != Some(0) {
         return EntryRead::Missing;
+    }
+    let bytes = Arc::new(bytes);
+    if let Some(hold) = reserve
+        && hold.bind(0, &bytes, bytes.capacity()).is_err()
+    {
+        return EntryRead::MediaLimit;
     }
     *left -= size;
     EntryRead::Found(SampleFile {
         name: original_name(name),
-        bytes: Arc::new(bytes),
+        bytes,
     })
 }
 

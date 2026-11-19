@@ -7,11 +7,27 @@ pub(crate) struct Delta<T> {
     pub before: Option<(usize, T)>,
     pub after: Option<(usize, T)>,
 }
+#[derive(Clone)]
+pub(crate) struct MediaVersion {
+    pub id: u32,
+    pub file: Option<SampleFile>,
+    pub decoded: Option<std::sync::Arc<grooviq_engine::SampleBuf>>,
+    pub peaks: Option<std::sync::Arc<grooviq_engine::waveform::PeakPyramid>>,
+}
+impl std::fmt::Debug for MediaVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaVersion")
+            .field("id", &self.id)
+            .finish()
+    }
+}
 #[derive(Clone, Debug)]
 pub(crate) struct Change {
     pub clips: Vec<Delta<Clip>>,
     pub tracks: Vec<Delta<PlaylistTrack>>,
     pub patterns: Vec<Delta<Pattern>>,
+    pub assets: Vec<Delta<AudioAsset>>,
+    pub media: Vec<(MediaVersion, MediaVersion)>,
     pub region: Option<(Option<LoopRegion>, Option<LoopRegion>)>,
     pub order: u64,
 }
@@ -59,6 +75,12 @@ fn apply<T: Clone>(list: &mut Vec<T>, deltas: &[Delta<T>], undo: bool, id: impl 
 impl Change {
     pub fn between(a: &Project, b: &Project) -> Self {
         Self {
+            assets: diff(
+                &a.arrangement.audio_assets,
+                &b.arrangement.audio_assets,
+                |a| a.id,
+            ),
+            media: Vec::new(),
             clips: diff(&a.arrangement.clips, &b.arrangement.clips, |c| c.id),
             tracks: diff(&a.arrangement.tracks, &b.arrangement.tracks, |c| c.id),
             patterns: diff(&a.patterns, &b.patterns, |p| p.id),
@@ -72,6 +94,9 @@ impl Change {
         }
     }
     pub fn apply(&self, p: &mut Project, undo: bool) {
+        apply(&mut p.arrangement.audio_assets, &self.assets, undo, |a| {
+            a.id
+        });
         apply(&mut p.arrangement.clips, &self.clips, undo, |c| c.id);
         apply(&mut p.arrangement.tracks, &self.tracks, undo, |c| c.id);
         apply(&mut p.patterns, &self.patterns, undo, |p| p.id);
@@ -89,7 +114,25 @@ impl Change {
     }
     pub fn bytes(&self, curves: &mut HashMap<usize, usize>) -> usize {
         let mut n = std::mem::size_of::<Self>()
-            + self.clips.capacity() * std::mem::size_of::<Delta<Clip>>()
+            + self.assets.capacity() * std::mem::size_of::<Delta<AudioAsset>>()
+            + self.media.capacity() * std::mem::size_of::<(MediaVersion, MediaVersion)>();
+        for (_, a) in self
+            .assets
+            .iter()
+            .flat_map(|d| [&d.before, &d.after])
+            .flatten()
+        {
+            n += a.sample.path.as_os_str().len()
+                + a.sample.file.as_ref().map_or(0, |s| s.capacity());
+        }
+        for (a, b) in &self.media {
+            for v in [a, b] {
+                if let Some(file) = &v.file {
+                    n += file.name.capacity();
+                }
+            }
+        }
+        n += self.clips.capacity() * std::mem::size_of::<Delta<Clip>>()
             + self.tracks.capacity() * std::mem::size_of::<Delta<PlaylistTrack>>()
             + self.patterns.capacity() * std::mem::size_of::<Delta<Pattern>>();
         for (_, c) in self

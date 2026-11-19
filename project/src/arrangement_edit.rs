@@ -69,6 +69,9 @@ pub enum ArrangementEdit {
     MakeUnique {
         clip: u32,
     },
+    DeleteAudioAsset {
+        asset: u32,
+    },
     CreatePattern {
         name: String,
     },
@@ -455,6 +458,15 @@ pub fn apply(p: &mut Project, ops: Vec<ArrangementEdit>) -> Result<Vec<u32>, Str
                     .map_err(|e| e.to_string())?,
                 );
             }
+            ArrangementEdit::DeleteAudioAsset { asset } => {
+                let i = p
+                    .arrangement
+                    .audio_assets
+                    .iter()
+                    .position(|a| a.id == asset)
+                    .ok_or("Unknown audio asset")?;
+                p.arrangement.audio_assets.remove(i);
+            }
             ArrangementEdit::SetLoop { region } => p.arrangement.loop_region = region,
         }
     }
@@ -500,4 +512,46 @@ pub struct ArrangementRefusal {
     pub message: String,
     pub reload: bool,
     pub state: Box<ArrangementView>,
+}
+
+/// IPC passes a bounded JSON string so the point/count visitors run before materializing
+/// the request. Tauri must not deserialize a serde_json::Value tree first.
+pub fn parse_batch(json: &str) -> Result<Vec<ArrangementEdit>, String> {
+    if json.len() > 64 * 1024 * 1024 {
+        return Err("Arrangement request exceeds 64 MiB".into());
+    }
+    struct Batch;
+    impl<'de> serde::de::Visitor<'de> for Batch {
+        type Value = Vec<ArrangementEdit>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "bounded arrangement batch")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut a: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut ops = Vec::new();
+            loop {
+                if ops.len() == crate::MAX_CLIPS {
+                    if a.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                        return Err(serde::de::Error::custom("Arrangement operation limit"));
+                    }
+                    break;
+                }
+                let Some(op) = a.next_element()? else {
+                    break;
+                };
+                ops.push(op);
+            }
+            Ok(ops)
+        }
+    }
+    use serde::de::Deserializer;
+    crate::reading::with_context(crate::VERSION, Default::default(), || {
+        let mut d = serde_json::Deserializer::from_str(json);
+        let ops = (&mut d).deserialize_seq(Batch).map_err(|e| e.to_string())?;
+        d.end().map_err(|e| e.to_string())?;
+        Ok(ops)
+    })
+    .0
 }

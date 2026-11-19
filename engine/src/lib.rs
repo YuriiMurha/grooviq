@@ -168,3 +168,7 @@ mod audio_clip;
 pub use audio_clip::{AudioAsset, AudioClip, AudioDiagnostic, AudioSchedule, MAX_AUDIO_VOICES};
 
 pub use command::TimelineUpdate;
+
+pub mod media_budget;
+
+pub use sample_file::decode_sample_budgeted;

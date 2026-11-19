@@ -126,12 +126,64 @@ pub fn decode_sample(
     extension: Option<&str>,
     max_seconds: f32,
 ) -> Result<SampleBuf, SampleError> {
+    decode_sample_inner(bytes, extension, max_seconds, None)
+}
+
+/// Shared-budget decoder; reserve planar growth before allocation. The borrowed Symphonia
+/// source does not copy input; repair buffers and planar conversion scratch are reserved.
+pub fn decode_sample_budgeted(
+    bytes: &[u8],
+    extension: Option<&str>,
+    max_seconds: f32,
+    budget: &crate::media_budget::MediaBudget,
+) -> Result<std::sync::Arc<SampleBuf>, SampleError> {
+    let mut output = budget.reserve(0).map_err(media_error)?;
+    let sample = decode_sample_inner(bytes, extension, max_seconds, Some((&mut output, budget)))?;
+    let sample = std::sync::Arc::new(sample);
+    let allocated = (sample.l.capacity() + sample.r.capacity()) * 4;
+    output.bind(1, &sample, allocated).map_err(media_error)?;
+    Ok(sample)
+}
+fn media_error(e: crate::media_budget::MediaLimit) -> SampleError {
+    SampleError::Unreadable(e.to_string())
+}
+fn decode_sample_inner(
+    bytes: &[u8],
+    extension: Option<&str>,
+    max_seconds: f32,
+    mut quota: Option<(
+        &mut crate::media_budget::MediaReservation,
+        &crate::media_budget::MediaBudget,
+    )>,
+) -> Result<SampleBuf, SampleError> {
+    let mut repairs = if let Some((_, budget)) = &quota {
+        Some(budget.reserve(0).map_err(media_error)?)
+    } else {
+        None
+    };
+    let mut scratch = if let Some((_, budget)) = &quota {
+        Some(budget.reserve(0).map_err(media_error)?)
+    } else {
+        None
+    };
     let mut hint = Hint::new();
     if let Some(ext) = extension {
         hint.with_extension(&ext.to_ascii_lowercase());
     }
     // A WAV whose recorder never came back to fill in its header sizes: read to the file's end.
-    let header = unfinished_wav_header(bytes);
+    let mut repair_error = false;
+    let header = unfinished_wav_header_with(bytes, &mut |n| {
+        if let Some(r) = &mut repairs
+            && r.resize(n).is_err()
+        {
+            repair_error = true;
+            return false;
+        }
+        true
+    });
+    if repair_error {
+        return Err(media_error(crate::media_budget::MediaLimit));
+    }
     let unfinished = header.is_some();
     let wav_fixed;
     let bytes = match header {
@@ -150,6 +202,9 @@ pub fn decode_sample(
     let ogg_fixed;
     let opened = match opened {
         Err(Error::DecodeError(_) | Error::IoError(_)) if bytes.starts_with(b"OggS") => {
+            if let Some(r) = &mut repairs {
+                r.resize(bytes.len()).map_err(media_error)?;
+            }
             match without_damaged_ogg_pages(bytes) {
                 Some(fixed) => {
                     ogg_fixed = fixed;
@@ -244,6 +299,45 @@ pub fn decode_sample(
             None => rate = Some(spec_rate),
             Some(_) => {}
         }
+        if let Some((output, _)) = &mut quota {
+            let frames = l
+                .len()
+                .checked_add(buf.frames())
+                .ok_or_else(|| media_error(crate::media_budget::MediaLimit))?;
+            let wanted = frames
+                .max(1)
+                .checked_next_power_of_two()
+                .ok_or_else(|| media_error(crate::media_budget::MediaLimit))?
+                .max(l.capacity())
+                .max(r.capacity());
+            output
+                .resize(
+                    wanted
+                        .checked_mul(8)
+                        .ok_or_else(|| media_error(crate::media_budget::MediaLimit))?,
+                )
+                .map_err(media_error)?;
+            if l.capacity() < wanted {
+                l.reserve_exact(wanted - l.len());
+                r.reserve_exact(wanted - r.len());
+            }
+            if let Some(s) = &mut scratch {
+                let retained = planes.capacity() * std::mem::size_of::<Vec<f32>>()
+                    + planes.iter().map(|p| p.capacity() * 4).sum::<usize>();
+                let wanted = buf
+                    .frames()
+                    .saturating_mul(buf.num_planes())
+                    .saturating_mul(8)
+                    + buf
+                        .num_planes()
+                        .checked_next_power_of_two()
+                        .unwrap_or(usize::MAX)
+                        .max(4)
+                        .max(planes.capacity())
+                        * std::mem::size_of::<Vec<f32>>();
+                s.resize(wanted.max(retained)).map_err(media_error)?;
+            }
+        }
         buf.copy_to_vecs_planar::<f32>(&mut planes);
         match planes.as_slice() {
             [] => {}
@@ -310,7 +404,10 @@ enum UnfinishedWav {
 /// the sizes made true, excluding a complete known metadata footer. `None` when this is not a WAV, or its header
 /// is finished: a writer that backpatched the RIFF size also backpatched the data size, so a
 /// data size of 0 there is an empty recording, whatever metadata follows it.
-fn unfinished_wav_header(bytes: &[u8]) -> Option<UnfinishedWav> {
+fn unfinished_wav_header_with(
+    bytes: &[u8],
+    reserve: &mut impl FnMut(usize) -> bool,
+) -> Option<UnfinishedWav> {
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return None;
     }
@@ -358,6 +455,9 @@ fn unfinished_wav_header(bytes: &[u8]) -> Option<UnfinishedWav> {
                 });
                 if audio_end == sound {
                     return Some(UnfinishedWav::NoSound);
+                }
+                if !reserve(audio_end) {
+                    return None;
                 }
                 let mut fixed = bytes[..audio_end].to_vec();
                 let end = |n: usize| u32::try_from(n).unwrap_or(u32::MAX - 1).min(u32::MAX - 1);
