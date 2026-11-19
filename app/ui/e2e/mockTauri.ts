@@ -1093,7 +1093,8 @@ export function installMockTauri(seed: MockSeed): void {
   const LOOPS_MAX = 999;
   const checkStamp = (origin: unknown) => {
     const stamp = origin as { generation?: number; patternId?: number; revision?: number } | undefined;
-    if (!stamp || stamp.generation !== s.generation || stamp.patternId !== s.project.pattern.id || stamp.revision !== s.notesRevision) {
+    if (stamp && stamp.generation !== s.generation) throw "The project changed before this finished, so it was not applied.";
+    if (!stamp || stamp.patternId !== s.project.pattern.id || stamp.revision !== s.notesRevision) {
       throw "The pattern changed before this gesture finished. Reload its notes.";
     }
   };
