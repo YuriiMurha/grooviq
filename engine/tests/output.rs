@@ -1221,6 +1221,87 @@ fn lists_the_real_outputs() {
 }
 
 #[test]
+fn returning_to_a_failed_default_reports_a_new_failure_episode() {
+    let fake = Fake::new(vec![airpods(true)]);
+    fake.state().fail_open = true;
+    let (c, p) = engine_48k();
+    let (out, events) = start(&fake, &c, p, OutputChoice::SystemDefault, true);
+    let failed = OutputEvent::OpenFailed {
+        output: airpods(true),
+        error: "the fake device refuses to open".into(),
+    };
+    assert_eq!(*events.lock().unwrap(), std::slice::from_ref(&failed));
+    assert_eq!(out.current(), None);
+    assert_eq!(fake.open_id(), None);
+    fake.state().fail_open = false;
+    fake.set(vec![sony(true)]);
+    out.poll_now();
+    assert_eq!(out.current(), Some(sony(true)));
+    assert_eq!(fake.open_id().as_deref(), Some("sony"));
+    fake.state().fail_open = true;
+    fake.set(vec![airpods(true)]);
+    out.poll_now();
+    assert_eq!(out.current(), None);
+    assert_eq!(fake.open_id(), None);
+    assert_eq!(fake.state().opened, ["sony"]);
+    assert_eq!(
+        *events.lock().unwrap(),
+        [
+            failed.clone(),
+            OutputEvent::Switched {
+                from: airpods(true),
+                to: sony(true)
+            },
+            failed,
+        ]
+    );
+    // Repeated looks in the same failing episode must remain quiet.
+    out.poll_now();
+    out.poll_now();
+    assert_eq!(events.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn a_failed_reopen_before_a_guarded_fallback_is_truthful_and_silent() {
+    let fake = Fake::new(vec![airpods(true)]);
+    let (c, p) = engine_48k();
+    c.lock().unwrap().send(tone(true)).unwrap();
+    let (out, events) = start(&fake, &c, p, OutputChoice::SystemDefault, true);
+    assert!(peak(&fake.pull(4_800)) > 0.2);
+    let slot = fake.slot();
+    fake.state().fail_open = true;
+    slot.stream_failed();
+    out.poll_now();
+    assert_eq!(out.current(), None);
+    assert_eq!(fake.open_id(), None);
+    let mut scratch = [1.0; 512];
+    slot.process(&mut scratch, 2);
+    assert!(scratch.iter().all(|x| *x == 0.0));
+    // Enumeration catches up: now the fallback can actually open.
+    fake.state().fail_open = false;
+    fake.set(vec![speakers(true)]);
+    out.poll_now();
+    assert_eq!(out.current(), Some(speakers(true)));
+    assert_eq!(fake.state().opened, ["airpods", "speakers"]);
+    assert_eq!(
+        *events.lock().unwrap(),
+        [
+            OutputEvent::Opened(airpods(true)),
+            OutputEvent::OpenFailed {
+                output: airpods(true),
+                error: "the fake device refuses to open".into(),
+            },
+            OutputEvent::GuardStopped { to: speakers(true) },
+            OutputEvent::Switched {
+                from: airpods(true),
+                to: speakers(true)
+            },
+        ]
+    );
+    assert!(fake.pull(4_800).iter().all(|x| *x == 0.0));
+}
+
+#[test]
 fn same_id_observed_route_policy() {
     for kind in [OutputKind::Speakers, OutputKind::Unknown] {
         for explicit in [false, true] {

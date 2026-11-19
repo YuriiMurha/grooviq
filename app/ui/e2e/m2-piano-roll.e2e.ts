@@ -76,6 +76,8 @@ const ink = (page: Page) =>
   });
 
 test.describe("ten thousand notes", () => {
+  // A bounded correctness deadline, including fixture setup; not a performance gate.
+  test.describe.configure({ timeout: 120_000 });
   // Ten keys, one bar, ten thousand notes: every one of them inside one box on screen.
   const many: MockNote[] = Array.from({ length: 10_000 }, (_, i) => ({
     id: i + 1,
@@ -88,48 +90,57 @@ test.describe("ten thousand notes", () => {
   test.use({ seed: { project: bass(many) } });
 
   test("moving_ten_thousand_selected_notes_commits_once", async ({ app, mock }, info) => {
-    // Ten thousand notes through the mock session (and its command log) take a while.
-    test.setTimeout(60_000);
-    await openRoll(app);
-    await tool(app, "Select").click();
-    // A box from above the notes (an empty row) to below and past them selects all of them.
-    await drag(app, await at(app, 30, 72), await at(app, 3960, 58));
-    await expect.poll(async () => (await stats(app)).bufferBuilds).toBeGreaterThan(0);
-    const before = await mock.eval<Required<MockNote>[]>("(m) => m.notes()");
-
-    // Grab a note and drag the whole selection two rows up and two beats on.
-    const from = await at(app, 1000, 65);
-    await app.mouse.move(from.x, from.y);
-    await app.mouse.down();
-    await nextFrame(app);
-    const atDown = await stats(app);
-    for (let i = 1; i <= 8; i++) {
-      await app.mouse.move(from.x + i * 6, from.y - (i * 28) / 8);
-      await nextFrame(app);
-    }
-    const atEnd = await stats(app);
-    await shot(app, info, "dragging-ten-thousand");
-    // The drag is drawn every frame from the same instance buffer: nothing was rebuilt.
-    expect(atEnd.bufferBuilds).toBe(atDown.bufferBuilds);
-    expect(atEnd.draws).toBeGreaterThan(atDown.draws);
-    expect(await mock.calls("notes_edit")).toEqual([]);
-    await app.mouse.up();
-
-    // One edit at release, with every note in it.
-    await expect.poll(async () => (await mock.calls("notes_edit")).length).toBe(1);
-    const [edit] = await mock.calls("notes_edit");
-    const sent = edit.args.edit as { update: unknown[]; add: unknown[]; delete: unknown[] };
-    expect([sent.update.length, sent.add.length, sent.delete.length]).toEqual([10_000, 0, 0]);
-    // Every note moved by the same delta: the grabbed note's start snapped to the step grid.
-    const after = new Map((await mock.eval<Required<MockNote>[]>("(m) => m.notes()")).map((n) => [n.id, n]));
-    const dTick = after.get(before[0].id)!.tick - before[0].tick;
-    expect(dTick).toBeGreaterThan(0);
-    const off = before.filter((n) => {
-      const m = after.get(n.id)!;
-      return m.tick - n.tick !== dTick || m.key - n.key !== 2 || m.length !== 240;
+    const before = await test.step("setup and select all 10,000 notes", async () => {
+      await openRoll(app);
+      await tool(app, "Select").click();
+      // A box from above the notes (an empty row) to below and past them selects all of them.
+      await drag(app, await at(app, 30, 72), await at(app, 3960, 58));
+      await expect.poll(async () => (await stats(app)).bufferBuilds).toBeGreaterThan(0);
+      return mock.eval<Required<MockNote>[]>("(m) => m.notes()");
     });
-    expect(off).toEqual([]);
-    await expect.poll(async () => (await stats(app)).bufferBuilds).toBeGreaterThan(atEnd.bufferBuilds);
+
+    const atEnd = await test.step("UI move without committing or rebuilding", async () => {
+      // Grab a note and drag the whole selection two rows up and two beats on.
+      const from = await at(app, 1000, 65);
+      await app.mouse.move(from.x, from.y);
+      await app.mouse.down();
+      await nextFrame(app);
+      const atDown = await stats(app);
+      for (let i = 1; i <= 8; i++) {
+        await app.mouse.move(from.x + i * 6, from.y - (i * 28) / 8);
+        await nextFrame(app);
+      }
+      const atEnd = await stats(app);
+      await shot(app, info, "dragging-ten-thousand");
+      // The drag is drawn every frame from the same instance buffer: nothing was rebuilt.
+      expect(atEnd.bufferBuilds).toBe(atDown.bufferBuilds);
+      expect(atEnd.draws).toBeGreaterThan(atDown.draws);
+      expect(await mock.eval<number>('(m) => m.calls.filter((c) => c.cmd === "notes_edit").length')).toBe(0);
+      return atEnd;
+    });
+    await test.step("release and settle one commit", async () => {
+      await app.mouse.up();
+
+      // One edit at release, with every note in it.
+      await expect.poll(() => mock.eval<number>('(m) => m.calls.filter((c) => c.cmd === "notes_edit").length')).toBe(1);
+    });
+    await test.step("assert complete moved data and rebuilt buffer", async () => {
+      const [edit] = await mock.calls("notes_edit");
+      const sent = edit.args.edit as { update: unknown[]; add: unknown[]; delete: unknown[] };
+      expect([sent.update.length, sent.add.length, sent.delete.length]).toEqual([10_000, 0, 0]);
+      // Every note moved by the same delta: the grabbed note's start snapped to the step grid.
+      const after = new Map((await mock.eval<Required<MockNote>[]>("(m) => m.notes()")).map((n) => [n.id, n]));
+      expect(before).toHaveLength(10_000);
+      expect(after.size).toBe(10_000);
+      const dTick = after.get(before[0].id)!.tick - before[0].tick;
+      expect(dTick).toBeGreaterThan(0);
+      const off = before.filter((n) => {
+        const m = after.get(n.id)!;
+        return m.tick - n.tick !== dTick || m.key - n.key !== 2 || m.length !== 240 || m.channel !== n.channel || m.velocity !== Math.fround(n.velocity) || m.slide !== n.slide;
+      });
+      expect(off.length, "every note retains its fields and moves by the same delta").toBe(0);
+      await expect.poll(async () => (await stats(app)).bufferBuilds).toBeGreaterThan(atEnd.bufferBuilds);
+    });
   });
 });
 
@@ -342,20 +353,33 @@ test.describe("renderers", () => {
     await openRoll(app);
     const before = await stats(app);
     expect(before.renderer).toBe("webgl2");
-    const lost = await canvas(app).evaluate((c: HTMLCanvasElement) => {
-      const ext = c.getContext("webgl2")?.getExtension("WEBGL_lose_context");
-      if (!ext) return false;
+    const restored = await canvas(app).evaluate(async (c: HTMLCanvasElement) => {
+      const gl = c.getContext("webgl2");
+      const ext = gl?.getExtension("WEBGL_lose_context");
+      if (!ext) return null;
+      const lost = new Promise<void>((resolve) => {
+        c.addEventListener("webglcontextlost", () => {
+          resolve();
+        }, { once: true });
+      });
+      // Capture runs before the renderer's restoration listener. Counters copied here
+      // cannot be satisfied by an upload or draw from before restoration.
+      const rebuilt = new Promise<{ bufferBuilds: number; draws: number }>((resolve) => {
+        c.addEventListener("webglcontextrestored", () => {
+          const { bufferBuilds, draws } = (window as unknown as { __grooviqRoll: RollStats }).__grooviqRoll;
+          resolve({ bufferBuilds, draws });
+        }, { once: true, capture: true });
+      });
       ext.loseContext();
-      (window as unknown as { __restore: () => void }).__restore = () => ext.restoreContext();
-      return true;
+      await lost;
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      ext.restoreContext();
+      return await rebuilt;
     });
-    test.skip(!lost, "no WEBGL_lose_context here");
-    await nextFrame(app);
-    await app.evaluate(() => (window as unknown as { __restore: () => void }).__restore());
-    // The notes are uploaded again to the new context and drawn.
-    await expect.poll(async () => (await stats(app)).bufferBuilds).toBeGreaterThan(before.bufferBuilds);
-    expect((await stats(app)).draws).toBeGreaterThan(before.draws);
-    await nextFrame(app);
+    test.skip(!restored, "no WEBGL_lose_context here");
+    await expect.poll(async () => (await stats(app)).bufferBuilds).toBeGreaterThan(restored!.bufferBuilds);
+    await expect.poll(async () => (await stats(app)).draws).toBeGreaterThan(restored!.draws);
+    expect((await stats(app)).renderer).toBe("webgl2");
     // The note is on screen again, in its channel's ink.
     const [onNote, offNote] = await pixelsAt(app, canvas(app), [await local(app, 480, 60), await local(app, 480, 66)]);
     await shot(app, info, "restored");
