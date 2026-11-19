@@ -120,6 +120,7 @@ enum Stage {
     Decoded,
     Built,
     Cached(usize),
+    Published,
 }
 struct CacheEntry {
     source: Weak<Vec<u8>>,
@@ -237,7 +238,12 @@ impl AudioAssets {
                     })
                 };
                 // receive() is the publication fence, including cancellation after this send.
-                let _ = job.reply.try_send(result);
+                let reply = job.reply.clone();
+                // Completion must not expose redundant producer source/reservation owners.
+                // PreparedAudio retains its own lease; errors release theirs before publication.
+                drop(job);
+                let _ = reply.try_send(result);
+                hook(Stage::Published);
             }
         });
         Self {
@@ -387,6 +393,131 @@ mod tests {
             }
         });
         (worker, Release(Some(release)), wait, stages)
+    }
+    #[test]
+    fn published_alias_releases_producer_owners_before_clients_finish() {
+        let budget = grooviq_engine::media_budget::MediaBudget::with_limit(1 << 20);
+        let (entered, wait) = mpsc::sync_channel(1);
+        let (release, gate) = mpsc::sync_channel(1);
+        let mut publications = 0;
+        let worker = AudioAssets::build(
+            Limits::default(),
+            move |stage| {
+                if stage == Stage::Published {
+                    publications += 1;
+                    if publications == 2 {
+                        entered.send(()).unwrap();
+                        let _ = gate.recv();
+                    }
+                }
+            },
+            budget.clone(),
+        );
+        // Declared after worker: unwinding always opens the gate before worker.join().
+        let _release = Release(Some(release));
+        let mut source = wav(1024);
+        let bytes = Arc::get_mut(&mut source.bytes).unwrap();
+        bytes[20..22].copy_from_slice(&1u16.to_le_bytes());
+        bytes[28..32].copy_from_slice(&16000u32.to_le_bytes());
+        bytes[32..34].copy_from_slice(&2u16.to_le_bytes());
+        bytes[34..36].copy_from_slice(&16u16.to_le_bytes());
+        bytes[4..8].copy_from_slice(&2084u32.to_le_bytes());
+        bytes[40..44].copy_from_slice(&2048u32.to_le_bytes());
+        bytes.truncate(2092);
+        bytes.shrink_to_fit();
+        assert_eq!(bytes.capacity(), 2092);
+        let weak = Arc::downgrade(&source.bytes);
+        let first = worker
+            .submit(0, 1, 1, source.clone())
+            .unwrap()
+            .receive()
+            .unwrap();
+        let used = budget.used();
+        let block = budget.reserve((1 << 20) - used).unwrap();
+        let mut alias = source.clone();
+        alias.name = "alias.wav".into();
+        let request = worker.submit(0, 2, 2, alias).unwrap();
+        let second = request.receive().unwrap();
+        wait.recv().unwrap();
+        assert_eq!(second.original.name, "alias.wav");
+        assert!(Arc::ptr_eq(&source.bytes, &second.original.bytes));
+        assert!(Arc::ptr_eq(&first.peaks, &second.peaks));
+        assert_eq!(budget.used(), 1 << 20);
+        drop((block, source, first, request));
+        assert!(weak.strong_count() > 0);
+        assert_eq!(budget.used(), used);
+        drop(second);
+        eprintln!(
+            "post-client source strong={}, budget={}",
+            weak.strong_count(),
+            budget.used()
+        );
+        assert_eq!(budget.used(), 0);
+        assert_eq!(weak.strong_count(), 0);
+        assert_eq!(worker.queued_bytes.lock().unwrap().used, 0);
+    }
+    #[test]
+    fn published_errors_cancellation_and_disconnect_release_producer_owners() {
+        for mode in 0..3 {
+            let budget = grooviq_engine::media_budget::MediaBudget::default();
+            let (queued, queued_wait) = mpsc::sync_channel(1);
+            let (start, start_gate) = mpsc::sync_channel(1);
+            let (published, published_wait) = mpsc::sync_channel(1);
+            let (finish, finish_gate) = mpsc::sync_channel(1);
+            let mut first_queued = true;
+            let mut first_published = true;
+            let worker = AudioAssets::build(
+                Limits::default(),
+                move |stage| {
+                    if stage == Stage::Queued && first_queued {
+                        first_queued = false;
+                        queued.send(()).unwrap();
+                        let _ = start_gate.recv();
+                    }
+                    if stage == Stage::Published && first_published {
+                        first_published = false;
+                        published.send(()).unwrap();
+                        let _ = finish_gate.recv();
+                    }
+                },
+                budget.clone(),
+            );
+            let mut start = Release(Some(start));
+            let mut finish = Release(Some(finish));
+            let source = if mode == 0 {
+                SampleFile {
+                    name: "bad.wav".into(),
+                    bytes: Arc::new(vec![0; 100]),
+                }
+            } else {
+                wav(1024)
+            };
+            let weak = Arc::downgrade(&source.bytes);
+            let mut request = Some(worker.submit(0, 1, 1, source).unwrap());
+            queued_wait.recv().unwrap();
+            assert!(budget.used() > 0, "in-flight originals must remain charged");
+            if mode == 1 {
+                request.as_ref().unwrap().cancel();
+            }
+            if mode == 2 {
+                drop(request.take());
+            }
+            start.open();
+            published_wait.recv().unwrap();
+            if let Some(request) = request {
+                let result = request.receive();
+                if mode == 0 {
+                    assert!(matches!(result, Err(AssetError::Decode(_))));
+                } else {
+                    assert!(matches!(result, Err(AssetError::Cancelled)));
+                }
+            }
+            assert_eq!(weak.strong_count(), 0);
+            assert_eq!(budget.used(), 0);
+            assert_eq!(worker.queued_bytes.lock().unwrap().used, 0);
+            finish.open();
+            assert!(worker.submit(0, 2, 2, wav(1)).unwrap().receive().is_ok());
+        }
     }
     #[test]
     fn busy_does_not_supersede_the_current_request() {
