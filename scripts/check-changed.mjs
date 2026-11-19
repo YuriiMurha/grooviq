@@ -154,6 +154,8 @@ if (needsUi && (manifests.length || !existsSync(join(uiDir, "node_modules"))))
     ["ci", "--no-audit", "--no-fund"],
     uiDir,
   );
+if (ui || workspace || changed.some((path) => path.startsWith("scripts/e2e-browser-results") || path === "Makefile" || path === ".github/workflows/ci.yml"))
+  step("e2e browser accounting safety tests", "node", ["--test", "scripts/e2e-browser-results.test.mjs"]);
 if (ui || workspace || changed.some((path) => path.startsWith("scripts/e2e-diagnostics") || path === "Makefile"))
   step("e2e diagnostic safety tests", "node", ["--test", "scripts/e2e-diagnostics.test.mjs"]);
 if (ui) {
