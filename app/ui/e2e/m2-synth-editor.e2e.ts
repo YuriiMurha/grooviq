@@ -89,6 +89,73 @@ async function shot(page: Page, info: TestInfo, name: string) {
 test.describe("the synth editor", () => {
   test.use({ seed: { project: withSynth(), files: soundsFor(KIT) } });
 
+  test("output_scope_moves_for_a_held_note_and_clears_when_released", async ({ app, mock }, info) => {
+    await open(app);
+    const scope = editor(app).getByLabel("Synth output waveform");
+    const status = editor(app).locator(".synth-output-status");
+    const pixels = () => scope.evaluate((c: HTMLCanvasElement) => c.toDataURL());
+    await expect(status).toContainText("0 voices");
+    const silent = await pixels();
+    await app.keyboard.down("z");
+    await expect(status).toContainText("1 voice");
+    await expect.poll(pixels).not.toBe(silent);
+    const first = await pixels();
+    await expect.poll(pixels).not.toBe(first);
+    await expect(editor(app).locator('[data-synth-meter="amp"]')).toBeVisible();
+    await shot(app, info, "live-output");
+    await app.keyboard.up("z");
+    await expect.poll(pixels).toBe(silent);
+    await expect(status).toContainText("0 voices");
+    await app.keyboard.down("z");
+    await expect(status).toContainText("1 voice");
+    await mock.eval("(m) => m.pauseLive(true)");
+    await expect.poll(pixels).toBe(silent);
+    await app.keyboard.up("z");
+    await mock.eval("(m) => m.pauseLive(false)");
+    await app.getByRole("button", { name: "Mute Kick", exact: true }).focus();
+    await expect(status).toContainText("0 voices");
+    const before = (await mock.calls("synth_meter")).length;
+    await app.evaluate(() => new Promise((resolve) => setTimeout(resolve, 150)));
+    expect((await mock.calls("synth_meter")).length).toBeLessThanOrEqual(before + 1);
+  });
+
+  test("held_meter_request_stays_bounded_across_selection_and_reopening", async ({ app, mock }) => {
+    const settleFrames = () => app.evaluate(() => new Promise<void>(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    }));
+    await mock.eval('m => m.holdCommand("synth_meter")');
+    await open(app);
+    await expect.poll(async () => (await mock.calls("synth_meter")).length).toBe(1);
+    try {
+      for (let i = 0; i < 5; i++) {
+        await app.getByRole("button", { name: "Mute Kick", exact: true }).focus();
+        await settleFrames();
+        await editor(app).getByText("Output", { exact: true }).click();
+        await settleFrames();
+      }
+      for (let i = 0; i < 3; i++) {
+        await editor(app).getByRole("button", { name: "Close the Bass synth", exact: true }).click();
+        await expect(editor(app)).toBeHidden();
+        await open(app);
+        await settleFrames();
+      }
+      expect((await mock.calls("synth_meter")).length, "unanswered requests must stay bounded").toBe(1);
+    } finally {
+      await mock.eval('m => m.releaseCommand("synth_meter")');
+    }
+    const scope = editor(app).getByLabel("Synth output waveform");
+    const status = editor(app).locator(".synth-output-status");
+    await expect(status).toContainText("0 voices");
+    const pixels = () => scope.evaluate((c: HTMLCanvasElement) => c.toDataURL());
+    const silent = await pixels();
+    await app.keyboard.down("z");
+    await expect(status).toContainText("1 voice");
+    await expect.poll(pixels).not.toBe(silent);
+    await app.keyboard.up("z");
+    await expect(status).toContainText("0 voices");
+    await expect.poll(pixels).toBe(silent);
+  });
+
   test("every_one_of_the_40_parameters_has_a_control", async ({ app, mock }, info) => {
     await open(app);
     await shot(app, info, "synth-editor");
@@ -206,11 +273,20 @@ test.describe("the synth editor", () => {
       ["osc1_semi", 1],
       ["osc1_semi", 2],
     ]);
+    // Keep the gesture pending across host RPCs; advance frames explicitly below.
+    await app.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await app.clock.pauseAt(new Date("2026-01-01T00:01:00Z"));
     // A wheel gesture is live while it turns and commits once when it settles.
     const level = control(app, "osc1_level");
     await level.hover();
-    for (let i = 0; i < 3; i++) await app.mouse.wheel(0, -100);
+    for (let i = 0; i < 3; i++) {
+      await app.mouse.wheel(0, -100);
+      await app.clock.runFor(32);
+      await expect.poll(() => liveValue(mock, "osc1_level")).toBeCloseTo(0.9 + (i + 1) * 0.025, 6);
+    }
     await expect.poll(() => liveValue(mock, "osc1_level")).toBeGreaterThan(0.9);
+    expect(await paramEdits(mock)).toHaveLength(2);
+    await app.clock.runFor(299);
     await expect.poll(() => paramEdits(mock)).toHaveLength(3);
     expect((await paramEdits(mock))[2][0]).toBe("osc1_level");
     expect((await stored(mock)).synth.osc1_level).toBeCloseTo(0.9 + 3 * 0.025, 6);
@@ -395,12 +471,17 @@ test.describe("ending a gesture early", () => {
 
   test("closing_during_a_wheel_gesture_sends_no_edit", async ({ app, mock }) => {
     await open(app);
+    // Keep the gesture pending across host RPCs; advance frames explicitly below.
+    await app.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await app.clock.pauseAt(new Date("2026-01-01T00:01:00Z"));
     await control(app, "filter_cutoff").hover();
     await app.mouse.wheel(0, -100);
+    await app.clock.runFor(32);
     await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
+    expect(await paramEdits(mock)).toEqual([]);
     await app.keyboard.press("Escape");
     await expect(editor(app)).toHaveCount(0);
-    await app.waitForTimeout(600);
+    await app.clock.runFor(600);
     expect(await paramEdits(mock)).toEqual([]);
     expect(await liveValue(mock, "filter_cutoff")).toBe(650);
   });
@@ -424,11 +505,16 @@ test.describe("presets during a gesture", () => {
 
   test("a_preset_during_a_wheel_gesture_wins", async ({ app, mock }) => {
     await open(app);
+    // Keep the gesture pending across host RPCs; advance frames explicitly below.
+    await app.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await app.clock.pauseAt(new Date("2026-01-01T00:01:00Z"));
     await control(app, "filter_cutoff").hover();
     await app.mouse.wheel(0, -100);
+    await app.clock.runFor(32);
     await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
+    expect(await paramEdits(mock)).toEqual([]);
     await editor(app).getByRole("button", { name: "Reese", exact: true }).evaluate((b: HTMLElement) => b.click());
-    await app.waitForTimeout(600);
+    await app.clock.runFor(600);
     expect(await paramEdits(mock)).toEqual([]);
     expect(await stored(mock)).toMatchObject({ preset: "Reese", synth: presetValues("Reese") });
     expectShown(await shown(app), presetValues("Reese"));

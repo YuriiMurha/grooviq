@@ -174,7 +174,8 @@ fn native_automation_range_and_instrument_are_checked() {
             tick: 0,
             value: f32::NAN,
             mode: SegmentMode::Hold,
-        }],
+        }]
+        .into(),
     };
     assert!(p.validate_arrangement().is_err());
 }
@@ -271,7 +272,8 @@ fn all_automation_targets_and_modes_roundtrip() {
                         value,
                         mode: SegmentMode::Linear,
                     },
-                ],
+                ]
+                .into(),
             },
         });
     }
@@ -308,7 +310,7 @@ fn all_automation_targets_and_modes_roundtrip() {
     save(&p, &SampleFiles::new(), &path).unwrap();
     assert_eq!(load(&path).unwrap().project, p);
     if let ClipContent::Automation { points, .. } = &mut p.arrangement.clips[1].content {
-        points[0].value = 3.0;
+        points.make_mut()[0].value = 3.0;
     }
     assert!(save(&p, &SampleFiles::new(), &path).is_err());
 }
@@ -335,7 +337,7 @@ fn sliced_priority_is_saved_and_siblings_must_be_disjoint() {
         priority: 30,
         offset_tick: 0,
         length_ticks: 960,
-        points: vec![],
+        points: vec![].into(),
     };
     let mut sibling = p.arrangement.clips[0].clone();
     sibling.id = 31;
@@ -487,7 +489,8 @@ fn auto_song() -> Project {
                 value: grooviq_dsp::sampler::SPEC[0].2,
                 mode: SegmentMode::Linear,
             },
-        ],
+        ]
+        .into(),
     };
     p.validate();
     p
@@ -592,7 +595,7 @@ fn isolated_automation_guards_refuse_without_destroying_last_good() {
                     instrument: "sampler".into(),
                     param: "start".into(),
                 };
-                for p in points {
+                for p in points.make_mut() {
                     p.value = 0.0;
                 }
             }
@@ -618,8 +621,8 @@ fn isolated_automation_guards_refuse_without_destroying_last_good() {
         {
             match field {
                 "kind" => p.channels[0].instrument = grooviq_engine::InstrumentKind::Synth,
-                "order" => points.swap(0, 1),
-                "tick" => points[1].tick = MAX_SONG_TICKS + 1,
+                "order" => points.make_mut().swap(0, 1),
+                "tick" => points.make_mut()[1].tick = MAX_SONG_TICKS + 1,
                 "end" => *offset_tick = MAX_SONG_TICKS as u32,
                 "collision" => *priority = 2,
                 _ => unreachable!(),
