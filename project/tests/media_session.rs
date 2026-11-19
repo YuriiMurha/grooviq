@@ -149,7 +149,7 @@ fn early_decode_and_peak_refusal_release_without_overshoot() {
 }
 #[test]
 fn final_publication_fence_rejects_received_results_after_new_revision_cancel_and_supersession() {
-    for scenario in 0..5 {
+    for scenario in 0..7 {
         let (mut s, assets, mut processor, _) = rig(1 << 20);
         let track = s.project().arrangement.tracks[0].id;
         let (intent, prepared) = prepare(&mut s, &assets, import(track), file(128));
@@ -177,6 +177,24 @@ fn final_publication_fence_rejects_received_results_after_new_revision_cancel_an
             }
             3 => {
                 let (_new, _prepared) = prepare(&mut s, &assets, import(track), file(129));
+            }
+            5 | 6 => {
+                let loaded = Loaded {
+                    project: Project::new(),
+                    samples: HashMap::new(),
+                    warnings: vec![],
+                };
+                if scenario == 5 {
+                    s.open(
+                        std::path::Path::new("generated-replacement.grooviq"),
+                        loaded,
+                        DecodedSamples::default(),
+                    )
+                    .unwrap();
+                } else {
+                    s.open_recovered(None, loaded, DecodedSamples::default(), Instant::now())
+                        .unwrap();
+                }
             }
             _ => {
                 let v = s.arrangement_view();

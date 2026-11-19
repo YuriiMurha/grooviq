@@ -965,10 +965,29 @@ fn production_session_maximum_geometry_shape_retains_one_curve_allocation() {
         )]),
         warnings: vec![],
     };
+    let json_start = std::time::Instant::now();
+    validate_save(&loaded.project, &loaded.samples).unwrap();
+    let writer_admission = json_start.elapsed();
     let decoded = decode_samples(&loaded);
+    let compile_start = std::time::Instant::now();
+    let compiled = grooviq_project::compile_song::compile_song(
+        &loaded.project,
+        &decoded.samples,
+        None,
+        grooviq_engine::MAX_SONG_NOTES,
+    )
+    .unwrap();
+    let compilation = compile_start.elapsed();
+    assert!(compiled.arrangement.notes.is_empty());
     s.open(&d.path().join("scale.grooviq"), loaded, decoded)
         .unwrap();
     processor.process(&mut [0.0; 128], 2);
+    eprintln!(
+        "scale components: writer JSON/schema admission {:?}; complete Song compiler {:?}; history before {:?}",
+        writer_admission,
+        compilation,
+        s.history_usage()
+    );
     let begin = std::time::Instant::now();
     edit(
         &mut s,
