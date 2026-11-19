@@ -1159,3 +1159,85 @@ fn leased_synth_scope_capture_never_allocates() {
             .any(|v| v.abs() > 0.001)
     );
 }
+
+#[test]
+fn admitted_mode_transition_replay_never_allocates() {
+    let sample = tone_sample(48_000);
+    let state = EngineState {
+        channels: vec![ChannelSetup::sampler(
+            ChannelId(1),
+            Some(sample),
+            Vec::new(),
+            ChannelMix::default(),
+        )],
+        song: grooviq_engine::SongData {
+            end_tick: 96000,
+            arrangement: grooviq_engine::ArrangementData {
+                length: 96000,
+                notes: vec![],
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
+    let mut out = [0.0; 128];
+    c.send(Command::SetRecording { on: true }).unwrap();
+    c.send(Command::Play).unwrap();
+    c.send(Command::ChannelNote {
+        channel: ChannelId(1),
+        key: 60,
+        velocity: 1.0,
+        on: true,
+        id: NoteId(997),
+    })
+    .unwrap();
+    realtime(|| p.process(&mut out, 2));
+    assert!(c.live().playing);
+    // Retire 65 patterns without collecting: 64 fill trash, one remains parked.
+    for _ in 0..65 {
+        c.set_pattern(PatternData::default()).unwrap();
+        realtime(|| p.process(&mut out, 2));
+    }
+    let snapshot = c.state().clone();
+    c.set_timeline(grooviq_engine::TimelineUpdate {
+        pattern: Box::new(snapshot.pattern),
+        song: Box::new(snapshot.song),
+        bpm: snapshot.bpm,
+        mode: snapshot.playback_mode,
+        region: snapshot.song_loop,
+        remove_channel: None,
+    })
+    .unwrap();
+    let before = c.send_marked(Command::SetTempo { bpm: 120.0 }).unwrap();
+    let mark = c
+        .send_marked(Command::SetPlaybackMode {
+            mode: grooviq_engine::PlaybackMode::Song,
+        })
+        .unwrap();
+    while c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+    c.reconfigure(
+        &mut p,
+        EngineConfig {
+            sample_rate: 44100.0,
+        },
+    );
+    realtime(|| p.process(&mut out, 2));
+    assert!(!c.live().playing);
+    assert!(!c.recording_armed());
+    let mut events = Vec::new();
+    c.take_recorded(&mut events);
+    let before = events
+        .iter()
+        .position(|e| matches!(e, grooviq_engine::RecordEvent::Mark { id } if *id == before))
+        .unwrap();
+    let end = events
+        .iter()
+        .position(|e| matches!(e, RecordEvent::End { .. }))
+        .unwrap();
+    let barrier = events
+        .iter()
+        .position(|e| matches!(e, RecordEvent::Mark { id } if *id == mark))
+        .unwrap();
+    assert!(before < end && end < barrier);
+}
