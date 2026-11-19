@@ -38,6 +38,10 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: app/ui/package-lock.json
+      - name: Instruction capture safety tests
+        if: matrix.os == 'macos-latest'
+        timeout-minutes: 2
+        run: make test-instruction-profiles
       - run: npm ci
         working-directory: app/ui
       - run: npm run build
@@ -83,13 +87,6 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: app/ui/package-lock.json
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-      - name: Instruction capture safety tests
-        timeout-minutes: 2
-        working-directory: .
-        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_capture_instruction_profiles.py
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
