@@ -153,7 +153,7 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }
           <p className="workspace-empty">F6 shows the channel rack, F7 the piano roll.</p>
         )}
       </div>
-      <DeviceWindows channels={view.channels} onError={onError} onRelink={relink} />
+      <DeviceWindows generation={view.generation} channels={view.channels} onError={onError} onRelink={relink} />
     </SelectionContext.Provider>
   );
 }
