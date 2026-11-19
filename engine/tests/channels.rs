@@ -919,3 +919,221 @@ fn a_synth_note_queued_before_a_rate_change_still_plays() {
     p.process(&mut out, 2);
     assert!(out.iter().any(|x| x.abs() > 0.01), "the synth plays it");
 }
+
+#[test]
+fn sampler_trim_is_one_admitted_callback_update_and_rejects_stale_instances() {
+    let sample = click();
+    let setup = channel(1, &sample, ChannelMix::default());
+    let (mut c, mut p) = engine_with(cfg(), state(vec![setup.clone()]));
+    let mut params: [f32; grooviq_dsp::sampler::SPEC.len()] = exact().try_into().unwrap();
+    params[3] = 0.25;
+    params[4] = 0.75;
+    params[12] = -6.0;
+    let expected = ChannelSetup::sampler(
+        ChannelId(1),
+        Some(sample),
+        params.to_vec(),
+        ChannelMix::default(),
+    );
+    let (mut reference, mut reference_processor) = engine_with(cfg(), state(vec![expected]));
+    let instance = c.channel_instance(ChannelId(1)).unwrap();
+    assert!(
+        c.send_at(
+            0,
+            Command::SetSamplerTrim {
+                channel: ChannelId(1),
+                instance: instance + 1,
+                params
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(c.state().channels[0].instrument.params()[3], 0.0);
+    c.send_at(
+        0,
+        Command::SetSamplerTrim {
+            channel: ChannelId(1),
+            instance,
+            params,
+        },
+    )
+    .unwrap();
+    assert_eq!(c.state().channels[0].instrument.params(), params);
+    c.send(note(1, true)).unwrap();
+    reference.send(note(1, true)).unwrap();
+    let mut out = [0.0; 512];
+    let mut expected = [0.0; 512];
+    p.process(&mut out, 2);
+    reference_processor.process(&mut expected, 2);
+    assert_eq!(
+        out, expected,
+        "callback must hear the entire final parameter bank before the note"
+    );
+    assert!(out.iter().any(|v| v.abs() > 0.001));
+    // Invalid final values and a full queue leave the whole mirror intact.
+    let before = c.state().channels[0].instrument.params().to_vec();
+    let mut invalid = params;
+    invalid[4] = f32::NAN;
+    assert!(
+        c.send_at(
+            0,
+            Command::SetSamplerTrim {
+                channel: ChannelId(1),
+                instance,
+                params: invalid
+            }
+        )
+        .is_err()
+    );
+    while c.send(Command::Stop).is_ok() {}
+    params[3] = 0.0;
+    params[4] = 1.0;
+    assert!(
+        c.send_at(
+            0,
+            Command::SetSamplerTrim {
+                channel: ChannelId(1),
+                instance,
+                params
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(c.state().channels[0].instrument.params(), before);
+}
+
+#[test]
+fn queued_trim_cannot_leak_into_reused_channel_after_load_or_rate_rebuild() {
+    for (replace, rebuild) in [(false, false), (true, false), (false, true), (true, true)] {
+        let sample = click();
+        let original = channel(1, &sample, ChannelMix::default());
+        let (mut c, mut p) = engine_with(cfg(), state(vec![original]));
+        let old = c.channel_instance(ChannelId(1)).unwrap();
+        let mut params: [f32; grooviq_dsp::sampler::SPEC.len()] = exact().try_into().unwrap();
+        params[3] = 0.8;
+        params[4] = 0.9;
+        c.send_at(
+            0,
+            Command::SetSamplerTrim {
+                channel: ChannelId(1),
+                instance: old,
+                params,
+            },
+        )
+        .unwrap();
+        let replacement = channel(1, &sample, ChannelMix::default());
+        if replace {
+            c.load_state(state(vec![replacement.clone()])).unwrap();
+        } else {
+            c.remove_channel(ChannelId(1)).unwrap();
+            c.add_channel(replacement.clone()).unwrap();
+        }
+        assert_ne!(c.channel_instance(ChannelId(1)).unwrap(), old);
+        assert!(
+            c.send_at(
+                0,
+                Command::SetSamplerTrim {
+                    channel: ChannelId(1),
+                    instance: old,
+                    params
+                }
+            )
+            .is_err()
+        );
+        let rate = if rebuild { 44100.0 } else { SR };
+        if rebuild {
+            c.reconfigure(&mut p, EngineConfig { sample_rate: rate });
+        }
+        let (mut reference, mut processor) =
+            engine_with(EngineConfig { sample_rate: rate }, state(vec![replacement]));
+        c.send(note(1, true)).unwrap();
+        reference.send(note(1, true)).unwrap();
+        let mut actual = [0.0; 512];
+        let mut expected = [0.0; 512];
+        p.process(&mut actual, 2);
+        processor.process(&mut expected, 2);
+        assert_eq!(actual, expected, "replacement={replace} rebuild={rebuild}");
+        assert!(actual.iter().any(|v| v.abs() > 0.01));
+    }
+}
+
+#[test]
+fn trim_pair_and_mode_stop_keep_their_effects_through_rebuild() {
+    use grooviq_engine::{PlaybackMode, RecordEvent, SongData, TimelineUpdate};
+    for timeline in [false, true] {
+        let sample = click();
+        let mut initial = state(vec![channel(1, &sample, ChannelMix::default())]);
+        initial.song = SongData {
+            end_tick: 96000,
+            ..Default::default()
+        };
+        let (mut c, mut p) = engine_with(cfg(), initial);
+        c.send(Command::SetRecording { on: true }).unwrap();
+        c.send(Command::Play).unwrap();
+        c.send(note(1, true)).unwrap();
+        p.process(&mut [0.0; 128], 2);
+        assert!(c.live().playing);
+        let mut params: [f32; SPEC.len()] = exact().try_into().unwrap();
+        params[3] = 0.2;
+        params[4] = 0.7;
+        c.send(Command::SetSamplerTrim {
+            channel: ChannelId(1),
+            instance: c.channel_instance(ChannelId(1)).unwrap(),
+            params,
+        })
+        .unwrap();
+        let barrier = if timeline {
+            let snapshot = c.state().clone();
+            c.set_timeline(TimelineUpdate {
+                pattern: Box::new(snapshot.pattern),
+                song: Box::new(snapshot.song),
+                bpm: snapshot.bpm,
+                mode: PlaybackMode::Song,
+                region: snapshot.song_loop,
+                remove_channel: None,
+            })
+            .unwrap();
+            c.send_marked(Command::SetTempo { bpm: 120.0 }).unwrap()
+        } else {
+            c.send_marked(Command::SetPlaybackMode {
+                mode: PlaybackMode::Song,
+            })
+            .unwrap()
+        };
+        for rate in [44100.0, 96000.0] {
+            c.reconfigure(&mut p, EngineConfig { sample_rate: rate });
+        }
+        p.process(&mut [0.0; 128], 2);
+        assert!(!c.live().playing, "timeline={timeline}");
+        assert!(!c.recording_armed());
+        assert_eq!(c.state().channels[0].instrument.params(), params);
+        let mut events = Vec::new();
+        c.take_recorded(&mut events);
+        let end = events
+            .iter()
+            .position(|e| matches!(e, RecordEvent::End { .. }))
+            .unwrap();
+        let mark = events
+            .iter()
+            .position(|e| matches!(e, RecordEvent::Mark { id } if *id == barrier))
+            .unwrap();
+        assert!(end < mark);
+        let (mut reference, mut rp) = engine_with(
+            EngineConfig {
+                sample_rate: 96000.0,
+            },
+            c.state().clone(),
+        );
+        c.send(note(1, true)).unwrap();
+        reference.send(note(1, true)).unwrap();
+        let mut actual = [0.0; 512];
+        let mut expected = [0.0; 512];
+        p.process(&mut actual, 2);
+        rp.process(&mut expected, 2);
+        assert_eq!(
+            actual, expected,
+            "the rebuilt callback retains the whole trim vector"
+        );
+        assert!(actual.iter().any(|v| v.abs() > 0.001));
+    }
+}

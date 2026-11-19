@@ -4,6 +4,8 @@
 // prevents accidental substitution of raw apply; neither is a sandbox against casts or eval.
 // Runtime generation checks also refuse queued edits after project replacement.
 
+import type { TrimAction, TrimReply } from "../api/samplerTrim";
+import type { ProjectContextValue } from "../project/context";
 import type { Edit } from "../api/project";
 import { isProjectReplacing, projectGeneration } from "../project/replacement";
 import { LiveCoalescer } from "./controls/paramDrag";
@@ -62,4 +64,18 @@ export function editorSink(d: SinkDeps): {
     shown: d.shown,
   };
   return { sink, live, send: Object.assign(send, { [guardedEdit]: true as const }) };
+}
+
+const guardedTrim: unique symbol = Symbol("guarded sampler trim");
+export type GuardedTrim = ((action: TrimAction) => Promise<TrimReply | null>) & { readonly [guardedTrim]: true };
+/** Only sampler repair commands enter this path; callers cannot substitute arbitrary IPC. */
+export function trimSink(channel: number, context: Pick<ProjectContextValue, "trim">): GuardedTrim {
+  const generation = projectGeneration();
+  const current = () => generation === projectGeneration() && !isProjectReplacing();
+  const send = async (action: TrimAction): Promise<TrimReply | null> => {
+    if (!current()) return null;
+    const reply = await context.trim?.(channel, action, current);
+    return current() ? reply ?? null : null;
+  };
+  return Object.assign(send, { [guardedTrim]: true as const });
 }

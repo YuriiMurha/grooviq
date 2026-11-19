@@ -158,7 +158,7 @@ struct State {
     /// An `Opened` for the target is owed: it was held back when the device failed to open, or
     /// the target's stream failed and its reopening is to be reported, once.
     owed: bool,
-    /// Devices whose `OpenFailed` was reported since they last opened or the choice changed.
+    /// Devices whose `OpenFailed` was reported in this target/choice episode.
     reported: HashSet<String>,
 }
 
@@ -254,6 +254,9 @@ impl AudioOutput {
 
     /// Looks at the devices now, as the poll thread does every 500 ms, and delivers what
     /// changed before returning (when called from `on_event`, right after it returns).
+    /// Blocks on an in-progress look and on event delivery by another thread. A callback
+    /// must not wait for another thread calling `poll_now`: that thread waits for the
+    /// callback to return. Calling it directly within the callback is supported.
     pub fn poll_now(&self) {
         self.shared.look();
     }
@@ -390,6 +393,7 @@ impl State {
         let target_id = target.as_ref().map(|t| t.id.clone());
         if target_id != self.target {
             self.target = target_id;
+            self.reported.clear();
             self.retry = Retry::default();
             self.owed = false;
         }
@@ -401,7 +405,12 @@ impl State {
         }
         match target {
             None => self.close(slot),
-            Some(target) if self.open.as_ref().is_some_and(|o| o.info.id == target.id) => {}
+            Some(mut target) if self.open.as_ref().is_some_and(|o| o.info.id == target.id) => {
+                let open = self.open.as_mut().expect("matching open stream");
+                // Enumeration describes the route; only opening determines the actual rate.
+                target.sample_rate = open.info.sample_rate;
+                open.info = target;
+            }
             Some(target) => {
                 self.close(slot);
                 if self.retry.due(now) {
@@ -498,12 +507,16 @@ impl State {
         // Failures of earlier streams no longer matter.
         slot.failed.store(false, Ordering::Release);
         let rate = self.backend.open(target, Arc::clone(slot))?;
-        let Some(mut processor) = self.processor.take() else {
-            // Cannot happen: every close takes the processor back.
-            return Err("the output has no processor to play".into());
-        };
         let config = EngineConfig {
             sample_rate: rate as f32,
+        };
+        // A physical stream cannot follow the config's clamping: reject it while the slot
+        // is still silent, before taking or rebuilding the parked processor.
+        if config.rate() != config.sample_rate {
+            return Err(format!("unsupported actual output sample rate: {rate} Hz"));
+        }
+        let Some(mut processor) = self.processor.take() else {
+            return Err("the output has no processor to play".into());
         };
         {
             let mut controller = lock(&self.controller);
