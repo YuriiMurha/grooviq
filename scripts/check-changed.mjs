@@ -151,6 +151,8 @@ if (needsUi && (manifests.length || !existsSync(join(uiDir, "node_modules"))))
     ["ci", "--no-audit", "--no-fund"],
     uiDir,
   );
+if (ui || workspace || changed.some((path) => path.startsWith("scripts/e2e-diagnostics") || path === "Makefile"))
+  step("e2e diagnostic safety tests", "node", ["--test", "scripts/e2e-diagnostics.test.mjs"]);
 if (ui) {
   step("ui lint", "npm", ["run", "lint"], uiDir);
   step("ui typecheck", "npm", ["run", "typecheck"], uiDir);
