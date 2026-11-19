@@ -176,6 +176,7 @@ pub fn compile_song(
     let mut end_tick = musical_end;
     let frame_rate = 48_000.0;
     let mut audio_frame_end = 0;
+    let mut audio_extents = Vec::new();
     for c in &project.arrangement.clips {
         match c.content {
             ClipContent::Pattern { length_ticks, .. }
@@ -193,6 +194,7 @@ pub fn compile_song(
                 ..
             } => {
                 let source = assets.get(&asset).ok_or("Missing audio asset")?;
+                audio_extents.push((c.start_tick, source_end - source_start, source.source_rate));
                 let seconds = (source_end - source_start) as f64 / f64::from(source.source_rate);
                 let ticks = (seconds * f64::from(project.bpm) * 960.0 / 60.0).ceil() as u64;
                 end_tick = end_tick.max(
@@ -235,5 +237,9 @@ pub fn compile_song(
         end_tick,
         end_frame,
         frame_rate,
+        frame_extent: Some(Arc::new(engine::SongFrameExtent {
+            musical_end_tick: musical_end,
+            audio: audio_extents,
+        })),
     })
 }

@@ -1189,3 +1189,137 @@ fn byte_limit_evicts_old_complete_large_curve_step_but_preserves_new_small_gestu
     assert_eq!(s.project().arrangement.clips.len(), 1);
     assert_eq!(s.project().arrangement.tracks.len(), 1);
 }
+
+#[test]
+fn audio_metadata_does_not_replace_runtime_bank() {
+    let (mut s, _, _, _) = rig();
+    let clip = edit(&mut s, vec![draw(audio(false), 0)]).created_ids[0];
+    let before = s.checked_export_state().unwrap().song.audio;
+    edit(
+        &mut s,
+        vec![Op::SetClip {
+            clip,
+            name: "Renamed".into(),
+            muted: false,
+        }],
+    );
+    assert!(
+        before.shares_bank(&s.checked_export_state().unwrap().song.audio),
+        "name-only edit rebuilt active audio bank"
+    );
+}
+#[test]
+fn batch_streams_point_caps_before_trailing_syntax_with_kind_in_any_position() {
+    for (kind, fields) in [
+        (
+            "createClip",
+            r#""track":2,"name":"A","muted":false,"startTick":0"#,
+        ),
+        (
+            "createClipOnCreatedTrack",
+            r#""trackOperation":0,"name":"A","muted":false,"startTick":0"#,
+        ),
+        ("resize", r#""clip":3,"startTick":0"#),
+    ] {
+        for kind_first in [true, false] {
+            for count in [MAX_AUTOMATION_POINTS, MAX_AUTOMATION_POINTS + 1] {
+                let points = (0..count)
+                    .map(|n| format!(r#"{{"tick":{n},"value":0.5,"mode":"hold"}}"#))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let extra = if count > MAX_AUTOMATION_POINTS {
+                    ", INVALID"
+                } else {
+                    ""
+                };
+                let content = format!(
+                    r#"{{"type":"automation","target":{{"type":"channelPan","channel":1}},"priority":0,"offsetTick":0,"lengthTicks":960,"points":[{points}{extra}]}}"#
+                );
+                let op = if kind_first {
+                    format!(r#"{{"kind":"{kind}",{fields},"content":{content}}}"#)
+                } else {
+                    format!(r#"{{{fields},"content":{content},"kind":"{kind}"}}"#)
+                };
+                let result = arrangement_edit::parse_batch(&format!("[{op}]"));
+                if count == MAX_AUTOMATION_POINTS {
+                    assert!(result.is_ok());
+                } else {
+                    assert!(result.unwrap_err().contains("list limit"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn flat_operation_reader_preserves_variant_wire_fields_and_nullable_loop() {
+    let ops = vec![
+        Op::CreateTrack {
+            name: "T".into(),
+            color: 0,
+        },
+        Op::SetTrack {
+            track: 2,
+            name: "T".into(),
+            color: 1,
+            mute: true,
+        },
+        Op::DeleteTrack { track: 2 },
+        draw(audio(false), 1),
+        Op::CreateClipOnCreatedTrack {
+            track_operation: 0,
+            name: "A".into(),
+            start_tick: 1,
+            muted: false,
+            content: audio(false),
+        },
+        Op::Move {
+            clip: 3,
+            track: 2,
+            start_tick: 4,
+        },
+        Op::Copy {
+            clip: 3,
+            track: 2,
+            start_tick: 4,
+        },
+        Op::Slice {
+            clip: 3,
+            tick: 4,
+            audio_first_frames: None,
+        },
+        Op::Resize {
+            clip: 3,
+            start_tick: 1,
+            content: audio(false),
+        },
+        Op::SetClip {
+            clip: 3,
+            name: "C".into(),
+            muted: true,
+        },
+        Op::DeleteClip { clip: 3 },
+        Op::MakeUnique { clip: 3 },
+        Op::DeleteAudioAsset { asset: 4 },
+        Op::CreatePattern { name: "P".into() },
+        Op::SetLoop { region: None },
+        Op::SetLoop {
+            region: Some(LoopRegion {
+                start_tick: 0,
+                end_tick: 960,
+                enabled: true,
+            }),
+        },
+    ];
+    let encoded = serde_json::to_string(&ops).unwrap();
+    let parsed = arrangement_edit::parse_batch(&encoded).unwrap();
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), encoded);
+    for invalid in [
+        r#"[{"kind":"setLoop"}]"#,
+        r#"[{"kind":"move","clip":1,"startTick":0}]"#,
+        r#"[{"kind":"move","kind":"copy","clip":1,"track":2,"startTick":0}]"#,
+        r#"[["deleteClip",1]]"#,
+    ] {
+        assert!(arrangement_edit::parse_batch(invalid).is_err());
+    }
+}

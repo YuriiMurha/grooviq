@@ -1239,26 +1239,48 @@ impl Session {
     }
 
     fn same_audio(&self, project: &Project) -> bool {
-        let clips = |p: &Project| {
-            p.arrangement
-                .clips
-                .iter()
-                .filter(|c| matches!(c.content, crate::ClipContent::Audio { .. }))
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        let tracks = |p: &Project| {
-            p.arrangement
+        fn runtime(p: &Project) -> Vec<(u32, u64, &crate::ClipContent, u32, u64)> {
+            let tracks: HashMap<_, _> = p
+                .arrangement
                 .tracks
                 .iter()
                 .map(|t| (t.id, t.mute))
-                .collect::<Vec<_>>()
-        };
-        // Decoded allocations are Session-owned and cannot change between this proof and
-        // publication under the same exclusive Session borrow.
-        self.project.arrangement.audio_assets == project.arrangement.audio_assets
-            && clips(&self.project) == clips(project)
-            && tracks(&self.project) == tracks(project)
+                .collect();
+            let assets: HashMap<_, _> = p
+                .arrangement
+                .audio_assets
+                .iter()
+                .map(|a| (a.id, a))
+                .collect();
+            let mut clips: Vec<_> = p
+                .arrangement
+                .clips
+                .iter()
+                .filter_map(|c| {
+                    if let crate::ClipContent::Audio { asset, .. } = &c.content
+                        && !c.muted
+                        && tracks.get(&c.track) == Some(&false)
+                        && let Some(a) = assets.get(asset)
+                    {
+                        Some((
+                            c.id,
+                            c.start_tick,
+                            &c.content,
+                            a.source_rate,
+                            a.source_frames,
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            clips.sort_unstable_by_key(|c| c.0);
+            clips
+        }
+        // Metadata and equivalent track organization do not affect the runtime bank.
+        // Decoded owners cannot change within this exclusive borrow; media publication
+        // uses a separate path which always rebuilds the bank.
+        runtime(&self.project) == runtime(project)
     }
 
     fn prepare_song(&self, project: &Project) -> Result<grooviq_engine::SongData, SessionError> {
@@ -3073,7 +3095,11 @@ impl Session {
         let mut state = engine_state(&self.project, &self.decoded);
         state.song = self.compiled_song.clone();
         state.playback_mode = Self::timeline(&self.project, state.song.clone()).mode;
-        state.song_loop = Self::timeline(&self.project, state.song.clone()).region;
+        state.song_loop = if self.song_error.is_none() {
+            Self::timeline(&self.project, state.song.clone()).region
+        } else {
+            None
+        };
         state
     }
 

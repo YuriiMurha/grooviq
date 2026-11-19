@@ -48,7 +48,7 @@ mod sample_file;
 mod sequencer;
 mod song;
 mod state;
-pub use song::{PlaybackMode, SongData, SongLoop};
+pub use song::{PlaybackMode, SongData, SongFrameExtent, SongLoop};
 mod stream;
 mod transport;
 

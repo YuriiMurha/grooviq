@@ -2,7 +2,7 @@
 use crate::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -79,6 +79,112 @@ pub enum ArrangementEdit {
         region: Option<LoopRegion>,
     },
 }
+
+// A flat struct streams nested ClipContent directly, regardless of kind's field order.
+// An internally tagged enum would first buffer the complete operation in serde Content.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EditFields {
+    kind: String,
+    name: Option<String>,
+    color: Option<u8>,
+    track: Option<u32>,
+    track_operation: Option<usize>,
+    mute: Option<bool>,
+    muted: Option<bool>,
+    start_tick: Option<u64>,
+    content: Option<ClipContent>,
+    clip: Option<u32>,
+    tick: Option<u64>,
+    audio_first_frames: Option<u64>,
+    asset: Option<u32>,
+    #[serde(default, deserialize_with = "read_region")]
+    region: Option<Option<LoopRegion>>,
+}
+fn read_region<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<LoopRegion>>, D::Error> {
+    Option::<LoopRegion>::deserialize(d).map(Some)
+}
+impl<'de> Deserialize<'de> for ArrangementEdit {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        fn need<T, E: serde::de::Error>(v: Option<T>, key: &'static str) -> Result<T, E> {
+            v.ok_or_else(|| E::missing_field(key))
+        }
+        let f = crate::reading::named::<D, EditFields>(d)?;
+        Ok(match f.kind.as_str() {
+            "createTrack" => Self::CreateTrack {
+                name: need(f.name, "name")?,
+                color: need(f.color, "color")?,
+            },
+            "setTrack" => Self::SetTrack {
+                track: need(f.track, "track")?,
+                name: need(f.name, "name")?,
+                color: need(f.color, "color")?,
+                mute: need(f.mute, "mute")?,
+            },
+            "deleteTrack" => Self::DeleteTrack {
+                track: need(f.track, "track")?,
+            },
+            "createClip" => Self::CreateClip {
+                track: need(f.track, "track")?,
+                name: need(f.name, "name")?,
+                start_tick: need(f.start_tick, "startTick")?,
+                muted: need(f.muted, "muted")?,
+                content: need(f.content, "content")?,
+            },
+            "createClipOnCreatedTrack" => Self::CreateClipOnCreatedTrack {
+                track_operation: need(f.track_operation, "trackOperation")?,
+                name: need(f.name, "name")?,
+                start_tick: need(f.start_tick, "startTick")?,
+                muted: need(f.muted, "muted")?,
+                content: need(f.content, "content")?,
+            },
+            "move" => Self::Move {
+                clip: need(f.clip, "clip")?,
+                track: need(f.track, "track")?,
+                start_tick: need(f.start_tick, "startTick")?,
+            },
+            "copy" => Self::Copy {
+                clip: need(f.clip, "clip")?,
+                track: need(f.track, "track")?,
+                start_tick: need(f.start_tick, "startTick")?,
+            },
+            "slice" => Self::Slice {
+                clip: need(f.clip, "clip")?,
+                tick: need(f.tick, "tick")?,
+                audio_first_frames: f.audio_first_frames,
+            },
+            "resize" => Self::Resize {
+                clip: need(f.clip, "clip")?,
+                start_tick: need(f.start_tick, "startTick")?,
+                content: need(f.content, "content")?,
+            },
+            "setClip" => Self::SetClip {
+                clip: need(f.clip, "clip")?,
+                name: need(f.name, "name")?,
+                muted: need(f.muted, "muted")?,
+            },
+            "deleteClip" => Self::DeleteClip {
+                clip: need(f.clip, "clip")?,
+            },
+            "makeUnique" => Self::MakeUnique {
+                clip: need(f.clip, "clip")?,
+            },
+            "deleteAudioAsset" => Self::DeleteAudioAsset {
+                asset: need(f.asset, "asset")?,
+            },
+            "createPattern" => Self::CreatePattern {
+                name: need(f.name, "name")?,
+            },
+            "setLoop" => Self::SetLoop {
+                region: need(f.region, "region")?,
+            },
+            _ => return Err(serde::de::Error::custom("Unknown arrangement operation")),
+        })
+    }
+}
+
 fn id(p: &mut Project, issued: &mut std::collections::HashSet<u32>) -> Result<u32, String> {
     while p.next_id < u32::MAX {
         let n = p.next_id;

@@ -765,6 +765,7 @@ fn song_swaps_loop_seek_and_full_trash_remain_realtime_safe() {
         end_tick: 1,
         end_frame: 0,
         frame_rate: 48000.0,
+        frame_extent: None,
         audio: grooviq_engine::AudioSchedule::default(),
     };
     c.set_song(song.clone()).unwrap();
@@ -839,6 +840,7 @@ fn review_probe_active_song_transitions_never_allocate() {
         end_tick: 8200,
         end_frame: 500_000,
         frame_rate: 44100.0,
+        frame_extent: None,
         audio: grooviq_engine::AudioSchedule::default(),
     };
     c.set_song(song.clone()).unwrap();
@@ -1086,7 +1088,13 @@ fn compound_timeline_retirement_and_fault_refusal_are_realtime_safe() {
                 length: 240 + i,
                 notes: vec![],
             }),
-            song: Box::default(),
+            song: Box::new(grooviq_engine::SongData {
+                frame_extent: Some(Arc::new(grooviq_engine::SongFrameExtent {
+                    musical_end_tick: 0,
+                    audio: Vec::with_capacity(1),
+                })),
+                ..Default::default()
+            }),
             bpm: 120.0,
             mode: grooviq_engine::PlaybackMode::Pattern,
             region: None,
@@ -1102,7 +1110,13 @@ fn compound_timeline_retirement_and_fault_refusal_are_realtime_safe() {
     p.process(&mut [0.0; 128], 2);
     c.set_timeline(grooviq_engine::TimelineUpdate {
         pattern: Box::default(),
-        song: Box::default(),
+        song: Box::new(grooviq_engine::SongData {
+            frame_extent: Some(Arc::new(grooviq_engine::SongFrameExtent {
+                musical_end_tick: 0,
+                audio: Vec::with_capacity(1),
+            })),
+            ..Default::default()
+        }),
         bpm: 130.0,
         mode: grooviq_engine::PlaybackMode::Pattern,
         region: None,

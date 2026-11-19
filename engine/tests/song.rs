@@ -33,6 +33,7 @@ fn state() -> EngineState {
             end_tick: 960,
             end_frame: 0,
             frame_rate: 48000.0,
+            frame_extent: None,
             audio: AudioSchedule::default(),
             automation: Default::default(),
         },
@@ -476,4 +477,122 @@ fn region_export_crops_future_audio_and_automation_without_invalid_horizon() {
         "region preparation must never construct an invalid engine state"
     );
     assert_eq!(result.unwrap().unwrap().frames, 12000);
+}
+#[test]
+fn region_export_excludes_onset_at_exact_end() {
+    let mut state = state();
+    state.song.end_tick = 1920;
+    state.song.audio = AudioSchedule::build(
+        vec![AudioAsset {
+            id: 2,
+            source_rate: 48000,
+            source_frames: 128,
+            decoded: Some(Arc::new(SampleBuf {
+                rate: 48000.0,
+                l: vec![0.25; 128],
+                r: vec![0.25; 128],
+            })),
+        }],
+        vec![AudioClip {
+            id: 3,
+            asset: 2,
+            start_tick: 720,
+            source_start: 0,
+            source_end: 128,
+            gain: 1.0,
+            reverse: false,
+            fade_in: 0,
+            fade_out: 0,
+        }],
+    )
+    .unwrap()
+    .0;
+    state.song.automation = AutomationSchedule::build(
+        vec![AutomationClip {
+            target: AutomationTarget::ChannelVolume(ChannelId(1)),
+            priority: 4,
+            start_tick: 0,
+            offset_tick: 0,
+            length_ticks: 1920,
+            points: vec![AutomationPoint {
+                tick: 0,
+                value: 0.5,
+                segment: AutomationSegment::Hold,
+            }],
+        }],
+        &state.channels,
+    )
+    .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let options = ExportOptions {
+        song_region: Some(SongLoop {
+            start_tick: 240,
+            end_tick: 720,
+        }),
+        max_tail_seconds: 0.0,
+        ..Default::default()
+    };
+    let result = std::panic::catch_unwind(|| {
+        export_wav(
+            state,
+            &options,
+            &d.path().join("region.wav"),
+            &mut |_| {},
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    });
+    assert!(
+        result.is_ok(),
+        "region preparation must never construct an invalid engine state"
+    );
+    assert_eq!(result.unwrap().unwrap().frames, 12000);
+}
+
+#[test]
+fn unrounded_extent_admission_refuses_invalid_geometry() {
+    let mut c = engine_with(
+        EngineConfig {
+            sample_rate: 48000.0,
+        },
+        state(),
+    )
+    .0;
+    let base = state().song;
+    let good = SongFrameExtent {
+        musical_end_tick: 960,
+        audio: vec![(0, 48001, 48000)],
+    };
+    let mut song = base.clone();
+    song.frame_extent = Some(Arc::new(good.clone()));
+    c.set_song(song).unwrap();
+    for extent in [
+        SongFrameExtent {
+            musical_end_tick: 961,
+            ..good.clone()
+        },
+        SongFrameExtent {
+            audio: vec![(960, 1, 48000)],
+            ..good.clone()
+        },
+        SongFrameExtent {
+            audio: vec![(0, 1, 7999)],
+            ..good.clone()
+        },
+        SongFrameExtent {
+            audio: vec![(0, 0, 48000)],
+            ..good.clone()
+        },
+        SongFrameExtent {
+            audio: vec![(0, 48000 * 600 + 1, 48000)],
+            ..good.clone()
+        },
+        SongFrameExtent {
+            audio: vec![(0, 1, 48000); 100001],
+            ..good
+        },
+    ] {
+        let mut song = base.clone();
+        song.frame_extent = Some(Arc::new(extent));
+        assert!(c.set_song(song).is_err());
+    }
 }

@@ -14,6 +14,14 @@ pub struct SongLoop {
     pub end_tick: u64,
 }
 
+/// Unrounded project geometry for control-side export at the requested rate. It includes
+/// muted/unavailable clips; runtime keeps the cached frame horizon and never scans this list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SongFrameExtent {
+    pub musical_end_tick: u64,
+    /// (onset tick, retained source frames, original source rate).
+    pub audio: Vec<(u64, u64, u32)>,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct SongData {
     pub audio: crate::AudioSchedule,
@@ -25,12 +33,23 @@ pub struct SongData {
     pub end_frame: u64,
     /// Reference rate of end_frame; conversion happens once at the render rate.
     pub frame_rate: f32,
+    pub frame_extent: Option<std::sync::Arc<SongFrameExtent>>,
 }
 impl SongData {
     pub(crate) fn checked(self, channels: &[ChannelId]) -> Result<Self, ControlError> {
         if !self.frame_rate.is_finite()
             || !(8000.0..=384000.0).contains(&self.frame_rate)
             || self.end_frame > 46_080_000_000
+            || self.frame_extent.as_ref().is_some_and(|e| {
+                e.musical_end_tick > self.end_tick
+                    || e.audio.len() > 100_000
+                    || e.audio.iter().any(|&(tick, frames, rate)| {
+                        tick >= self.end_tick
+                            || !(8000..=384000).contains(&rate)
+                            || frames == 0
+                            || frames > u64::from(rate) * 600
+                    })
+            })
             || self.end_tick > MAX_SONG_TICKS
             || self.automation.end_tick() > self.end_tick
             || !self.audio.valid_horizon(self.end_tick)
@@ -61,6 +80,23 @@ impl SongData {
     }
     pub(crate) fn end_frame_at(&self, rate: f32) -> u64 {
         (self.end_frame as f64 * f64::from(rate) / f64::from(self.frame_rate)).ceil() as u64
+    }
+    pub(crate) fn export_end_frame(&self, bpm: f32, rate: f32) -> u64 {
+        let end = if let Some(e) = &self.frame_extent {
+            e.audio
+                .iter()
+                .map(|&(tick, frames, source_rate)| {
+                    crate::ticks_to_frames(tick as f64, bpm, rate)
+                        + (frames as f64 * f64::from(rate) / f64::from(source_rate)).ceil() as u64
+                })
+                .max()
+                .unwrap_or(0)
+                .max(crate::ticks_to_frames(e.musical_end_tick as f64, bpm, rate))
+        } else {
+            // Engine callers predating project geometry keep their explicit tick/frame horizons.
+            crate::ticks_to_frames(self.end_tick as f64, bpm, rate).max(self.end_frame_at(rate))
+        };
+        end.max(self.audio.end_frame(bpm, rate))
     }
     pub(crate) fn valid_loop(&self, region: Option<SongLoop>) -> bool {
         region.is_none_or(|r| r.start_tick < r.end_tick && r.end_tick <= self.end_tick)
@@ -327,6 +363,7 @@ impl Default for SongData {
             end_tick: 0,
             end_frame: 0,
             frame_rate: 48000.0,
+            frame_extent: None,
             audio: crate::AudioSchedule::default(),
             automation: Default::default(),
         }
@@ -353,6 +390,7 @@ mod tests {
             end_tick: 1000,
             end_frame: 0,
             frame_rate: 48000.0,
+            frame_extent: None,
             audio: crate::AudioSchedule::default(),
             automation: Default::default(),
         }

@@ -493,3 +493,264 @@ fn generated_all_clip_song_save_reopen_and_wav_export_preserve_sound_and_origina
     );
     assert_eq!(before, after);
 }
+
+#[test]
+fn metadata_track_edits_and_history_preserve_playback_after_tempo_change() {
+    use arrangement_edit::ArrangementEdit as Op;
+    let (mut s, _, mut p, _d) = rig(10);
+    let (_r, rc, mut rp, _rd) = rig(10);
+    let check = |p: &mut AudioProcessor, rp: &mut AudioProcessor| {
+        for _ in 0..8 {
+            let mut a = [0.; 128];
+            let mut b = [0.; 128];
+            p.process(&mut a, 2);
+            rp.process(&mut b, 2);
+            assert_eq!(a, b, "metadata/history edit changed running audio");
+            assert!(a.iter().any(|v| *v != 0.0));
+        }
+    };
+    s.play().unwrap();
+    rc.lock().unwrap().send(Command::Play).unwrap();
+    check(&mut p, &mut rp);
+    s.apply(Edit::SetTempo { bpm: 180. }, Instant::now())
+        .unwrap();
+    rc.lock()
+        .unwrap()
+        .send(Command::SetTempo { bpm: 180. })
+        .unwrap();
+    check(&mut p, &mut rp);
+    let bank = s.checked_export_state().unwrap().song.audio;
+    let mut edit = |s: &mut Session, ops| {
+        let v = s.arrangement_view();
+        let ack = s
+            .edit_arrangement(v.generation, v.revision, ops, Instant::now())
+            .unwrap();
+        assert!(bank.shares_bank(&s.checked_export_state().unwrap().song.audio));
+        check(&mut p, &mut rp);
+        ack
+    };
+    edit(
+        &mut s,
+        vec![Op::SetClip {
+            clip: 5,
+            name: "Renamed".into(),
+            muted: false,
+        }],
+    );
+    edit(
+        &mut s,
+        vec![Op::SetTrack {
+            track: 2,
+            name: "Renamed track".into(),
+            color: 3,
+            mute: false,
+        }],
+    );
+    let track = edit(
+        &mut s,
+        vec![Op::CreateTrack {
+            name: "Other".into(),
+            color: 2,
+        }],
+    )
+    .created_ids[0];
+    edit(
+        &mut s,
+        vec![Op::Move {
+            clip: 5,
+            track,
+            start_tick: 1,
+        }],
+    );
+    for undo in [true, false] {
+        for _ in 0..4 {
+            let v = s.arrangement_view();
+            s.step_project_history(v.generation, v.revision, undo, Instant::now())
+                .unwrap();
+            assert!(bank.shares_bank(&s.checked_export_state().unwrap().song.audio));
+            check(&mut p, &mut rp);
+        }
+    }
+}
+
+#[test]
+fn audio_only_export_uses_unrounded_source_geometry_at_each_rate() {
+    use arrangement_edit::ArrangementEdit as Op;
+    let (mut s, _, _, d) = rig(10);
+    let v = s.arrangement_view();
+    s.edit_arrangement(
+        v.generation,
+        v.revision,
+        vec![Op::DeleteClip { clip: 3 }],
+        Instant::now(),
+    )
+    .unwrap();
+    for bpm in [120.0, 137.0] {
+        s.apply(Edit::SetTempo { bpm }, Instant::now()).unwrap();
+        for muted in [false, true] {
+            let v = s.arrangement_view();
+            s.edit_arrangement(
+                v.generation,
+                v.revision,
+                vec![Op::SetClip {
+                    clip: 5,
+                    name: "A".into(),
+                    muted,
+                }],
+                Instant::now(),
+            )
+            .unwrap();
+            for rate in [8000, 22050, 44100, 48000, 96000, 192000, 384000] {
+                let expected = engine::ticks_to_frames(1.0, bpm, rate as f32)
+                    + (48001.0 * f64::from(rate) / 48000.0).ceil() as u64;
+                if bpm == 120.0 && rate == 48000 {
+                    assert_eq!(expected, 48026);
+                }
+                let file = d.path().join("exact.wav");
+                let report = engine::export_wav(
+                    s.checked_export_state().unwrap(),
+                    &engine::ExportOptions {
+                        sample_rate: rate,
+                        max_tail_seconds: 0.0,
+                        format: engine::WavFormat::Float32,
+                        ..Default::default()
+                    },
+                    &file,
+                    &mut |_| {},
+                    &std::sync::atomic::AtomicBool::new(false),
+                )
+                .unwrap();
+                assert_eq!(
+                    report.frames, expected,
+                    "rate={rate},bpm={bpm},muted={muted}"
+                );
+                let bytes = std::fs::read(file).unwrap();
+                let mut offset = 12;
+                loop {
+                    let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap())
+                        as usize;
+                    if &bytes[offset..offset + 4] == b"data" {
+                        assert_eq!(size as u64 / 8, expected);
+                        break;
+                    }
+                    offset += 8 + size + (size % 2);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_song_pattern_exports_without_attaching_saved_loop_then_repairs() {
+    for initial in [PlayMode::Pattern, PlayMode::Song] {
+        let (mut s, _, _, d) = rig(0);
+        let mut project = s.project().clone();
+        project.play_mode = initial;
+        project.arrangement.loop_region = Some(LoopRegion {
+            start_tick: 0,
+            end_tick: 960,
+            enabled: true,
+        });
+        project.patterns[0].notes.push(Note {
+            id: 1,
+            channel: 1,
+            tick: 0,
+            length: 240,
+            key: 60,
+            velocity: 0.5,
+            slide: false,
+        });
+        project.patterns[0].next_note_id = 2;
+        s.open(
+            &d.path().join("invalid.grooviq"),
+            Loaded {
+                project,
+                samples: Default::default(),
+                warnings: vec![],
+            },
+            DecodedSamples::default(),
+        )
+        .unwrap();
+        assert!(s.song_error().is_some());
+        if initial == PlayMode::Song {
+            assert!(s.checked_export_state().is_err());
+            s.set_play_mode(PlayMode::Pattern, Instant::now()).unwrap();
+        }
+        assert!(s.play().is_ok());
+        assert!(
+            s.project()
+                .arrangement
+                .loop_region
+                .as_ref()
+                .unwrap()
+                .enabled
+        );
+        let state = s.checked_export_state().unwrap();
+        assert!(state.song_loop.is_none());
+        let options = engine::ExportOptions {
+            max_tail_seconds: 0.0,
+            ..Default::default()
+        };
+        let file = d.path().join("pattern.wav");
+        let report = engine::export_wav(
+            state,
+            &options,
+            &file,
+            &mut |_| {},
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(report.frames > 0);
+        assert!(std::fs::metadata(file).unwrap().len() > 44);
+        s.set_song_note_limit(10);
+        s.apply(Edit::SetTempo { bpm: 121.0 }, Instant::now())
+            .unwrap();
+        assert!(s.song_error().is_none());
+        s.set_play_mode(PlayMode::Song, Instant::now()).unwrap();
+        assert!(s.checked_export_state().unwrap().song_loop.is_some());
+        assert!(
+            engine::export_wav(
+                s.checked_export_state().unwrap(),
+                &options,
+                &d.path().join("repaired.wav"),
+                &mut |_| {},
+                &std::sync::atomic::AtomicBool::new(false)
+            )
+            .unwrap()
+            .frames
+                > 0
+        );
+    }
+}
+
+#[test]
+fn timeline_tempo_reaches_running_note_clock() {
+    let (mut s, _, mut p, _d) = rig(10);
+    let (mut r, rc, mut rp, _rd) = rig(10);
+    for session in [&mut s, &mut r] {
+        session
+            .apply(
+                Edit::ToggleStep {
+                    channel: 1,
+                    step: 2,
+                },
+                Instant::now(),
+            )
+            .unwrap();
+    }
+    s.apply(Edit::SetTempo { bpm: 180. }, Instant::now())
+        .unwrap();
+    rc.lock()
+        .unwrap()
+        .send(Command::SetTempo { bpm: 180. })
+        .unwrap();
+    s.play().unwrap();
+    rc.lock().unwrap().send(Command::Play).unwrap();
+    for _ in 0..400 {
+        let mut a = [0.; 128];
+        let mut b = [0.; 128];
+        p.process(&mut a, 2);
+        rp.process(&mut b, 2);
+        assert_eq!(a, b, "timeline tempo did not reach note clock");
+    }
+}
