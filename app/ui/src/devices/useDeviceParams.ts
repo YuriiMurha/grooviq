@@ -4,7 +4,7 @@ import type { Edit } from "../api/project";
 import { useProject } from "../project/context";
 import { isProjectReplacing, onProjectReplaced, onProjectReplacing } from "../project/replacement";
 import { DEAD_GESTURE, DEAD_GROUP, ParamGestures, type Gesture, type GestureGroup } from "./paramGestures";
-import { editorSink, type GuardedEdit } from "./paramSink";
+import { editorSink, trimSink, type GuardedEdit, type GuardedTrim } from "./paramSink";
 
 /** An instrument editor's parameter values as it shows them, its one gesture owner
  * (`ParamGestures`): `begin(id)` for a gesture, `group()` for a drag over several parameters,
@@ -16,7 +16,11 @@ import { editorSink, type GuardedEdit } from "./paramSink";
  * that replaced the one it was opened in: an edit is checked again when its turn in the queue
  * comes. */
 export function useDeviceParams(channel: number, stored: Record<string, number>, defaults: (id: string) => number, onError: (message: string) => void) {
-  const { apply } = useProject();
+  const context = useProject();
+  const { apply } = context;
+  const contextRef = useRef(context);
+  useLayoutEffect(() => { contextRef.current = context; });
+  const trimRef = useRef<GuardedTrim | null>(null);
   const [moving, setMoving] = useState<Readonly<Record<string, number>>>({});
   const latest = useRef({ stored, defaults, onError });
   useLayoutEffect(() => {
@@ -37,6 +41,7 @@ export function useDeviceParams(channel: number, stored: Record<string, number>,
     // No input at all while a replacement is on its way.
     const gestures = new ParamGestures(sink, isProjectReplacing);
     owner.current = gestures;
+    trimRef.current = trimSink(channel, { trim: (...args) => contextRef.current.trim?.(...args) ?? Promise.resolve(null) });
     sendRef.current = send;
     const cancel = () => gestures.cancelAll();
     window.addEventListener("blur", cancel);
@@ -51,7 +56,7 @@ export function useDeviceParams(channel: number, stored: Record<string, number>,
       offReplaced();
       gestures.dispose();
       sender.dispose();
-      if (owner.current === gestures) owner.current = null;
+      if (owner.current === gestures) { owner.current = null; trimRef.current = null; }
       if (sendRef.current === send) sendRef.current = null;
       setMoving({});
     };
@@ -68,5 +73,9 @@ export function useDeviceParams(channel: number, stored: Record<string, number>,
     owner.current?.cancelAll();
     return (await sendRef.current?.(edit)) ?? false;
   }, []);
-  return { value, begin, group, set, cancelAll, send: send as GuardedEdit };
+  const trim = useCallback(async (action: Parameters<GuardedTrim>[0]) => {
+    if (action.kind !== "view") owner.current?.cancelAll();
+    return (await trimRef.current?.(action)) ?? null;
+  }, []);
+  return { value, begin, group, set, cancelAll, trim: trim as GuardedTrim, send: send as GuardedEdit };
 }

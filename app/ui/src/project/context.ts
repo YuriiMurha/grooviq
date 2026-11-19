@@ -3,6 +3,7 @@ import { createContext, useContext } from "react";
 import type { Edit, ProjectView } from "../api/project";
 
 export interface ProjectContextValue {
+  trim?: (channel: number, action: import("../api/samplerTrim").TrimAction, still: () => boolean) => Promise<import("../api/samplerTrim").TrimReply | null>;
   /** The current project, `null` until the first `project_view` arrives. */
   view: ProjectView | null;
   /** Sends the edit to the engine and stores the view it returns. Edits are sent one at a
