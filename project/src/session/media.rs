@@ -322,70 +322,83 @@ mod tests {
     use crate::{arrangement_edit::ArrangementEdit, audio_assets::AudioAssets};
     #[test]
     fn final_generation_is_checked_independently_of_request_identity() {
-        let (c, _p) = grooviq_engine::engine(grooviq_engine::EngineConfig {
-            sample_rate: 48000.0,
-        });
-        let mut s = Session::new(Arc::new(Mutex::new(c)));
-        let v = s.arrangement_view();
-        let track = s
-            .edit_arrangement(
-                v.generation,
-                v.revision,
-                vec![ArrangementEdit::CreateTrack {
-                    name: "T".into(),
-                    color: 0,
-                }],
-                Instant::now(),
-            )
-            .unwrap()
-            .created_ids[0];
-        let mut bytes = Vec::new();
-        let n = 16u32;
-        bytes.extend_from_slice(b"RIFF");
-        bytes.extend_from_slice(&(36 + n * 2).to_le_bytes());
-        bytes.extend_from_slice(b"WAVEfmt ");
-        bytes.extend_from_slice(&16u32.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&48000u32.to_le_bytes());
-        bytes.extend_from_slice(&96000u32.to_le_bytes());
-        bytes.extend_from_slice(&2u16.to_le_bytes());
-        bytes.extend_from_slice(&16u16.to_le_bytes());
-        bytes.extend_from_slice(b"data");
-        bytes.extend_from_slice(&(n * 2).to_le_bytes());
-        bytes.extend_from_slice(&[0u8; 32]);
-        let v = s.arrangement_view();
-        let mut intent = s
-            .media_intent(
-                v.generation,
-                v.revision,
-                MediaTarget::Import {
-                    track,
-                    start_tick: 0,
-                    name: "A".into(),
-                },
-            )
-            .unwrap();
-        let assets = AudioAssets::with_budget(s.media_budget());
-        let prepared = assets
-            .submit(
-                0,
-                intent.key(),
-                intent.request(),
-                crate::SampleFile {
-                    name: "generated.wav".into(),
-                    bytes: Arc::new(bytes),
-                },
-            )
-            .unwrap()
-            .receive()
-            .unwrap();
-        // Independent guard fixture: valid current target/revision/request with only its server
-        // generation mismatched. Actual Open/supersession races are exercised by integration tests.
-        intent.generation = s.generation + 1;
-        s.media_requests.insert(intent.key(), intent.clone());
-        let before = s.project.clone();
-        assert!(s.publish_media(&intent, prepared, Instant::now()).is_err());
-        assert_eq!(s.project, before);
+        for cause in 0..4 {
+            let (c, _p) = grooviq_engine::engine(grooviq_engine::EngineConfig {
+                sample_rate: 48000.0,
+            });
+            let mut s = Session::new(Arc::new(Mutex::new(c)));
+            let v = s.arrangement_view();
+            let track = s
+                .edit_arrangement(
+                    v.generation,
+                    v.revision,
+                    vec![ArrangementEdit::CreateTrack {
+                        name: "T".into(),
+                        color: 0,
+                    }],
+                    Instant::now(),
+                )
+                .unwrap()
+                .created_ids[0];
+            let mut bytes = Vec::new();
+            let n = 16u32;
+            bytes.extend_from_slice(b"RIFF");
+            bytes.extend_from_slice(&(36 + n * 2).to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&48000u32.to_le_bytes());
+            bytes.extend_from_slice(&96000u32.to_le_bytes());
+            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&16u16.to_le_bytes());
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&(n * 2).to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 32]);
+            let v = s.arrangement_view();
+            let mut intent = s
+                .media_intent(
+                    v.generation,
+                    v.revision,
+                    MediaTarget::Import {
+                        track,
+                        start_tick: 0,
+                        name: "A".into(),
+                    },
+                )
+                .unwrap();
+            let assets = AudioAssets::with_budget(s.media_budget());
+            let prepared = assets
+                .submit(
+                    0,
+                    intent.key(),
+                    intent.request(),
+                    crate::SampleFile {
+                        name: "generated.wav".into(),
+                        bytes: Arc::new(bytes),
+                    },
+                )
+                .unwrap()
+                .receive()
+                .unwrap();
+            // Isolate each fence with the other server-owned facts valid. Real lifecycle
+            // races remain covered through New/Open/recovery in integration tests.
+            match cause {
+                0 => intent.generation = s.generation + 1,
+                1 => intent.revision = s.arrangement_revision + 1,
+                2 => intent.cancelled.store(true, Ordering::SeqCst),
+                _ => {
+                    intent.target = MediaTarget::Import {
+                        track: 999,
+                        start_tick: 0,
+                        name: "Deleted target".into(),
+                    }
+                }
+            }
+            s.media_requests.insert(intent.key(), intent.clone());
+            let before = s.project.clone();
+            assert!(s.publish_media(&intent, prepared, Instant::now()).is_err());
+            assert_eq!(s.project, before);
+        }
     }
 }
