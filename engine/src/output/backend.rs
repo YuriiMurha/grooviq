@@ -405,7 +405,12 @@ impl State {
         }
         match target {
             None => self.close(slot),
-            Some(target) if self.open.as_ref().is_some_and(|o| o.info.id == target.id) => {}
+            Some(mut target) if self.open.as_ref().is_some_and(|o| o.info.id == target.id) => {
+                let open = self.open.as_mut().expect("matching open stream");
+                // Enumeration describes the route; only opening determines the actual rate.
+                target.sample_rate = open.info.sample_rate;
+                open.info = target;
+            }
             Some(target) => {
                 self.close(slot);
                 if self.retry.due(now) {

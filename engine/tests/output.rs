@@ -1419,3 +1419,202 @@ fn unsupported_returning_default_reports_a_new_failure_episode() {
     let audio = left(&fake.pull(44_100));
     assert!((219..=221).contains(&upward_crossings(&audio[22_050..])));
 }
+
+#[test]
+fn same_id_observed_route_policy() {
+    for kind in [OutputKind::Speakers, OutputKind::Unknown] {
+        for explicit in [false, true] {
+            let h = airpods(true);
+            let changed = OutputInfo { kind, ..h.clone() };
+            let choice = if explicit {
+                OutputChoice::Device(h.id.clone())
+            } else {
+                OutputChoice::SystemDefault
+            };
+            let mut monitor = OutputMonitor::new(choice.clone(), true);
+            assert_eq!(
+                monitor.tick(std::slice::from_ref(&h)),
+                [OutputEvent::Opened(h.clone())]
+            );
+            assert_eq!(
+                monitor.tick(std::slice::from_ref(&changed)),
+                [OutputEvent::GuardStopped {
+                    to: changed.clone()
+                }]
+            );
+            assert!(monitor.tick(std::slice::from_ref(&changed)).is_empty());
+            monitor.tick(std::slice::from_ref(&h));
+            monitor.set_choice(choice);
+            assert!(monitor.tick(std::slice::from_ref(&changed)).is_empty());
+            monitor.tick(std::slice::from_ref(&h));
+            assert_eq!(
+                monitor.tick(std::slice::from_ref(&changed)),
+                [OutputEvent::GuardStopped {
+                    to: changed.clone()
+                }]
+            );
+            monitor.tick(std::slice::from_ref(&h));
+            monitor.set_guard(false);
+            assert!(monitor.tick(std::slice::from_ref(&changed)).is_empty());
+            assert_eq!(monitor.current(), Some(&changed));
+            monitor.set_guard(true);
+            assert!(monitor.tick(&[changed]).is_empty());
+        }
+    }
+}
+
+#[test]
+fn same_id_metadata_refresh_preserves_stream_and_actual_rate() {
+    let fake = Fake::new(vec![airpods(true)]);
+    fake.state().open_rate = Some(44_100);
+    let (c, p) = engine_48k();
+    let (out, events) = start(&fake, &c, p, OutputChoice::SystemDefault, false);
+    let slot = fake.slot();
+    let changed = OutputInfo {
+        name: "Observed route".into(),
+        kind: OutputKind::Unknown,
+        sample_rate: 96_000,
+        ..airpods(true)
+    };
+    fake.set(vec![changed.clone()]);
+    out.poll_now();
+    assert_eq!(
+        out.current(),
+        Some(OutputInfo {
+            sample_rate: 44_100,
+            ..changed
+        })
+    );
+    assert!(Arc::ptr_eq(&slot, &fake.slot()));
+    assert_eq!(fake.state().attempts, 1);
+    assert_eq!(events.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn same_id_guard_stop_silences_notes_once_and_reopens_without_replay() {
+    for kind in [OutputKind::Speakers, OutputKind::Unknown] {
+        let fake = Fake::new(vec![airpods(true)]);
+        let (c, p) = engine_48k();
+        c.lock().unwrap().send(note_on(48)).unwrap();
+        c.lock().unwrap().send(tone(true)).unwrap();
+        let (out, events) = start(&fake, &c, p, OutputChoice::Device("airpods".into()), true);
+        assert!(peak(&fake.pull(4_800)) > 0.0);
+        let changed = OutputInfo {
+            kind,
+            name: "Changed route".into(),
+            ..airpods(true)
+        };
+        fake.set(vec![changed.clone()]);
+        out.poll_now();
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                OutputEvent::Opened(airpods(true)),
+                OutputEvent::GuardStopped {
+                    to: changed.clone()
+                }
+            ]
+        );
+        assert_eq!(out.current(), Some(changed));
+        assert_eq!(fake.state().attempts, 2);
+        assert!(fake.pull(4_800).iter().all(|v| *v == 0.0));
+        out.poll_now();
+        assert_eq!(fake.state().attempts, 2);
+        assert_eq!(events.lock().unwrap().len(), 2);
+        fake.slot().stream_failed();
+        out.poll_now();
+        assert!(fake.pull(4_800).iter().all(|v| *v == 0.0));
+    }
+}
+
+#[test]
+fn same_id_guard_during_open_failure_keeps_retry_and_fresh_metadata() {
+    let fake = Fake::new(vec![airpods(true)]);
+    let (c, p) = engine_48k();
+    let (out, events) = start(&fake, &c, p, OutputChoice::SystemDefault, true);
+    fake.state().fail_open = true;
+    let changed = OutputInfo {
+        kind: OutputKind::Unknown,
+        ..airpods(true)
+    };
+    fake.set(vec![changed.clone()]);
+    out.poll_now();
+    assert!(out.current().is_none());
+    assert!(
+        matches!(&events.lock().unwrap()[1], OutputEvent::GuardStopped { to } if to == &changed)
+    );
+    let attempts = fake.state().attempts;
+    out.poll_now();
+    assert_eq!(fake.state().attempts, attempts);
+    fake.state().fail_open = false;
+    out.select(OutputChoice::Device(changed.id.clone()));
+    out.poll_now();
+    assert_eq!(out.current(), Some(changed));
+    assert_eq!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, OutputEvent::GuardStopped { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn same_id_guard_rejects_an_unsupported_reopen_and_recovers_silently() {
+    let fake = Fake::new(vec![airpods(true)]);
+    fake.state().open_rate = Some(44_100);
+    let (c, p) = engine_48k();
+    c.lock().unwrap().send(note_on(48)).unwrap();
+    c.lock().unwrap().send(tone(true)).unwrap();
+    let (out, events) = start(&fake, &c, p, OutputChoice::SystemDefault, true);
+    assert!(peak(&fake.pull(4_410)) > 0.01);
+    let changed = OutputInfo {
+        name: "Observed speaker route".into(),
+        kind: OutputKind::Unknown,
+        sample_rate: 96_000,
+        ..airpods(true)
+    };
+    fake.state().open_rate = Some(7_999);
+    fake.set(vec![changed.clone()]);
+    out.poll_now();
+    assert_eq!(
+        out.current(),
+        None,
+        "the guarded reopen must validate its actual rate"
+    );
+    assert!(fake.open_id().is_none());
+    let rejected = Arc::clone(fake.state().last_slot.as_ref().unwrap());
+    let mut silent = [1.0; 512];
+    rejected.process(&mut silent, 2);
+    assert!(silent.iter().all(|v| *v == 0.0));
+    assert!(events.lock().unwrap().iter().any(|e| matches!(e,
+        OutputEvent::OpenFailed { error, .. } if error.contains("unsupported actual output sample rate")
+    )));
+    let guards = || {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, OutputEvent::GuardStopped { .. }))
+            .count()
+    };
+    assert_eq!(guards(), 1);
+    out.poll_now();
+    assert_eq!(guards(), 1);
+    fake.state().open_rate = Some(44_100);
+    assert!(wait_for(Duration::from_secs(4), || out.current().is_some()));
+    assert_eq!(
+        out.current(),
+        Some(OutputInfo {
+            sample_rate: 44_100,
+            ..changed
+        })
+    );
+    assert_eq!(guards(), 1);
+    assert!(
+        fake.pull(4_410).iter().all(|v| *v == 0.0),
+        "guarded notes and tone must not replay after retry"
+    );
+}
