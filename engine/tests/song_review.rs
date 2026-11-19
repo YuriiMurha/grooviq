@@ -1125,3 +1125,162 @@ fn noop_timeline_restores_mode_without_ending_take_before_its_barrier() {
         }
     }
 }
+
+#[test]
+fn direct_noop_restores_mode_before_take_barrier() {
+    for frames in [1, 63, 64, 127, 128, 255, 256, 511] {
+        for looped in [false, true] {
+            for rebuilds in 0..=2 {
+                for transition_is_timeline in [false, true] {
+                    let mut s = song_state(vec![], 96000);
+                    s.playback_mode = PlaybackMode::Pattern;
+                    if looped {
+                        s.song_loop = Some(SongLoop {
+                            start_tick: 0,
+                            end_tick: 96000,
+                        });
+                    }
+                    let (mut c, mut p) = engine_with(CFG, s);
+                    c.send(Command::SetRecording { on: true }).unwrap();
+                    c.send(Command::Play).unwrap();
+                    p.process(&mut vec![0.0; frames * 2], 2);
+                    let snapshot = c.state().clone();
+                    c.send(Command::SetPlaybackMode {
+                        mode: PlaybackMode::Pattern,
+                    })
+                    .unwrap();
+                    for on in [true, false] {
+                        c.send(Command::ChannelNote {
+                            channel: ChannelId(1),
+                            key: 60,
+                            velocity: 1.0,
+                            on,
+                            id: NoteId(408),
+                        })
+                        .unwrap();
+                    }
+                    let before = c.send_marked(Command::SetTempo { bpm: 120.0 }).unwrap();
+                    let after = if transition_is_timeline {
+                        c.set_timeline(TimelineUpdate {
+                            pattern: Box::new(snapshot.pattern),
+                            song: Box::new(snapshot.song),
+                            bpm: snapshot.bpm,
+                            mode: PlaybackMode::Song,
+                            region: snapshot.song_loop,
+                            remove_channel: None,
+                        })
+                        .unwrap();
+                        c.send_marked(Command::SetTempo { bpm: 120.0 }).unwrap()
+                    } else {
+                        c.send_marked(Command::SetPlaybackMode {
+                            mode: PlaybackMode::Song,
+                        })
+                        .unwrap()
+                    };
+                    for rate in [44100.0, 96000.0].into_iter().take(rebuilds) {
+                        c.reconfigure(&mut p, EngineConfig { sample_rate: rate });
+                    }
+                    // A short callback may first consume the previous block's cache.
+                    for _ in 0..64_usize.div_ceil(frames) {
+                        p.process(&mut vec![0.0; frames * 2], 2);
+                    }
+                    let mut events = Vec::new();
+                    c.take_recorded(&mut events);
+                    assert!(
+                        matches!(events.as_slice(), [
+                RecordEvent::Note { on: true, key: 60, id: NoteId(408), .. }, RecordEvent::Note { on: false, key: 60, id: NoteId(408), .. },
+                RecordEvent::Mark { id: a }, RecordEvent::End { .. }, RecordEvent::Mark { id: b }
+            ] if *a==before && *b==after),
+                        "rebuilds={rebuilds},timeline={transition_is_timeline}: {events:?}"
+                    );
+                    assert!(!c.live().playing);
+                    assert!(!c.recording_armed());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn direct_noop_keeps_held_take_until_future_transition() {
+    for rebuilds in 0..=2 {
+        let mut s = song_state(vec![], 96000);
+        s.playback_mode = PlaybackMode::Pattern;
+        let (mut c, mut p) = engine_with(CFG, s);
+        c.send(Command::SetRecording { on: true }).unwrap();
+        c.send(Command::Play).unwrap();
+        p.process(&mut [0.0; 128], 2);
+        let position = c.live().position_ticks;
+        for _ in 0..3 {
+            c.send(Command::SetPlaybackMode {
+                mode: PlaybackMode::Pattern,
+            })
+            .unwrap();
+        }
+        c.send(Command::ChannelNote {
+            channel: ChannelId(1),
+            key: 60,
+            velocity: 1.0,
+            on: true,
+            id: NoteId(411),
+        })
+        .unwrap();
+        let before = c.send_marked(Command::SetTempo { bpm: 120.0 }).unwrap();
+        let due = c.live().frames + 1024;
+        c.send_at(
+            due,
+            Command::SetPlaybackMode {
+                mode: PlaybackMode::Song,
+            },
+        )
+        .unwrap();
+        let after = c.send_marked(Command::SetTempo { bpm: 120.0 }).unwrap();
+        for rate in [44100.0, 96000.0].into_iter().take(rebuilds) {
+            c.reconfigure(&mut p, EngineConfig { sample_rate: rate });
+        }
+        let mut out = [0.0; 128];
+        p.process(&mut out, 2);
+        assert!(c.live().playing);
+        // Admission mirrors the future transition immediately; the note/mark pair
+        // below proves callback capture remains active until that transition is due.
+        assert!(!c.recording_armed());
+        assert!(c.live().position_ticks >= position);
+        assert!(out.iter().any(|x| x.abs() > 0.05));
+        let mut events = Vec::new();
+        c.take_recorded(&mut events);
+        assert!(
+            matches!(events.as_slice(), [RecordEvent::Note { on: true, id: NoteId(411), .. }, RecordEvent::Mark { id }] if *id == before),
+            "{events:?}"
+        );
+        events.clear();
+        while c.live().frames <= due + 64 {
+            p.process(&mut out, 2);
+        }
+        c.take_recorded(&mut events);
+        assert!(
+            matches!(events.as_slice(), [RecordEvent::End { .. }, RecordEvent::Mark { id }] if *id == after),
+            "{events:?}"
+        );
+        assert!(!c.live().playing);
+        assert!(!c.recording_armed());
+        for _ in 0..100 {
+            p.process(&mut out, 2);
+        }
+        // A live audition press survives transport stop; release it explicitly.
+        c.send(Command::ChannelNote {
+            channel: ChannelId(1),
+            key: 60,
+            velocity: 1.0,
+            on: false,
+            id: NoteId(411),
+        })
+        .unwrap();
+        for _ in 0..100 {
+            p.process(&mut out, 2);
+        }
+        assert!(out.iter().all(|x| x.abs() < 0.001));
+        events.clear();
+        c.take_recorded(&mut events);
+        assert!(events.is_empty());
+    }
+}
