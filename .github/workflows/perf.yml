@@ -170,6 +170,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: instructions
+      - name: Synth workload witnesses
+        run: cargo test -p grooviq-golden --test synth_workload
       # The rust jobs never build this Linux-only code, so lint it here.
       - run: cargo clippy -p grooviq-golden --benches -- -D warnings
       # The runner must match the `gungraun` crate's version in Cargo.lock.
@@ -186,24 +188,38 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: |
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          overlay=$(mktemp -d)
+          paths=(tests/golden/benches/instructions.rs tests/golden/benches/support/synth_workload.rs tests/golden/benches/support/sampler_workload.rs)
+          for path in "${paths[@]}"; do
+            mkdir -p "$overlay/$(dirname "$path")"
+            cp "$path" "$overlay/$path"
+          done
           git checkout --quiet "$BASE_SHA"
+          # Restore BASE's tracked files, remove only overlays absent from BASE, even on failure.
+          cleanup() {
+            for path in "${paths[@]}"; do
+              if git cat-file -e "$BASE_SHA:$path" 2>/dev/null; then
+                git restore --source="$BASE_SHA" -- "$path"
+              else
+                rm -f -- "$path"
+              fi
+            done
+            git checkout --quiet "$HEAD_SHA"
+            rm -rf -- "$overlay"
+          }
+          trap cleanup EXIT
+          for path in "${paths[@]}"; do
+            mkdir -p "$(dirname "$path")"
+            cp "$overlay/$path" "$path"
+          done
           if [ -f tests/golden/benches/instructions.rs ]; then
-            # Use identical workloads on BASE and HEAD, including new cases.
-            git show "$HEAD_SHA:tests/golden/benches/instructions.rs" > tests/golden/benches/instructions.rs
-            mkdir -p tests/golden/benches/support
-            git show "$HEAD_SHA:tests/golden/benches/support/sampler_workload.rs" > tests/golden/benches/support/sampler_workload.rs
             cargo bench -p grooviq-golden --bench instructions -- --save-baseline=base
             echo "BASELINE=--baseline=base" >> "$GITHUB_ENV"
-            git restore tests/golden/benches/instructions.rs
-            if git ls-files --error-unmatch tests/golden/benches/support/sampler_workload.rs > /dev/null 2>&1; then
-              git restore tests/golden/benches/support/sampler_workload.rs
-            else
-              rm tests/golden/benches/support/sampler_workload.rs
-            fi
           else
             echo "The base has no instruction benchmarks yet: no comparison."
           fi
-          git checkout --quiet "$HEAD_SHA"
+          cleanup
+          trap - EXIT
       # BASELINE is set by the step above when there is one to compare with.
       - name: Instruction counts
         run: |
