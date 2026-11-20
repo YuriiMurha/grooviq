@@ -9,6 +9,7 @@
 //! and `midi_cmds`. Started with `GROOVIQ_AUDIO=null` it opens no audio device at all (see
 //! [`output_mode`]): the silent mode for QA runs.
 
+mod arrangement_cmds;
 mod audio_log;
 mod autosave_notice;
 mod commands;
@@ -23,6 +24,9 @@ mod output_mode;
 pub mod panic_hook;
 mod patterns_cmds;
 mod project_cmds;
+#[cfg(all(feature = "qa-driver", target_os = "macos"))]
+mod qa_driver;
+mod sampler_trim_cmds;
 mod settings;
 
 use audio_log::{AudioLog, Level};
@@ -72,6 +76,7 @@ pub(crate) struct Audio {
     stream: Option<StreamServer>,
     /// The open project.
     session: Arc<Mutex<Session>>,
+    assets: Arc<grooviq_project::audio_assets::AudioAssets>,
     /// The recovery folder; `None` if it could not be taken (no autosave then). Taken out by a
     /// clean exit.
     recovery: Arc<Mutex<Option<RecoveryDir>>>,
@@ -204,10 +209,12 @@ fn start_audio(app: &AppHandle) -> Audio {
         Arc::clone(&selected_channel),
         &settings,
     )));
-    spawn_named("grooviq-midi", {
-        let (midi, log, app) = (Arc::clone(&midi), Arc::clone(&log), app.clone());
-        move || midi_cmds::poll_loop(&midi, &log, &app)
-    });
+    if !qa_automation() {
+        spawn_named("grooviq-midi", {
+            let (midi, log, app) = (Arc::clone(&midi), Arc::clone(&log), app.clone());
+            move || midi_cmds::poll_loop(&midi, &log, &app)
+        });
+    }
     if autosave_on {
         spawn_named("grooviq-autosave", {
             let (session, recovery, log, status, app) = (
@@ -221,7 +228,11 @@ fn start_audio(app: &AppHandle) -> Audio {
         });
     }
 
+    let assets = Arc::new(grooviq_project::audio_assets::AudioAssets::with_budget(
+        lock(&session).media_budget(),
+    ));
     Audio {
+        assets,
         controller,
         output,
         log,
@@ -322,6 +333,9 @@ fn end_session(audio: &Audio) {
 
 /// Whether closing must wait for the person; if so, asks the UI.
 fn hold_close(app: &AppHandle) -> bool {
+    if qa_automation() {
+        return false;
+    }
     let Some(audio) = app.try_state::<Audio>() else {
         return false;
     };
@@ -383,9 +397,41 @@ fn toggle_high_refresh(app: &AppHandle) {
     display::apply(app, on);
 }
 
+fn qa_automation() -> bool {
+    #[cfg(all(feature = "qa-driver", target_os = "macos"))]
+    {
+        qa_driver::enabled()
+    }
+    #[cfg(not(all(feature = "qa-driver", target_os = "macos")))]
+    {
+        false
+    }
+}
+
 /// Runs the app.
 pub fn run() {
     panic_hook::install();
+    if std::env::var_os("GROOVIQ_QA_DRIVER").is_some() && !qa_automation() {
+        eprintln!("automation requires a macOS qa-driver build");
+        std::process::exit(2);
+    }
+    #[allow(unused_mut)]
+    let mut context = tauri::generate_context!();
+    #[cfg(all(feature = "qa-driver", target_os = "macos"))]
+    let qa_dir = if qa_automation() {
+        let dir = qa_driver::validate().unwrap_or_else(|error| {
+            eprintln!("QA launch refused: {error}");
+            std::process::exit(2);
+        });
+        for window in &mut context.config_mut().app.windows {
+            window.create = false;
+            window.visible = false;
+            window.focus = false;
+        }
+        Some(dir)
+    } else {
+        None
+    };
     let builder = tauri::Builder::default();
     // Cmd+Q through our own Quit item, so it asks about unsaved changes (see `menu`).
     #[cfg(target_os = "macos")]
@@ -394,13 +440,23 @@ pub fn run() {
         if menu::is_quit(id) {
             // Raises a preventable `ExitRequested`, held below like a window close.
             app.exit(0);
+        } else if let Some(redo) = menu::history_action(id) {
+            let _ = app.emit("edit-history", redo);
         } else if menu::is_high_refresh(id) {
             toggle_high_refresh(app);
         }
     });
     let app = builder
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
+        .setup(move |app| {
+            #[cfg(all(feature = "qa-driver", target_os = "macos"))]
+            if let Some(dir) = qa_dir {
+                app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+                for config in &app.config().app.windows {
+                    tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
+                }
+                qa_driver::start(app.handle().clone(), dir)?;
+            }
             let audio = start_audio(app.handle());
             let high_refresh = lock(&audio.settings).high_refresh;
             app.manage(audio);
@@ -411,6 +467,21 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            sampler_trim_cmds::sampler_trim_view,
+            sampler_trim_cmds::sampler_trim_reset,
+            sampler_trim_cmds::sampler_trim_undo,
+            arrangement_cmds::arrangement_view,
+            arrangement_cmds::arrangement_edit,
+            arrangement_cmds::arrangement_history,
+            arrangement_cmds::arrangement_curve,
+            arrangement_cmds::audio_import,
+            arrangement_cmds::audio_relink,
+            arrangement_cmds::audio_cancel,
+            arrangement_cmds::arrangement_waveform,
+            arrangement_cmds::arrangement_mode,
+            arrangement_cmds::arrangement_loop,
+            arrangement_cmds::arrangement_seek,
+            menu::edit_history_enabled,
             commands::audio_outputs,
             commands::audio_select,
             commands::audio_settings,
@@ -446,6 +517,7 @@ pub fn run() {
             notes_cmds::channel_add_synth,
             notes_cmds::channel_note,
             notes_cmds::channel_param_live,
+            notes_cmds::synth_meter,
             notes_cmds::channel_select,
             notes_cmds::channel_waveform,
             notes_cmds::record_set,
@@ -453,7 +525,7 @@ pub fn run() {
             midi_cmds::midi_inputs,
             midi_cmds::midi_set_enabled,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("the Tauri app builds");
     app.run(|app, event| match event {
         RunEvent::WindowEvent {

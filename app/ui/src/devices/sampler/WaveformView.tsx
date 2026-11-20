@@ -35,6 +35,8 @@ interface Props {
   set: (id: Marker, value: number) => void;
   /** Drawn over the waveform (what to do when there is no sample). */
   children?: ReactNode;
+  busy?: boolean;
+  onTrimIntent?: () => void;
 }
 
 const NO_PEAKS = new Float32Array(0);
@@ -43,7 +45,7 @@ const regionValue = (r: Region, m: Marker) => (m === "loop_start" ? r.loopStart 
 /** The sample's waveform in a canvas, drawn again (from the peaks it has) whenever its drawn
  * size or the region changes, with the region's start, end and loop markers as handles to drag
  * or move with the keys. Outside the played region the sample is dimmed. */
-export function WaveformView({ name, peaks, region, loop, markers, begin, set, children }: Props) {
+export function WaveformView({ name, peaks, region, loop, markers, begin, set, children, busy = false, onTrimIntent }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const { w, h } = useBoxSize(host);
@@ -135,7 +137,9 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
     return d;
   };
   const onDown = (id: Marker) => (e: PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || busy) return;
+    if (id !== "loop_start") onTrimIntent?.();
+    if (!markerRange(id, region)) return;
     e.preventDefault();
     e.currentTarget.focus({ preventScroll: true });
     try {
@@ -170,10 +174,12 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
   const onCancel = () => stop()?.gesture.cancel();
 
   const onKeyDown = (id: Marker) => (e: KeyboardEvent<HTMLDivElement>) => {
+    if (busy) return;
     const value = regionValue(region, id);
     const step = (id === "loop_start" ? LOOP_KEY_STEP : KEY_STEP) * (e.shiftKey ? FINE : 1);
     const dir = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1, PageUp: PAGE, PageDown: -PAGE, Home: -Infinity, End: Infinity }[e.key];
     if (dir === undefined) return;
+    if (id !== "loop_start") onTrimIntent?.();
     e.preventDefault();
     const next = nudgeMarker(id, region, value, dir * step);
     if (next !== value) set(id, next);
@@ -194,13 +200,14 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
         role="slider"
         tabIndex={0}
         aria-label={`${name} ${m.name.toLowerCase()}`}
+        aria-disabled={busy || !range || min === max}
         aria-orientation="horizontal"
         aria-valuemin={Number(min.toFixed(4))}
         aria-valuemax={Number(max.toFixed(4))}
         aria-valuenow={Number(value.toFixed(4))}
         aria-valuetext={m.format(value)}
         data-param={id}
-        data-hint={`${m.does} Drag it along the waveform (it stops at the other markers), or use the arrow keys; double-click resets it.`}
+        data-hint={`${busy ? "Trim update pending. " : !range ? "This marker has no legal position that leaves one full frame. Use whole sample to repair the trim. " : min === max ? "This marker cannot move on a one-frame sample. " : ""}${m.does} Drag it along the waveform (it stops at the other markers), or use the arrow keys; double-click resets it.`}
         onPointerDown={onDown(id)}
         onPointerMove={onMove}
         onPointerUp={onUp}
@@ -208,7 +215,8 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
         onLostPointerCapture={onCancel}
         onKeyDown={onKeyDown(id)}
         onDoubleClick={() => {
-          if (!range) return;
+          if (!busy && id !== "loop_start") onTrimIntent?.();
+          if (!range || busy) return;
           const v = Math.min(max, Math.max(min, m.default));
           if (v !== value) set(id, v);
         }}

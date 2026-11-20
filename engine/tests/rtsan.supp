@@ -1,6 +1,0 @@
-# RealtimeSanitizer suppressions for the `rtsan` CI job (RTSAN_OPTIONS=suppressions=...).
-# Each line silences a known violation until its issue is fixed; delete the line with the fix.
-
-# #111: AudioSlot::process unlocks a std Mutex after its try_lock. A lock taken on the audio
-# thread still fails the job (pthread_mutex_lock), only the unlock is let through.
-function-name-matches:pthread_mutex_unlock

@@ -274,4 +274,34 @@ describe("waveform", () => {
     expect(nudgeMarker("start", stuck, 0.2, -Infinity)).toBe(0.2);
     expect(dragMarker("end", 1, stuck)).toBe(0.7);
   });
+
+  it("impossible_legacy_pairs_refuse_each_marker_without_changing_stored_geometry", () => {
+    for (const reverse of [false, true]) {
+      for (const [length, start, end] of [[1, 0.2, 0.7], [2, 0.6, 0.4]]) {
+        const region = Object.freeze({ start: Math.fround(start), end: Math.fround(end), loopStart: Math.fround(0.37), reverse, frames: length });
+        const before = { ...region };
+        for (const marker of ["start", "end"] as const) {
+          expect(markerRange(marker, region)).toBeNull();
+          for (const at of [0, 0.25, 0.5, 0.75, 1]) expect(dragMarker(marker, at, region)).toBe(region[marker]);
+          for (const delta of [-Infinity, -0.001, 0.001, Infinity]) expect(nudgeMarker(marker, region, region[marker], delta)).toBe(region[marker]);
+          expect(markerPosition(marker, region)).toBe(region[marker]);
+        }
+        expect(region).toEqual(before);
+      }
+    }
+  });
+
+  it("short_ordered_regions_keep_their_legal_single_marker_recovery", () => {
+    for (const [start, end, marker, target] of [[0.1, 0.2, "end", 1], [0.8, 0.9, "start", 0]] as const) {
+      const region: Region = { start: Math.fround(start), end: Math.fround(end), frames: 2, loopStart: 0.37, reverse: false };
+      expect((region.end - region.start) * region.frames!).toBeLessThan(1);
+      expect(markerRange(marker, region)).not.toBeNull();
+      const value = dragMarker(marker, target, region);
+      const next = { ...region, [marker]: value };
+      expect(next.end * 2 - next.start * 2).toBeGreaterThanOrEqual(1);
+      expect(region.start).toBe(Math.fround(start));
+      expect(region.end).toBe(Math.fround(end));
+    }
+  });
+
 });
