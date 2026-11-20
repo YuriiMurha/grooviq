@@ -243,14 +243,21 @@ fn write_part(
         .song_region
         .map_or(state.song.end_tick, |r| r.end_tick);
     let exact_end = if options.song_region.is_none() {
-        state
-            .song
-            .end_frame_at(rate)
-            .max(state.song.audio.end_frame(state.bpm, rate))
+        state.song.export_end_frame(state.bpm, rate)
     } else {
         0
     };
     if is_song && options.song_region.is_some() {
+        state.song.automation = state
+            .song
+            .automation
+            .before_tick(song_end, &state.channels)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        state.song.audio = state
+            .song
+            .audio
+            .before_tick(song_end)
+            .map_err(|e| io::Error::other(e.to_string()))?;
         state.song.arrangement.notes.retain(|n| n.tick < song_end);
         for n in &mut state.song.arrangement.notes {
             n.length = n.length.min(song_end - n.tick);
@@ -258,6 +265,7 @@ fn write_part(
         state.song.arrangement.length = state.song.arrangement.length.min(song_end);
         state.song.end_tick = song_end;
         state.song.end_frame = 0;
+        state.song.frame_extent = None;
     }
     let (mut controller, mut processor) = engine_with(config, state);
     let loops = options.loops.max(1);
@@ -279,7 +287,7 @@ fn write_part(
         if options.song_region.is_some() {
             ticks_to_frames((song_end - from) as f64, bpm, rate)
         } else {
-            ticks_to_frames(song_end as f64, bpm, rate).max(exact_end)
+            exact_end
         }
     } else {
         ticks_to_frames(f64::from(loops) * f64::from(length), bpm, rate)

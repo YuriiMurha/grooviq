@@ -20,6 +20,7 @@
 pub mod autosave;
 pub mod backup;
 pub mod compile;
+pub mod compile_song;
 pub mod file;
 pub mod model;
 pub mod notes;
@@ -49,3 +50,14 @@ pub use arrangement::*;
 pub use file::validate_save;
 
 pub mod pattern_edit;
+
+pub mod arrangement_edit;
+
+mod arrangement_history;
+pub use arrangement_history::HistoryLimits;
+
+pub use file::{load_budgeted, read_sample_file_budgeted};
+
+pub use session::decode_samples_budgeted;
+
+pub use session::decode_samples_budgeted_checked;

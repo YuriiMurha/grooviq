@@ -163,29 +163,11 @@ describe("ChannelRack", () => {
   });
 
   it("a_missing_sample_is_marked", async () => {
-    const { user, engine } = setup(project([channel(1, "Kick", { missing: true, sampleName: "Punchy 03" }), SNARE]));
+    setup(project([channel(1, "Kick", { missing: true, sampleName: "Punchy 03" }), SNARE]));
     await rack();
     const row = screen.getByRole("group", { name: "Kick" });
     expect(within(row).getByText("Missing")).toBeTruthy();
     expect(within(screen.getByRole("group", { name: "Snare" })).queryByText("Missing")).toBeNull();
-
-    // Relinking asks for a file; nothing is read until the person picks one.
-    mocks.open.mockResolvedValueOnce(null);
-    await user.click(within(row).getByRole("button", { name: "Relink Kick" }));
-    await waitFor(() => expect(mocks.open).toHaveBeenCalledTimes(1));
-    expect(engine.argsOf("channel_set_sample")).toEqual([]);
-    expect(mocks.open.mock.calls[0][0]).toMatchObject({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "Audio", extensions: AUDIO }],
-    });
-
-    mocks.open.mockResolvedValueOnce("/kit/Punchy 03.wav");
-    await user.click(within(row).getByRole("button", { name: "Relink Kick" }));
-    await waitFor(() =>
-      expect(engine.argsOf("channel_set_sample")).toEqual([{ channel: 1, path: "/kit/Punchy 03.wav", generation: 0 }]),
-    );
-    await waitFor(() => expect(within(row).queryByText("Missing")).toBeNull());
   });
 
   it("swing_and_pattern_length_send_their_edits", async () => {

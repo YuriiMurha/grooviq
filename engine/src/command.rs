@@ -133,6 +133,12 @@ pub enum Command {
     },
     /// Sets a sampler channel's parameter by its index in `grooviq_dsp::sampler::SPEC`,
     /// clamped to its range. Refused for a synth channel.
+    /// A complete sampler parameter snapshot, published as one callback-visible operation.
+    SetSamplerTrim {
+        channel: ChannelId,
+        instance: u64,
+        params: [f32; grooviq_dsp::sampler::SPEC.len()],
+    },
     SetSamplerParam {
         channel: ChannelId,
         index: u32,
@@ -221,6 +227,11 @@ impl Command {
                     value: value.clamp(min, max),
                 })
             }
+            Self::SetSamplerTrim { params, .. } => params
+                .iter()
+                .zip(grooviq_dsp::sampler::SPEC)
+                .all(|(v, (lo, hi, _))| v.is_finite() && *v >= lo && *v <= hi)
+                .then_some(self),
             // The range depends on the channel's instrument: the controller clamps it.
             Self::SetChannelParam { value, .. } => value.is_finite().then_some(self),
             Self::SetChoke { group, .. } => (group <= MAX_CHOKE_GROUP).then_some(self),
@@ -248,6 +259,7 @@ impl Command {
     pub(crate) fn channel(self) -> Option<ChannelId> {
         match self {
             Self::SetChannelMix { channel, .. }
+            | Self::SetSamplerTrim { channel, .. }
             | Self::SetSamplerParam { channel, .. }
             | Self::SetChannelParam { channel, .. }
             | Self::SetChoke { channel, .. }
@@ -263,6 +275,7 @@ pub(crate) enum Msg {
     Command {
         due: u64,
         cmd: Command,
+        mode_changed: bool,
     },
     /// A fresh graph to swap in (after a panic, or for a new state); the old one goes back
     /// through the trash queue.
@@ -279,6 +292,15 @@ pub(crate) enum Msg {
     /// The pattern to play; the old one goes back through the trash queue.
     SetPattern(Box<PatternData>),
     SetSong(Box<crate::SongData>),
+    // Flags capture transitions at admission, before a rebuild installs the final graph.
+    Timeline(Box<TimelineUpdate>, bool, bool),
+    TimelineRebuilt {
+        bpm: f32,
+        mode: crate::PlaybackMode,
+        region: Option<crate::SongLoop>,
+        mode_changed: bool,
+        loop_changed: bool,
+    },
     /// Queues [`crate::RecordEvent::Mark`] with this id in the recording queue.
     RecordMark(u32),
 }
@@ -287,8 +309,22 @@ impl Msg {
     /// Whether applying the message may hand something back through the trash queue: such a
     /// message waits while the processor holds a parked item (it has room for only one).
     pub(crate) fn makes_trash(&self) -> bool {
-        !matches!(self, Self::Command { .. } | Self::RecordMark(_))
+        !matches!(
+            self,
+            Self::Command { .. } | Self::RecordMark(_) | Self::TimelineRebuilt { .. }
+        )
     }
+}
+
+/// One control-allocated envelope is also the retirement container for both payloads.
+#[derive(Clone, Debug)]
+pub struct TimelineUpdate {
+    pub pattern: Box<PatternData>,
+    pub song: Box<crate::SongData>,
+    pub bpm: f32,
+    pub mode: crate::PlaybackMode,
+    pub region: Option<crate::SongLoop>,
+    pub remove_channel: Option<ChannelId>,
 }
 
 /// What is left of the queued messages, in queue order, once the graph is rebuilt from the
@@ -310,7 +346,7 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
     let mut cut: Vec<ChannelId> = Vec::new();
     let mut kept = Vec::with_capacity(queued.len());
     for msg in queued.into_iter().rev() {
-        let (due, cmd) = match msg {
+        let (due, cmd, mode_changed) = match msg {
             Msg::ReplaceGraph(_) => {
                 all_cut = true;
                 continue;
@@ -320,16 +356,38 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
                 continue;
             }
             Msg::AddChannel(_) | Msg::SetPattern(_) | Msg::SetSong(_) => continue,
+            Msg::Timeline(update, mode_changed, loop_changed) => {
+                if let Some(id) = update.remove_channel {
+                    cut.push(id);
+                }
+                kept.push(Msg::TimelineRebuilt {
+                    bpm: update.bpm,
+                    mode: update.mode,
+                    region: update.region,
+                    mode_changed,
+                    loop_changed,
+                });
+                continue;
+            }
+            transport @ Msg::TimelineRebuilt { .. } => {
+                kept.push(transport);
+                continue;
+            }
             Msg::RecordMark(id) => {
                 kept.push(Msg::RecordMark(id));
                 continue;
             }
-            Msg::Command { due, cmd } => (due, cmd),
+            Msg::Command {
+                due,
+                cmd,
+                mode_changed,
+            } => (due, cmd, mode_changed),
         };
         let cmd = match cmd {
             Command::TestTone { .. }
             | Command::SetSynthParam { .. }
             | Command::SetChannelMix { .. }
+            | Command::SetSamplerTrim { .. }
             | Command::SetSamplerParam { .. }
             | Command::SetChannelParam { .. }
             | Command::SetChoke { .. } => continue,
@@ -356,7 +414,11 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
             #[cfg(feature = "test-hooks")]
             Command::InjectNaN | Command::InjectPanic => cmd,
         };
-        kept.push(Msg::Command { due, cmd });
+        kept.push(Msg::Command {
+            due,
+            cmd,
+            mode_changed,
+        });
     }
     kept.reverse();
     kept
@@ -374,6 +436,7 @@ pub(crate) enum Trash {
     Sample(Arc<SampleBuf>),
     Pattern(Box<PatternData>),
     Song(Box<crate::SongData>),
+    Timeline(Box<TimelineUpdate>, Option<Box<ChannelNode>>),
 }
 
 #[cfg(test)]
