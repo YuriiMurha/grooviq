@@ -8,6 +8,7 @@ import {
   type ExportFormat,
 } from "../api/project";
 import { exportMessage } from "./exportText";
+import { isProjectReplacing, projectGeneration } from "./replacement";
 import { Modal } from "./Modal";
 
 const RATES = [44100, 48000, 96000] as const;
@@ -33,33 +34,53 @@ export function ExportDialog({ name, onClose }: Props) {
   const [loops, setLoops] = useState("1");
   const [phase, setPhase] = useState<Phase>({ kind: "options", error: null });
   const cancelled = useRef(false);
+  const alive = useRef(false);
+  const prompting = useRef(false);
   const running = phase.kind === "running";
 
   useEffect(() => {
+    alive.current = true;
     const unlisten = onExportProgress((fraction) =>
       setPhase((p) => (p.kind === "running" ? { kind: "running", progress: fraction } : p)),
     );
     return () => {
+      alive.current = false;
       unlisten.then((stop) => stop());
     };
   }, []);
 
   const start = async () => {
-    const path = await saveDialog({
-      title: "Export WAV",
-      defaultPath: `${name}.wav`,
-      filters: [{ name: "WAV audio", extensions: ["wav"] }],
-    }).catch(() => null);
-    if (!path) return;
+    if (prompting.current || isProjectReplacing()) return;
+    prompting.current = true;
+    const generation = projectGeneration();
+    const current = () => alive.current && generation === projectGeneration() && !isProjectReplacing();
+    let path: string | null;
+    try {
+      path = await saveDialog({
+        title: "Export WAV",
+        defaultPath: `${name}.wav`,
+        filters: [{ name: "WAV audio", extensions: ["wav"] }],
+      });
+    } catch (e) {
+      if (current()) setPhase({ kind: "options", error: errorText(e) });
+      return;
+    } finally {
+      prompting.current = false;
+    }
+    if (!current()) return;
+    if (!path) {
+      setPhase({ kind: "options", error: null });
+      return;
+    }
     const count = Math.min(LOOPS_MAX, Math.max(1, Math.round(Number(loops)) || 1));
     cancelled.current = false;
     setPhase({ kind: "running", progress: 0 });
     try {
       const result = await projectExport(path, { sampleRate: rate, format, loops: count });
-      setPhase({ kind: "done", ...exportMessage(result) });
+      if (current()) setPhase({ kind: "done", ...exportMessage(result) });
     } catch (e) {
       // Cancelling is the person's own doing: no error, back to the options.
-      setPhase({ kind: "options", error: cancelled.current ? null : errorText(e) });
+      if (current()) setPhase({ kind: "options", error: cancelled.current ? null : errorText(e) });
     }
   };
 

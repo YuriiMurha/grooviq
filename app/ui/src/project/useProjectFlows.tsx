@@ -1,4 +1,4 @@
-import { beginProjectTransition } from "./pending";
+import { beginProjectTransition, hasProjectDraft } from "./pending";
 import { settlePattern } from "../api/patterns";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
@@ -178,7 +178,7 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
   const guarded = useCallback((why: Why, proceed: () => Promise<void>) => {
     const current = viewRef.current;
     // An edit still on its way may make it dirty: ask, rather than drop it unasked.
-    if (current?.dirty === false && !unsettledRef.current()) {
+    if (current?.dirty === false && !unsettledRef.current() && !hasProjectDraft()) {
       proceed().catch(fail);
     } else {
       setPending({ why, name: current?.name ?? "this project", proceed });
