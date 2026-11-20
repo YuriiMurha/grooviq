@@ -141,8 +141,8 @@ fn start_audio(app: &AppHandle) -> Audio {
     let controller = Arc::new(Mutex::new(controller));
     let session = Arc::new(Mutex::new(Session::new(Arc::clone(&controller))));
     let data_dir = app.path().app_data_dir().ok();
-    let (recovery, pending_recovery, autosave_off) = start_recovery(data_dir.as_deref(), &log);
-    let autosave_status = Arc::new(Mutex::new(AutosaveStatus::off(autosave_off)));
+    let (recovery, pending_recovery, autosave_status) = start_recovery(data_dir.as_deref(), &log);
+    let autosave_status = Arc::new(Mutex::new(autosave_status));
     let backups = data_dir.map_or_else(
         || std::env::temp_dir().join("grooviq-backups"),
         |dir| dir.join("backups"),
@@ -257,10 +257,16 @@ fn start_audio(app: &AppHandle) -> Audio {
 fn start_recovery(
     data_dir: Option<&std::path::Path>,
     log: &Mutex<AudioLog>,
-) -> (Option<RecoveryDir>, Option<Recovery>, Option<String>) {
+) -> (Option<RecoveryDir>, Option<Recovery>, AutosaveStatus) {
     let Some(dir) = data_dir else {
         lock(log).push(Level::Warn, "No data folder: autosave and recovery are off");
-        return (None, None, None);
+        return (
+            None,
+            None,
+            AutosaveStatus::off(disabled_notice(&std::io::Error::other(
+                "No data folder is available",
+            ))),
+        );
     };
     match RecoveryDir::start(&dir.join("recovery")) {
         Ok((recovery, found)) => {
@@ -275,11 +281,15 @@ fn start_recovery(
                 );
             }
             // The newest first; the others wait for later launches.
-            (Some(recovery), found.into_iter().next(), None)
+            (
+                Some(recovery),
+                found.into_iter().next(),
+                AutosaveStatus::default(),
+            )
         }
         Err(e) => {
             lock(log).push(Level::Warn, format!("Autosave and recovery are off: {e}"));
-            (None, None, disabled_notice(&e))
+            (None, None, AutosaveStatus::off(disabled_notice(&e)))
         }
     }
 }
@@ -538,4 +548,47 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod recovery_startup_tests {
+    use super::*;
+
+    #[test]
+    fn startup_failures_retain_disabled_status_without_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("not-a-folder");
+        std::fs::write(&file, b"keep").unwrap();
+        for path in [None, Some(file.as_path())] {
+            let log = Mutex::new(AudioLog::default());
+            let (recovery, pending, status) = start_recovery(path, &log);
+            assert!(recovery.is_none());
+            assert!(pending.is_none());
+            assert!(status.disabled.is_some(), "{path:?}");
+            assert_eq!(status.clone().disabled, status.disabled);
+            assert!(status.failure.is_none());
+            let entries = lock(&log).entries();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].level, Level::Warn);
+        }
+        assert_eq!(std::fs::read(file).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn successful_startup_is_quiet_and_second_copy_retains_disabled_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = Mutex::new(AudioLog::default());
+        let (owner, pending, status) = start_recovery(Some(temp.path()), &log);
+        assert!(owner.is_some());
+        assert!(pending.is_none());
+        assert_eq!(status, AutosaveStatus::default());
+        let (second, pending, status) = start_recovery(Some(temp.path()), &log);
+        assert!(second.is_none());
+        assert!(pending.is_none());
+        assert_eq!(
+            status.disabled,
+            disabled_notice(&std::io::ErrorKind::WouldBlock.into())
+        );
+        drop(owner);
+    }
 }
