@@ -630,6 +630,64 @@ export function installMockTauri(seed: MockSeed): void {
     return { spec, value: clamp(finite(value, `${synth ? "synth" : "sampler"} value`), spec[1], spec[2]) };
   };
   type Edit = Record<string, unknown> & { kind: string };
+  // #181 sampler-only capability bookkeeping; no legacy note/history semantics here.
+  let trimEpoch = 0n;
+  const trimIdentities = new Map<number, { sample: bigint; edit: bigint }>();
+  const trimInstances = new WeakMap<MockChannel, bigint>();
+  const trimInverse = new Map<number, { token: string; stamp: string; before: [number | undefined, number | undefined] }>();
+  let trimRefusal: string | null = null;
+  let trimResponseHold: { promise: Promise<void>; release: () => void } | null = null;
+  const invalidateTrim = (channel: number, sample = false) => {
+    const state = trimIdentities.get(channel) ?? {sample:0n,edit:0n};
+    state.edit = ++trimEpoch;
+    if (sample) state.sample = trimEpoch;
+    trimIdentities.set(channel,state); trimInverse.delete(channel);
+  };
+  const trimView = (channel: number) => {
+    const c = s.project.channels[channelIndex(channel)];
+    if (c.kind === "synth") throw "Not a sampler channel";
+    if (!trimInstances.has(c)) trimInstances.set(c,++trimEpoch);
+    const identity = trimIdentities.get(channel) ?? {sample:0n,edit:0n};
+    const stamp = `${s.generation}:${trimInstances.get(c)}:${identity.sample}:${identity.edit}`;
+    const inverse = trimInverse.get(channel);
+    return { stamp,start:c.sampler.start ?? 0,end:c.sampler.end ?? 1,
+      frames:c.sample === null || missing(c) ? null : c.frames ?? Math.round(48000*sampleSeconds(c.sample)),
+      undo:inverse?.stamp === stamp ? inverse.token : null };
+  };
+  const trimMutation = async (channel: number, stamp: string, token?: string) => {
+    let reply;
+    try {
+      const before = trimView(channel);
+      if (before.stamp !== stamp) throw "Sample or trim changed; reload trim";
+      if (trimRefusal !== null) { const message=trimRefusal;trimRefusal=null;throw message; }
+      const c=s.project.channels[channelIndex(channel)];
+      if (token === undefined) {
+        if (!before.frames) throw "No decoded sample to repair";
+        if (before.start === 0 && before.end === 1) return {status:"applied",state:before,changed:false};
+        const original: [number | undefined, number | undefined]=[c.sampler.start,c.sampler.end];
+        c.sampler.start=0;c.sampler.end=1;
+        invalidateTrim(channel);
+        const state=trimView(channel);
+        trimInverse.set(channel,{token:(++trimEpoch).toString(),stamp:state.stamp,before:original});
+      } else {
+        const inverse=trimInverse.get(channel);
+        if (!inverse || inverse.token !== token || inverse.stamp !== stamp) throw "Undo reset is no longer available";
+        for (const [i,param] of ["start","end"].entries()) {
+          const value=inverse.before[i];
+          if (value === undefined) delete c.sampler[param]; else c.sampler[param]=value;
+        }
+        invalidateTrim(channel);
+      }
+      changed();
+      reply={status:"applied",state:trimView(channel),changed:true};
+    } catch (e) {
+      let state=null;try {state=trimView(channel);} catch { /* removed target */ }
+      reply={status:"refused",state,message:String(e)};
+    }
+    if (trimResponseHold) await trimResponseHold.promise;
+    return reply;
+  };
+
   const applyEdit = (e: Edit): boolean => {
     const p = s.project;
     switch (e.kind) {
@@ -638,6 +696,8 @@ export function installMockTauri(seed: MockSeed): void {
         editPattern((pat) => {
           pat.notes = pat.notes.filter((n) => n.channel !== e.channel);
         });
+        invalidateTrim(Number(e.channel));
+        trimIdentities.delete(Number(e.channel));
         p.channels.splice(i, 1);
         clearHistory();
         // The engine drops the channel's live notes with it (Task 5).
@@ -650,6 +710,7 @@ export function installMockTauri(seed: MockSeed): void {
         const store = c.kind === "synth" ? (c.synth ??= {}) : c.sampler;
         if (store[spec[0]] === value) return false;
         store[spec[0]] = value;
+        if (c.kind !== "synth" && (spec[0] === "start" || spec[0] === "end")) invalidateTrim(c.id);
         return true;
       }
       case "loadSynthPreset": {
@@ -693,6 +754,7 @@ export function installMockTauri(seed: MockSeed): void {
         const value = clamp(finite(e.value, "sampler value"), spec[1], spec[2]);
         if (c.sampler[spec[0]] === value) return false;
         c.sampler[spec[0]] = value;
+        if (spec[0] === "start" || spec[0] === "end") invalidateTrim(c.id);
         return true;
       }
       case "toggleStep": {
@@ -791,6 +853,7 @@ export function installMockTauri(seed: MockSeed): void {
   const openProject = (p: Project, path: string | null, unsaved: boolean) => {
     stopTransport();
     s.generation += 1;
+    trimIdentities.clear();trimInverse.clear();
     s.project = normalise(clone(p));
     clearHistory();
     notesChanged();
@@ -842,6 +905,7 @@ export function installMockTauri(seed: MockSeed): void {
 
   // --- The live stream: a fake WebSocket that sends v2 frames at 60 Hz. ---
   const LIVE_PORT = 47999;
+  let synthObservation: number[] | null = null;
   const encodeLive = () => {
     const buf = new ArrayBuffer(40);
     const v = new DataView(buf);
@@ -1029,7 +1093,8 @@ export function installMockTauri(seed: MockSeed): void {
   const LOOPS_MAX = 999;
   const checkStamp = (origin: unknown) => {
     const stamp = origin as { generation?: number; patternId?: number; revision?: number } | undefined;
-    if (!stamp || stamp.generation !== s.generation || stamp.patternId !== s.project.pattern.id || stamp.revision !== s.notesRevision) {
+    if (stamp && stamp.generation !== s.generation) throw "The project changed before this finished, so it was not applied.";
+    if (!stamp || stamp.patternId !== s.project.pattern.id || stamp.revision !== s.notesRevision) {
       throw "The pattern changed before this gesture finished. Reload its notes.";
     }
   };
@@ -1098,7 +1163,21 @@ export function installMockTauri(seed: MockSeed): void {
     if (id>=0xffffffff) throw "Project ids are exhausted.";
     return id;
   };
+  // T7 region lease: these native-only workflows have real Session/IPC acceptance.
+  // Explicit refusal avoids pretending that this UI fixture implements media/history.
+  const nativeArrangementOnly = () => { throw "Arrangement/media commands are not simulated by this browser fixture; use native offline acceptance."; };
   const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
+    arrangement_view: nativeArrangementOnly,
+    arrangement_edit: nativeArrangementOnly,
+    arrangement_history: nativeArrangementOnly,
+    arrangement_curve: nativeArrangementOnly,
+    audio_import: nativeArrangementOnly,
+    audio_relink: nativeArrangementOnly,
+    audio_cancel: nativeArrangementOnly,
+    arrangement_waveform: nativeArrangementOnly,
+    arrangement_mode: nativeArrangementOnly,
+    arrangement_loop: nativeArrangementOnly,
+    arrangement_seek: nativeArrangementOnly,
     // Native menu state has no platform menu in this headless fixture.
     edit_history_enabled: () => null,
     // commands.rs
@@ -1170,6 +1249,7 @@ export function installMockTauri(seed: MockSeed): void {
       c.embedded = true;
       // session.rs: the length is the new file's (a seeded length belonged to the old one).
       delete c.frames;
+      invalidateTrim(c.id,true);
       changed();
       return view();
     },
@@ -1207,10 +1287,26 @@ export function installMockTauri(seed: MockSeed): void {
       return view();
     },
     channel_note: (a) => (a.on ? liveOn(a.channel, a.key, a.velocity) : liveOff(a.channel, a.key, a.press)),
+    synth_meter: (a) => {
+      if (a.generation !== s.generation) return null;
+      const channel = s.project.channels.find((c) => c.id === a.channel && c.kind === "synth");
+      if (!channel) return null;
+      const instance = (s.generation + 1) * 100000 + channel.id;
+      if (a.instance != null && a.instance !== instance) return null;
+      if (s.livePaused) return synthObservation?.[0] === instance ? synthObservation : null;
+      const sounding = [...s.live.keys()].some((key) => key.startsWith(`${channel.id}:`));
+      const t = performance.now() / 1000;
+      synthObservation = [instance, Math.floor(performance.now() * 48), sounding ? 0.5 : 0, sounding ? 0.5 : 0, sounding ? 1 : 0, sounding ? Math.sin(t) : 0, sounding ? 0.7 : 0, sounding ? 0.4 : 0, ...Array.from({ length: 256 }, (_, i) => sounding ? Math.sin(i / 10 + t * 9) * 0.4 : 0)];
+      return synthObservation;
+    },
+    sampler_trim_view: (a) => trimView(Number(a.channel)),
+    sampler_trim_reset: (a) => trimMutation(Number(a.channel),String(a.stamp)),
+    sampler_trim_undo: (a) => trimMutation(Number(a.channel),String(a.stamp),String(a.token)),
     channel_param_live: (a) => {
       const c = s.project.channels[channelIndex(a.channel)];
       const { spec, value } = instrumentParam(c, a.param, a.value);
       s.liveParams.set(`${c.id}:${spec[0]}`, value);
+      if (c.kind !== "synth" && (spec[0] === "start" || spec[0] === "end")) invalidateTrim(c.id);
       return null;
     },
     channel_select: (a) => {
@@ -1480,6 +1576,9 @@ export function installMockTauri(seed: MockSeed): void {
       ? null
       : `format: unknown variant ${JSON.stringify((v as { format?: unknown }).format ?? null)}, expected \`pcm24\` or \`float32\``);
   const ARGS: Record<string, Record<string, Check>> = {
+    sampler_trim_view: { channel:u32 },
+    sampler_trim_reset: { channel:u32,stamp:str },
+    sampler_trim_undo: { channel:u32,stamp:str,token:str },
     audio_select: { id: str },
     audio_set_guard: { on: bool },
     test_tone: { on: bool },
@@ -1494,6 +1593,7 @@ export function installMockTauri(seed: MockSeed): void {
     notes_redo: { stamp: fields({ generation: u64, patternId: u32, revision: u32 }) },
     channel_add_synth: { preset: str, generation: u64 },
     channel_note: { channel: u32, key: u8, velocity: f32, on: bool, press: optional(u64) },
+    synth_meter: { channel: u32, generation: u64, instance: optional(u64) },
     channel_param_live: { channel: u32, param: str, value: f32 },
     channel_select: { channel: optional(u32) },
     midi_set_enabled: { id: str, enabled: bool },
@@ -1549,6 +1649,16 @@ export function installMockTauri(seed: MockSeed): void {
     unregisterListener: (_event: string, id: number) => callbacks.delete(id),
   };
   w.__grooviqMock = {
+    trimState: trimView,
+    trimInverseCount: () => trimInverse.size,
+    refuseTrim: (message: string) => { trimRefusal=message; },
+    holdTrimResponse: () => {
+      if (trimResponseHold) throw new Error("Trim response already held");
+      let release=()=>{};
+      const promise=new Promise<void>(resolve=>{release=resolve;});
+      trimResponseHold={promise,release};
+    },
+    releaseTrimResponse: () => { trimResponseHold?.release();trimResponseHold=null; },
     releaseExport: () => {
       if (!releaseExport) throw new Error("No export is held.");
       releaseExport();

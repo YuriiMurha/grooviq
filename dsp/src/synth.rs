@@ -1276,6 +1276,8 @@ pub struct Synth {
     last_pitch: Option<f32>,
     last_voice: usize,
     fresh: bool,
+    #[cfg(test)]
+    force_full_preparation: bool,
     level_l: PeakMeter,
     level_r: PeakMeter,
     lfo_meter: f32,
@@ -1357,6 +1359,8 @@ impl Synth {
             last_pitch: None,
             last_voice: 0,
             fresh: true,
+            #[cfg(test)]
+            force_full_preparation: false,
             level_l: PeakMeter::default(),
             level_r: PeakMeter::default(),
             lfo_meter: 0.0,
@@ -1576,6 +1580,45 @@ impl Synth {
             b.drive_g[i] = self.drive_cache.1;
             b.drive_n[i] = self.drive_cache.2;
             b.master[i] = self.s_master.next();
+            self.lfo_meter = lfo;
+        }
+    }
+
+    // Keep the recurrence order identical to fill_bufs; no voice reads these buffers.
+    fn advance_idle(&mut self, n: usize) {
+        for _ in 0..n {
+            let lfo = self.lfo.next();
+            self.s_lfo_amt.next();
+            let _ = self.route.each_mut().map(|r| r.next());
+            self.s_shape1.next();
+            self.s_shape2.next();
+            self.s_lvl1.next();
+            self.s_lvl2.next();
+            self.s_sub.next();
+            self.s_noise.next();
+            let res = self.s_res.next();
+            if res != self.res_cache.0 {
+                let q = 0.707 * libm::powf(35.0, res);
+                let x = ((res - 0.3) / 0.3).clamp(0.0, 1.0);
+                let t = self.cut_ms[0] + (self.cut_ms[1] - self.cut_ms[0]) * x;
+                let coef = libm::expf(-1000.0 / (t * self.cx.sr).max(1.0e-3));
+                self.res_cache = (res, 1.0 / q, 4.1 * res, coef);
+            }
+            self.s_cut.next(self.res_cache.3);
+            self.s_env.next();
+            self.s_kt.next();
+            self.r_off[0].next();
+            self.r_off[1].next();
+            self.uxf[0].next();
+            self.uxf[1].next();
+            let _ = self.fw.each_mut().map(|w| w.next());
+            let drive = self.s_drive.next();
+            if drive != self.drive_cache.0 {
+                let g = 10.0 * drive * drive;
+                let n = if g > 1.0e-3 { 1.0 / fast_tanh(g) } else { 1.0 };
+                self.drive_cache = (drive, g, n);
+            }
+            self.s_master.next();
             self.lfo_meter = lfo;
         }
     }
@@ -1953,7 +1996,18 @@ impl Device for Synth {
             let cr = &mut r[base..base + len];
             cl.fill(0.0);
             cr.fill(0.0);
-            self.fill_bufs(len);
+            let idle = self.voices.iter().all(|v| !v.active)
+                && !events[ei..]
+                    .iter()
+                    .take_while(|e| (e.offset as usize) < base + len || last_chunk)
+                    .any(|e| e.on && e.velocity > 0.0);
+            #[cfg(test)]
+            let idle = idle && !self.force_full_preparation;
+            if idle {
+                self.advance_idle(len);
+            } else {
+                self.fill_bufs(len);
+            }
             let mut pos = 0;
             while ei < events.len() {
                 let off = events[ei].offset as usize;
@@ -2034,6 +2088,7 @@ impl Device for Synth {
 
 #[cfg(test)]
 mod tests {
+    mod idle;
     use super::*;
 
     #[derive(Clone, Copy)]

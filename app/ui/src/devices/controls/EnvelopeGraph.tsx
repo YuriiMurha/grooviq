@@ -17,6 +17,7 @@ export interface EnvParam {
 export interface EnvelopeGraphProps {
   /** The accessible name ("Amp envelope"). */
   name: string;
+  meter?: "amp" | "flt";
   attack: EnvParam;
   decay: EnvParam;
   sustain: EnvParam;
@@ -34,7 +35,7 @@ const HANDLES: Record<EnvHandle, ("attack" | "decay" | "sustain" | "release")[]>
 /** An ADSR curve with three points to drag: the peak (attack time), the decay end (decay time
  * and sustain level) and the release end (release time). The number fields beside it are the
  * keyboard way in. */
-export function EnvelopeGraph({ name, attack, decay, sustain, release, group }: EnvelopeGraphProps) {
+export function EnvelopeGraph({ meter, name, attack, decay, sustain, release, group }: EnvelopeGraphProps) {
   const host = useRef<HTMLDivElement>(null);
   const { w, h } = useBoxSize(host);
   const [hot, setHot] = useState<EnvHandle | null>(null);
@@ -132,6 +133,7 @@ export function EnvelopeGraph({ name, attack, decay, sustain, release, group }: 
           ))}
           <path className="dw-fill" d={fill} />
           <path className="dw-line" d={line} />
+          {meter && <ellipse className="dw-node" data-synth-meter={meter} data-meter-top={box.top} data-meter-bottom={p.yBottom} cx={w - 8} cy={p.yBottom} rx={3} ry={3} style={{ visibility: "hidden" }} />}
           {point("attack", p.xA, p.yTop)}
           {point("decay", p.xD, p.yS)}
           {point("release", p.xR, p.yBottom)}

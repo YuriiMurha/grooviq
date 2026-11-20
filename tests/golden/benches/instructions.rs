@@ -11,7 +11,16 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
+#[path = "support/synth_workload.rs"]
+mod synth_workload;
+
+#[cfg(target_os = "linux")]
+#[path = "support/sampler_workload.rs"]
+mod sampler_workload;
+
+#[cfg(target_os = "linux")]
 mod counts {
+    use super::sampler_workload::scenario;
     use std::hint::black_box;
     use std::sync::Arc;
 
@@ -89,6 +98,9 @@ mod counts {
     // 100 blocks of 64 frames. (Plain comments: the macro rejects doc attributes.)
     #[library_benchmark]
     #[bench::voices_16(sampler(16))]
+    #[bench::filter_static_16(scenario(0.0, false))]
+    #[bench::filter_envelope_16(scenario(0.7, false))]
+    #[bench::filter_velocity_16(scenario(0.7, true))]
     fn sampler_blocks(mut s: Sampler) -> f32 {
         render(&mut s)
     }
@@ -99,6 +111,14 @@ mod counts {
     #[bench::dark_pad_4(synth("Dark Pad", 4))]
     fn synth_blocks(mut s: Synth) -> f32 {
         render(&mut s)
+    }
+
+    #[library_benchmark]
+    #[bench::idle_initialized(crate::synth_workload::setup(false, false))]
+    #[bench::idle_freerunning(crate::synth_workload::setup(true, false))]
+    #[bench::active_modulated(crate::synth_workload::setup(true, true))]
+    fn synth_idle_blocks(s: Synth) -> Synth {
+        crate::synth_workload::render(s)
     }
 
     /// An engine playing a reference scene, and a stereo buffer of one engine block.
@@ -132,7 +152,7 @@ mod counts {
         (controller, processor, buf)
     }
 
-    library_benchmark_group!(name = dsp; benchmarks = sampler_blocks, synth_blocks);
+    library_benchmark_group!(name = dsp; benchmarks = sampler_blocks, synth_blocks, synth_idle_blocks);
     library_benchmark_group!(name = engine; benchmarks = scene_second);
 }
 

@@ -51,6 +51,7 @@ impl Source {
 pub(crate) struct ChannelNode {
     host: Option<grooviq_dsp::HostTransport>,
     id: ChannelId,
+    pub(crate) instance: u64,
     source: Source,
     mix: ChannelMix,
     base_params: Vec<f32>,
@@ -103,6 +104,7 @@ impl ChannelNode {
         Self {
             host: None,
             id: setup.id,
+            instance: 0,
             source,
             mix: setup.mix,
             base_params: setup
@@ -126,6 +128,23 @@ impl ChannelNode {
             #[cfg(test)]
             never_skip: false,
         }
+    }
+
+    pub(crate) fn synth_meter(&self) -> Option<crate::SynthMeter> {
+        let Source::Synth(synth) = &self.source else {
+            return None;
+        };
+        let mut meter = crate::SynthMeter {
+            instance: self.instance,
+            levels: std::array::from_fn(|i| synth.meter(i as u32)),
+            scope: [0.0; crate::SYNTH_SCOPE_LEN],
+        };
+        if meter.levels[2] > 0.0 {
+            synth.meter_array(6, &mut meter.scope);
+        } else {
+            meter.levels = [0.0; 6];
+        }
+        Some(meter)
     }
 
     pub(crate) fn automate(
