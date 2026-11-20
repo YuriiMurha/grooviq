@@ -47,6 +47,8 @@ class AgentTests(unittest.TestCase):
 
             def git(self, *args):
                 owner.calls.append(('git', args))
+                if args[:2] == ('remote', 'get-url'):
+                    return 'https://github.com/YuriiMurha/grooviq.git'
                 if args[0] == 'rev-parse':
                     return str(owner.common_repo / '.git') if args[1] == '--git-common-dir' else owner.latest
                 if args[0] == 'diff': return '\n'.join(owner.paths)
@@ -62,6 +64,29 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.agent.tick()['status'], 'unchanged')
         self.assertEqual([c for c in self.calls if c[0] == 'refresh'], [('refresh', self.latest)])
         self.assertFalse((self.agent.ops / 'validation-lease.json').exists())
+
+    def test_foreign_origin_refuses_before_fetch_or_build(self):
+        original = self.agent.git
+        def foreign(*args):
+            if args[:2] == ('remote', 'get-url'):
+                return 'https://example.invalid/another/project.git'
+            return original(*args)
+        with patch.object(self.agent, 'git', side_effect=foreign):
+            self.assertEqual(self.agent.tick()['status'], 'failed')
+        self.assertFalse(any(c[0] == 'refresh' or c == ('git', ('fetch', 'origin', '--prune')) for c in self.calls))
+
+    def test_foreign_origin_cannot_register_a_scheduler(self):
+        original = self.merged_sources()
+        def foreign(*args):
+            if args[:2] == ('remote', 'get-url'):
+                return 'https://example.invalid/another/project.git'
+            return original(*args)
+        with patch.object(self.agent, 'git', side_effect=foreign), \
+                patch.object(m.subprocess, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'canonical Grooviq origin'):
+                self.agent.enable()
+            run.assert_not_called()
+        self.assertFalse((self.home / 'bin/grooviq-refresh').exists())
 
     def test_docs_and_test_only_do_not_build_or_change_installed_source(self):
         self.paths = ['README.md', 'app/ui/e2e/bpm-save.e2e.ts', 'engine/tests/safety.rs']

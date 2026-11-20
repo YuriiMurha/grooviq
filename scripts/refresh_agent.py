@@ -77,6 +77,13 @@ class Agent:
             if shutil.which(tool, path=self.env['PATH']) is None:
                 raise RuntimeError('Missing ' + tool + '; install the toolchain before enabling refresh. Rust PATH is ~/.cargo/bin; Node/npm use Homebrew or /usr/local/bin.')
 
+    def verify_origin(self):
+        origin = self.git('remote', 'get-url', 'origin')
+        if origin not in ('https://github.com/YuriiMurha/grooviq.git',
+                          'https://github.com/YuriiMurha/grooviq',
+                          'git@github.com:YuriiMurha/grooviq.git'):
+            raise RuntimeError('Automatic refresh requires the canonical Grooviq origin; no foreign repository was fetched or installed')
+
     def read(self, path, default=None):
         safe_path(path)
         return json.loads(path.read_text()) if path.exists() else default
@@ -133,6 +140,7 @@ class Agent:
         lease_path = self.ops / 'validation-lease.json'
         nonce, owned = uuid.uuid4().hex, None
         try:
+            self.verify_origin()
             self.git('fetch', 'origin', '--prune')
             latest = self.git('rev-parse', 'origin/main')
             if not re.fullmatch('[0-9a-f]{40}', latest):
@@ -210,6 +218,7 @@ class Agent:
         require_runtime()
         control = self.state / 'control.json'
         previous_request = self.read(control, None)
+        self.verify_origin()
         self.git('fetch', 'origin', '--prune')
         revision = self.git('rev-parse', 'origin/main')
         if not re.fullmatch('[0-9a-f]{40}', revision):
