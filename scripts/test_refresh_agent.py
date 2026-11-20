@@ -154,6 +154,37 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.agent.tick()['status'], 'disabled')
         self.assertEqual(self.calls, before)
 
+    def test_old_disable_cannot_unload_a_newer_successful_enable(self):
+        loaded, events = [False], []
+        def launchctl(args, **_kwargs):
+            events.append(args[1])
+            if args[1] == 'bootstrap': loaded[0] = True
+            elif args[1] == 'bootout': loaded[0] = False
+        real_locked = m.locked
+        pending = [True]
+        @contextlib.contextmanager
+        def interleaved(path):
+            if path == self.agent.state / 'tick.lock' and pending[0]:
+                pending[0] = False
+                self.assertEqual(self.agent.enable()['status'], 'enabled')
+            with real_locked(path):
+                yield
+        with patch.object(self.agent, 'git', side_effect=self.merged_sources()), \
+                patch.object(m.subprocess, 'run', side_effect=launchctl):
+            self.agent.enable()
+            self.assertTrue(loaded[0])
+            with patch.object(m, 'locked', side_effect=interleaved):
+                self.agent.disable()
+            self.assertTrue(loaded[0], 'stale disable unloaded the newer registration')
+            self.assertTrue(self.agent.status()['enabled'])
+            self.assertEqual(events, ['bootstrap', 'bootout', 'bootstrap'])
+            self.assertEqual(json.loads((self.agent.state / 'control.json').read_text())['request'], 'enable')
+            self.assertFalse((self.agent.state / 'disabled').exists())
+            # A current ordinary disable must still unload the registered agent.
+            self.assertEqual(self.agent.disable()['status'], 'disabled')
+            self.assertFalse(loaded[0])
+            self.assertFalse(self.agent.status()['enabled'])
+
     def test_install_lock_race_before_refresh_entry_is_retryable_busy(self):
         original = self.agent.perform_refresh
         def contender():

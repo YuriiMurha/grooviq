@@ -280,11 +280,15 @@ class Agent:
 
     def disable(self):
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        token = uuid.uuid4().hex
         with locked(self.state / 'control.lock'):
-            atomic_json(self.state / 'control.json', {'request': 'disable', 'token': uuid.uuid4().hex})
+            atomic_json(self.state / 'control.json', {'request': 'disable', 'token': token})
             atomic_text(self.state / 'disabled', 'disabled by coordinator\n')
         try:
             with locked(self.state / 'tick.lock'):
+                with locked(self.state / 'control.lock'):
+                    if self.read(self.state / 'control.json', {}).get('token') != token:
+                        return {'status': 'superseded', 'reason': 'newer control request superseded disable'}
                 if (self.state / 'registration.json').exists():
                     subprocess.run(['/bin/launchctl', 'bootout', 'gui/' + str(os.getuid()) + '/' + LABEL],
                                    check=False, capture_output=True, timeout=15)
