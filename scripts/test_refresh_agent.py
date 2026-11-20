@@ -22,6 +22,8 @@ class AgentTests(unittest.TestCase):
         self.home = Path(self.tmp.name).resolve()
         self.repo = self.home / 'repo'
         self.repo.mkdir()
+        (self.repo / '.git').mkdir()
+        self.common_repo = self.repo
         owner = self
         self.latest, self.installed = 'b' * 40, 'a' * 40
         self.paths = ['app/src-tauri/src/lib.rs']
@@ -45,7 +47,8 @@ class AgentTests(unittest.TestCase):
 
             def git(self, *args):
                 owner.calls.append(('git', args))
-                if args[0] == 'rev-parse': return owner.latest
+                if args[0] == 'rev-parse':
+                    return str(owner.common_repo / '.git') if args[1] == '--git-common-dir' else owner.latest
                 if args[0] == 'diff': return '\n'.join(owner.paths)
                 if args[0] == 'show': return b'merged source\n'
                 return ''
@@ -308,6 +311,18 @@ class AgentTests(unittest.TestCase):
                 self.agent.enable()
             run.assert_not_called()
         self.assertEqual(front.read_text(), 'foreign owner')
+
+    def test_registered_frontdoor_uses_common_repo_not_disposable_worktree(self):
+        self.common_repo = self.home / 'stable-common-repository'
+        (self.common_repo / '.git').mkdir(parents=True)
+        with patch.object(self.agent, 'git', side_effect=self.merged_sources()), \
+                patch.object(m.subprocess, 'run'):
+            self.agent.enable()
+        registration = json.loads((self.agent.state / 'registration.json').read_text())
+        self.assertEqual(registration['repo'], str(self.common_repo))
+        plist = self.home / 'Library/LaunchAgents' / (m.LABEL + '.plist')
+        argv = m.plistlib.loads(plist.read_bytes())['ProgramArguments']
+        self.assertEqual(argv[argv.index('--repo') + 1], str(self.common_repo))
 
     def test_failed_registration_keeps_disabled_and_never_builds(self):
         with patch.object(self.agent, 'git', side_effect=self.merged_sources()), \

@@ -221,6 +221,13 @@ class Agent:
             if path.is_symlink() or path.read_bytes() != merged:
                 raise RuntimeError('enable requires exact reviewed merged source: ' + name)
             payloads[name] = merged
+        common = Path(self.git('rev-parse', '--git-common-dir'))
+        if not common.is_absolute():
+            common = self.repo / common
+        common = safe_path(common.resolve())
+        if common.name != '.git' or not common.is_dir():
+            raise RuntimeError('A stable shared repository is required for automatic refresh')
+        stable_repo = common.parent
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         with locked(self.state / 'tick.lock'):
             registration = self.read(self.state / 'registration.json', {})
@@ -240,7 +247,9 @@ class Agent:
                         stream.write(raw)
             python = str(Path(sys.executable).resolve())
             script = str(version / 'refresh_agent.py')
-            prefix = [python, '-S', '-B', script, '--repo', str(self.repo)]
+            # A prepared review/feature checkout may be removed after merge.
+            # Only Git objects are needed; no physical root Makefile is used.
+            prefix = [python, '-S', '-B', script, '--repo', str(stable_repo)]
             wrapper.parent.mkdir(parents=True, exist_ok=True)
             plist.parent.mkdir(parents=True, exist_ok=True)
             text = ('#!/bin/sh\n# Grooviq verified merged refresh frontdoor\n'
@@ -268,7 +277,7 @@ class Agent:
             atomic_json(self.state / 'registration.json', {'source_sha': revision,
                 'wrapper_sha256': hashlib.sha256(wrapper.read_bytes()).hexdigest(),
                 'plist_sha256': hashlib.sha256(plist.read_bytes()).hexdigest(),
-                'snapshot': str(version), 'repo': str(self.repo), 'python': python})
+                'snapshot': str(version), 'repo': str(stable_repo), 'python': python})
             subprocess.run(['/bin/launchctl', 'bootstrap', 'gui/' + str(os.getuid()), str(plist)],
                            check=True, capture_output=True, timeout=15)
             with locked(self.state / 'control.lock'):
