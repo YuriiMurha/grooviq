@@ -1,5 +1,6 @@
 """Owned temporary fixtures only: no build, launchd registration or app launch."""
 import importlib.util
+import contextlib
 import json
 from pathlib import Path
 import tempfile
@@ -67,7 +68,8 @@ class AgentTests(unittest.TestCase):
 
     def test_product_inputs_are_conservative(self):
         for path in ['app/ui/src/app.css', 'app/ui/package-lock.json', 'app/src-tauri/tauri.conf.json',
-                     'engine/src/lib.rs', 'dsp/Cargo.toml', 'Cargo.lock', 'app/ui/vite.config.ts']:
+                     'engine/src/lib.rs', 'dsp/Cargo.toml', 'Cargo.lock', 'app/ui/vite.config.ts',
+                     'app/ui/public/icon.svg', 'app/ui/tsconfig.app.json']:
             self.assertTrue(m.product_path(path), path)
         self.assertFalse(m.product_path('docs/research.md'))
 
@@ -123,6 +125,66 @@ class AgentTests(unittest.TestCase):
         (self.agent.state / 'disabled').write_text('disabled')
         self.assertEqual(self.agent.tick()['status'], 'disabled')
         self.assertEqual(self.calls, [])
+
+    def test_disable_between_initial_check_and_tick_lock_prevents_admission(self):
+        real_locked = m.locked
+        pending = [True]
+        @contextlib.contextmanager
+        def interleaved(path):
+            if path == self.agent.state / 'tick.lock' and pending[0]:
+                pending[0] = False
+                self.assertEqual(self.agent.disable()['status'], 'disabled')
+            with real_locked(path):
+                yield
+        with patch.object(m, 'locked', side_effect=interleaved):
+            self.assertEqual(self.agent.tick()['status'], 'disabled')
+        self.assertFalse(any(c[0] == 'refresh' for c in self.calls))
+        self.assertEqual(json.loads((self.agent.ops / 'installed.json').read_text())['source_sha'], self.installed)
+
+    def test_disable_during_enable_bootstrap_wins_and_next_tick_does_no_work(self):
+        def bootstrap(args, **_kwargs):
+            if args[1] == 'bootstrap':
+                self.assertEqual(self.agent.disable()['status'], 'disabled')
+            return None
+        with patch.object(self.agent, 'git', side_effect=self.merged_sources()), \
+                patch.object(m.subprocess, 'run', side_effect=bootstrap):
+            self.agent.enable()
+        self.assertTrue((self.agent.state / 'disabled').exists())
+        before = list(self.calls)
+        self.assertEqual(self.agent.tick()['status'], 'disabled')
+        self.assertEqual(self.calls, before)
+
+    def test_install_lock_race_before_refresh_entry_is_retryable_busy(self):
+        original = self.agent.perform_refresh
+        def contender():
+            with m.locked(self.agent.cache / 'install.lock'):
+                refresh = self.agent.refresher()
+                refresh.app = self.home / 'fake-app'
+                return m.Refresh.refresh(refresh)
+        with patch.object(self.agent, 'perform_refresh', side_effect=contender):
+            self.assertEqual(self.agent.tick()['status'], 'deferred')
+        self.assertFalse((self.agent.ops / 'validation-lease.json').exists())
+        self.assertTrue(self.agent.queue.exists())
+        self.assertEqual(self.agent.tick()['status'], 'installed')
+
+    def test_post_entry_blocking_io_is_protected_not_initial_lock_busy(self):
+        with patch.object(self.agent, 'perform_refresh', side_effect=BlockingIOError('transaction write')):
+            self.assertEqual(self.agent.tick()['status'], 'failed protected')
+        lease = json.loads((self.agent.ops / 'validation-lease.json').read_text())
+        self.assertEqual(lease['status'], 'FAILED_PROTECTED_REFRESH')
+        self.assertTrue(self.agent.queue.exists())
+
+    def test_lock_busy_type_is_only_acquisition_not_post_yield_body(self):
+        path = self.agent.ops / 'fixture.lock'
+        with m.locked(path):
+            with self.assertRaises(m.LockBusy) as caught:
+                with m.locked(path): self.fail('duplicate owner admitted')
+        self.assertEqual(caught.exception.path, path)
+        original = BlockingIOError('body IO')
+        with self.assertRaises(BlockingIOError) as body:
+            with m.locked(path): raise original
+        self.assertIs(body.exception, original)
+        self.assertNotIsInstance(body.exception, m.LockBusy)
 
     def test_environment_has_rust_path_and_clt(self):
         refresh = self.agent.refresher()

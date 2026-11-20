@@ -14,7 +14,7 @@ import subprocess
 import sys
 import uuid
 
-from refresh_install import Refresh, atomic_json, atomic_text, locked, safe_path
+from refresh_install import LockBusy, Refresh, atomic_json, atomic_text, locked, safe_path
 
 LABEL = 'io.github.yuriimurha.grooviq.refresh'
 SNAPSHOT_FILES = ('refresh_agent.py', 'refresh_install.py')
@@ -38,9 +38,10 @@ def product_path(name):
     if name.endswith(('.test.ts', '.spec.ts', '.md')):
         return False
     return (name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml')
-            or name.startswith(('dsp/', 'engine/', 'project/', 'app/src-tauri/', 'app/ui/src/'))
+            or name.startswith(('dsp/', 'engine/', 'project/', 'app/src-tauri/', 'app/ui/src/', 'app/ui/public/'))
             or name in ('app/ui/package.json', 'app/ui/package-lock.json', 'app/ui/index.html')
-            or (name.startswith('app/ui/vite') and name.endswith(('.ts', '.js', '.mjs'))))
+            or (name.startswith('app/ui/vite') and name.endswith(('.ts', '.js', '.mjs')))
+            or (name.startswith('app/ui/tsconfig') and name.endswith('.json')))
 
 
 class Agent:
@@ -122,6 +123,8 @@ class Agent:
             return self.record({'status': 'disabled'})
         try:
             with locked(self.state / 'tick.lock'):
+                if (self.state / 'disabled').exists():
+                    return self.record({'status': 'disabled'})
                 return self._tick()
         except BlockingIOError:
             return {'status': 'deferred', 'reason': 'another refresh coordinator is active'}
@@ -180,6 +183,11 @@ class Agent:
                     current = lease_path.lstat()
                     if ((current.st_dev, current.st_ino) == (owned.st_dev, owned.st_ino)
                             and self.read(lease_path).get('nonce') == nonce):
+                        if isinstance(error, LockBusy) and error.path == self.cache / 'install.lock':
+                            # This type is raised only before locked() yields;
+                            # no installer body/transaction has been entered.
+                            lease_path.unlink()
+                            return self.record({'status': 'deferred', 'reason': str(error)})
                         value = self.read(lease_path)
                         value.update(status='FAILED_PROTECTED_REFRESH', error=str(error))
                         atomic_json(lease_path, value)
@@ -200,6 +208,8 @@ class Agent:
     def enable(self):
         """Provision only bytes already present on fetched, protected origin/main."""
         require_runtime()
+        control = self.state / 'control.json'
+        previous_request = self.read(control, None)
         self.git('fetch', 'origin', '--prune')
         revision = self.git('rev-parse', 'origin/main')
         if not re.fullmatch('[0-9a-f]{40}', revision):
@@ -243,7 +253,12 @@ class Agent:
                 'StandardErrorPath': str(self.state / 'launchd.stderr.log')})
             # Mark disabled before changing registration; a failed bootstrap never
             # leaves a partially updated agent permitted to build.
-            atomic_text(self.state / 'disabled', 'registration in progress\n')
+            token = uuid.uuid4().hex
+            with locked(self.state / 'control.lock'):
+                if self.read(control, None) != previous_request:
+                    return {'status': 'disabled', 'reason': 'newer control request superseded enable'}
+                atomic_json(control, {'request': 'enable', 'token': token})
+                atomic_text(self.state / 'disabled', 'registration in progress\n')
             if registration:
                 subprocess.run(['/bin/launchctl', 'bootout', 'gui/' + str(os.getuid()) + '/' + LABEL],
                                check=False, capture_output=True, timeout=15)
@@ -256,13 +271,18 @@ class Agent:
                 'snapshot': str(version), 'repo': str(self.repo), 'python': python})
             subprocess.run(['/bin/launchctl', 'bootstrap', 'gui/' + str(os.getuid()), str(plist)],
                            check=True, capture_output=True, timeout=15)
-            (self.state / 'disabled').unlink()
-        return {'status': 'enabled', 'interval_seconds': 300, 'frontdoor': str(wrapper),
+            with locked(self.state / 'control.lock'):
+                enabled = self.read(control, {}).get('token') == token
+                if enabled:
+                    (self.state / 'disabled').unlink()
+        return {'status': 'enabled' if enabled else 'disabled', 'interval_seconds': 300, 'frontdoor': str(wrapper),
                 'source_sha': revision, 'launched_app': False}
 
     def disable(self):
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
-        atomic_text(self.state / 'disabled', 'disabled by coordinator\n')
+        with locked(self.state / 'control.lock'):
+            atomic_json(self.state / 'control.json', {'request': 'disable', 'token': uuid.uuid4().hex})
+            atomic_text(self.state / 'disabled', 'disabled by coordinator\n')
         try:
             with locked(self.state / 'tick.lock'):
                 if (self.state / 'registration.json').exists():
