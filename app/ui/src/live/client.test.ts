@@ -113,3 +113,20 @@ test("honours a custom backoff range", () => {
   vi.advanceTimersByTime(1);
   expect(FakeSocket.all).toHaveLength(3);
 });
+
+test("connection resets and ignores old or stopped socket deliveries", () => {
+  const frames: LiveFrame[] = [];
+  const lifecycle = vi.fn();
+  const stop = connectLive(endpoint, f => frames.push(f), { WebSocketImpl, onConnectionChange: lifecycle });
+  const old = FakeSocket.all[0];
+  old.onopen?.(); old.drop();
+  old.onmessage?.({ data: v2(1) });
+  vi.advanceTimersByTime(250);
+  old.onopen?.();
+  const fresh = FakeSocket.all[1];
+  fresh.onopen?.(); fresh.onmessage?.({ data: v2(0.2) });
+  expect(frames).toHaveLength(1);
+  stop(); fresh.onmessage?.({ data: v2(1) });
+  expect(frames).toHaveLength(1);
+  expect(lifecycle).toHaveBeenCalledTimes(4);
+});
