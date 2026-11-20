@@ -15,6 +15,7 @@ import { createRollRenderer, readRollPalette, type RollPalette, type RollRendere
 import { KeyColumn } from "./KeyColumn";
 import { copy, duplicate, paste, type Clip } from "./clipboard";
 import { NoteStore, buildInstances } from "./noteStore";
+import { useTransformAmounts } from "./useTransformAmounts";
 import { RollToolbar } from "./RollToolbar";
 import { scaleMask } from "./scales";
 import { DEFAULT_GRID, GRIDS, barTicks, gridTicks, snapTick } from "./snap";
@@ -37,11 +38,6 @@ const EMPTY_HINT = "Click to draw a note, right-click to delete it. F6 goes back
 
 /** What Mod+C copied, kept while the roll is closed and reopened. */
 let clipboard: Clip | null = null;
-/** How far a strum spreads each voice (ticks), and the humanize amounts: about 15 ms, 10 ms and a tenth of the range at 120 BPM. */
-const STRUM_TICKS = 30;
-const HUMANIZE_TICKS = 20;
-const HUMANIZE_VELOCITY = 0.1;
-
 interface Props {
   /** The channel being edited. */
   channel: number | null;
@@ -123,6 +119,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   useEffect(() => setRollHistory({ run: (command) => queue.run(command) }), [queue]);
   const pointerTick = useRef<number | null>(null);
   const humanizeSeed = useRef(1);
+  const amounts = useTransformAmounts();
 
   const sig = project?.timeSignature ?? { beats: 4, unit: 4 };
   const grid = gridTicks(GRIDS[gridIndex], sig);
@@ -516,8 +513,8 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   };
   const actions = {
     quantize: () => transform((ns) => quantize(ns, scene.current.grid)),
-    strum: (direction: "up" | "down") => transform((ns) => strum(ns, STRUM_TICKS, direction)),
-    humanize: () => transform((ns) => humanize(ns, HUMANIZE_TICKS, HUMANIZE_VELOCITY, humanizeSeed.current++)),
+    strum: (direction: "up" | "down") => transform((ns) => strum(ns, amounts.values.spread, direction)),
+    humanize: () => transform((ns) => humanize(ns, amounts.values.timing, amounts.values.velocity, humanizeSeed.current++)),
     selectAll: () => {
       const ch = scene.current.channel;
       if (ch !== null) store.setSelection(store.channelNotes(ch));
@@ -575,6 +572,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
   return (
     <div className="roll">
       <RollToolbar
+        amounts={amounts}
         tool={tool}
         onTool={setTool}
         gridIndex={gridIndex}
@@ -598,7 +596,7 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
         onHumanize={actions.humanize}
       />
       <div className="roll-body">
-        <KeyColumn channel={channel} keyAt={keyAt} strip={strip} onError={reportKey} releaseKeys={releaseKeys} />
+        <KeyColumn projectKey={project?.key ?? null} channel={channel} keyAt={keyAt} strip={strip} onError={reportKey} releaseKeys={releaseKeys} />
         <div className="roll-wrap" ref={wrap}>
           <canvas
             key={use2d ? "2d" : "webgl2"}

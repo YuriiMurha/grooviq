@@ -34,6 +34,8 @@ pub enum HealthEvent {
 pub enum ControlError {
     /// A value was not finite, or a key, parameter index or pattern length is out of range.
     Rejected,
+    /// Fixed-second audio exceeds the admitted overlap budget.
+    AudioVoiceLimit,
     /// The queue had no room.
     Full,
     /// No channel has that id.
@@ -50,6 +52,7 @@ pub enum ControlError {
 impl std::fmt::Display for ControlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::AudioVoiceLimit => "audio needs more than 256 simultaneous instances at 400 BPM; shorten trims, remove overlaps or lengthen the loop",
             Self::Rejected => "a value is out of range or not a number",
             Self::Full => "the engine's command queue is full",
             Self::UnknownChannel => "no channel has that id",
@@ -172,6 +175,8 @@ impl Controller {
     /// Queues `cmd` for the next block, with its values clamped into range. Gives it back if
     /// it is rejected (a value not finite, an unknown key, parameter index or channel) or the
     /// queue is full.
+    // The bounded inline sampler snapshot avoids allocation/free on the callback.
+    #[allow(clippy::result_large_err)]
     pub fn send(&mut self, cmd: Command) -> Result<(), Command> {
         self.send_at(0, cmd).map_err(|_| cmd)
     }
@@ -187,6 +192,9 @@ impl Controller {
             && let Some(r) = self.state.song_loop
         {
             *tick = (*tick).clamp(r.start_tick, r.end_tick - 1);
+        }
+        if let Command::SetSongLoop { region } = cmd {
+            self.state.song.audio.validate_loop(region)?;
         }
         match cmd {
             Command::Seek { tick }
@@ -216,6 +224,12 @@ impl Controller {
                 .instrument
                 .kind();
             match &mut cmd {
+                Command::SetSamplerTrim { instance, .. }
+                    if kind != InstrumentKind::Sampler
+                        || self.instances.get(&id) != Some(instance) =>
+                {
+                    return Err(ControlError::Rejected);
+                }
                 Command::SetSamplerParam { .. } if kind != InstrumentKind::Sampler => {
                     return Err(ControlError::WrongInstrument);
                 }
@@ -229,8 +243,16 @@ impl Controller {
                 _ => {}
             }
         }
+        // Capture the accepted transition before the mirror moves; rebuilt graphs already
+        // contain the final mode, but queued stop/disarm effects still belong in order.
+        let mode_changed =
+            matches!(cmd, Command::SetPlaybackMode { mode } if mode != self.state.playback_mode);
         self.commands
-            .push(Msg::Command { due, cmd })
+            .push(Msg::Command {
+                due,
+                cmd,
+                mode_changed,
+            })
             .map_err(|_| ControlError::Full)?;
         self.mirror(cmd);
         Ok(())
@@ -279,6 +301,8 @@ impl Controller {
             ))
         }))
         .map_err(|_| ControlError::Rejected)?;
+        let mut node = node;
+        node.instance = self.next_instance + 1;
         self.push(Msg::AddChannel(node))?;
         self.next_instance += 1;
         self.instances.insert(setup.id, self.next_instance);
@@ -296,6 +320,7 @@ impl Controller {
             .notes
             .iter()
             .any(|n| n.channel == id)
+            || self.state.song.automation.references(id)
         {
             return Err(ControlError::Rejected);
         }
@@ -333,11 +358,59 @@ impl Controller {
     pub fn set_song(&mut self, song: crate::SongData) -> Result<(), ControlError> {
         let ids: Vec<_> = self.state.channels.iter().map(|c| c.id).collect();
         let song = song.checked(&ids)?;
+        song.automation.validate(&self.state.channels)?;
+        song.audio.validate_loop(self.state.song_loop)?;
         if !song.valid_loop(self.state.song_loop) {
             return Err(ControlError::Rejected);
         }
         self.push(Msg::SetSong(Box::new(song.clone())))?;
         self.state.song = song;
+        Ok(())
+    }
+
+    /// Publishes a complete musical candidate through one queue admission.
+    pub fn set_timeline(&mut self, update: crate::TimelineUpdate) -> Result<(), ControlError> {
+        if let Some(id) = update.remove_channel {
+            self.channel_index(id)?;
+        }
+        let channels: Vec<_> = self
+            .state
+            .channels
+            .iter()
+            .filter(|c| Some(c.id) != update.remove_channel)
+            .cloned()
+            .collect();
+        let ids: Vec<_> = channels.iter().map(|c| c.id).collect();
+        let pattern = (*update.pattern).clone().checked()?;
+        let song = (*update.song).clone().checked(&ids)?;
+        song.automation.validate(&channels)?;
+        if !update.bpm.is_finite()
+            || !(20.0..=400.0).contains(&update.bpm)
+            || !song.valid_loop(update.region)
+        {
+            return Err(ControlError::Rejected);
+        }
+        self.push(Msg::Timeline(
+            Box::new(crate::TimelineUpdate {
+                pattern: Box::new(pattern.clone()),
+                song: Box::new(song.clone()),
+                ..update.clone()
+            }),
+            self.state.playback_mode != update.mode,
+            self.state.song_loop != update.region,
+        ))?;
+        if let Some(id) = update.remove_channel {
+            self.state.channels.retain(|c| c.id != id);
+            self.instances.remove(&id);
+        }
+        self.state.pattern = pattern;
+        self.state.song = song;
+        self.state.bpm = update.bpm;
+        if self.state.playback_mode != update.mode {
+            self.recording_armed = false;
+        }
+        self.state.playback_mode = update.mode;
+        self.state.song_loop = update.region;
         Ok(())
     }
 
@@ -368,7 +441,11 @@ impl Controller {
         self.renew_instances();
         let graph = self.build_graph();
         // Only this thread pushes, and the queue had room for all five.
-        let command = |cmd| Msg::Command { due: 0, cmd };
+        let command = |cmd| Msg::Command {
+            due: 0,
+            cmd,
+            mode_changed: false,
+        };
         let tempo = Command::SetTempo {
             bpm: self.state.bpm,
         };
@@ -607,6 +684,8 @@ impl Controller {
                 setup,
                 any_solo,
             ));
+            let mut node = node;
+            node.instance = self.instances.get(&setup.id).copied().unwrap_or(0);
             let refused = graph.add_channel(node);
             debug_assert!(refused.is_none(), "the state holds valid channels only");
         }
@@ -643,6 +722,13 @@ impl Controller {
             Command::SetChannelMix { channel, mix } => {
                 if let Some(c) = self.state.channel_mut(channel) {
                     c.mix = mix;
+                }
+            }
+            Command::SetSamplerTrim {
+                channel, params, ..
+            } => {
+                if let Some(c) = self.state.channel_mut(channel) {
+                    c.instrument.params_mut().copy_from_slice(&params);
                 }
             }
             // `send_at` let these through for a channel whose instrument has the parameter.
@@ -1016,5 +1102,42 @@ mod tests {
         assert!(!c.synth_preset("Reese"));
         assert_eq!(c.commands.slots(), 39);
         assert_eq!(c.synth, before);
+    }
+}
+
+#[cfg(test)]
+mod sampler_trim_tests {
+    use super::*;
+    #[test]
+    fn pair_publication_uses_exactly_one_queue_slot() {
+        let (mut c, _p) = crate::engine(crate::EngineConfig {
+            sample_rate: 48000.0,
+        });
+        let setup = crate::ChannelSetup::sampler(
+            ChannelId(1),
+            None,
+            Vec::new(),
+            crate::ChannelMix::default(),
+        );
+        c.add_channel(setup).unwrap();
+        let instance = c.channel_instance(ChannelId(1)).unwrap();
+        let before = c.commands.slots();
+        let mut params = grooviq_dsp::sampler::SPEC.map(|(_, _, d)| d);
+        params[3] = 0.2;
+        params[4] = 0.7;
+        c.send_at(
+            0,
+            Command::SetSamplerTrim {
+                channel: ChannelId(1),
+                instance,
+                params,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            c.commands.slots(),
+            before - 1,
+            "a multi-message prefix must never become callback-visible"
+        );
     }
 }
