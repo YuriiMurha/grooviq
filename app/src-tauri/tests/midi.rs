@@ -555,9 +555,10 @@ fn a_selected_channel_change_is_let_go_by_the_next_poll_without_a_message() {
 }
 
 #[test]
+#[ignore = "enumerates real system MIDI ports; owner hand-check #167 only"]
 fn the_system_ports_list_without_error_and_refuse_a_name_that_is_not_there() {
-    // A runner has no MIDI devices (this machine may have some): listing must neither fail nor
-    // panic, and a port that is not plugged in is refused rather than opened.
+    // This manual smoke enumerates OS MIDI ports; automatic coverage uses FakePorts.
+    // A port that is not plugged in is refused rather than opened.
     let mut ports = grooviq_app::midi::MidirPorts::new();
     let listed = ports.list();
     let missing = "Grooviq test: no such MIDI input";

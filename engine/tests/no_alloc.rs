@@ -593,7 +593,7 @@ fn choke_never_allocates() {
                 }
             }
         }
-        assert_no_alloc(|| p.process(&mut buf, 2));
+        realtime(|| p.process(&mut buf, 2));
         c.check_health();
     }
     assert!(c.live().peak[0] > 0.05, "it sounded");
@@ -769,6 +769,7 @@ fn song_swaps_loop_seek_and_full_trash_remain_realtime_safe() {
         end_tick: 1,
         end_frame: 0,
         frame_rate: 48000.0,
+        frame_extent: None,
         audio: grooviq_engine::AudioSchedule::default(),
     };
     c.set_song(song.clone()).unwrap();
@@ -843,6 +844,7 @@ fn review_probe_active_song_transitions_never_allocate() {
         end_tick: 8200,
         end_frame: 500_000,
         frame_rate: 44100.0,
+        frame_extent: None,
         audio: grooviq_engine::AudioSchedule::default(),
     };
     c.set_song(song.clone()).unwrap();
@@ -1078,5 +1080,242 @@ fn automation_targets_restoration_and_retirement_are_realtime_safe() {
     ] {
         let _ = c.send(cmd);
         realtime(|| p.process(&mut out, 2));
+    }
+}
+
+#[test]
+fn compound_timeline_retirement_and_fault_refusal_are_realtime_safe() {
+    let (mut c, mut p) = engine(EngineConfig { sample_rate: SR });
+    for i in 0..32 {
+        c.set_timeline(grooviq_engine::TimelineUpdate {
+            pattern: Box::new(PatternData {
+                length: 240 + i,
+                notes: vec![],
+            }),
+            song: Box::new(grooviq_engine::SongData {
+                frame_extent: Some(Arc::new(grooviq_engine::SongFrameExtent {
+                    musical_end_tick: 0,
+                    audio: Vec::with_capacity(1),
+                })),
+                ..Default::default()
+            }),
+            bpm: 120.0,
+            mode: grooviq_engine::PlaybackMode::Pattern,
+            region: None,
+            remove_channel: None,
+        })
+        .unwrap();
+    }
+    realtime(|| p.process(&mut [0.0; 128], 2));
+    let _ = c.check_health();
+    c.send(Command::InjectPanic).unwrap();
+    // The injected panic deliberately allocates its unwind payload, as existing fault
+    // tests do; only ordinary publication and refusal belong inside the RT guard.
+    p.process(&mut [0.0; 128], 2);
+    c.set_timeline(grooviq_engine::TimelineUpdate {
+        pattern: Box::default(),
+        song: Box::new(grooviq_engine::SongData {
+            frame_extent: Some(Arc::new(grooviq_engine::SongFrameExtent {
+                musical_end_tick: 0,
+                audio: Vec::with_capacity(1),
+            })),
+            ..Default::default()
+        }),
+        bpm: 130.0,
+        mode: grooviq_engine::PlaybackMode::Pattern,
+        region: None,
+        remove_channel: None,
+    })
+    .unwrap();
+    realtime(|| p.process(&mut [0.0; 128], 2));
+}
+
+#[test]
+fn leased_synth_scope_capture_never_allocates() {
+    let setup = ChannelSetup::synth(ChannelId(1), Vec::new(), ChannelMix::default());
+    let (mut c, mut p) = engine_with(
+        EngineConfig { sample_rate: SR },
+        EngineState {
+            channels: vec![setup],
+            ..EngineState::default()
+        },
+    );
+    let instance = c.channel_instance(ChannelId(1)).unwrap();
+    let live = c.live_shared();
+    c.send(Command::ChannelNote {
+        channel: ChannelId(1),
+        key: 60,
+        velocity: 0.8,
+        on: true,
+        id: NoteId(1),
+    })
+    .unwrap();
+    let mut output = [0.0; 2048];
+    for _ in 0..100 {
+        live.synth_meter(instance);
+        realtime(|| p.process(&mut output, 2));
+    }
+    assert!(
+        live.synth_meter(instance)
+            .unwrap()
+            .scope
+            .iter()
+            .any(|v| v.abs() > 0.001)
+    );
+}
+
+#[test]
+fn admitted_mode_transition_replay_never_allocates() {
+    for direct in [false, true] {
+        let sample = tone_sample(48_000);
+        let state = EngineState {
+            channels: vec![ChannelSetup::sampler(
+                ChannelId(1),
+                Some(sample),
+                Vec::new(),
+                ChannelMix::default(),
+            )],
+            song: grooviq_engine::SongData {
+                end_tick: 96000,
+                arrangement: grooviq_engine::ArrangementData {
+                    length: 96000,
+                    notes: vec![],
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
+        let mut out = [0.0; 128];
+        c.send(Command::SetRecording { on: true }).unwrap();
+        c.send(Command::Play).unwrap();
+        c.send(Command::ChannelNote {
+            channel: ChannelId(1),
+            key: 60,
+            velocity: 1.0,
+            on: true,
+            id: NoteId(997),
+        })
+        .unwrap();
+        realtime(|| p.process(&mut out, 2));
+        assert!(c.live().playing);
+        // Retire 65 patterns without collecting: 64 fill trash, one remains parked.
+        for _ in 0..65 {
+            c.set_pattern(PatternData::default()).unwrap();
+            realtime(|| p.process(&mut out, 2));
+        }
+        if direct {
+            c.send(Command::SetPlaybackMode {
+                mode: grooviq_engine::PlaybackMode::Pattern,
+            })
+            .unwrap();
+            for on in [true, false] {
+                c.send(Command::ChannelNote {
+                    channel: ChannelId(1),
+                    key: 61,
+                    velocity: 1.0,
+                    on,
+                    id: NoteId(411),
+                })
+                .unwrap();
+            }
+        } else {
+            let snapshot = c.state().clone();
+            c.set_timeline(grooviq_engine::TimelineUpdate {
+                pattern: Box::new(snapshot.pattern),
+                song: Box::new(snapshot.song),
+                bpm: snapshot.bpm,
+                mode: snapshot.playback_mode,
+                region: snapshot.song_loop,
+                remove_channel: None,
+            })
+            .unwrap();
+        }
+        let before = c.send_marked(Command::SetTempo { bpm: 120.0 }).unwrap();
+        let mark = c
+            .send_marked(Command::SetPlaybackMode {
+                mode: grooviq_engine::PlaybackMode::Song,
+            })
+            .unwrap();
+        while c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+        c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 44100.0,
+            },
+        );
+        realtime(|| p.process(&mut out, 2));
+        assert!(!c.live().playing);
+        assert!(!c.recording_armed());
+        let mut events = Vec::new();
+        c.take_recorded(&mut events);
+        if direct {
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        RecordEvent::Note { on: true, .. },
+                        RecordEvent::Note {
+                            on: true,
+                            key: 61,
+                            ..
+                        },
+                        RecordEvent::Note {
+                            on: false,
+                            key: 61,
+                            ..
+                        },
+                        RecordEvent::Mark { .. },
+                        RecordEvent::End { .. },
+                        RecordEvent::Mark { .. }
+                    ]
+                ),
+                "{events:?}"
+            );
+        }
+        let before = events
+            .iter()
+            .position(|e| matches!(e, grooviq_engine::RecordEvent::Mark { id } if *id == before))
+            .unwrap();
+        let end = events
+            .iter()
+            .position(|e| matches!(e, RecordEvent::End { .. }))
+            .unwrap();
+        let barrier = events
+            .iter()
+            .position(|e| matches!(e, RecordEvent::Mark { id } if *id == mark))
+            .unwrap();
+        assert!(before < end && end < barrier);
+    }
+}
+
+#[test]
+fn sampler_trim_pair_never_allocates_or_frees_on_the_callback() {
+    let params: [f32; grooviq_dsp::sampler::SPEC.len()] =
+        grooviq_dsp::sampler::SPEC.map(|(_, _, default)| default);
+    let setup = ChannelSetup::sampler(ChannelId(1), None, params.to_vec(), ChannelMix::default());
+    let (mut c, mut p) = engine_with(
+        EngineConfig { sample_rate: SR },
+        EngineState {
+            channels: vec![setup],
+            ..Default::default()
+        },
+    );
+    let instance = c.channel_instance(ChannelId(1)).unwrap();
+    let mut buf = [0.0; 128];
+    for i in 0..20 {
+        let mut params = params;
+        params[3] = if i % 2 == 0 { 0.2 } else { 0.0 };
+        params[4] = if i % 2 == 0 { 0.7 } else { 1.0 };
+        c.send_at(
+            0,
+            Command::SetSamplerTrim {
+                channel: ChannelId(1),
+                instance,
+                params,
+            },
+        )
+        .unwrap();
+        realtime(|| p.process(&mut buf, 2));
     }
 }

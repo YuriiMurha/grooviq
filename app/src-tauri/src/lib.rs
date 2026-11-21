@@ -9,6 +9,7 @@
 //! and `midi_cmds`. Started with `GROOVIQ_AUDIO=null` it opens no audio device at all (see
 //! [`output_mode`]): the silent mode for QA runs.
 
+mod arrangement_cmds;
 mod audio_log;
 mod autosave_notice;
 mod commands;
@@ -23,6 +24,9 @@ mod output_mode;
 pub mod panic_hook;
 mod patterns_cmds;
 mod project_cmds;
+#[cfg(all(feature = "qa-driver", target_os = "macos"))]
+mod qa_driver;
+mod sampler_trim_cmds;
 mod settings;
 
 use audio_log::{AudioLog, Level};
@@ -72,6 +76,7 @@ pub(crate) struct Audio {
     stream: Option<StreamServer>,
     /// The open project.
     session: Arc<Mutex<Session>>,
+    assets: Arc<grooviq_project::audio_assets::AudioAssets>,
     /// The recovery folder; `None` if it could not be taken (no autosave then). Taken out by a
     /// clean exit.
     recovery: Arc<Mutex<Option<RecoveryDir>>>,
@@ -136,8 +141,8 @@ fn start_audio(app: &AppHandle) -> Audio {
     let controller = Arc::new(Mutex::new(controller));
     let session = Arc::new(Mutex::new(Session::new(Arc::clone(&controller))));
     let data_dir = app.path().app_data_dir().ok();
-    let (recovery, pending_recovery, autosave_off) = start_recovery(data_dir.as_deref(), &log);
-    let autosave_status = Arc::new(Mutex::new(AutosaveStatus::off(autosave_off)));
+    let (recovery, pending_recovery, autosave_status) = start_recovery(data_dir.as_deref(), &log);
+    let autosave_status = Arc::new(Mutex::new(autosave_status));
     let backups = data_dir.map_or_else(
         || std::env::temp_dir().join("grooviq-backups"),
         |dir| dir.join("backups"),
@@ -204,10 +209,12 @@ fn start_audio(app: &AppHandle) -> Audio {
         Arc::clone(&selected_channel),
         &settings,
     )));
-    spawn_named("grooviq-midi", {
-        let (midi, log, app) = (Arc::clone(&midi), Arc::clone(&log), app.clone());
-        move || midi_cmds::poll_loop(&midi, &log, &app)
-    });
+    if !qa_automation() {
+        spawn_named("grooviq-midi", {
+            let (midi, log, app) = (Arc::clone(&midi), Arc::clone(&log), app.clone());
+            move || midi_cmds::poll_loop(&midi, &log, &app)
+        });
+    }
     if autosave_on {
         spawn_named("grooviq-autosave", {
             let (session, recovery, log, status, app) = (
@@ -221,7 +228,11 @@ fn start_audio(app: &AppHandle) -> Audio {
         });
     }
 
+    let assets = Arc::new(grooviq_project::audio_assets::AudioAssets::with_budget(
+        lock(&session).media_budget(),
+    ));
     Audio {
+        assets,
         controller,
         output,
         log,
@@ -246,10 +257,16 @@ fn start_audio(app: &AppHandle) -> Audio {
 fn start_recovery(
     data_dir: Option<&std::path::Path>,
     log: &Mutex<AudioLog>,
-) -> (Option<RecoveryDir>, Option<Recovery>, Option<String>) {
+) -> (Option<RecoveryDir>, Option<Recovery>, AutosaveStatus) {
     let Some(dir) = data_dir else {
         lock(log).push(Level::Warn, "No data folder: autosave and recovery are off");
-        return (None, None, None);
+        return (
+            None,
+            None,
+            AutosaveStatus::off(disabled_notice(&std::io::Error::other(
+                "No data folder is available",
+            ))),
+        );
     };
     match RecoveryDir::start(&dir.join("recovery")) {
         Ok((recovery, found)) => {
@@ -264,11 +281,15 @@ fn start_recovery(
                 );
             }
             // The newest first; the others wait for later launches.
-            (Some(recovery), found.into_iter().next(), None)
+            (
+                Some(recovery),
+                found.into_iter().next(),
+                AutosaveStatus::default(),
+            )
         }
         Err(e) => {
             lock(log).push(Level::Warn, format!("Autosave and recovery are off: {e}"));
-            (None, None, disabled_notice(&e))
+            (None, None, AutosaveStatus::off(disabled_notice(&e)))
         }
     }
 }
@@ -312,6 +333,9 @@ fn end_session(audio: &Audio) {
 
 /// Whether closing must wait for the person; if so, asks the UI.
 fn hold_close(app: &AppHandle) -> bool {
+    if qa_automation() {
+        return false;
+    }
     let Some(audio) = app.try_state::<Audio>() else {
         return false;
     };
@@ -373,9 +397,41 @@ fn toggle_high_refresh(app: &AppHandle) {
     display::apply(app, on);
 }
 
+fn qa_automation() -> bool {
+    #[cfg(all(feature = "qa-driver", target_os = "macos"))]
+    {
+        qa_driver::enabled()
+    }
+    #[cfg(not(all(feature = "qa-driver", target_os = "macos")))]
+    {
+        false
+    }
+}
+
 /// Runs the app.
 pub fn run() {
     panic_hook::install();
+    if std::env::var_os("GROOVIQ_QA_DRIVER").is_some() && !qa_automation() {
+        eprintln!("automation requires a macOS qa-driver build");
+        std::process::exit(2);
+    }
+    #[allow(unused_mut)]
+    let mut context = tauri::generate_context!();
+    #[cfg(all(feature = "qa-driver", target_os = "macos"))]
+    let qa_dir = if qa_automation() {
+        let dir = qa_driver::validate().unwrap_or_else(|error| {
+            eprintln!("QA launch refused: {error}");
+            std::process::exit(2);
+        });
+        for window in &mut context.config_mut().app.windows {
+            window.create = false;
+            window.visible = false;
+            window.focus = false;
+        }
+        Some(dir)
+    } else {
+        None
+    };
     let builder = tauri::Builder::default();
     // Cmd+Q through our own Quit item, so it asks about unsaved changes (see `menu`).
     #[cfg(target_os = "macos")]
@@ -392,7 +448,15 @@ pub fn run() {
     });
     let app = builder
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
+        .setup(move |app| {
+            #[cfg(all(feature = "qa-driver", target_os = "macos"))]
+            if let Some(dir) = qa_dir {
+                app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+                for config in &app.config().app.windows {
+                    tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
+                }
+                qa_driver::start(app.handle().clone(), dir)?;
+            }
             let audio = start_audio(app.handle());
             let high_refresh = lock(&audio.settings).high_refresh;
             app.manage(audio);
@@ -403,6 +467,20 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            sampler_trim_cmds::sampler_trim_view,
+            sampler_trim_cmds::sampler_trim_reset,
+            sampler_trim_cmds::sampler_trim_undo,
+            arrangement_cmds::arrangement_view,
+            arrangement_cmds::arrangement_edit,
+            arrangement_cmds::arrangement_history,
+            arrangement_cmds::arrangement_curve,
+            arrangement_cmds::audio_import,
+            arrangement_cmds::audio_relink,
+            arrangement_cmds::audio_cancel,
+            arrangement_cmds::arrangement_waveform,
+            arrangement_cmds::arrangement_mode,
+            arrangement_cmds::arrangement_loop,
+            arrangement_cmds::arrangement_seek,
             menu::edit_history_enabled,
             commands::audio_outputs,
             commands::audio_select,
@@ -439,6 +517,7 @@ pub fn run() {
             notes_cmds::channel_add_synth,
             notes_cmds::channel_note,
             notes_cmds::channel_param_live,
+            notes_cmds::synth_meter,
             notes_cmds::channel_select,
             notes_cmds::channel_waveform,
             notes_cmds::record_set,
@@ -446,7 +525,7 @@ pub fn run() {
             midi_cmds::midi_inputs,
             midi_cmds::midi_set_enabled,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("the Tauri app builds");
     app.run(|app, event| match event {
         RunEvent::WindowEvent {
@@ -469,4 +548,47 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod recovery_startup_tests {
+    use super::*;
+
+    #[test]
+    fn startup_failures_retain_disabled_status_without_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("not-a-folder");
+        std::fs::write(&file, b"keep").unwrap();
+        for path in [None, Some(file.as_path())] {
+            let log = Mutex::new(AudioLog::default());
+            let (recovery, pending, status) = start_recovery(path, &log);
+            assert!(recovery.is_none());
+            assert!(pending.is_none());
+            assert!(status.disabled.is_some(), "{path:?}");
+            assert_eq!(status.clone().disabled, status.disabled);
+            assert!(status.failure.is_none());
+            let entries = lock(&log).entries();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].level, Level::Warn);
+        }
+        assert_eq!(std::fs::read(file).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn successful_startup_is_quiet_and_second_copy_retains_disabled_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = Mutex::new(AudioLog::default());
+        let (owner, pending, status) = start_recovery(Some(temp.path()), &log);
+        assert!(owner.is_some());
+        assert!(pending.is_none());
+        assert_eq!(status, AutosaveStatus::default());
+        let (second, pending, status) = start_recovery(Some(temp.path()), &log);
+        assert!(second.is_none());
+        assert!(pending.is_none());
+        assert_eq!(
+            status.disabled,
+            disabled_notice(&std::io::ErrorKind::WouldBlock.into())
+        );
+        drop(owner);
+    }
 }

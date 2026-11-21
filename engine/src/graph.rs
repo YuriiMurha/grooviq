@@ -97,6 +97,12 @@ impl Graph {
         }
     }
 
+    pub(crate) fn synth_meter(&self, instance: u64) -> Option<crate::SynthMeter> {
+        self.present()
+            .find(|c| c.instance == instance)?
+            .synth_meter()
+    }
+
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
@@ -195,6 +201,21 @@ impl Graph {
         if let Some(channel) = self.channel(id) {
             channel.set_mix(mix);
             self.retarget();
+        }
+    }
+
+    pub(crate) fn set_sampler_trim(
+        &mut self,
+        id: ChannelId,
+        instance: u64,
+        params: &[f32; grooviq_dsp::sampler::SPEC.len()],
+    ) {
+        if let Some(channel) = self.channel(id)
+            && channel.instance == instance
+        {
+            for (index, value) in params.iter().enumerate() {
+                channel.set_param(index as u32, *value);
+            }
         }
     }
 

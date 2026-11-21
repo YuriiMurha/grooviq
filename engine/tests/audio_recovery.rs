@@ -42,6 +42,7 @@ fn state(frames: usize) -> EngineState {
             end_tick: (frames as u64).div_ceil(25),
             end_frame: frames as u64,
             frame_rate: 48_000.0,
+            frame_extent: None,
             ..SongData::default()
         },
         ..EngineState::default()

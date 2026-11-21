@@ -9,6 +9,7 @@ export interface LiveEndpoint {
 }
 
 export interface ConnectOptions {
+  onConnectionChange?: () => void;
   /** The WebSocket class to use (tests pass a fake). */
   WebSocketImpl?: typeof WebSocket;
   /** First and longest wait before reconnecting, in ms; each failure doubles the wait. */
@@ -37,9 +38,12 @@ export function connectLive(
     socket = ws;
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
+      if (stopped || socket !== ws) return;
+      opts.onConnectionChange?.();
       wait = first;
     };
     ws.onmessage = (e: MessageEvent) => {
+      if (stopped || socket !== ws) return;
       if (!(e.data instanceof ArrayBuffer)) return;
       const frame = decodeLive(e.data);
       if (!frame) return;
@@ -48,6 +52,7 @@ export function connectLive(
     };
     ws.onclose = () => {
       if (stopped || socket !== ws) return;
+      opts.onConnectionChange?.();
       socket = null;
       timer = setTimeout(open, wait);
       wait = Math.min(wait * 2, max);
@@ -57,6 +62,7 @@ export function connectLive(
   open();
   return () => {
     stopped = true;
+    opts.onConnectionChange?.();
     if (timer !== null) clearTimeout(timer);
     socket?.close();
     socket = null;

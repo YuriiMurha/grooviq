@@ -192,7 +192,11 @@ impl OutputMonitor {
         let by_itself = !(by_user && as_chosen);
         match self.current.take() {
             // The same device: keep it, with its fresh details.
-            Some(current) if current.id == target.id => {}
+            Some(current) if current.id == target.id => {
+                if current.kind == OutputKind::Headphones && self.guard_stops(by_itself, &target) {
+                    events.push(OutputEvent::GuardStopped { to: target.clone() });
+                }
+            }
             Some(current) => {
                 if self.guard_stops(by_itself, &target) {
                     events.push(OutputEvent::GuardStopped { to: target.clone() });

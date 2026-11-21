@@ -1,6 +1,6 @@
 //! Bounded control-worker asset preparation, independent of Session and persisted schemas.
 use crate::SampleFile;
-use grooviq_engine::{MAX_SAMPLE_SECONDS, decode_sample, waveform::PeakPyramid};
+use grooviq_engine::{MAX_SAMPLE_SECONDS, waveform::PeakPyramid};
 use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex, Weak,
@@ -41,7 +41,7 @@ struct SourceReservation {
 impl Drop for SourceReservation {
     fn drop(&mut self) {
         let mut budget = self.budget.lock().unwrap();
-        budget.used -= self.source.len();
+        budget.used -= self.source.capacity();
         let key = Arc::as_ptr(&self.source) as usize;
         // A new lease may replace the expired Weak while this Drop waits for the lock.
         if budget
@@ -76,6 +76,7 @@ struct Job {
     reply: SyncSender<Result<Arc<PreparedAudio>, AssetError>>,
 }
 pub struct AssetRequest {
+    received: AtomicBool,
     generation: u64,
     pub request: u64,
     pub asset: u32,
@@ -98,13 +99,18 @@ impl AssetRequest {
         {
             Err(AssetError::Cancelled)
         } else {
+            if result.is_ok() {
+                self.received.store(true, Ordering::SeqCst);
+            }
             result
         }
     }
 }
 impl Drop for AssetRequest {
     fn drop(&mut self) {
-        self.cancel();
+        if !self.received.load(Ordering::SeqCst) {
+            self.cancel();
+        }
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -114,6 +120,7 @@ enum Stage {
     Decoded,
     Built,
     Cached(usize),
+    Published,
 }
 struct CacheEntry {
     source: Weak<Vec<u8>>,
@@ -126,6 +133,7 @@ pub struct AudioAssets {
     queued_bytes: Arc<Mutex<SourceBudget>>,
     latest: Mutex<HashMap<u32, Weak<AtomicBool>>>,
     limits: Limits,
+    budget: grooviq_engine::media_budget::MediaBudget,
 }
 impl Default for AudioAssets {
     fn default() -> Self {
@@ -134,7 +142,10 @@ impl Default for AudioAssets {
 }
 impl AudioAssets {
     pub fn new() -> Self {
-        Self::with_hooks(Limits::default(), |_| {})
+        Self::with_budget(Default::default())
+    }
+    pub fn with_budget(budget: grooviq_engine::media_budget::MediaBudget) -> Self {
+        Self::build(Limits::default(), |_| {}, budget)
     }
     #[cfg(test)]
     fn with_gate(mut gate: impl FnMut() + Send + 'static) -> Self {
@@ -144,7 +155,16 @@ impl AudioAssets {
             }
         })
     }
-    fn with_hooks(limits: Limits, mut hook: impl FnMut(Stage) + Send + 'static) -> Self {
+    #[cfg(test)]
+    fn with_hooks(limits: Limits, hook: impl FnMut(Stage) + Send + 'static) -> Self {
+        Self::build(limits, hook, Default::default())
+    }
+    fn build(
+        limits: Limits,
+        mut hook: impl FnMut(Stage) + Send + 'static,
+        budget: grooviq_engine::media_budget::MediaBudget,
+    ) -> Self {
+        let worker_budget = budget.clone();
         let (sender, receiver) = mpsc::sync_channel::<Job>(QUEUE);
         let epoch = Arc::new(AtomicU64::new(0));
         let worker_epoch = epoch.clone();
@@ -178,20 +198,23 @@ impl AudioAssets {
                             .extension()
                             .and_then(|s| s.to_str());
                         hook(Stage::Decode);
-                        decode_sample(&job.file.bytes, ext, MAX_SAMPLE_SECONDS)
-                            .map_err(|e| AssetError::Decode(e.to_string()))
-                            .and_then(|sample| {
-                                hook(Stage::Decoded);
-                                if !live() {
-                                    return Err(AssetError::Cancelled);
-                                }
-                                let peaks =
-                                    Arc::new(PeakPyramid::new(Arc::new(sample)).map_err(|_| {
-                                        AssetError::Decode("Invalid decoded waveform".into())
-                                    })?);
-                                hook(Stage::Built);
-                                Ok(peaks)
-                            })
+                        grooviq_engine::decode_sample_budgeted(
+                            &job.file.bytes,
+                            ext,
+                            MAX_SAMPLE_SECONDS,
+                            &worker_budget,
+                        )
+                        .map_err(|e| AssetError::Decode(e.to_string()))
+                        .and_then(|sample| {
+                            hook(Stage::Decoded);
+                            if !live() {
+                                return Err(AssetError::Cancelled);
+                            }
+                            let peaks = PeakPyramid::budgeted(sample, &worker_budget)
+                                .map_err(AssetError::Decode)?;
+                            hook(Stage::Built);
+                            Ok(peaks)
+                        })
                     };
                     peaks.map(|peaks| {
                         if !cache
@@ -215,7 +238,12 @@ impl AudioAssets {
                     })
                 };
                 // receive() is the publication fence, including cancellation after this send.
-                let _ = job.reply.try_send(result);
+                let reply = job.reply.clone();
+                // Completion must not expose redundant producer source/reservation owners.
+                // PreparedAudio retains its own lease; errors release theirs before publication.
+                drop(job);
+                let _ = reply.try_send(result);
+                hook(Stage::Published);
             }
         });
         Self {
@@ -225,6 +253,7 @@ impl AudioAssets {
             queued_bytes,
             latest: Mutex::new(HashMap::new()),
             limits,
+            budget,
         }
     }
     /// T7 uses this monotonically advancing token as the project generation. Never reuse it.
@@ -241,10 +270,29 @@ impl AudioAssets {
         request: u64,
         file: SampleFile,
     ) -> Result<AssetRequest, AssetError> {
+        self.submit_cancellable(
+            generation,
+            asset,
+            request,
+            file,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+    pub fn submit_cancellable(
+        &self,
+        generation: u64,
+        asset: u32,
+        request: u64,
+        file: SampleFile,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<AssetRequest, AssetError> {
         if generation != self.epoch.load(Ordering::SeqCst) {
             return Err(AssetError::Cancelled);
         }
-        let len = file.bytes.len();
+        self.budget
+            .original(&file.bytes)
+            .map_err(|_| AssetError::Busy)?;
+        let len = file.bytes.capacity();
         if len > self.limits.source {
             return Err(AssetError::TooLarge);
         }
@@ -270,7 +318,6 @@ impl AudioAssets {
             reservation
         };
         drop(budget);
-        let cancelled = Arc::new(AtomicBool::new(false));
         let (reply, receiver) = mpsc::sync_channel(1);
         let job = Job {
             reservation,
@@ -292,6 +339,7 @@ impl AudioAssets {
             old.store(true, Ordering::SeqCst);
         }
         Ok(AssetRequest {
+            received: AtomicBool::new(false),
             generation,
             request,
             asset,
@@ -345,6 +393,131 @@ mod tests {
             }
         });
         (worker, Release(Some(release)), wait, stages)
+    }
+    #[test]
+    fn published_alias_releases_producer_owners_before_clients_finish() {
+        let budget = grooviq_engine::media_budget::MediaBudget::with_limit(1 << 20);
+        let (entered, wait) = mpsc::sync_channel(1);
+        let (release, gate) = mpsc::sync_channel(1);
+        let mut publications = 0;
+        let worker = AudioAssets::build(
+            Limits::default(),
+            move |stage| {
+                if stage == Stage::Published {
+                    publications += 1;
+                    if publications == 2 {
+                        entered.send(()).unwrap();
+                        let _ = gate.recv();
+                    }
+                }
+            },
+            budget.clone(),
+        );
+        // Declared after worker: unwinding always opens the gate before worker.join().
+        let _release = Release(Some(release));
+        let mut source = wav(1024);
+        let bytes = Arc::get_mut(&mut source.bytes).unwrap();
+        bytes[20..22].copy_from_slice(&1u16.to_le_bytes());
+        bytes[28..32].copy_from_slice(&16000u32.to_le_bytes());
+        bytes[32..34].copy_from_slice(&2u16.to_le_bytes());
+        bytes[34..36].copy_from_slice(&16u16.to_le_bytes());
+        bytes[4..8].copy_from_slice(&2084u32.to_le_bytes());
+        bytes[40..44].copy_from_slice(&2048u32.to_le_bytes());
+        bytes.truncate(2092);
+        bytes.shrink_to_fit();
+        assert_eq!(bytes.capacity(), 2092);
+        let weak = Arc::downgrade(&source.bytes);
+        let first = worker
+            .submit(0, 1, 1, source.clone())
+            .unwrap()
+            .receive()
+            .unwrap();
+        let used = budget.used();
+        let block = budget.reserve((1 << 20) - used).unwrap();
+        let mut alias = source.clone();
+        alias.name = "alias.wav".into();
+        let request = worker.submit(0, 2, 2, alias).unwrap();
+        let second = request.receive().unwrap();
+        wait.recv().unwrap();
+        assert_eq!(second.original.name, "alias.wav");
+        assert!(Arc::ptr_eq(&source.bytes, &second.original.bytes));
+        assert!(Arc::ptr_eq(&first.peaks, &second.peaks));
+        assert_eq!(budget.used(), 1 << 20);
+        drop((block, source, first, request));
+        assert!(weak.strong_count() > 0);
+        assert_eq!(budget.used(), used);
+        drop(second);
+        eprintln!(
+            "post-client source strong={}, budget={}",
+            weak.strong_count(),
+            budget.used()
+        );
+        assert_eq!(budget.used(), 0);
+        assert_eq!(weak.strong_count(), 0);
+        assert_eq!(worker.queued_bytes.lock().unwrap().used, 0);
+    }
+    #[test]
+    fn published_errors_cancellation_and_disconnect_release_producer_owners() {
+        for mode in 0..3 {
+            let budget = grooviq_engine::media_budget::MediaBudget::default();
+            let (queued, queued_wait) = mpsc::sync_channel(1);
+            let (start, start_gate) = mpsc::sync_channel(1);
+            let (published, published_wait) = mpsc::sync_channel(1);
+            let (finish, finish_gate) = mpsc::sync_channel(1);
+            let mut first_queued = true;
+            let mut first_published = true;
+            let worker = AudioAssets::build(
+                Limits::default(),
+                move |stage| {
+                    if stage == Stage::Queued && first_queued {
+                        first_queued = false;
+                        queued.send(()).unwrap();
+                        let _ = start_gate.recv();
+                    }
+                    if stage == Stage::Published && first_published {
+                        first_published = false;
+                        published.send(()).unwrap();
+                        let _ = finish_gate.recv();
+                    }
+                },
+                budget.clone(),
+            );
+            let mut start = Release(Some(start));
+            let mut finish = Release(Some(finish));
+            let source = if mode == 0 {
+                SampleFile {
+                    name: "bad.wav".into(),
+                    bytes: Arc::new(vec![0; 100]),
+                }
+            } else {
+                wav(1024)
+            };
+            let weak = Arc::downgrade(&source.bytes);
+            let mut request = Some(worker.submit(0, 1, 1, source).unwrap());
+            queued_wait.recv().unwrap();
+            assert!(budget.used() > 0, "in-flight originals must remain charged");
+            if mode == 1 {
+                request.as_ref().unwrap().cancel();
+            }
+            if mode == 2 {
+                drop(request.take());
+            }
+            start.open();
+            published_wait.recv().unwrap();
+            if let Some(request) = request {
+                let result = request.receive();
+                if mode == 0 {
+                    assert!(matches!(result, Err(AssetError::Decode(_))));
+                } else {
+                    assert!(matches!(result, Err(AssetError::Cancelled)));
+                }
+            }
+            assert_eq!(weak.strong_count(), 0);
+            assert_eq!(budget.used(), 0);
+            assert_eq!(worker.queued_bytes.lock().unwrap().used, 0);
+            finish.open();
+            assert!(worker.submit(0, 2, 2, wav(1)).unwrap().receive().is_ok());
+        }
     }
     #[test]
     fn busy_does_not_supersede_the_current_request() {
@@ -696,7 +869,7 @@ mod tests {
         let worker = AudioAssets::new();
         let bytes = worker.queued_bytes.clone();
         let file = file();
-        let len = file.bytes.len();
+        let len = file.bytes.capacity();
         bytes.lock().unwrap().used = QUEUE_BYTES - len + 1;
         assert!(matches!(
             worker.submit(0, 1, 1, file.clone()),

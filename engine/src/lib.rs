@@ -37,6 +37,8 @@ mod export;
 mod graph;
 mod leftover;
 mod live;
+mod synth_meter;
+pub use synth_meter::{SYNTH_SCOPE_LEN, SynthMeter};
 mod metronome;
 mod offline;
 mod output;
@@ -46,7 +48,7 @@ mod sample_file;
 mod sequencer;
 mod song;
 mod state;
-pub use song::{PlaybackMode, SongData, SongLoop};
+pub use song::{PlaybackMode, SongData, SongFrameExtent, SongLoop};
 mod stream;
 mod transport;
 
@@ -166,3 +168,9 @@ pub mod waveform;
 
 mod audio_clip;
 pub use audio_clip::{AudioAsset, AudioClip, AudioDiagnostic, AudioSchedule, MAX_AUDIO_VOICES};
+
+pub use command::TimelineUpdate;
+
+pub mod media_budget;
+
+pub use sample_file::decode_sample_budgeted;

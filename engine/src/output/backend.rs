@@ -2,7 +2,7 @@
 //!
 //! A poll thread looks at the devices every 500 ms (cpal has no default-device notification);
 //! a stream error or a new choice wakes it at once. While a stream plays, the processor sits in
-//! the [`AudioSlot`], which the device callback only `try_lock`s. Otherwise the output layer
+//! the [`AudioSlot`], which the device callback only tries to claim. Otherwise the output layer
 //! holds it, so it can run it silent after a guard stop or move it to another rate. A new
 //! stream starts with the slot empty, so silent; the processor goes in once it runs at the
 //! stream's rate.
@@ -14,6 +14,7 @@
 
 use super::{OutputChoice, OutputEvent, OutputInfo, OutputMonitor, lock};
 use crate::{AudioProcessor, BLOCK, Command, Controller, EngineConfig, LiveShared};
+use std::cell::UnsafeCell;
 use std::collections::{HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,7 +54,8 @@ pub trait OutputBackend: Send {
 /// What an open stream's callback pulls audio from: the processor (absent while no stream
 /// plays), and where the stream reports its latency and its failures.
 pub struct AudioSlot {
-    processor: Mutex<Option<AudioProcessor>>,
+    processor: UnsafeCell<Option<AudioProcessor>>,
+    busy: AtomicBool,
     live: Arc<LiveShared>,
     /// The open stream reported a failure that the next look must handle.
     failed: AtomicBool,
@@ -61,26 +63,74 @@ pub struct AudioSlot {
     poller: OnceLock<Thread>,
 }
 
+// SAFETY: every shared access to processor is through a unique SlotClaim, obtained by
+// Acquire CAS and released by a Release store. AudioProcessor is Send (checked below),
+// so ownership may cross threads; it need not be Sync. References cannot outlive the
+// claim's mutable borrow. Claim Drop also releases during unwinding and never touches
+// the processor. The callback only borrows it: put/take and replacement destruction
+// belong to control callers. Shutdown closes/joins the backend before take; surviving
+// callback Arcs then hold an empty slot. Final cell destruction requires exclusive
+// ownership, so cannot overlap a claim even during unwinding.
+unsafe impl Sync for AudioSlot {}
+
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<AudioProcessor>();
+};
+
+struct SlotClaim<'a>(&'a AudioSlot);
+
+impl SlotClaim<'_> {
+    fn processor(&mut self) -> &mut Option<AudioProcessor> {
+        // SAFETY: only the successful claimant can reach this cell; the mutable borrow
+        // prevents two references from this claim, and cannot outlive its release.
+        unsafe { &mut *self.0.processor.get() }
+    }
+}
+
+impl Drop for SlotClaim<'_> {
+    fn drop(&mut self) {
+        self.0.busy.store(false, Ordering::Release);
+    }
+}
+
 impl AudioSlot {
     pub(super) fn new(live: Arc<LiveShared>) -> Self {
         Self {
-            processor: Mutex::new(None),
+            processor: UnsafeCell::new(None),
+            busy: AtomicBool::new(false),
             live,
             failed: AtomicBool::new(false),
             poller: OnceLock::new(),
         }
     }
 
-    /// Fills `out` (interleaved, `channels` per frame) from the processor. It plays silence
-    /// while the output layer holds the lock or the slot is empty (a stream that has just
-    /// started). Real-time safe: it never waits for the lock.
+    /// Fills `out` without waiting: a busy or empty slot plays silence.
     pub fn process(&self, out: &mut [f32], channels: usize) {
-        match self.processor.try_lock() {
-            Ok(mut slot) => match slot.as_mut() {
-                Some(processor) => processor.process(out, channels),
-                None => out.fill(0.0),
-            },
-            Err(_) => out.fill(0.0),
+        let Some(mut claim) = self.try_claim() else {
+            out.fill(0.0);
+            return;
+        };
+        match claim.processor().as_mut() {
+            Some(processor) => processor.process(out, channels),
+            None => out.fill(0.0),
+        }
+    }
+
+    fn try_claim(&self) -> Option<SlotClaim<'_>> {
+        self.busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| SlotClaim(self))
+    }
+
+    // Only the control thread waits. The callback makes exactly one attempt.
+    fn claim_control(&self) -> SlotClaim<'_> {
+        loop {
+            if let Some(claim) = self.try_claim() {
+                return claim;
+            }
+            thread::yield_now();
         }
     }
 
@@ -105,11 +155,13 @@ impl AudioSlot {
     }
 
     pub(super) fn put(&self, processor: AudioProcessor) {
-        *lock(&self.processor) = Some(processor);
+        let old = self.claim_control().processor().replace(processor);
+        // Replacement destruction belongs to this control caller, outside the claim.
+        drop(old);
     }
 
     fn take(&self) -> Option<AudioProcessor> {
-        lock(&self.processor).take()
+        self.claim_control().processor().take()
     }
 }
 
@@ -405,7 +457,12 @@ impl State {
         }
         match target {
             None => self.close(slot),
-            Some(target) if self.open.as_ref().is_some_and(|o| o.info.id == target.id) => {}
+            Some(mut target) if self.open.as_ref().is_some_and(|o| o.info.id == target.id) => {
+                let open = self.open.as_mut().expect("matching open stream");
+                // Enumeration describes the route; only opening determines the actual rate.
+                target.sample_rate = open.info.sample_rate;
+                open.info = target;
+            }
             Some(target) => {
                 self.close(slot);
                 if self.retry.due(now) {
@@ -507,12 +564,16 @@ impl State {
         // Failures of earlier streams no longer matter.
         slot.failed.store(false, Ordering::Release);
         let rate = self.backend.open(target, Arc::clone(slot))?;
-        let Some(mut processor) = self.processor.take() else {
-            // Cannot happen: every close takes the processor back.
-            return Err("the output has no processor to play".into());
-        };
         let config = EngineConfig {
             sample_rate: rate as f32,
+        };
+        // A physical stream cannot follow the config's clamping: reject it while the slot
+        // is still silent, before taking or rebuilding the parked processor.
+        if config.rate() != config.sample_rate {
+            return Err(format!("unsupported actual output sample rate: {rate} Hz"));
+        }
+        let Some(mut processor) = self.processor.take() else {
+            return Err("the output has no processor to play".into());
         };
         {
             let mut controller = lock(&self.controller);
@@ -585,6 +646,155 @@ fn silence(controller: &mut Controller, processor: &mut AudioProcessor, mut stop
 mod tests {
     use super::*;
     use crate::{EngineConfig, engine};
+
+    fn populated_slot() -> (crate::Controller, Arc<AudioSlot>) {
+        let (mut c, p) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        c.send(Command::TestTone {
+            on: true,
+            hz: 440.0,
+            gain_db: -12.0,
+        })
+        .unwrap();
+        let slot = Arc::new(AudioSlot::new(c.live_shared()));
+        slot.put(p);
+        (c, slot)
+    }
+
+    #[test]
+    fn busy_callback_returns_silence_without_advancing_processor() {
+        let (c, slot) = populated_slot();
+        let claim = slot.claim_control();
+        let before = c.live().frames;
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn({
+            let slot = Arc::clone(&slot);
+            move || {
+                let mut out = [1.0; 128];
+                slot.process(&mut out, 2);
+                done_tx.send(out).unwrap();
+            }
+        });
+        // Completion while holding the claim proves the callback does not wait.
+        let out = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("callback must not wait");
+        assert!(out.iter().all(|x| *x == 0.0));
+        worker.join().unwrap();
+        assert_eq!(c.live().frames, before);
+        drop(claim);
+        let mut out = [0.0; 128];
+        slot.process(&mut out, 2);
+        assert!(out.iter().any(|x| *x != 0.0));
+        assert!(c.live().frames > before);
+        drop(slot.take());
+    }
+
+    #[test]
+    fn rendering_keeps_samples_alive_until_control_replaces_processor() {
+        use crate::{ChannelId, ChannelMix, ChannelSetup, EngineState, SampleBuf, engine_with};
+        let sample = Arc::new(SampleBuf {
+            rate: 48_000.0,
+            l: vec![0.5; 480],
+            r: vec![0.5; 480],
+        });
+        let weak = Arc::downgrade(&sample);
+        let (c, p) = engine_with(
+            EngineConfig {
+                sample_rate: 48_000.0,
+            },
+            EngineState {
+                channels: vec![ChannelSetup::sampler(
+                    ChannelId(1),
+                    Some(sample),
+                    Vec::new(),
+                    ChannelMix::default(),
+                )],
+                ..EngineState::default()
+            },
+        );
+        let slot = AudioSlot::new(c.live_shared());
+        slot.put(p);
+        drop(c);
+        let mut out = [0.0; 128];
+        for _ in 0..100 {
+            slot.process(&mut out, 2);
+        }
+        assert!(
+            weak.upgrade().is_some(),
+            "callback retains the processor's sample"
+        );
+        let (_new_c, new_p) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        slot.put(new_p);
+        assert!(
+            weak.upgrade().is_none(),
+            "replacement on control thread destroys old graph"
+        );
+        drop(slot.take());
+    }
+
+    #[test]
+    fn unwind_releases_claim_and_preserves_processor_ownership() {
+        let (_c, slot) = populated_slot();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut claim = slot.try_claim().unwrap();
+            assert!(claim.processor().is_some());
+            panic!("forced unwind while borrowing processor");
+        }));
+        assert!(result.is_err());
+        assert!(slot.try_claim().is_some(), "unwind must release exclusion");
+        let processor = slot.take().expect("unwind did not lose processor");
+        let mut out = [1.0; 128];
+        slot.process(&mut out, 2);
+        assert!(out.iter().all(|x| *x == 0.0));
+        slot.put(processor);
+        slot.process(&mut out, 2);
+        assert!(out.iter().any(|x| *x != 0.0));
+        drop(slot.take());
+    }
+
+    #[test]
+    fn control_handoff_waits_for_callback_claim_and_reclaims_on_control_thread() {
+        let (_c, slot) = populated_slot();
+        let claim = slot.try_claim().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn({
+            let slot = Arc::clone(&slot);
+            move || {
+                started_tx.send(()).unwrap();
+                let p = slot.take().expect("one owner");
+                done_tx.send(()).unwrap();
+                // Repeated take/put races with callbacks; processor stays owned throughout.
+                slot.put(p);
+                for _ in 0..1000 {
+                    let p = slot.take().expect("ownership retained");
+                    slot.put(p);
+                }
+                slot.take().unwrap()
+            }
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(claim);
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut out = [0.0; 128];
+        for _ in 0..1000 {
+            slot.process(&mut out, 2);
+            assert!(out.iter().all(|x| x.is_finite()));
+        }
+        let mut processor = worker.join().unwrap();
+        assert!(slot.take().is_none());
+        slot.process(&mut out, 2);
+        assert!(out.iter().all(|x| *x == 0.0));
+        processor.process(&mut out, 2);
+        assert!(out.iter().any(|x| *x != 0.0));
+        // Final processor destruction happens here, after the callback has finished.
+        drop(processor);
+    }
 
     #[test]
     fn a_failed_rate_rebuild_keeps_the_processor_out_of_the_stream() {

@@ -33,6 +33,7 @@ fn state() -> EngineState {
             end_tick: 960,
             end_frame: 0,
             frame_rate: 48000.0,
+            frame_extent: None,
             audio: AudioSchedule::default(),
             automation: Default::default(),
         },
@@ -332,4 +333,376 @@ fn fault_recovery_retains_song_region_and_musical_cursor() {
         })
     );
     assert_eq!(c.state().playback_mode, PlaybackMode::Song);
+}
+
+#[test]
+fn compound_timeline_refusal_and_rebuild_preserve_complete_candidate() {
+    let cfg = EngineConfig {
+        sample_rate: 48000.0,
+    };
+    let (mut c, mut p) = engine_with(cfg, state());
+    let update = TimelineUpdate {
+        pattern: Box::new(PatternData {
+            length: 1920,
+            notes: vec![],
+        }),
+        song: Box::new(state().song),
+        bpm: 180.0,
+        mode: PlaybackMode::Song,
+        region: None,
+        remove_channel: None,
+    };
+    while c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+    let before = c.state().clone();
+    assert_eq!(c.set_timeline(update.clone()), Err(ControlError::Full));
+    assert_eq!(c.state(), &before);
+    p.process(&mut [0.0; 128], 2);
+    c.set_timeline(update).unwrap();
+    assert_eq!(c.state().bpm, 180.0);
+    assert_eq!(c.state().pattern.length, 1920);
+    c.reconfigure(
+        &mut p,
+        EngineConfig {
+            sample_rate: 44100.0,
+        },
+    );
+    c.send(Command::Play).unwrap();
+    let mut actual = vec![0.0; 10_000];
+    p.process(&mut actual, 2);
+    let expected = render_offline_with(
+        EngineConfig {
+            sample_rate: 44100.0,
+        },
+        c.state().clone(),
+        &[(0, Command::Play)],
+        5000,
+        64,
+    );
+    assert!(expected.iter().any(|x| *x != 0.0));
+    assert_eq!(actual.as_slice(), expected.as_slice());
+}
+
+#[test]
+fn queued_compound_mode_change_still_stops_transport_after_reconfigure() {
+    let cfg = EngineConfig {
+        sample_rate: 48000.0,
+    };
+    let mut initial = state();
+    initial.playback_mode = PlaybackMode::Pattern;
+    let (mut c, mut p) = engine_with(cfg, initial);
+    c.send(Command::SetRecording { on: true }).unwrap();
+    c.send(Command::Play).unwrap();
+    p.process(&mut [0.0; 128], 2);
+    assert!(c.live().playing);
+    c.set_timeline(TimelineUpdate {
+        pattern: Box::new(PatternData::default()),
+        song: Box::new(state().song),
+        bpm: 180.0,
+        mode: PlaybackMode::Song,
+        region: None,
+        remove_channel: None,
+    })
+    .unwrap();
+    c.reconfigure(&mut p, cfg);
+    p.process(&mut [0.0; 128], 2);
+    assert!(!c.live().playing);
+    assert_eq!(c.state().playback_mode, PlaybackMode::Song);
+}
+
+#[test]
+fn region_export_crops_future_audio_and_automation_without_invalid_horizon() {
+    let mut state = state();
+    state.song.end_tick = 1920;
+    state.song.audio = AudioSchedule::build(
+        vec![AudioAsset {
+            id: 2,
+            source_rate: 48000,
+            source_frames: 128,
+            decoded: Some(Arc::new(SampleBuf {
+                rate: 48000.0,
+                l: vec![0.25; 128],
+                r: vec![0.25; 128],
+            })),
+        }],
+        vec![AudioClip {
+            id: 3,
+            asset: 2,
+            start_tick: 1440,
+            source_start: 0,
+            source_end: 128,
+            gain: 1.0,
+            reverse: false,
+            fade_in: 0,
+            fade_out: 0,
+        }],
+    )
+    .unwrap()
+    .0;
+    state.song.automation = AutomationSchedule::build(
+        vec![AutomationClip {
+            target: AutomationTarget::ChannelVolume(ChannelId(1)),
+            priority: 4,
+            start_tick: 0,
+            offset_tick: 0,
+            length_ticks: 1920,
+            points: vec![AutomationPoint {
+                tick: 0,
+                value: 0.5,
+                segment: AutomationSegment::Hold,
+            }],
+        }],
+        &state.channels,
+    )
+    .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let options = ExportOptions {
+        song_region: Some(SongLoop {
+            start_tick: 240,
+            end_tick: 720,
+        }),
+        max_tail_seconds: 0.0,
+        ..Default::default()
+    };
+    let result = std::panic::catch_unwind(|| {
+        export_wav(
+            state,
+            &options,
+            &d.path().join("region.wav"),
+            &mut |_| {},
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    });
+    assert!(
+        result.is_ok(),
+        "region preparation must never construct an invalid engine state"
+    );
+    assert_eq!(result.unwrap().unwrap().frames, 12000);
+}
+#[test]
+fn region_export_excludes_onset_at_exact_end() {
+    let mut state = state();
+    state.song.end_tick = 1920;
+    state.song.audio = AudioSchedule::build(
+        vec![AudioAsset {
+            id: 2,
+            source_rate: 48000,
+            source_frames: 128,
+            decoded: Some(Arc::new(SampleBuf {
+                rate: 48000.0,
+                l: vec![0.25; 128],
+                r: vec![0.25; 128],
+            })),
+        }],
+        vec![AudioClip {
+            id: 3,
+            asset: 2,
+            start_tick: 720,
+            source_start: 0,
+            source_end: 128,
+            gain: 1.0,
+            reverse: false,
+            fade_in: 0,
+            fade_out: 0,
+        }],
+    )
+    .unwrap()
+    .0;
+    state.song.automation = AutomationSchedule::build(
+        vec![AutomationClip {
+            target: AutomationTarget::ChannelVolume(ChannelId(1)),
+            priority: 4,
+            start_tick: 0,
+            offset_tick: 0,
+            length_ticks: 1920,
+            points: vec![AutomationPoint {
+                tick: 0,
+                value: 0.5,
+                segment: AutomationSegment::Hold,
+            }],
+        }],
+        &state.channels,
+    )
+    .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let options = ExportOptions {
+        song_region: Some(SongLoop {
+            start_tick: 240,
+            end_tick: 720,
+        }),
+        max_tail_seconds: 0.0,
+        ..Default::default()
+    };
+    let result = std::panic::catch_unwind(|| {
+        export_wav(
+            state,
+            &options,
+            &d.path().join("region.wav"),
+            &mut |_| {},
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    });
+    assert!(
+        result.is_ok(),
+        "region preparation must never construct an invalid engine state"
+    );
+    assert_eq!(result.unwrap().unwrap().frames, 12000);
+}
+
+#[test]
+fn unrounded_extent_admission_refuses_invalid_geometry() {
+    let mut c = engine_with(
+        EngineConfig {
+            sample_rate: 48000.0,
+        },
+        state(),
+    )
+    .0;
+    let base = state().song;
+    let good = SongFrameExtent {
+        musical_end_tick: 960,
+        audio: vec![(0, 48001, 48000)],
+    };
+    let mut song = base.clone();
+    song.frame_extent = Some(Arc::new(good.clone()));
+    c.set_song(song).unwrap();
+    for extent in [
+        SongFrameExtent {
+            musical_end_tick: 961,
+            ..good.clone()
+        },
+        SongFrameExtent {
+            audio: vec![(960, 1, 48000)],
+            ..good.clone()
+        },
+        SongFrameExtent {
+            audio: vec![(0, 1, 7999)],
+            ..good.clone()
+        },
+        SongFrameExtent {
+            audio: vec![(0, 0, 48000)],
+            ..good.clone()
+        },
+        SongFrameExtent {
+            audio: vec![(0, 48000 * 600 + 1, 48000)],
+            ..good.clone()
+        },
+        SongFrameExtent {
+            audio: vec![(0, 1, 48000); 100001],
+            ..good
+        },
+    ] {
+        let mut song = base.clone();
+        song.frame_extent = Some(Arc::new(extent));
+        assert!(c.set_song(song).is_err());
+    }
+}
+
+#[test]
+fn explicit_extent_cannot_shorten_admitted_musical_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    for source in ["arrangement", "note", "automation"] {
+        let mut initial = state();
+        initial.song.arrangement.length = 0;
+        initial.song.arrangement.notes.clear();
+        let minimum = match source {
+            "arrangement" => {
+                initial.song.arrangement.length = 960;
+                960
+            }
+            "note" => {
+                // Engine callers may provide a note beyond arrangement.length. The note's
+                // release is independently mandatory; the UI end_tick is not its substitute.
+                initial.song.arrangement.notes = state().song.arrangement.notes;
+                360
+            }
+            _ => {
+                initial.song.automation = AutomationSchedule::build(
+                    vec![AutomationClip {
+                        target: AutomationTarget::ChannelVolume(ChannelId(1)),
+                        priority: 1,
+                        start_tick: 240,
+                        offset_tick: 0,
+                        length_ticks: 720,
+                        points: vec![AutomationPoint {
+                            tick: 0,
+                            value: 0.5,
+                            segment: AutomationSegment::Hold,
+                        }],
+                    }],
+                    &initial.channels,
+                )
+                .unwrap();
+                960
+            }
+        };
+        initial.song.frame_extent = Some(Arc::new(SongFrameExtent {
+            musical_end_tick: minimum,
+            audio: Vec::new(),
+        }));
+        let (mut c, mut p) = engine_with(
+            EngineConfig {
+                sample_rate: 48000.0,
+            },
+            initial.clone(),
+        );
+        let options = ExportOptions {
+            format: WavFormat::Float32,
+            max_tail_seconds: 0.0,
+            ..Default::default()
+        };
+        let file = dir.path().join("valid.wav");
+        let expected = ticks_to_frames(minimum as f64, 120.0, 48000.0);
+        assert_eq!(
+            export_wav(c.state().clone(), &options, &file, &mut |_| {}, &cancel)
+                .unwrap()
+                .frames,
+            expected
+        );
+        if source == "note" {
+            assert!(
+                hound::WavReader::open(&file)
+                    .unwrap()
+                    .into_samples::<f32>()
+                    .any(|s| s.unwrap() != 0.0)
+            );
+        }
+        for endpoint in [0, minimum - 1] {
+            let mut contradictory = initial.song.clone();
+            contradictory.frame_extent = Some(Arc::new(SongFrameExtent {
+                musical_end_tick: endpoint,
+                audio: Vec::new(),
+            }));
+            let before = c.state().clone();
+            assert_eq!(
+                c.set_song(contradictory.clone()),
+                Err(ControlError::Rejected),
+                "{source} endpoint {endpoint}"
+            );
+            assert_eq!(c.state(), &before);
+            assert_eq!(
+                c.set_timeline(TimelineUpdate {
+                    pattern: Box::new(before.pattern.clone()),
+                    song: Box::new(contradictory),
+                    bpm: before.bpm,
+                    mode: before.playback_mode,
+                    region: None,
+                    remove_channel: None,
+                }),
+                Err(ControlError::Rejected)
+            );
+            assert_eq!(c.state(), &before);
+            assert_eq!(
+                export_wav(c.state().clone(), &options, &file, &mut |_| {}, &cancel)
+                    .unwrap()
+                    .frames,
+                expected
+            );
+        }
+        c.set_song(initial.song).unwrap();
+        c.send(Command::Play).unwrap();
+        p.process(&mut [0.0; 128], 2);
+        let mut reader = hound::WavReader::open(file).unwrap();
+        assert_eq!(reader.samples::<f32>().count() as u64, expected * 2);
+    }
 }

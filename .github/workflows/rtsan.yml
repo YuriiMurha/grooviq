@@ -4,7 +4,7 @@ name: rtsan
 # device as the cpal callback drives it. Any allocation, free, lock, sleep, file or network
 # access or other blocking call on that path fails the job with a stack trace. macOS only:
 # RTSan has no Windows runtime, and the same tests keep `assert_no_alloc` on every platform.
-# Not a required check. Known violations wait in `engine/tests/rtsan.supp`, each with its issue.
+# No suppressions: callback violations must fail the job.
 
 on:
   push:
