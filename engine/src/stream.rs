@@ -11,7 +11,7 @@
 //! all threads within about [`POLL`].
 
 use std::fmt;
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
@@ -192,6 +192,18 @@ fn authorise(request: &Request, token: &str) -> Result<(), ErrorResponse> {
     if uri.path() != "/live" {
         return Err(error_response(StatusCode::NOT_FOUND));
     }
+    // Exact serialized origins from tauri.conf.json / Vite and Tauri's default
+    // custom-protocol origins (macOS and Windows respectively).
+    let mut origins = request.headers().get_all("origin").iter();
+    if let Some(origin) = origins.next()
+        && (origins.next().is_some()
+            || !matches!(
+                origin.to_str(),
+                Ok("tauri://localhost" | "http://tauri.localhost" | "http://127.0.0.1:1420")
+            ))
+    {
+        return Err(error_response(StatusCode::FORBIDDEN));
+    }
     let given = uri
         .query()
         .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")))
@@ -218,9 +230,7 @@ fn serve(
     // as `WouldBlock` (a read timeout is `TimedOut` on Windows, which tungstenite treats as a
     // failure), and the deadline and the stop flag are checked every round however slowly
     // bytes trickle in.
-    if stream.set_nonblocking(true).is_err()
-        || stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err()
-    {
+    if stream.set_nonblocking(true).is_err() {
         return;
     }
     let callback = |request: &Request, response: Response| {
@@ -233,6 +243,12 @@ fn serve(
         .max_message_size(Some(MAX_INCOMING))
         .max_frame_size(Some(MAX_INCOMING));
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let stream = DeadlineIo {
+        inner: stream,
+        clock: WallClock,
+        deadline,
+        stop,
+    };
     let mut attempt = tungstenite::accept_hdr_with_config(stream, callback, Some(config));
     let mut ws = loop {
         match attempt {
@@ -250,6 +266,94 @@ fn serve(
     if !reject {
         stream_frames(&mut ws, live, period, stop);
     }
+}
+
+// All underlying sockets remain nonblocking. Check every read/write/flush so
+// tungstenite's partial-frame loops cannot bypass the deadline or shutdown.
+trait WriteClock {
+    fn now(&self) -> Instant;
+    fn pause(&mut self, duration: Duration);
+}
+
+struct WallClock;
+impl WriteClock for WallClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    fn pause(&mut self, duration: Duration) {
+        thread::sleep(duration);
+    }
+}
+
+struct DeadlineIo<'a, S, C = WallClock> {
+    inner: S,
+    clock: C,
+    deadline: Instant,
+    stop: &'a AtomicBool,
+}
+
+impl<S, C: WriteClock> DeadlineIo<'_, S, C> {
+    fn check(&self) -> io::Result<()> {
+        if self.stop.load(SeqCst) || self.clock.now() >= self.deadline {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "stream I/O deadline",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<S: Read, C: WriteClock> Read for DeadlineIo<'_, S, C> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.check()?;
+        self.inner.read(bytes)
+    }
+}
+impl<S: Write, C: WriteClock> Write for DeadlineIo<'_, S, C> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.check()?;
+        self.inner.write(bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.check()?;
+        self.inner.flush()
+    }
+}
+
+fn flush_until<S: Read + Write, C: WriteClock>(ws: &mut WebSocket<DeadlineIo<'_, S, C>>) -> bool {
+    loop {
+        if ws.get_ref().check().is_err() {
+            return false;
+        }
+        match ws.flush() {
+            Ok(()) => return ws.get_ref().check().is_ok(),
+            Err(Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {
+                let remaining = ws
+                    .get_ref()
+                    .deadline
+                    .saturating_duration_since(ws.get_ref().clock.now());
+                ws.get_mut()
+                    .clock
+                    .pause(remaining.min(Duration::from_millis(1)))
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+fn send_frame<S: Read + Write, C: WriteClock>(
+    ws: &mut WebSocket<DeadlineIo<'_, S, C>>,
+    frame: Vec<u8>,
+) -> bool {
+    ws.get_mut().deadline = ws.get_ref().clock.now() + WRITE_TIMEOUT;
+    match ws.write(Message::Binary(frame.into())) {
+        Ok(()) => {}
+        Err(Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {}
+        Err(_) => return false,
+    }
+    flush_until(ws)
 }
 
 fn frame_period(hz: u32) -> Duration {
@@ -297,13 +401,13 @@ impl Schedule {
 /// connection is over: the client sent Close (the reply is flushed first), the stream failed or
 /// closed, or a frame or message exceeded [`MAX_INCOMING`] (or was otherwise a protocol
 /// error). Text, Binary and Pong messages within that limit are read and ignored.
-fn drain_incoming(ws: &mut WebSocket<TcpStream>) -> bool {
+fn drain_incoming(ws: &mut WebSocket<DeadlineIo<'_, TcpStream>>) -> bool {
+    ws.get_mut().deadline = Instant::now() + WRITE_TIMEOUT;
     for _ in 0..MAX_DRAIN {
         match ws.read() {
             Ok(Message::Close(_)) => {
                 // tungstenite queued the Close reply; push it out, then end the connection.
-                let _ = ws.get_ref().set_nonblocking(false);
-                let _ = ws.flush();
+                let _ = flush_until(ws);
                 return false;
             }
             Ok(_) => {}
@@ -315,7 +419,7 @@ fn drain_incoming(ws: &mut WebSocket<TcpStream>) -> bool {
 }
 
 fn stream_frames(
-    ws: &mut WebSocket<TcpStream>,
+    ws: &mut WebSocket<DeadlineIo<'_, TcpStream>>,
     live: &LiveShared,
     period: Duration,
     stop: &AtomicBool,
@@ -331,13 +435,13 @@ trait FrameRuntime {
     fn send(&mut self) -> bool;
 }
 
-struct SocketFrames<'a> {
-    ws: &'a mut WebSocket<TcpStream>,
+struct SocketFrames<'a, 'b> {
+    ws: &'a mut WebSocket<DeadlineIo<'b, TcpStream>>,
     live: &'a LiveShared,
     stop: &'a AtomicBool,
 }
 
-impl FrameRuntime for SocketFrames<'_> {
+impl FrameRuntime for SocketFrames<'_, '_> {
     fn now(&self) -> Instant {
         Instant::now()
     }
@@ -352,10 +456,7 @@ impl FrameRuntime for SocketFrames<'_> {
 
     fn send(&mut self) -> bool {
         let frame = encode_live(&self.live.snapshot());
-        // Writes block (bounded by WRITE_TIMEOUT) so a frame is whole or the client is dropped.
-        self.ws.get_ref().set_nonblocking(false).is_ok()
-            && self.ws.send(Message::Binary(frame.to_vec().into())).is_ok()
-            && self.ws.get_ref().set_nonblocking(true).is_ok()
+        send_frame(self.ws, frame.to_vec())
     }
 }
 
@@ -383,6 +484,328 @@ fn run_frames(runtime: &mut impl FrameRuntime, period: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_is_exact_single_and_optional_but_never_replaces_token() {
+        for origin in [
+            None,
+            Some("tauri://localhost"),
+            Some("http://tauri.localhost"),
+            Some("http://127.0.0.1:1420"),
+        ] {
+            let mut request = Request::builder().uri("/live?token=secret");
+            if let Some(value) = origin {
+                request = request.header("origin", value);
+            }
+            assert!(authorise(&request.body(()).unwrap(), "secret").is_ok());
+        }
+        for origin in [
+            "null",
+            "http://127.0.0.1:1421",
+            "http://localhost:1420",
+            "tauri://localhost.evil",
+            "http://tauri.localhost/",
+            "http://tauri.localhost http://evil",
+            "https://evil",
+        ] {
+            let request = Request::builder()
+                .uri("/live?token=secret")
+                .header("origin", origin)
+                .body(())
+                .unwrap();
+            assert_eq!(
+                authorise(&request, "secret").unwrap_err().status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        let request = Request::builder()
+            .uri("/live?token=secret")
+            .header("origin", "tauri://localhost")
+            .header("origin", "http://evil")
+            .body(())
+            .unwrap();
+        assert!(authorise(&request, "secret").is_err());
+        let mut malformed = Request::builder()
+            .uri("/live?token=secret")
+            .body(())
+            .unwrap();
+        malformed.headers_mut().insert(
+            "origin",
+            tungstenite::http::HeaderValue::from_bytes(&[0xff]).unwrap(),
+        );
+        assert!(authorise(&malformed, "secret").is_err());
+        let request = Request::builder()
+            .uri("/live?token=wrong")
+            .header("origin", "tauri://localhost")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            authorise(&request, "secret").unwrap_err().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)] // tungstenite handshake callback type
+    fn authenticated_never_reader_hits_write_deadline_and_releases_slot() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let clients = Arc::new(AtomicUsize::new(1));
+        let count = clients.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _slot = Slot(count);
+            let (socket, _) = listener.accept().unwrap();
+            socket.set_nonblocking(true).unwrap();
+            let stop = AtomicBool::new(false);
+            let io = DeadlineIo {
+                inner: socket,
+                clock: WallClock,
+                deadline: Instant::now() + HANDSHAKE_TIMEOUT,
+                stop: &stop,
+            };
+            let callback = |request: &Request, response: Response| {
+                authorise(request, "secret").map(|()| response)
+            };
+            let mut attempt = tungstenite::accept_hdr(io, callback);
+            let mut ws = loop {
+                match attempt {
+                    Ok(ws) => break ws,
+                    Err(HandshakeError::Interrupted(mid)) => {
+                        thread::sleep(HANDSHAKE_POLL);
+                        attempt = mid.handshake();
+                    }
+                    Err(_) => panic!("loopback handshake failed"),
+                }
+            };
+            // Exercise the production frame write path without waiting minutes for
+            // 40-byte frames at 60 Hz to fill the OS buffers. The peer stays open.
+            let start = Instant::now();
+            let mut sent = 0;
+            while start.elapsed() < Duration::from_secs(4) && sent < 1_000_000 {
+                if !send_frame(&mut ws, vec![0; 40]) {
+                    tx.send((sent, ws.get_ref().clock.now() >= ws.get_ref().deadline))
+                        .unwrap();
+                    return;
+                }
+                sent += 1;
+            }
+            tx.send((sent, false)).unwrap();
+        });
+        let (_silent, _) =
+            tungstenite::connect(format!("ws://{address}/live?token=secret")).unwrap();
+        let (sent, expired) = rx.recv_timeout(Duration::from_secs(6)).unwrap();
+        worker.join().unwrap();
+        assert!(sent > 0, "must authenticate and send actual frames");
+        assert!(
+            expired,
+            "must expire in the write path with the peer still open"
+        );
+        assert_eq!(
+            clients.load(SeqCst),
+            0,
+            "deadline must return the connection permit"
+        );
+        let healthy = start_stream(Arc::new(LiveShared::default()), 60).unwrap();
+        let mut client = connect(&healthy);
+        assert!(client.read().unwrap().is_binary());
+    }
+
+    #[test]
+    fn websocket_handshake_enforces_origin_with_a_valid_token() {
+        use tungstenite::client::IntoClientRequest;
+        let server = start_stream(Arc::new(LiveShared::default()), 60).unwrap();
+        let url = format!("ws://127.0.0.1:{}/live?token={}", server.port, server.token);
+        for origin in [
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "http://127.0.0.1:1420",
+        ] {
+            let mut request = url.as_str().into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("origin", origin.parse().unwrap());
+            let (mut client, _) = tungstenite::connect(request).unwrap();
+            assert_eq!(client.read().unwrap().into_data().len(), 40);
+            drop(client);
+        }
+        for origin in ["null", "http://127.0.0.1:1421", "tauri://localhost.evil"] {
+            let mut request = url.as_str().into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("origin", origin.parse().unwrap());
+            assert!(matches!(tungstenite::connect(request),
+                Err(Error::Http(response)) if response.status() == StatusCode::FORBIDDEN));
+        }
+    }
+
+    struct TestClock(std::rc::Rc<std::cell::Cell<Instant>>);
+    impl WriteClock for TestClock {
+        fn now(&self) -> Instant {
+            self.0.get()
+        }
+        fn pause(&mut self, duration: Duration) {
+            self.0.set(self.0.get() + duration);
+        }
+    }
+
+    fn fragmented_message_obeys_budget(stop_after: Option<usize>, expected_reads: usize) {
+        struct Fragments<'a> {
+            clock: std::rc::Rc<std::cell::Cell<Instant>>,
+            stop: &'a AtomicBool,
+            stop_after: Option<usize>,
+            reads: usize,
+        }
+        impl Read for Fragments<'_> {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                if self.reads == 100 {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                // Valid masked fragments with no final frame or payload: message-size
+                // and complete-message limits cannot end this protocol work.
+                let frame = [if self.reads == 0 { 0x02 } else { 0x00 }, 0x80, 0, 0, 0, 0];
+                bytes[..frame.len()].copy_from_slice(&frame);
+                self.reads += 1;
+                self.clock.set(self.clock.get() + Duration::from_millis(10));
+                if self.stop_after == Some(self.reads) {
+                    self.stop.store(true, SeqCst);
+                }
+                Ok(frame.len())
+            }
+        }
+        impl Write for Fragments<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let now = Instant::now();
+        let clock = std::rc::Rc::new(std::cell::Cell::new(now));
+        let stop = AtomicBool::new(false);
+        let io = DeadlineIo {
+            inner: Fragments {
+                clock: clock.clone(),
+                stop: &stop,
+                stop_after,
+                reads: 0,
+            },
+            clock: TestClock(clock.clone()),
+            deadline: now + WRITE_TIMEOUT,
+            stop: &stop,
+        };
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_INCOMING))
+            .max_frame_size(Some(MAX_INCOMING));
+        let mut ws =
+            WebSocket::from_raw_socket(io, tungstenite::protocol::Role::Server, Some(config));
+        assert!(matches!(ws.read(), Err(Error::Io(e)) if e.kind() == io::ErrorKind::TimedOut));
+        assert_eq!(ws.get_ref().inner.reads, expected_reads);
+        assert_eq!(
+            clock.get() - now,
+            Duration::from_millis(10 * expected_reads as u64)
+        );
+    }
+
+    #[test]
+    fn fragmented_message_cannot_outlive_its_control_deadline() {
+        fragmented_message_obeys_budget(None, 5);
+    }
+
+    #[test]
+    fn fragmented_message_cannot_hide_a_shutdown_request() {
+        fragmented_message_obeys_budget(Some(1), 1);
+    }
+
+    struct SlowWriter {
+        clock: std::rc::Rc<std::cell::Cell<Instant>>,
+        bytes: usize,
+        dribble: bool,
+    }
+    impl Read for SlowWriter {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+    }
+    impl Write for SlowWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.dribble {
+                self.clock.set(self.clock.get() + Duration::from_millis(10));
+                self.bytes += 1;
+                Ok(bytes.len().min(1))
+            } else {
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn frame_deadline_bounds_never_reading_and_partial_progress() {
+        for dribble in [true, false] {
+            let now = Instant::now();
+            let clock = std::rc::Rc::new(std::cell::Cell::new(now));
+            let stop = AtomicBool::new(false);
+            let io = DeadlineIo {
+                inner: SlowWriter {
+                    clock: clock.clone(),
+                    bytes: 0,
+                    dribble,
+                },
+                clock: TestClock(clock.clone()),
+                deadline: now,
+                stop: &stop,
+            };
+            let mut ws = WebSocket::from_raw_socket(io, tungstenite::protocol::Role::Server, None);
+            assert!(!send_frame(&mut ws, vec![0; 40]));
+            assert_eq!(clock.get() - now, WRITE_TIMEOUT);
+            assert_eq!(ws.get_ref().inner.bytes, if dribble { 5 } else { 0 });
+        }
+    }
+
+    #[test]
+    fn stop_interrupts_pending_frame_flush() {
+        struct StopClock<'a> {
+            now: std::rc::Rc<std::cell::Cell<Instant>>,
+            stop: &'a AtomicBool,
+        }
+        impl WriteClock for StopClock<'_> {
+            fn now(&self) -> Instant {
+                self.now.get()
+            }
+            fn pause(&mut self, duration: Duration) {
+                self.now.set(self.now.get() + duration);
+                self.stop.store(true, SeqCst);
+            }
+        }
+        let now = Instant::now();
+        let clock = std::rc::Rc::new(std::cell::Cell::new(now));
+        let stop = AtomicBool::new(false);
+        let io = DeadlineIo {
+            inner: SlowWriter {
+                clock: clock.clone(),
+                bytes: 0,
+                dribble: false,
+            },
+            clock: StopClock {
+                now: clock.clone(),
+                stop: &stop,
+            },
+            deadline: now,
+            stop: &stop,
+        };
+        let mut ws = WebSocket::from_raw_socket(io, tungstenite::protocol::Role::Server, None);
+        assert!(!send_frame(&mut ws, vec![0; 40]));
+        assert!(
+            stop.load(SeqCst),
+            "must reach pending flush before requesting shutdown"
+        );
+        assert_eq!(clock.get() - now, Duration::from_millis(1));
+        assert_eq!(ws.get_ref().inner.bytes, 0);
+    }
 
     fn connect(server: &StreamServer) -> WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
         let url = format!("ws://127.0.0.1:{}/live?token={}", server.port, server.token);
