@@ -34,6 +34,9 @@ type Choke = (u8, u32, ChannelId);
 pub(crate) struct Graph {
     /// The controller's `reconfigure` count when the graph was built.
     generation: u64,
+    pub(crate) host_epoch: u64,
+    host: Option<grooviq_dsp::HostTransport>,
+    automation_active: bool,
     tone: ToneNode,
     synth: SynthNode,
     /// Created with room for [`MAX_CHANNELS`] plus [`MAX_LEAVING`], so adding and removing
@@ -46,6 +49,9 @@ pub(crate) struct Graph {
     pattern: Box<PatternData>,
     sequencer: Sequencer,
     song: Box<crate::SongData>,
+    audio: crate::audio_clip::AudioRuntime,
+    audio_l: [f32; BLOCK],
+    audio_r: [f32; BLOCK],
     song_sequencer: crate::song::SongSequencer,
     pub(crate) playback_mode: crate::PlaybackMode,
     pub(crate) song_loop: Option<crate::SongLoop>,
@@ -69,12 +75,18 @@ impl Graph {
         let ramp_len = ramp_len(sample_rate);
         Self {
             generation,
+            host_epoch: 0,
+            host: None,
+            automation_active: false,
             tone: ToneNode::new(sample_rate, ramp_len),
             synth: SynthNode::new(sample_rate, ramp_len),
             channels: Vec::with_capacity(MAX_CHANNELS + MAX_LEAVING),
             pattern: Box::new(PatternData::default()),
             sequencer: Sequencer::new(),
             song: Box::default(),
+            audio: Default::default(),
+            audio_l: [0.0; BLOCK],
+            audio_r: [0.0; BLOCK],
             song_sequencer: crate::song::SongSequencer::new(),
             playback_mode: crate::PlaybackMode::Pattern,
             song_loop: None,
@@ -83,6 +95,12 @@ impl Graph {
             node_l: [0.0; BLOCK],
             node_r: [0.0; BLOCK],
         }
+    }
+
+    pub(crate) fn synth_meter(&self, instance: u64) -> Option<crate::SynthMeter> {
+        self.present()
+            .find(|c| c.instance == instance)?
+            .synth_meter()
     }
 
     pub(crate) fn generation(&self) -> u64 {
@@ -186,6 +204,21 @@ impl Graph {
         }
     }
 
+    pub(crate) fn set_sampler_trim(
+        &mut self,
+        id: ChannelId,
+        instance: u64,
+        params: &[f32; grooviq_dsp::sampler::SPEC.len()],
+    ) {
+        if let Some(channel) = self.channel(id)
+            && channel.instance == instance
+        {
+            for (index, value) in params.iter().enumerate() {
+                channel.set_param(index as u32, *value);
+            }
+        }
+    }
+
     pub(crate) fn set_sampler_param(&mut self, id: ChannelId, index: u32, value: f32) {
         if let Some(channel) = self.channel(id) {
             channel.set_sampler_param(index, value);
@@ -233,6 +266,7 @@ impl Graph {
     /// Swaps in a pattern and returns the old one, to be freed elsewhere. Playback goes on at
     /// the same tick, in the new pattern (notes already sounding end as booked).
     pub(crate) fn set_pattern(&mut self, pattern: Box<PatternData>) -> Box<PatternData> {
+        self.host_epoch = self.host_epoch.wrapping_add(1);
         self.sequencer.reseek();
         self.song_sequencer.reseek();
         std::mem::replace(&mut self.pattern, pattern)
@@ -245,12 +279,14 @@ impl Graph {
 
     /// The transport started: the sequencer finds its place again.
     pub(crate) fn transport_started(&mut self) {
+        self.audio.reset();
         self.sequencer.reseek();
         self.song_sequencer.reseek();
     }
 
     /// The transport stopped: every pending note-off goes out at the next block's start.
     pub(crate) fn transport_stopped(&mut self) {
+        self.audio.reset();
         self.sequencer.stop();
         self.song_sequencer.stop();
     }
@@ -258,6 +294,18 @@ impl Graph {
     /// Queues into the channels the sequenced notes of the block that starts at frame `f0`
     /// (call it before [`Self::render`]).
     pub(crate) fn sequence(&mut self, clock: &TransportClock, f0: u64) {
+        self.audio_l.fill(0.0);
+        self.audio_r.fill(0.0);
+        if self.playback_mode == crate::PlaybackMode::Song {
+            self.audio.render(
+                &self.song.audio,
+                self.song_loop,
+                clock,
+                f0,
+                &mut self.audio_l,
+                &mut self.audio_r,
+            );
+        }
         let channels = &mut self.channels;
         let mut sink = |id, event| match channels.iter_mut().find(|c| c.id() == id && !c.leaving())
         {
@@ -283,10 +331,28 @@ impl Graph {
     }
 
     pub(crate) fn set_song(&mut self, song: Box<crate::SongData>) -> Box<crate::SongData> {
+        self.host_epoch = self.host_epoch.wrapping_add(1);
         self.song_sequencer.stop();
+        if !crate::audio_clip::AudioRuntime::compatible(&self.song.audio, &song.audio) {
+            self.audio.reset();
+        }
         std::mem::replace(&mut self.song, song)
     }
 
+    pub(crate) fn reset_audio(&mut self) {
+        self.audio.reset();
+    }
+    pub(crate) fn audio_active(&self) -> bool {
+        self.audio.active()
+    }
+    pub(crate) fn keep_audio(&mut self, old: &Self) {
+        if self.song_loop == old.song_loop
+            && self.playback_mode == old.playback_mode
+            && crate::audio_clip::AudioRuntime::compatible(&self.song.audio, &old.song.audio)
+        {
+            self.audio = old.audio.clone();
+        }
+    }
     pub(crate) fn song(&self) -> &crate::SongData {
         &self.song
     }
@@ -329,6 +395,37 @@ impl Graph {
         self.synth.panic_next = true;
     }
 
+    pub(crate) fn set_host(&mut self, host: grooviq_dsp::HostTransport) {
+        self.host = Some(host);
+    }
+
+    pub(crate) fn automate(&mut self, clock: &TransportClock, start: u64) {
+        let active = clock.playing()
+            && self.playback_mode == crate::PlaybackMode::Song
+            && !self.song.automation.is_empty();
+        // Leaving automation needs one restoration pass; an already-idle graph
+        // must not walk every channel's parameter table on every audio block.
+        if !active && !self.automation_active {
+            return;
+        }
+        self.automation_active = active;
+        let tick = active.then(|| {
+            let tick = clock.tick_at(start);
+            self.song_loop.map_or(tick, |r| {
+                if tick >= r.end_tick as f64 {
+                    r.start_tick as f64
+                        + (tick - r.start_tick as f64) % (r.end_tick - r.start_tick) as f64
+                } else {
+                    tick
+                }
+            })
+        });
+        let any_solo = self.present().any(ChannelNode::solo);
+        for c in self.channels.iter_mut().filter(|c| !c.leaving()) {
+            c.automate(&self.song.automation, tick, any_solo);
+        }
+    }
+
     /// Renders one block into the master bus `l`/`r` (overwritten); `events` are sorted by
     /// offset. Returns how many nodes the NaN guard silenced.
     pub(crate) fn render(
@@ -348,6 +445,9 @@ impl Graph {
         *l = *node_l;
         *r = *node_r;
 
+        if let Some(host) = self.host {
+            self.synth.device.set_transport(&host);
+        }
         self.synth.render(node_l, node_r, events);
         if guard(node_l, node_r) {
             self.synth.reset();
@@ -363,6 +463,7 @@ impl Graph {
             }
             let splits = splits_for(channel, chokes, &mut self.splits);
             // A silent channel adds nothing.
+            channel.set_host(self.host);
             if !channel.render(node_l, node_r, splits) {
                 continue;
             }
@@ -372,6 +473,12 @@ impl Graph {
                 continue;
             }
             mix_in(l, r, node_l, node_r);
+        }
+        if !self.song.audio.is_empty() && self.playback_mode == crate::PlaybackMode::Song {
+            if guard(&mut self.audio_l, &mut self.audio_r) {
+                silenced += 1;
+            }
+            mix_in(l, r, &self.audio_l, &self.audio_r);
         }
         silenced
     }
@@ -639,5 +746,15 @@ impl SynthNode {
     fn reset(&mut self) {
         self.device.reset();
         self.fade = None;
+    }
+}
+
+#[cfg(test)]
+impl Graph {
+    pub(crate) fn observe_synth(&mut self, device: Box<dyn grooviq_dsp::Device>) {
+        self.synth.device = device;
+    }
+    pub(crate) fn channel_gain_target(&self) -> f32 {
+        self.channels[0].gain_target()
     }
 }

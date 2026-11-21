@@ -31,6 +31,18 @@ Read the code; it is the documentation. `make help` lists the supported commands
 - The owner's sample kit under `/Users/yurii/Music` never enters the repo, a fixture or a test.
 - A repeatable command gets a Makefile target. One-off scripts stay untracked.
 
+## Local installs and storage
+
+- Quality and speed is the sole local install coordinator. Other sessions report meaningful feature
+  merges; Quality coalesces them and installs only verified merged `origin/main`.
+- The owner authorizes local reinstall separately from deployment. Never launch the installed app,
+  interrupt a running instance, or touch owner projects or samples during installation.
+- Reuse one stable release cache with bounded compiler jobs. Keep the prior app until the staged copy
+  is verified; record source SHA, build time and executable hash outside `/Applications`.
+- Each session preserves compact evidence, then cleans its owned disposable probes and completed
+  clean/pushed worktrees. Coordinate active owners first. Preserve active caches, dirty/unpushed work
+  and all local/remote branches. Never archive `target` or `node_modules`; pass this lifecycle to delegates.
+
 ## Git
 
 - Branch from fresh `origin/main` in your own worktree. Check `git branch --show-current` first.

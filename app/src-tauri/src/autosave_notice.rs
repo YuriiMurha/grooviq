@@ -16,7 +16,7 @@ pub(crate) const FAILED_EVENT: &str = "autosave-failed";
 /// What the UI is owed about autosave. `{ disabled, failure }` as JSON.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub(crate) struct AutosaveStatus {
-    /// Why autosave is off in this copy for good (another Grooviq holds the recovery folder).
+    /// Why autosave could not start in this window.
     pub(crate) disabled: Option<String>,
     /// The latest failing autosave's sentence, until an autosave succeeds.
     pub(crate) failure: Option<String>,
@@ -58,12 +58,15 @@ impl AutosaveStatus {
     }
 }
 
-/// The sentence for a recovery folder that could not be taken, if the person should hear of it:
-/// another running Grooviq holds it. (Other failures stay in the audio log.)
+/// Retained startup warning. Folder ownership has its own actionable explanation.
 pub(crate) fn disabled_notice(error: &io::Error) -> Option<String> {
-    (error.kind() == io::ErrorKind::WouldBlock).then(|| {
+    Some(if error.kind() == io::ErrorKind::WouldBlock {
         "Another Grooviq is already running, so autosave is off in this window. Unsaved changes here are lost if it closes unexpectedly; save often."
             .to_owned()
+    } else {
+        format!(
+            "Autosave and recovery could not start: {error}. Your changes are not being backed up; save the project to keep them."
+        )
     })
 }
 
@@ -133,13 +136,14 @@ mod tests {
     }
 
     #[test]
-    fn only_a_folder_held_by_another_copy_is_announced() {
-        let held = io::Error::new(io::ErrorKind::WouldBlock, "another Grooviq is running");
-        assert!(disabled_notice(&held).is_some());
-        assert_eq!(disabled_notice(&error("read-only file system")), None);
-        assert_eq!(
-            disabled_notice(&io::Error::from(io::ErrorKind::PermissionDenied)),
-            None
-        );
+    fn every_initialization_error_is_announced_with_its_reason() {
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::Other,
+        ] {
+            let error = io::Error::new(kind, "startup-probe");
+            assert!(disabled_notice(&error).unwrap().contains("startup-probe"));
+        }
     }
 }

@@ -37,25 +37,59 @@ for (const [w, h] of [
   });
 }
 
-test.describe("the project name in the toolbar", () => {
-  // The mockup's name. "Untitled" is cut too in the real app and on Linux, but fits in macOS
-  // headless WebKit, so only this name pins #104 everywhere.
-  test.use({ seed: { project: { ...project(KIT), name: "Late Night Flip" }, files: soundsFor(KIT) } });
-
-  test("is cut short at 1280 px while the toolbar has room (#104)", async ({ app }, info) => {
-    await app.evaluate(() => document.fonts.ready.then(() => undefined));
-    const button = app.getByRole("button", { name: "Late Night Flip", exact: true });
-    const label = button.locator(".project-name-text");
-    const { cut, room } = await label.evaluate((el) => {
-      const chip = document.querySelector(".chip-anchor")?.getBoundingClientRect();
-      const position = document.querySelector("[aria-label='Position']")?.getBoundingClientRect();
-      return { cut: el.scrollWidth > el.clientWidth, room: chip && position ? chip.left - position.right : 0 };
+for (const name of ["Late Night Flip", "Untitled"]) {
+  test.describe(`project title: ${name}`, () => {
+    test.use({ seed: { project: project(KIT, {}, { name }), files: soundsFor(KIT) } });
+    test("uses available width at 1280 (#104)", async ({ app }, info) => {
+      await app.evaluate(() => document.fonts.ready.then(() => undefined));
+      const label = app.locator(".project-name-text");
+      expect(await label.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(0);
+      await app.locator("header.toolbar").screenshot({ path: info.outputPath("toolbar.png") });
     });
-    await app.locator("header.toolbar").screenshot({ path: info.outputPath("toolbar.png") });
-    expect(room, "free toolbar space between the position and the output chip").toBeGreaterThan(300);
-    // Known defect #104: pinned. When it is fixed this fails: expect `false` instead.
-    info.annotations.push({ type: "issue", description: "#104" });
-    expect(cut, "#104 fixed? expect the full name now").toBe(true);
+  });
+}
+
+test.describe("long project title", () => {
+  const name = "Late Night Flip — extended arrangement with alternate drums and final mix";
+  test.use({ seed: { project: project(KIT, {}, { name }), files: soundsFor(KIT) }, viewport: { width: 900, height: 560 } });
+  test("ellipsizes without hiding controls and keeps the full project name (#104)", async ({ app, mock }, info) => {
+    await app.evaluate(() => document.fonts.ready.then(() => undefined));
+    const title = app.getByRole("button", { name, exact: true });
+    const geometry = await app.locator(".project-name-text").evaluate((el) => ({ width: el.clientWidth, natural: el.scrollWidth }));
+    expect(geometry.width).toBeGreaterThan(20);
+    expect(geometry.natural).toBeGreaterThan(geometry.width);
+    expect(await app.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+    const controls = [title, app.getByRole("button", { name: "Play", exact: true }), app.getByRole("button", { name: "Stop", exact: true }), app.locator(".toolbar-audio")];
+    const boxes = [];
+    for (const control of controls) {
+      const box = await control.boundingBox();
+      expect(box).not.toBeNull();
+      boxes.push(box!);
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(900);
+    }
+    for (let i = 1; i < boxes.length; i++) expect(boxes[i].x).toBeGreaterThanOrEqual(boxes[i - 1].x + boxes[i - 1].width);
+    await title.click();
+    await expect(app.getByRole("menuitem", { name: /^New/ })).toBeFocused();
+    await app.keyboard.press("Escape");
+    await expect(title).toBeFocused();
+    await title.click();
+    await app.getByRole("menuitem", { name: /Save as/ }).click();
+    expect(await mock.eval("(m) => m.state.dialogCalls.at(-1).options.defaultPath")).toBe(`${name}.grooviq`);
+    await expect(title).toHaveAccessibleName(name);
+    await mock.eval(`(m) => m.queueDialog(${JSON.stringify(`/qa/projects/${name}.grooviq`)})`);
+    await title.click();
+    await app.getByRole("menuitem", { name: /Save as/ }).click();
+    await expect.poll(() => mock.view().then((v) => v.path)).toBe(`/qa/projects/${name}.grooviq`);
+    expect(await mock.eval(`(m) => m.file(${JSON.stringify(`/qa/projects/${name}.grooviq`)}).project.name`)).toBe(name);
+    await expect(title).toHaveAccessibleName(name);
+    await title.click();
+    await app.getByRole("menuitem", { name: /Export WAV/ }).click();
+    await expect(app.getByRole("dialog", { name: "Export WAV" })).toBeVisible();
+    await app.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(title).toHaveAccessibleName(name);
+    await info.attach("geometry", { body: JSON.stringify({ geometry, boxes }), contentType: "application/json" });
+    await app.locator("header.toolbar").screenshot({ path: info.outputPath("toolbar-long.png") });
   });
 });
 
