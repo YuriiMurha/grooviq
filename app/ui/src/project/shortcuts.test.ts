@@ -182,3 +182,15 @@ describe("non-Latin Mod shortcuts", () => {
     });
   }
 });
+
+describe("shared printed-letter resolution", () => {
+  it("does not fold non-ASCII characters into ASCII shortcuts", () => {
+    // The long s lowercases to itself; Kelvin sign lowercases to ASCII k.
+    // Neither is an ASCII printed letter, so the physical S decides Save.
+    expect(shortcutFor(key("K", { code: "KeyS", ctrlKey: true }), "Win32")).toBe("save");
+    expect(shortcutFor(key("ſ", { code: "KeyS", ctrlKey: true }), "Win32")).toBe("save");
+    for (const code of [undefined, "Keys", "keyS", "KeySS", "KeySmore"]) {
+      expect(shortcutFor(key("Dead", { code, ctrlKey: true }), "Win32")).toBeNull();
+    }
+  });
+});

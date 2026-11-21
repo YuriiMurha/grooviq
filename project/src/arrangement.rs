@@ -124,7 +124,7 @@ pub enum ClipContent {
         priority: u32,
         offset_tick: u32,
         length_ticks: u64,
-        points: Vec<AutomationPoint>,
+        points: CurvePoints,
     },
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -160,6 +160,49 @@ pub struct AutomationPoint {
     pub value: f32,
     pub mode: SegmentMode,
 }
+/// Immutable shared curve allocation. Serialization remains the v3 point array; bounded
+/// decoding still runs through Points before converting to shared storage.
+#[derive(Clone, Debug)]
+pub struct CurvePoints(std::sync::Arc<Vec<AutomationPoint>>);
+impl PartialEq for CurvePoints {
+    fn eq(&self, other: &Self) -> bool {
+        self.shares_allocation(other) || self.0 == other.0
+    }
+}
+impl From<Vec<AutomationPoint>> for CurvePoints {
+    fn from(points: Vec<AutomationPoint>) -> Self {
+        Self(std::sync::Arc::new(points))
+    }
+}
+impl std::ops::Deref for CurvePoints {
+    type Target = [AutomationPoint];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl CurvePoints {
+    pub fn shares_allocation(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+    pub(crate) fn allocation(&self) -> (usize, usize) {
+        (
+            std::sync::Arc::as_ptr(&self.0) as usize,
+            std::mem::size_of::<Vec<AutomationPoint>>()
+                + 2 * std::mem::size_of::<usize>()
+                + self.0.capacity() * std::mem::size_of::<AutomationPoint>(),
+        )
+    }
+    /// Explicit copy-on-write for source editing; ordinary geometry never calls this.
+    pub fn make_mut(&mut self) -> &mut Vec<AutomationPoint> {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+impl Serialize for CurvePoints {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.as_slice().serialize(serializer)
+    }
+}
+
 // Flat readers deliberately avoid serde's internally-tagged Content buffer. Unknown fields
 // stream through IgnoredAny; points reach their cap before the rest of the array is read.
 #[derive(Deserialize)]
@@ -212,7 +255,7 @@ impl<'de> Deserialize<'de> for ClipContent {
                 priority: required(f.priority, "priority")?,
                 offset_tick: required(f.offset_tick, "offsetTick")?,
                 length_ticks: required(f.length_ticks, "lengthTicks")?,
-                points: required(f.points, "points")?.0,
+                points: required(f.points, "points")?.0.into(),
             },
             _ => {
                 return Err(D::Error::unknown_variant(
@@ -524,5 +567,35 @@ impl Arrangement {
             .map(|x| x.id)
             .chain(self.clips.iter().map(|x| x.id))
             .chain(self.audio_assets.iter().map(|x| x.id))
+    }
+}
+
+#[cfg(test)]
+mod shared_curve_tests {
+    use super::*;
+    #[test]
+    fn shared_curve_serialization_is_exact_v3_array_and_source_edits_use_cow() {
+        let original = vec![
+            AutomationPoint {
+                tick: 0,
+                value: 0.25,
+                mode: SegmentMode::Linear,
+            },
+            AutomationPoint {
+                tick: 960,
+                value: 0.75,
+                mode: SegmentMode::Hold,
+            },
+        ];
+        let points: CurvePoints = original.clone().into();
+        let mut copy = points.clone();
+        assert!(points.shares_allocation(&copy));
+        assert_eq!(
+            serde_json::to_vec(&points).unwrap(),
+            serde_json::to_vec(&original).unwrap()
+        );
+        copy.make_mut()[0].value = 0.5;
+        assert!(!points.shares_allocation(&copy));
+        assert_eq!(points[0].value, 0.25);
     }
 }

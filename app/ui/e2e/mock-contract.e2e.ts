@@ -234,6 +234,44 @@ test.describe("recording when the pattern's note ids run out", () => {
   });
 });
 
+test.describe("MIDI ownership", () => {
+  test.use({ seed: { project: twoChannels([]) } });
+  for (const zeroVelocityOn of [false, true]) {
+    test(`note_off_releases_every_repeated_MIDI_press_${zeroVelocityOn}`, async ({ app, mock }) => {
+      await call(app, "channel_select", { channel: 1 });
+      await take(app);
+      await mock.eval("(m) => { m.midiNote(60, 127, true); m.midiNote(60, 64, true); }");
+      await hold(app, 240);
+      await mock.eval(`(m) => m.midiNote(60, 0, ${zeroVelocityOn})`);
+      expect(await mock.eval("(m) => m.live()")).toEqual([]);
+      expect(await recorded(app)).toEqual([[0, 240, 60, 1], [0, 240, 60, 64 / 127]]);
+    });
+  }
+
+  test("selection_releases_MIDI_only_and_stale_key_up_leaves_new_producers_alone", async ({ app, mock }) => {
+    await call(app, "channel_select", { channel: 1 });
+    await take(app);
+    const midi = await mock.eval<number>("(m) => m.midiNote(60, 127, true)");
+    const again = await mock.eval<number>("(m) => m.midiNote(60, 64, true)");
+    const typed = await call<number>(app, "channel_note", { channel: 1, key: 60, velocity: 0.5, on: true });
+    expect(new Set([midi, again, typed]).size).toBe(3);
+    await hold(app, 120);
+    await call(app, "channel_select", { channel: 1 });
+    expect(await recorded(app)).toEqual([]);
+    await hold(app, 240);
+    await call(app, "channel_select", { channel: 2 });
+    expect(await mock.eval("(m) => m.live()")).toEqual(["1:60"]);
+    expect(await recorded(app)).toEqual([[0, 240, 60, 1], [0, 240, 60, 64 / 127]]);
+    await mock.eval("(m) => m.midiNote(60, 0, false)");
+    expect(await mock.eval("(m) => m.live()")).toEqual(["1:60"]);
+    await hold(app, 480);
+    await call(app, "channel_note", { channel: 1, key: 60, velocity: 0, on: false, press: typed });
+    expect(await mock.eval("(m) => m.live()")).toEqual([]);
+    await call(app, "channel_select", { channel: null });
+    expect(await mock.eval("(m) => m.midiNote(60, 127, true)")).toBeNull();
+  });
+});
+
 
 test("play_while_playing_preserves_the_clock_and_held_position", async ({ app, mock }) => {
   await call(app, "transport_play");
@@ -247,4 +285,20 @@ test("play_while_playing_preserves_the_clock_and_held_position", async ({ app, m
   expect(await mock.eval("(m) => m.state.transport.playing")).toBe(true);
   expect(await mock.eval("(m) => m.state.transport.held")).toBeNull();
   expect(await mock.eval("(m) => m.state.transport.startTicks")).toBe(0);
+});
+
+
+test.describe("autosave initialization failure", () => {
+  const disabled = "Autosave and recovery could not start: startup-probe. Your changes are not being backed up; save the project to keep them.";
+  test.use({ seed: { audioLog: [], autosave: { disabled } } });
+
+  test("retains unavailable status and warns once at startup", async ({ app }) => {
+    const warnings = app.getByRole("status", { name: "Messages" }).locator(".toast.warn");
+    await expect(warnings).toHaveCount(1);
+    await expect(warnings).toContainText([disabled]);
+    for (let i = 0; i < 3; i++) {
+      expect(await call(app, "autosave_status")).toEqual({ disabled, failure: null });
+    }
+    await expect(warnings).toHaveCount(1);
+  });
 });

@@ -68,6 +68,8 @@ const NO_EVENT: NoteEvent = NoteEvent {
     id: 0,
 };
 
+type HostSignature = (bool, u64, u64, u64, u64, u64, u64, u64);
+
 /// Renders audio on the audio thread. Created by [`crate::engine`].
 pub struct AudioProcessor {
     commands: Consumer<Msg>,
@@ -89,6 +91,9 @@ pub struct AudioProcessor {
     events: [NoteEvent; MAX_EVENTS],
     /// First frame of the next block: the engine's sample clock.
     clock: u64,
+    stream_generation: u64,
+    host_revision: u64,
+    host_last: Option<HostSignature>,
     /// Play state and tempo. Owned here, not by the graph, so it survives graph swaps, as do
     /// the recording tap and the metronome.
     transport: TransportClock,
@@ -124,6 +129,9 @@ impl AudioProcessor {
             served: BLOCK,
             events: [NO_EVENT; MAX_EVENTS],
             clock: 0,
+            stream_generation: 0,
+            host_revision: 0,
+            host_last: None,
             transport,
             recorder: Recorder::new(recorded),
             metronome: Metronome::new(sample_rate, time_signature),
@@ -167,6 +175,7 @@ impl AudioProcessor {
     /// [`crate::Controller::reconfigure`] calls this, with the audio callback stopped, so the
     /// old graph is freed on its thread. The transport keeps playing from the tick it reached.
     pub(crate) fn restart(&mut self, sample_rate: f32, graph: Box<Graph>) {
+        self.stream_generation = self.stream_generation.wrapping_add(1);
         self.transport.set_sample_rate(self.clock, sample_rate);
         self.metronome.set_sample_rate(sample_rate);
         // A pattern of a new length can arrive with the fresh graph (its swap was still queued,
@@ -182,6 +191,11 @@ impl AudioProcessor {
             self.transport.keep_position(self.clock, len, len);
         }
         self.generation = graph.generation();
+        let mut graph = graph;
+        // Silent faulted callbacks advance transport without advancing clip progress.
+        if !self.faulted {
+            graph.keep_audio(&self.graph);
+        }
         self.graph = graph;
         self.unsent = None;
         self.faulted = false;
@@ -206,6 +220,37 @@ impl AudioProcessor {
         let end = start + BLOCK as u64;
         self.retry_trash();
         let count = self.drain(start, end);
+        let region = self.graph.song_loop;
+        let signature = (
+            self.transport.playing(),
+            self.transport.revision(),
+            region.map_or(0, |r| r.start_tick),
+            self.graph.generation(),
+            region.map_or(0, |r| r.end_tick),
+            self.graph.playback_mode as u64,
+            self.transport.shift(),
+            self.graph.host_epoch,
+        );
+        let changed = self.host_last != Some(signature);
+        if changed {
+            self.host_revision = self.host_revision.wrapping_add(1);
+            self.host_last = Some(signature);
+        }
+        let region = if self.graph.playback_mode == crate::PlaybackMode::Song {
+            self.graph.song_loop.or(Some(crate::SongLoop {
+                start_tick: 0,
+                end_tick: 0,
+            }))
+        } else {
+            None
+        };
+        self.graph.set_host(self.transport.host(
+            start,
+            self.stream_generation,
+            self.host_revision,
+            changed,
+            region,
+        ));
         if !self.faulted {
             let Self {
                 graph,
@@ -216,6 +261,7 @@ impl AudioProcessor {
                 ..
             } = self;
             match catch_unwind(AssertUnwindSafe(|| {
+                graph.automate(transport, start);
                 graph.sequence(transport, start);
                 graph.render(block_l, block_r, &events[..count])
             })) {
@@ -244,6 +290,7 @@ impl AudioProcessor {
         if self.graph.playback_mode == crate::PlaybackMode::Song
             && self.graph.song_loop.is_none()
             && self.transport.playing()
+            && !self.graph.audio_active()
             && end
                 >= self
                     .transport
@@ -260,6 +307,16 @@ impl AudioProcessor {
         let tone = !self.faulted && self.graph.tone_on();
         self.live
             .publish(self.meter, tone, self.clock, self.faults, self.guard_hits);
+        // At most one fixed-size capture per 1024 rendered frames; no work when unleased.
+        if self.clock.is_multiple_of(1024) {
+            let instance = self.live.synth.selected(self.clock);
+            let meter = if instance != 0 && !self.faulted {
+                self.graph.synth_meter(instance)
+            } else {
+                None
+            };
+            self.live.synth.publish(meter.as_ref());
+        }
         self.live.publish_transport(
             self.transport.playing(),
             self.graph.position(self.transport.position_ticks(start)),
@@ -342,6 +399,51 @@ impl AudioProcessor {
                         self.discard(Trash::Sample(sample));
                     }
                 }
+                Msg::TimelineRebuilt {
+                    bpm,
+                    mode,
+                    region,
+                    mode_changed,
+                    loop_changed,
+                } => {
+                    if !self.faulted {
+                        self.timeline_transport(
+                            start,
+                            bpm,
+                            mode,
+                            region,
+                            mode_changed,
+                            loop_changed,
+                        );
+                    }
+                }
+                Msg::Timeline(mut update, mode_changed, loop_changed) => {
+                    let mut removed = None;
+                    if !self.faulted {
+                        let old_len = self.graph.pattern_length();
+                        let new_len = update.pattern.length;
+                        update.pattern = self.graph.set_pattern(update.pattern);
+                        // Graph setters preserve same-bank active audio progress.
+                        update.song = self.graph.set_song(update.song);
+                        if self.graph.playback_mode == crate::PlaybackMode::Pattern {
+                            self.transport.keep_position(start, old_len, new_len);
+                        } else {
+                            self.transport.keep_position(start, new_len, new_len);
+                        }
+                        if let Some(id) = update.remove_channel {
+                            removed = self.graph.remove_channel(id);
+                        }
+                        self.timeline_transport(
+                            start,
+                            update.bpm,
+                            update.mode,
+                            update.region,
+                            mode_changed,
+                            loop_changed,
+                        );
+                    }
+                    self.discard(Trash::Timeline(update, removed));
+                }
                 Msg::SetSong(song) => {
                     let old = if self.faulted {
                         song
@@ -366,7 +468,11 @@ impl AudioProcessor {
                     };
                     self.discard(Trash::Pattern(leaving));
                 }
-                Msg::Command { due, cmd } => match cmd {
+                Msg::Command {
+                    due,
+                    cmd,
+                    mode_changed,
+                } => match cmd {
                     Command::Note {
                         key,
                         velocity,
@@ -415,6 +521,13 @@ impl AudioProcessor {
                     Command::SetChannelMix { channel, mix } => {
                         self.with_graph(|g| g.set_channel_mix(channel, mix));
                     }
+                    Command::SetSamplerTrim {
+                        channel,
+                        instance,
+                        params,
+                    } => {
+                        self.with_graph(|g| g.set_sampler_trim(channel, instance, &params));
+                    }
                     Command::SetSamplerParam {
                         channel,
                         index,
@@ -437,13 +550,15 @@ impl AudioProcessor {
                         self.transport.seek(start, tick);
                     }
                     Command::SetPlaybackMode { mode } => {
-                        if mode != self.graph.playback_mode {
+                        if mode_changed {
                             self.recorder.set(false, &self.transport, start, &self.live);
                             self.stop(start);
                             let len = self.graph.pattern_length();
                             self.transport.keep_position(start, len, len);
-                            self.with_graph(|g| g.playback_mode = mode);
                         }
+                        // Rebuild starts at the final mirrored mode; replay even an accepted
+                        // no-op in queue order, without introducing transition effects.
+                        self.with_graph(|g| g.playback_mode = mode);
                     }
                     Command::SetSongLoop { region } => {
                         let tick = self.graph.position(self.transport.position_ticks(start));
@@ -453,7 +568,10 @@ impl AudioProcessor {
                             self.with_graph(Graph::transport_stopped);
                             self.transport.seek(start, tick);
                         }
-                        self.with_graph(|g| g.song_loop = region);
+                        self.with_graph(|g| {
+                            g.song_loop = region;
+                            g.reset_audio();
+                        });
                     }
                     Command::Play => {
                         if !self.transport.playing() {
@@ -536,6 +654,35 @@ impl AudioProcessor {
         }
     }
 
+    fn timeline_transport(
+        &mut self,
+        start: u64,
+        bpm: f32,
+        mode: crate::PlaybackMode,
+        region: Option<crate::SongLoop>,
+        mode_changed: bool,
+        loop_changed: bool,
+    ) {
+        self.transport.set_bpm(start, bpm);
+        if mode_changed {
+            self.recorder.set(false, &self.transport, start, &self.live);
+            self.stop(start);
+        }
+        // Rebuild starts at the final mirrored mode. Restore this message's mode in
+        // queue order without inventing a transition before its accepted barrier.
+        self.graph.playback_mode = mode;
+        if loop_changed || self.graph.song_loop != region {
+            let tick = self.graph.position(self.transport.position_ticks(start));
+            self.graph.transport_stopped();
+            self.transport.seek(
+                start,
+                region.map_or(tick, |r| tick.clamp(r.start_tick, r.end_tick - 1)),
+            );
+            self.graph.song_loop = region;
+            self.graph.reset_audio();
+        }
+    }
+
     /// Runs `f` on the graph unless it is faulted, catching a panic like a render does.
     fn with_graph(&mut self, f: impl FnOnce(&mut Graph)) {
         if self.faulted {
@@ -555,10 +702,14 @@ impl AudioProcessor {
     /// Swaps in a fresh graph, unless it is from an earlier generation: a restart queued
     /// before `reconfigure` arrives after the fresh graph it made, and must not replace it
     /// (cutting held voices, or bringing back the old rate).
-    fn replace_graph(&mut self, graph: Box<Graph>, at: u64) {
+    fn replace_graph(&mut self, mut graph: Box<Graph>, at: u64) {
+        self.host_last = None;
         let leaving = if graph.generation() == self.generation {
-            self.faulted = false;
             let new_len = graph.pattern_length();
+            if !self.faulted {
+                graph.keep_audio(&self.graph);
+            }
+            self.faulted = false;
             let leaving = std::mem::replace(&mut self.graph, graph);
             // A pattern swap a faulted graph refused arrives with the fresh graph.
             if self.graph.playback_mode == crate::PlaybackMode::Pattern {
@@ -665,6 +816,44 @@ mod tests {
         assert!(p.unsent.is_none());
     }
 
+    #[test]
+    fn timeline_bundles_park_and_resume_without_partial_publication() {
+        let (mut p, mut commands, mut trash) = processor();
+        for n in [10, 20, 30] {
+            let update = crate::TimelineUpdate {
+                pattern: Box::new(PatternData {
+                    length: n,
+                    notes: vec![],
+                }),
+                song: Box::new(crate::SongData {
+                    end_tick: n as u64,
+                    ..Default::default()
+                }),
+                bpm: 100.0 + n as f32,
+                mode: crate::PlaybackMode::Pattern,
+                region: None,
+                remove_channel: None,
+            };
+            assert!(
+                commands
+                    .push(Msg::Timeline(Box::new(update), false, false))
+                    .is_ok()
+            );
+        }
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert_eq!(p.graph.pattern().length, 20);
+        assert_eq!(p.graph.song().end_tick, 20);
+        assert!(matches!(p.unsent, Some(Trash::Timeline(_, _))));
+        assert_eq!(commands.slots(), QUEUE_CAPACITY - 1);
+        assert!(matches!(trash.pop(), Ok(Trash::Timeline(_, _))));
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert_eq!(p.graph.pattern().length, 30);
+        assert_eq!(p.graph.song().end_tick, 30);
+        assert!(matches!(trash.pop(), Ok(Trash::Timeline(_, _))));
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert!(matches!(trash.pop(), Ok(Trash::Timeline(_, _))));
+    }
+
     fn sample() -> Arc<SampleBuf> {
         Arc::new(SampleBuf {
             rate: SR,
@@ -686,7 +875,11 @@ mod tests {
     }
 
     fn cmd(cmd: Command) -> Msg {
-        Msg::Command { due: 0, cmd }
+        Msg::Command {
+            due: 0,
+            cmd,
+            mode_changed: matches!(cmd, Command::SetPlaybackMode { .. }),
+        }
     }
 
     #[test]
@@ -868,5 +1061,307 @@ mod tests {
             panic!("a graph handed back");
         };
         assert_eq!(stale.generation(), 0);
+    }
+}
+
+#[cfg(test)]
+mod transport_delivery_tests {
+    use super::*;
+    use crate::*;
+    use std::sync::{Arc, Mutex};
+    struct Observe {
+        pending: Option<grooviq_dsp::HostTransport>,
+        seen: Arc<Mutex<Vec<grooviq_dsp::HostTransport>>>,
+    }
+    impl grooviq_dsp::Device for Observe {
+        fn set_param(&mut self, _: u32, _: f32) {}
+        fn reset(&mut self) {}
+        fn set_transport(&mut self, h: &grooviq_dsp::HostTransport) {
+            assert!(self.pending.replace(*h).is_none());
+        }
+        fn process(
+            &mut self,
+            l: &mut [f32],
+            r: &mut [f32],
+            _: Option<(&[f32], &[f32])>,
+            _: &[grooviq_dsp::NoteEvent],
+        ) {
+            let h = self
+                .pending
+                .take()
+                .expect("actual host producer must deliver facts");
+            assert_eq!(h.frames as usize, l.len());
+            self.seen.lock().unwrap().push(h);
+            l.fill(0.);
+            r.fill(0.);
+        }
+    }
+    #[test]
+    fn processor_delivers_grid_targets_and_stop_restores_base() {
+        let ch = ChannelSetup::sampler(ChannelId(1), None, vec![], ChannelMix::default());
+        let schedule = AutomationSchedule::build(
+            vec![AutomationClip {
+                target: AutomationTarget::ChannelVolume(ch.id),
+                priority: 1,
+                start_tick: 0,
+                offset_tick: 0,
+                length_ticks: 960,
+                points: vec![
+                    AutomationPoint {
+                        tick: 0,
+                        value: 0.,
+                        segment: AutomationSegment::Linear,
+                    },
+                    AutomationPoint {
+                        tick: 960,
+                        value: 2.,
+                        segment: AutomationSegment::Hold,
+                    },
+                ],
+            }],
+            std::slice::from_ref(&ch),
+        )
+        .unwrap();
+        let (mut c, mut p) = engine_with(
+            EngineConfig {
+                sample_rate: 48000.,
+            },
+            EngineState {
+                bpm: 120.,
+                channels: vec![ch],
+                playback_mode: PlaybackMode::Song,
+                song: SongData {
+                    automation: schedule,
+                    end_tick: 1000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        p.graph.observe_synth(Box::new(Observe {
+            pending: None,
+            seen: seen.clone(),
+        }));
+        c.send(Command::Play).unwrap();
+        p.process(&mut [0.; 2], 2);
+        assert_eq!(p.graph.channel_gain_target(), 0.);
+        // Consume the cached remainder, then enter the next absolute block using a one-frame callback.
+        p.process(&mut [0.; 126], 2);
+        p.process(&mut [0.; 2], 2);
+        assert_eq!(p.graph.channel_gain_target(), (2. * 2.56 / 960.) as f32);
+        p.process(&mut [0.; 126], 2);
+        c.send(Command::Stop).unwrap();
+        p.process(&mut [0.; 128], 2);
+        assert_eq!(p.graph.channel_gain_target(), 1.);
+        let facts = seen.lock().unwrap();
+        assert_eq!(
+            facts.iter().map(|h| h.frame).collect::<Vec<_>>(),
+            [0, 64, 128]
+        );
+        assert!(facts[0].playing);
+        assert!(!facts[2].playing);
+        assert_ne!(facts[0].discontinuity, facts[2].discontinuity);
+    }
+    #[test]
+    fn processor_loop_edge_matches_scheduled_frame() {
+        let (mut c, mut p) = engine_with(
+            EngineConfig { sample_rate: 8000. },
+            EngineState {
+                bpm: 120.,
+                playback_mode: PlaybackMode::Song,
+                song: SongData {
+                    end_tick: 30,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        p.graph.observe_synth(Box::new(Observe {
+            pending: None,
+            seen: seen.clone(),
+        }));
+        c.send(Command::SetSongLoop {
+            region: Some(SongLoop {
+                start_tick: 0,
+                end_tick: 30,
+            }),
+        })
+        .unwrap();
+        c.send(Command::Play).unwrap();
+        p.process(&mut [0.; 256], 2);
+        let facts = seen.lock().unwrap();
+        let first_wrap = facts
+            .iter()
+            .flat_map(|h| {
+                h.edges()
+                    .map(move |e| (h.frame + u64::from(e.offset), e.iteration))
+            })
+            .find(|(_, i)| *i == 1)
+            .unwrap();
+        assert_eq!(first_wrap.0, 125);
+    }
+    #[test]
+    fn processor_delivers_command_and_rate_transition_contexts() {
+        let (mut c, mut p) = engine(EngineConfig {
+            sample_rate: 48000.,
+        });
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        p.graph.observe_synth(Box::new(Observe {
+            pending: None,
+            seen: seen.clone(),
+        }));
+        for command in [
+            Command::Play,
+            Command::SetTempo { bpm: 137. },
+            Command::Stop,
+            Command::Play,
+            Command::SetPlaybackMode {
+                mode: PlaybackMode::Song,
+            },
+            Command::Seek { tick: 0 },
+            Command::Seek { tick: 0 },
+        ] {
+            c.send(command).unwrap();
+            p.process(&mut [0.; 128], 2);
+        }
+        {
+            let facts = seen.lock().unwrap();
+            assert_eq!(facts.len(), 7);
+            assert_eq!(facts[1].bpm, 137.);
+            assert_eq!(facts[0].discontinuity, facts[1].discontinuity);
+            assert!(!facts[2].playing);
+            assert_ne!(facts[2].discontinuity, facts[3].discontinuity);
+            assert_eq!(facts[4].domain, grooviq_dsp::HostDomain::Song);
+            assert_ne!(facts[5].discontinuity, facts[6].discontinuity);
+        }
+        c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 44100.,
+            },
+        );
+        p.graph.observe_synth(Box::new(Observe {
+            pending: None,
+            seen: seen.clone(),
+        }));
+        p.process(&mut [0.; 128], 2);
+        let facts = seen.lock().unwrap();
+        assert_eq!(facts[7].sample_rate, 44100.);
+        assert_ne!(facts[6].stream_generation, facts[7].stream_generation);
+    }
+    #[test]
+    fn idle_automation_transitions_restore_and_resume_current_targets() {
+        let channel = ChannelSetup::sampler(ChannelId(1), None, vec![], ChannelMix::default());
+        let automated = SongData {
+            end_tick: 9600,
+            automation: AutomationSchedule::build(
+                vec![AutomationClip {
+                    target: AutomationTarget::ChannelVolume(channel.id),
+                    priority: 1,
+                    start_tick: 0,
+                    offset_tick: 0,
+                    length_ticks: 9600,
+                    points: vec![AutomationPoint {
+                        tick: 0,
+                        value: 0.5,
+                        segment: AutomationSegment::Hold,
+                    }],
+                }],
+                std::slice::from_ref(&channel),
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        let (mut control, mut processor) = engine_with(
+            EngineConfig {
+                sample_rate: 48000.0,
+            },
+            EngineState {
+                channels: vec![channel],
+                song: automated.clone(),
+                ..Default::default()
+            },
+        );
+        let mut block = [0.0; BLOCK * 2];
+        // No automation in Pattern, including a manual base edit while idle.
+        control.send(Command::Play).unwrap();
+        control
+            .send(Command::SetChannelMix {
+                channel: ChannelId(1),
+                mix: ChannelMix {
+                    volume: 0.25,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.25);
+        control
+            .send(Command::SetPlaybackMode {
+                mode: PlaybackMode::Song,
+            })
+            .unwrap();
+        control.send(Command::Play).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.5);
+        // Clear a live schedule: restore once, then remain at the updated base.
+        control
+            .set_song(SongData {
+                end_tick: 9600,
+                ..Default::default()
+            })
+            .unwrap();
+        for _ in 0..3 {
+            processor.process(&mut block, 2);
+            assert_eq!(processor.graph.channel_gain_target(), 0.25);
+        }
+        control.set_song(automated).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.5);
+        control
+            .send(Command::SetPlaybackMode {
+                mode: PlaybackMode::Pattern,
+            })
+            .unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.25);
+        control
+            .send(Command::SetChannelMix {
+                channel: ChannelId(1),
+                mix: ChannelMix {
+                    volume: 0.75,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.75);
+        control
+            .send(Command::SetPlaybackMode {
+                mode: PlaybackMode::Song,
+            })
+            .unwrap();
+        control.send(Command::Play).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.5);
+        control.send(Command::Stop).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.75);
+        control.send(Command::Play).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.5);
+        control.reconfigure(
+            &mut processor,
+            EngineConfig {
+                sample_rate: 44100.0,
+            },
+        );
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.5);
+        control.send(Command::Stop).unwrap();
+        processor.process(&mut block, 2);
+        assert_eq!(processor.graph.channel_gain_target(), 0.75);
     }
 }

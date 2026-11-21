@@ -7,7 +7,7 @@ import type { LiveFrame } from "../live/decode";
 import { ConfirmDialog } from "../project/ConfirmDialog";
 import { useProject, type ProjectStamp } from "../project/context";
 import { AddChannelMenu } from "./AddChannelMenu";
-import { pickSounds, relinkChannel } from "./audioFiles";
+import { pickSounds } from "./audioFiles";
 import { ChannelRow } from "./ChannelRow";
 import { useFileDrop } from "./fileDrop";
 import { CELL, EDGE, GAP } from "./gridModel";
@@ -109,8 +109,6 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, onOpenRoll
       solo: change.solo ?? ch.solo,
     });
 
-  const relink = (ch: ChannelView) => relinkChannel(ch, project, onError);
-
   const addSamples = () => {
     const at = stamp();
     pickSounds().then((paths) => addFiles(paths, at), (e: unknown) => onError(errorText(e)));
@@ -158,7 +156,6 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, onOpenRoll
                 key={ch.id}
                 channel={ch}
                 onMix={(change) => mix(ch, change)}
-                onRelink={() => relink(ch)}
                 onError={onError}
                 selected={ch.id === selected}
                 onSelect={() => select(ch.id)}

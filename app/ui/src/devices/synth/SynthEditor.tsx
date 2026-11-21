@@ -1,3 +1,4 @@
+import { OutputScope } from "./OutputScope";
 import type { ReactNode } from "react";
 import { SYNTH_PRESETS } from "../../api/notes";
 import type { ChannelView } from "../../api/project";
@@ -14,6 +15,8 @@ import { lfoWave, randomSteps } from "./waveShapes";
 
 interface Props {
   channel: ChannelView;
+  active: boolean;
+  generation: number;
   index: number;
   z: number;
   opener: HTMLElement | null;
@@ -43,7 +46,7 @@ const SUB_GLYPHS = [glyph(0), glyph(3)];
 /** The basic synth's editor, "Wave lab": two oscillators drawn large that morph with their
  * shape, the filter curve, two envelopes with points to drag, the LFO and the voice section;
  * the presets and the volume in the title bar. Every one of the 40 parameters has a control. */
-export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onError }: Props) {
+export function SynthEditor({ generation, active, channel, index, z, opener, onClose, onRaise, onError }: Props) {
   const params = useDeviceParams(channel.id, channel.synth, (id) => synthParam(id).default, onError);
   const v = params.value;
   const ctl = (id: string): ParamControl => ({ begin: () => params.begin(id), set: (x) => params.set(id, x) });
@@ -126,6 +129,7 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
       `env ${w}`,
       <>
         <EnvelopeGraph
+          meter={w}
           name={w === "amp" ? "Amp envelope" : "Filter envelope"}
           attack={{ id: `${w}_attack`, param: synthParam(`${w}_attack`), value: v(`${w}_attack`) }}
           decay={{ id: `${w}_decay`, param: synthParam(`${w}_decay`), value: v(`${w}_decay`) }}
@@ -203,6 +207,7 @@ export function SynthEditor({ channel, index, z, opener, onClose, onRaise, onErr
             "voice",
             <>
               {slot("voice", "side")}
+              <OutputScope channel={channel.id} active={active} generation={generation} />
               <div className="voice-glide">
                 {slot("voice", "foot", { size: 34 })}
                 <GlideDisplay glide={v("glide")} max={synthParam("glide").max} />

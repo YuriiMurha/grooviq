@@ -1,7 +1,10 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { installMenuHistory } from "./project/menuHistory";
 import { isProjectReplacing } from "./project/replacement";
 import { settleProjectEdits } from "./project/pending";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   autosaveStatus,
   errorText,
@@ -25,6 +28,7 @@ import {
 } from "./audio";
 import { AudioReplay } from "./toast/audioReplay";
 import { HintBar } from "./hint/HintBar";
+import { MeterHistory, type MeterContext } from "./meter/history";
 import { connectLive } from "./live/client";
 import type { LiveFrame } from "./live/decode";
 import { Meter } from "./meter/Meter";
@@ -71,6 +75,9 @@ export function App() {
   const playGuard = useRef(new PlayGuard());
   const [latencyFrames, setLatencyFrames] = useState<number | null>(null);
   const latest = useRef<LiveFrame | null>(null);
+  const [meterHistory] = useState(() => new MeterHistory());
+  const meterContext = useRef<MeterContext>({});
+  const outputRequest = useRef(0);
   const nextToast = useRef(0);
   const audioReplay = useRef(new AudioReplay());
   // The typing keyboard is on by default; R records only while it is off.
@@ -78,10 +85,23 @@ export function App() {
   const keyboardRef = useRef(true);
   const [metronome, setMetronome] = useState(false);
 
+  const refreshOutputs = useCallback((active: () => boolean = () => true) => {
+    const request = ++outputRequest.current;
+    audioOutputs().then((outputs) => {
+      if (!active() || request !== outputRequest.current) return;
+      const output = outputs.find((o) => o.current);
+      const context = { id: output?.id, rate: output?.sampleRate };
+      if (context.id !== meterContext.current.id || !Object.is(context.rate, meterContext.current.rate)) {
+        meterHistory.reset();
+      }
+      meterContext.current = context;
+      setOutputs(outputs);
+    }, () => {});
+  }, [meterHistory]);
   const refresh = useCallback(() => {
-    audioOutputs().then(setOutputs, () => {});
+    refreshOutputs();
     audioLog().then(setLog, () => {});
-  }, []);
+  }, [refreshOutputs]);
 
   const toast = useCallback((message: string, warn: boolean) => {
     const id = nextToast.current++;
@@ -197,6 +217,38 @@ export function App() {
     [enqueue, adopt, shown, toast, session],
   );
   useEffect(() => trackDrags(window), []);
+  const menuHistoryAction = useRef(stepHistory);
+  useLayoutEffect(() => { menuHistoryAction.current = stepHistory; }, [stepHistory]);
+  useEffect(() => {
+    const sync = () => {
+      const text = isTypingTarget(document.activeElement);
+      void invoke("edit_history_enabled", {
+        undo: text ? (document.queryCommandEnabled?.("undo") ?? false) : Boolean(view?.canUndo),
+        redo: text ? (document.queryCommandEnabled?.("redo") ?? false) : Boolean(view?.canRedo),
+      }).catch(() => {});
+    };
+    sync();
+    document.addEventListener("focusin", sync);
+    document.addEventListener("input", sync);
+    document.addEventListener("selectionchange", sync);
+    return () => {
+      document.removeEventListener("focusin", sync);
+      document.removeEventListener("input", sync);
+      document.removeEventListener("selectionchange", sync);
+    };
+  }, [view?.canUndo, view?.canRedo]);
+  useEffect(() => {
+    const router = installMenuHistory(document, (redo) => menuHistoryAction.current(redo), () => modalIsOpen());
+    let disposed = false;
+    const listening = listen<boolean>("edit-history", ({ payload }) => {
+      if (!disposed && typeof payload === "boolean") router.dispatch(payload);
+    });
+    return () => {
+      disposed = true;
+      router.dispose();
+      void listening.then((stop) => stop());
+    };
+  }, []);
   const toggleMetronome = () => {
     const on = !metronome;
     metronomeSet(on).then(() => setMetronome(on), (e: unknown) => toast(errorText(e), true));
@@ -245,10 +297,12 @@ export function App() {
   useEffect(() => {
     let active = true;
     const refreshAudio = () => {
-      audioOutputs().then((outputs) => { if (active) setOutputs(outputs); }, () => {});
+      meterHistory.reset();
+      meterContext.current = {};
+      refreshOutputs(() => active);
       audioLog().then((entries) => { if (active) setLog(entries); }, () => {});
     };
-    audioOutputs().then((outputs) => { if (active) setOutputs(outputs); }, () => {});
+    refreshOutputs(() => active);
     audioSettings().then((settings) => {
       if (!active) return;
       setChosen(settings.output);
@@ -260,7 +314,7 @@ export function App() {
       return entries;
     }, toast, refreshAudio);
     return () => { active = false; stop(); };
-  }, [toast]);
+  }, [toast, refreshOutputs, meterHistory]);
 
   // Autosave trouble the person must hear of. Listen first, then ask what already happened
   // (a copy running without autosave, a failure before the listener was there); a failure told
@@ -288,7 +342,7 @@ export function App() {
     };
   }, [toast]);
 
-  // The live stream: meters read `latest` every animation frame; the rest becomes state only
+  // Capture each meter observation before latest is overwritten; the rest becomes state only
   // when it changes.
   useEffect(() => {
     let disconnect: (() => void) | null = null;
@@ -297,6 +351,7 @@ export function App() {
       (endpoint) => {
         if (cancelled) return;
         disconnect = connectLive(endpoint, (frame) => {
+          meterHistory.push(frame, meterContext.current, performance.now());
           const before = latest.current;
           latest.current = frame;
           if (before?.tone !== frame.tone) setTone(frame.tone);
@@ -317,7 +372,7 @@ export function App() {
           if (before?.outputLatencyFrames !== frame.outputLatencyFrames) {
             setLatencyFrames(frame.outputLatencyFrames);
           }
-        });
+        }, { onConnectionChange: () => meterHistory.reset() });
       },
       (e: unknown) => toast(`Live meters are off: ${String(e)}`, true),
     );
@@ -325,7 +380,7 @@ export function App() {
       cancelled = true;
       disconnect?.();
     };
-  }, [toast, releaseHeld]);
+  }, [toast, releaseHeld, meterHistory]);
 
   const current = outputs.find((o) => o.current) ?? null;
   const latencyMs =
@@ -383,7 +438,7 @@ export function App() {
               sampleRate={sampleRate}
               onPlay={play}
               onStop={stop}
-              onTempo={(bpm) => void session.apply({ kind: "setTempo", bpm })}
+              onTempo={(bpm) => session.apply({ kind: "setTempo", bpm })}
               onSignature={(beats, unit) => void session.apply({ kind: "setTimeSignature", beats, unit })}
               extra={
                 <>
@@ -418,7 +473,7 @@ export function App() {
             >
               Test tone
             </button>
-            <Meter latest={latest} />
+            <Meter history={meterHistory} />
           </div>
         </header>
         <main className="stage">

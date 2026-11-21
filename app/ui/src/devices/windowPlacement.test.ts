@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DESIGN_H, DESIGN_W, clampPlacement, fitScale, initialPlacement } from "./windowPlacement";
+import { DESIGN_H, DESIGN_W, clampPlacement, containPlacement, fitScale, initialPlacement } from "./windowPlacement";
 
 describe("device window placement", () => {
   it("scales_down_to_fit_but_never_up", () => {
@@ -25,5 +25,21 @@ describe("device window placement", () => {
     const second = initialPlacement(1280, 800, 1, 1);
     expect(second.x).toBeGreaterThan(first.x);
     expect(second.y).toBeGreaterThan(first.y);
+  });
+});
+
+describe("resize containment", () => {
+  it("contains retained and cascaded positions at the supported minimum", () => {
+    const s = fitScale(900, 560);
+    for (const x of [-800, 200, 520, 2000]) {
+      const p = containPlacement({ x, y: 320 }, 900, 560, s);
+      expect(p.x).toBeGreaterThanOrEqual(0);
+      expect(p.y).toBeGreaterThanOrEqual(0);
+      expect(p.x + DESIGN_W * s).toBeLessThanOrEqual(900);
+      expect(p.y + DESIGN_H * s).toBeLessThanOrEqual(560);
+    }
+  });
+  it("anchors impossible fits at the reachable top left", () => {
+    expect(containPlacement({ x: 200, y: 200 }, 100, 80, fitScale(100, 80))).toEqual({ x: 0, y: 0 });
   });
 });
