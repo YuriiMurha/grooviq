@@ -470,6 +470,11 @@ impl State {
                 }
             }
         }
+        if let Some(processor) = self.processor.as_mut() {
+            // No stream owns it: deliver retained take boundaries even with no callback
+            // and no device available for another rebuild attempt.
+            processor.flush_recording_boundaries();
+        }
         let mut seen = lock(&shared.seen);
         seen.devices = devices;
         seen.current = self.open.as_ref().map(|open| open.info.clone());
@@ -572,8 +577,11 @@ impl State {
         };
         {
             let mut controller = lock(&self.controller);
-            if controller.sample_rate() != config.rate() {
-                controller.reconfigure(&mut processor, config);
+            if controller.sample_rate() != config.rate()
+                && !controller.reconfigure(&mut processor, config)
+            {
+                self.processor = Some(processor);
+                return Err("the sound engine could not rebuild for the output rate".into());
             }
         }
         slot.put(processor);
@@ -789,6 +797,72 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_rate_rebuild_keeps_the_processor_out_of_the_stream() {
+        struct At44100;
+        impl OutputBackend for At44100 {
+            fn outputs(&self) -> Vec<OutputInfo> {
+                vec![]
+            }
+            fn open(&mut self, _: &OutputInfo, slot: Arc<AudioSlot>) -> Result<u32, String> {
+                // Starting a callback before admission must remain silent too.
+                let mut out = [1.0; BLOCK * 2];
+                slot.process(&mut out, 2);
+                assert!(out.iter().all(|x| *x == 0.0));
+                Ok(44_100)
+            }
+            fn close(&mut self) {}
+        }
+        let (mut c, mut p) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        c.send(Command::TestTone {
+            on: true,
+            hz: 440.0,
+            gain_db: -12.0,
+        })
+        .unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        c.fail_replays(1);
+        let slot = Arc::new(AudioSlot::new(c.live_shared()));
+        let controller = Arc::new(Mutex::new(c));
+        let mut state = State {
+            backend: Box::new(At44100),
+            controller: Arc::clone(&controller),
+            monitor: OutputMonitor::new(OutputChoice::SystemDefault, false),
+            processor: Some(p),
+            open: None,
+            target: None,
+            retry: Retry::default(),
+            owed: false,
+            reported: HashSet::new(),
+        };
+        let target = OutputInfo {
+            id: "fake-output".into(),
+            name: "Fake output".into(),
+            kind: super::super::OutputKind::Headphones,
+            is_default: true,
+            sample_rate: 44_100,
+        };
+        assert!(state.open_stream(&target, &slot).is_err());
+        assert!(state.processor.is_some());
+        assert!(slot.claim_control().processor().is_none());
+        assert_eq!(lock(&controller).sample_rate(), 48_000.0);
+        let mut out = [1.0; BLOCK * 2];
+        slot.process(&mut out, 2);
+        assert!(out.iter().all(|x| *x == 0.0));
+
+        // The failed construction left both the processor and tone available for retry.
+        assert_eq!(
+            state.open_stream(&target, &slot).unwrap().sample_rate,
+            44_100
+        );
+        assert_eq!(lock(&controller).sample_rate(), 44_100.0);
+        assert!(state.processor.is_none());
+        slot.process(&mut out, 2);
+        assert!(out.iter().any(|x| *x != 0.0));
+    }
+
+    #[test]
     fn the_guard_silence_gets_past_restarts_waiting_for_room() {
         let (mut c, mut p) = engine(EngineConfig {
             sample_rate: 48_000.0,
@@ -809,5 +883,67 @@ mod tests {
         p.process(&mut out, 2);
         assert!(out.iter().all(|x| *x == 0.0));
         assert!(!c.live().tone);
+    }
+    #[test]
+    fn detached_processor_delivers_recording_boundaries_without_a_callback() {
+        use crate::{ChannelId, ChannelMix, ChannelSetup, NoteId, RecordEvent};
+        struct NoOutput;
+        impl OutputBackend for NoOutput {
+            fn outputs(&self) -> Vec<OutputInfo> {
+                Vec::new()
+            }
+            fn open(&mut self, _: &OutputInfo, _: Arc<AudioSlot>) -> Result<u32, String> {
+                panic!("there must be no output to open")
+            }
+            fn close(&mut self) {}
+        }
+        let (mut c, mut p) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        c.add_channel(ChannelSetup::synth(
+            ChannelId(1),
+            Vec::new(),
+            ChannelMix::default(),
+        ))
+        .unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
+        c.send(Command::Play).unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        for _ in 0..512 {
+            let id = NoteId::live();
+            for on in [true, false] {
+                c.send(Command::ChannelNote {
+                    channel: ChannelId(1),
+                    key: 60,
+                    velocity: 0.8,
+                    on,
+                    id,
+                })
+                .unwrap();
+            }
+            p.process(&mut [0.0; BLOCK * 2], 2);
+        }
+        assert_eq!(c.record_dropped(), 0);
+        p.finish_recovery_stop(77);
+        let c = Arc::new(Mutex::new(c));
+        let output = AudioOutput::start(
+            Box::new(NoOutput),
+            Arc::clone(&c),
+            p,
+            OutputChoice::SystemDefault,
+            false,
+            Box::new(|_| {}),
+        );
+        let mut events = Vec::new();
+        lock(&c).take_recorded(&mut events);
+        assert_eq!(events.len(), 1024);
+        output.poll_now();
+        lock(&c).take_recorded(&mut events);
+        assert!(
+            matches!(events.get(1024), Some(RecordEvent::End { .. })),
+            "missing retained take End"
+        );
+        assert_eq!(events.get(1025), Some(&RecordEvent::Mark { id: 77 }));
+        assert!(!lock(&c).live().playing);
     }
 }

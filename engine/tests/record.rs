@@ -282,7 +282,7 @@ fn stop_and_record_off_push_an_end_marker() {
 }
 
 #[test]
-fn the_take_number_moves_on_even_when_the_end_is_dropped() {
+fn the_take_number_moves_on_while_the_end_waits() {
     let mut r = Rig::new();
     r.c.send(Command::SetRecording { on: true }).unwrap();
     r.c.send(Command::Play).unwrap();
@@ -297,7 +297,7 @@ fn the_take_number_moves_on_even_when_the_end_is_dropped() {
         r.run_to(to);
     }
     assert!(r.c.record_dropped() > 0);
-    // The take ends while the queue is full: its End is dropped.
+    // The take ends while the queue is full: its End waits before the next take.
     r.c.send(Command::SetRecording { on: false }).unwrap();
     r.c.send(Command::SetRecording { on: true }).unwrap();
     let to = r.at + 64;
@@ -314,8 +314,11 @@ fn the_take_number_moves_on_even_when_the_end_is_dropped() {
     r.run_to(to);
     let next = r.take();
     assert!(
-        // The dropped End moved the number on, and so did the Record-on.
-        matches!(next[..], [RecordEvent::Note { take: 3, .. }]),
+        // The retained End moved the number on, and so did the Record-on.
+        matches!(
+            next[..],
+            [RecordEvent::End { .. }, RecordEvent::Note { take: 3, .. }]
+        ),
         "{next:?}"
     );
 }
@@ -868,8 +871,8 @@ fn a_mark_that_finds_the_queue_full_goes_out_first_later() {
         let to = r.at + 64;
         r.run_to(to);
     }
-    // Full: the stop's End is dropped (counted), the mark waits; a note in the same block
-    // after it is dropped rather than going ahead of it.
+    // Full: the take End and mark wait in order; a later note is refused
+    // rather than overtaking either boundary.
     r.c.load_state(state(vec![channel(1, &dc(0.5))])).unwrap();
     let mark = r.c.record_mark();
     r.c.send(Command::Play).unwrap();
@@ -880,15 +883,16 @@ fn a_mark_that_finds_the_queue_full_goes_out_first_later() {
     let got = r.take();
     assert_eq!(got.len(), RECORD_CAPACITY);
     assert!(!got.contains(&RecordEvent::Mark { id: mark }));
-    // Room again: the mark goes out at the next block, before the next note.
+    // Room again: the retained End, mark, then next note go out in order.
     r.c.send(note(false)).unwrap();
     let to = r.at + 64;
     r.run_to(to);
     let got = r.take();
-    assert_eq!(got.len(), 2, "{got:?}");
-    assert_eq!(got[0], RecordEvent::Mark { id: mark });
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert!(matches!(got[0], RecordEvent::End { .. }), "{got:?}");
+    assert_eq!(got[1], RecordEvent::Mark { id: mark });
     assert!(
-        matches!(got[1], RecordEvent::Note { on: false, .. }),
+        matches!(got[2], RecordEvent::Note { on: false, .. }),
         "{got:?}"
     );
     assert_eq!(
