@@ -47,11 +47,20 @@ def manifest(path):
             for p in sorted(path.rglob('*')) if p.is_file()}
 
 
+class LockBusy(BlockingIOError):
+    def __init__(self, path):
+        self.path = Path(path)
+        super().__init__('Initial lock admission busy: ' + str(path))
+
+
 @contextlib.contextmanager
 def locked(path):
     safe_tree(path)
     with path.open('a+') as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise LockBusy(path) from error
         yield
 
 

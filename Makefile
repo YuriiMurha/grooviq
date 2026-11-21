@@ -82,11 +82,28 @@ qa-app: ## Run the built app silently (GROOVIQ_AUDIO=null) with a throwaway home
 install-app: refresh-app ## Alias for the verified merged-main refresh
 
 .PHONY: refresh-app test-refresh-app
+# Local refresh uses tarfile's safe extraction filter (Python 3.12+).
+REFRESH_PYTHON ?= $(shell command -v python3.14 || command -v python3.13 || command -v python3.12 || command -v python3)
 refresh-app: ## Quality only: build merged origin/main in the stable cache and replace safely
-	python3 scripts/refresh_install.py
+	@$(REFRESH_PYTHON) -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else "Grooviq refresh requires Python 3.12+; install Homebrew python or set REFRESH_PYTHON.")'
+	$(REFRESH_PYTHON) -B scripts/refresh_install.py
 
 test-refresh-app: ## Exercise install failures with owned fake apps; never builds or launches
-	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_refresh_install.py
+	PYTHONDONTWRITEBYTECODE=1 $(REFRESH_PYTHON) scripts/test_refresh_install.py
+	PYTHONDONTWRITEBYTECODE=1 $(REFRESH_PYTHON) scripts/test_refresh_agent.py
+
+.PHONY: refresh-agent-enable refresh-agent-status refresh-agent-disable refresh-agent-tick
+refresh-agent-enable: ## Enable optional five-minute merged-main refreshes (reviewed merged code only)
+	$(REFRESH_PYTHON) -B scripts/refresh_agent.py enable
+
+refresh-agent-status: ## Show local refresh queue, install source and lease deferral
+	$(REFRESH_PYTHON) -B scripts/refresh_agent.py status
+
+refresh-agent-disable: ## Disable future automatic refreshes without interrupting an active one
+	$(REFRESH_PYTHON) -B scripts/refresh_agent.py disable
+
+refresh-agent-tick: ## Check merged-main queue once through the same guarded coordinator
+	$(REFRESH_PYTHON) -B scripts/refresh_agent.py tick
 
 .PHONY: qa-driver-build qa-driver
 qa-driver-build: ui-install ## Build the optional macOS QA driver app
