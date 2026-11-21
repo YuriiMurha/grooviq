@@ -16,6 +16,7 @@ export interface Output {
 }
 
 export interface LogEntry {
+  id: number;
   atMs: number;
   level: "info" | "warn" | "error";
   message: string;
@@ -32,6 +33,7 @@ export type AudioEventKind =
   | "silenced";
 
 export interface AudioEvent {
+  id: number;
   kind: AudioEventKind;
   output?: Output;
   message: string;

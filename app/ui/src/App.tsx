@@ -20,13 +20,13 @@ import {
   audioSelect,
   audioSetGuard,
   audioSettings,
-  eventWarns,
   liveEndpoint,
   onAudioEvent,
   testTone,
   type LogEntry,
   type Output,
 } from "./audio";
+import { AudioReplay } from "./toast/audioReplay";
 import { HintBar } from "./hint/HintBar";
 import { MeterHistory, type MeterContext } from "./meter/history";
 import { connectLive } from "./live/client";
@@ -79,15 +79,16 @@ export function App() {
   const meterContext = useRef<MeterContext>({});
   const outputRequest = useRef(0);
   const nextToast = useRef(0);
+  const audioReplay = useRef(new AudioReplay());
   // The typing keyboard is on by default; R records only while it is off.
   const [keyboard, setKeyboard] = useState(true);
   const keyboardRef = useRef(true);
   const [metronome, setMetronome] = useState(false);
 
-  const refresh = useCallback(() => {
+  const refreshOutputs = useCallback((active: () => boolean = () => true) => {
     const request = ++outputRequest.current;
     audioOutputs().then((outputs) => {
-      if (request !== outputRequest.current) return;
+      if (!active() || request !== outputRequest.current) return;
       const output = outputs.find((o) => o.current);
       const context = { id: output?.id, rate: output?.sampleRate };
       if (context.id !== meterContext.current.id || !Object.is(context.rate, meterContext.current.rate)) {
@@ -96,8 +97,11 @@ export function App() {
       meterContext.current = context;
       setOutputs(outputs);
     }, () => {});
-    audioLog().then(setLog, () => {});
   }, [meterHistory]);
+  const refresh = useCallback(() => {
+    refreshOutputs();
+    audioLog().then(setLog, () => {});
+  }, [refreshOutputs]);
 
   const toast = useCallback((message: string, warn: boolean) => {
     const id = nextToast.current++;
@@ -283,29 +287,34 @@ export function App() {
   }, [perform, play, stop, toggleRecord, stepHistory]);
 
   const loadSettings = useCallback(() => {
-    audioSettings().then(
-      (s) => {
-        setChosen(s.output);
-        setGuard(s.guard);
-      },
-      () => {},
-    );
+    audioSettings().then((settings) => {
+      setChosen(settings.output);
+      setGuard(settings.guard);
+    }, () => {});
   }, []);
 
-  // Startup: what plays, the saved settings, the log; then follow audio events.
+  // Subscribe before reading history: native logs each event before emitting it.
   useEffect(() => {
-    refresh();
-    loadSettings();
-    const unlisten = onAudioEvent((e) => {
-      toast(e.message, eventWarns(e.kind));
+    let active = true;
+    const refreshAudio = () => {
       meterHistory.reset();
       meterContext.current = {};
-      refresh();
-    });
-    return () => {
-      unlisten.then((stop) => stop());
+      refreshOutputs(() => active);
+      audioLog().then((entries) => { if (active) setLog(entries); }, () => {});
     };
-  }, [refresh, loadSettings, toast, meterHistory]);
+    refreshOutputs(() => active);
+    audioSettings().then((settings) => {
+      if (!active) return;
+      setChosen(settings.output);
+      setGuard(settings.guard);
+    }, () => {});
+    const stop = audioReplay.current.connect(onAudioEvent, async () => {
+      const entries = await audioLog();
+      if (active) setLog(entries);
+      return entries;
+    }, toast, refreshAudio);
+    return () => { active = false; stop(); };
+  }, [toast, refreshOutputs, meterHistory]);
 
   // Autosave trouble the person must hear of. Listen first, then ask what already happened
   // (a copy running without autosave, a failure before the listener was there); a failure told

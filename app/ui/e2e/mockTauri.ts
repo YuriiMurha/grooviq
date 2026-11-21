@@ -84,6 +84,8 @@ interface Growth {
 type LengthEntry = { owner: number | null; growth: Growth } | { set: number };
 
 export interface MockSeed {
+  audioLog?: { id: number; atMs: number; level: "info" | "warn" | "error"; message: string }[];
+  holdAudioLog?: boolean;
   /** Paths the mock's file system holds. */
   files?: Record<string, MockFile>;
   /** The project the engine holds at start; untitled and empty if absent. */
@@ -1198,8 +1200,8 @@ export function installMockTauri(seed: MockSeed): void {
     },
     synth_note: () => null,
     live_endpoint: () => ({ port: LIVE_PORT, token: "e2e" }),
-    audio_log: () => [
-      { atMs: Date.now(), level: "warn", message: "Silent QA mode (mock engine): no audio device" },
+    audio_log: () => seed.audioLog ?? [
+      { id: 1, atMs: Date.now(), level: "warn", message: "Silent QA mode (mock engine): no audio device" },
     ],
     // project_cmds.rs
     pattern_list: () => patternsView(),
@@ -1608,6 +1610,11 @@ export function installMockTauri(seed: MockSeed): void {
   /** Commands the test holds back (`holdCommand`), each until `releaseCommand`. */
   const holds = new Map<string, { promise: Promise<void>; release: () => void }>();
   /** Commands whose next call the engine refuses (`refuseNext`), with the error it gives. */
+  if (seed.holdAudioLog) {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => { release = resolve; });
+    holds.set("audio_log", { promise, release });
+  }
   const refusals = new Map<string, string>();
   const invoke = async (cmd: string, args: Record<string, unknown> = {}) => {
     calls.push({ cmd, args: clone(args ?? {}), at: performance.now() });
