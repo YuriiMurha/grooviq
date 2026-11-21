@@ -845,7 +845,7 @@ mod tests {
         };
         assert!(state.open_stream(&target, &slot).is_err());
         assert!(state.processor.is_some());
-        assert!(lock(&slot.processor).is_none());
+        assert!(slot.claim_control().processor().is_none());
         assert_eq!(lock(&controller).sample_rate(), 48_000.0);
         let mut out = [1.0; BLOCK * 2];
         slot.process(&mut out, 2);

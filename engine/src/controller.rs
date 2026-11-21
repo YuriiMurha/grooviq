@@ -631,7 +631,11 @@ impl Controller {
         // Reserve the complete Stop/disarm/barrier transaction before publishing it.
         self.record_mark = self.record_mark.wrapping_add(1);
         for cmd in [Command::Stop, Command::SetRecording { on: false }] {
-            let queued = self.commands.push(Msg::Command { due: 0, cmd });
+            let queued = self.commands.push(Msg::Command {
+                due: 0,
+                cmd,
+                mode_changed: false,
+            });
             debug_assert!(queued.is_ok());
         }
         let queued = self.commands.push(Msg::RecordMark(self.record_mark));
