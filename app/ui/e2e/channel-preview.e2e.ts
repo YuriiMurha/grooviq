@@ -100,3 +100,92 @@ test("nonprimary and secondary-button presses start no preview", async ({ app, m
   expect(await commands(mock)).toEqual([]);
   expect(await held(mock)).toBe(0);
 });
+
+for (const first of ["keyboard", "pointer"] as const) {
+  for (const releaseFirst of ["keyboard", "pointer"] as const) {
+    test(`mixed hold starts ${first}, releases ${releaseFirst} first`, async ({ app, mock }) => {
+      const name = app.getByRole("button", { name: /^Bass / });
+      await name.focus();
+      // Keep focus stable here; focus loss has its own lifecycle test below.
+      await name.evaluate((el) => el.addEventListener("pointerdown", (event) => event.preventDefault()));
+      await name.hover();
+      if (first === "keyboard") await app.keyboard.down("Enter");
+      else await app.mouse.down();
+      await expect.poll(() => held(mock)).toBe(1);
+      if (first === "keyboard") await app.mouse.down();
+      else await app.keyboard.down("Enter");
+      await app.keyboard.down("Enter");
+      expect(await commands(mock)).toEqual([true]);
+      if (releaseFirst === "keyboard") await app.keyboard.up("Enter");
+      else await app.mouse.up();
+      expect(await commands(mock)).toEqual([true]);
+      expect(await held(mock)).toBe(1);
+      if (releaseFirst === "keyboard") await app.mouse.up();
+      else await app.keyboard.up("Enter");
+      await expect.poll(() => commands(mock)).toEqual([true, false]);
+      expect(await held(mock)).toBe(0);
+      const calls = await mock.calls("channel_preview");
+      expect(calls[1].args.press).toBe(1);
+      expect(calls[1].args.channel).toBe(calls[0].args.channel);
+    });
+  }
+}
+
+for (const terminal of ["focus", "window", "unmount", "cancel", "capture"] as const) {
+  test(`mixed hold survives only remaining owners after ${terminal}`, async ({ app, mock }) => {
+    const name = app.getByRole("button", { name: /^Bass / });
+    await name.focus();
+    await name.evaluate((el) => el.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      if (event instanceof PointerEvent) el.setAttribute("data-pointer", String(event.pointerId));
+    }));
+    await app.keyboard.down("Enter");
+    await name.hover();
+    await app.mouse.down();
+    await expect.poll(() => held(mock)).toBe(1);
+    if (terminal === "focus") await app.getByRole("button", { name: "Stop", exact: true }).focus();
+    if (terminal === "window") await app.evaluate(() => window.dispatchEvent(new Event("blur")));
+    if (terminal === "unmount") await app.keyboard.press("F6");
+    if (terminal === "cancel" || terminal === "capture") {
+      await name.dispatchEvent(terminal === "cancel" ? "pointercancel" : "lostpointercapture", {
+        pointerId: await name.getAttribute("data-pointer").then(Number),
+      });
+    }
+    const allEnded = terminal === "window" || terminal === "unmount";
+    expect(await commands(mock)).toEqual(allEnded ? [true, false] : [true]);
+    expect(await held(mock)).toBe(allEnded ? 0 : 1);
+    if (terminal === "focus") await app.mouse.up();
+    else await app.keyboard.up("Enter");
+    await expect.poll(() => held(mock)).toBe(0);
+    await app.mouse.up();
+    await app.keyboard.up("Enter");
+    expect(await commands(mock)).toEqual([true, false]);
+  });
+}
+
+for (const terminal of ["release", "window", "unmount"] as const) {
+  test(`late preview acknowledgement after mixed ${terminal} releases original press`, async ({ app, mock }) => {
+    const name = app.getByRole("button", { name: /^Bass / });
+    await mock.eval('m => m.holdCommand("channel_preview")');
+    await name.focus();
+    await name.evaluate((el) => el.addEventListener("pointerdown", (event) => event.preventDefault()));
+    await app.keyboard.down("Enter");
+    await name.hover();
+    await app.mouse.down();
+    expect(await commands(mock)).toEqual([true]);
+    expect(await held(mock)).toBe(0);
+    await app.keyboard.up("Enter");
+    expect(await commands(mock)).toEqual([true]);
+    if (terminal === "window") await app.evaluate(() => window.dispatchEvent(new Event("blur")));
+    else if (terminal === "unmount") await app.keyboard.press("F6");
+    else await app.mouse.up();
+    expect(await commands(mock)).toEqual([true]);
+    await mock.eval('m => m.releaseCommand("channel_preview")');
+    await expect.poll(() => commands(mock)).toEqual([true, false]);
+    await expect.poll(() => held(mock)).toBe(0);
+    const calls = await mock.calls("channel_preview");
+    expect(calls[1].args).toMatchObject({ channel: calls[0].args.channel, press: 1 });
+    await app.mouse.up();
+    expect(await commands(mock)).toEqual([true, false]);
+  });
+}
