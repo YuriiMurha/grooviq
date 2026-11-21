@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "frames": 8640000,
+  "rate": 48000,
+  "channels": 2,
+  "format": "f32le-wav",
+  "size": 69120068,
+  "sha256": "3a88a1aa3fee45e1ddad060e5d9d8461acfa08b19b44ed0d1299b7705445b37a",
+  "chunks": [
+    {
+      "name": "000.zlib",
+      "size": 8388608,
+      "sha256": "9c3d759490c97f58180a81dc92f33ce773af3212a6c351194e4dda288e5e3041"
+    },
+    {
+      "name": "001.zlib",
+      "size": 8388608,
+      "sha256": "3c0ab252a1d3890721b06f396c6b69f0e435316f3e1476d24b42bdd363552bef"
+    },
+    {
+      "name": "002.zlib",
+      "size": 8388608,
+      "sha256": "acaf7c4f70a26d617d39703c610a180691f0513201d49ea0e34340d1235f9036"
+    },
+    {
+      "name": "003.zlib",
+      "size": 8388608,
+      "sha256": "5cfa4794d07fe5e2c5aa70ea9b20ecb10e4c6fd937690c5156d9682aef6c0d71"
+    },
+    {
+      "name": "004.zlib",
+      "size": 8388608,
+      "sha256": "e87c07a9de1c23ec7f11d362714eb146cc30626c3396a9423b0fd9b31f0bc581"
+    },
+    {
+      "name": "005.zlib",
+      "size": 8388608,
+      "sha256": "8cbcd5bc94a1e9d2b390067bc6e0b25119dd9919b8bc8e91c6ce406156af96e2"
+    },
+    {
+      "name": "006.zlib",
+      "size": 8388608,
+      "sha256": "7daa9850549dbe144f3645f4ac68c2fabf06988a2f41dcd37d4943e4cc6ddc5b"
+    },
+    {
+      "name": "007.zlib",
+      "size": 8388608,
+      "sha256": "7eea7260ce1294a84a3dd5834908ea29a06349f960a7691aea912a84f2823e8e"
+    },
+    {
+      "name": "008.zlib",
+      "size": 2011204,
+      "sha256": "a1578852c4bb888d7ab0b12062ac56295dfae765a18a75621c8783781404de00"
+    }
+  ]
+}

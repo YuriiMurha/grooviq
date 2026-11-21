@@ -1492,12 +1492,17 @@ dependencies = [
 name = "grooviq-golden"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "grooviq-dsp",
  "grooviq-engine",
  "grooviq-project",
  "gungraun",
  "hound",
  "libm",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

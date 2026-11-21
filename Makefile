@@ -138,6 +138,26 @@ export-budget: ## Optimized 8-second PCM24 export with the original 4-second bud
 optional-rust-policy-test: ## Test optional Rust CI selection and conservative failure fallback
 	node --test scripts/optional-rust-checks.test.cjs
 
+# T13: isolated Song reference selection; no global golden or benchmark workload changes.
+.PHONY: song-golden-test song-golden-update song-export-budget
+song-golden-test: ## Compare complete M3 WAV, partitions and bounded reference storage
+	@set -eu; log=$$(mktemp); trap 'rm -f "$$log"' EXIT; \
+	env -u SONG_M3_UPDATE CARGO_BUILD_JOBS=2 $(CARGO) test -p grooviq-golden --lib song::storage -- --skip the_system_ports_list_without_error_and_refuse_a_name_that_is_not_there --skip lists_the_real_outputs >"$$log" 2>&1 || { cat "$$log"; exit 1; }; \
+	cat "$$log"; test "$$(grep -c '^test result: ok. 2 passed; 0 failed; 0 ignored;' "$$log")" = 1; \
+	env -u SONG_M3_UPDATE CARGO_BUILD_JOBS=2 $(CARGO) test -p grooviq-golden --release --test song_m3 -- --skip the_system_ports_list_without_error_and_refuse_a_name_that_is_not_there --skip lists_the_real_outputs >"$$log" 2>&1 || { cat "$$log"; exit 1; }; \
+	cat "$$log"; test "$$(grep -c '^test result: ok. 3 passed; 0 failed; 1 ignored;' "$$log")" = 1
+
+song-golden-update: ## Explicit SONG_M3_UPDATE=1 opt-in; update only the new M3 Song reference
+	@test "$(SONG_M3_UPDATE)" = 1 || { echo 'Set SONG_M3_UPDATE=1 explicitly to update only song_m3'; exit 1; }
+	@set -eu; log=$$(mktemp); trap 'rm -f "$$log"' EXIT; \
+	SONG_M3_UPDATE=1 CARGO_BUILD_JOBS=2 $(CARGO) test -p grooviq-golden --release --test song_m3 complete_song_bytes_roundtrip_and_full_callback_partitions -- --exact --skip the_system_ports_list_without_error_and_refuse_a_name_that_is_not_there --skip lists_the_real_outputs >"$$log" 2>&1 || { cat "$$log"; exit 1; }; \
+	cat "$$log"; test "$$(grep -c '^test result: ok. 1 passed; 0 failed; 0 ignored;' "$$log")" = 1
+
+song-export-budget: ## Five warmed release production exports; median at most nine seconds
+	@set -eu; log=$$(mktemp); trap 'rm -f "$$log"' EXIT; \
+	env -u SONG_M3_UPDATE CARGO_BUILD_JOBS=2 $(CARGO) test -p grooviq-golden --release --test song_m3 warmed_export_budget -- --ignored --exact --nocapture --skip the_system_ports_list_without_error_and_refuse_a_name_that_is_not_there --skip lists_the_real_outputs >"$$log" 2>&1 || { cat "$$log"; exit 1; }; \
+	cat "$$log"; test "$$(grep -c '^test result: ok. 1 passed; 0 failed; 0 ignored;' "$$log")" = 1
+
 .PHONY: qa-stability qa-stability-smoke
 qa-stability: ## Opt-in: twenty full Linux WebKit + Chromium suites at HEAD in Docker (2 CPUs)
 	sh scripts/stability/container.sh proof
