@@ -18,6 +18,8 @@ pub enum Level {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogEntry {
+    /// Monotonic identity within this launch, shared with the emitted audio event.
+    pub id: u64,
     /// Milliseconds since the Unix epoch.
     pub at_ms: u64,
     pub level: Level,
@@ -28,26 +30,30 @@ pub struct LogEntry {
 #[derive(Debug, Default)]
 pub struct AudioLog {
     entries: VecDeque<LogEntry>,
+    next_id: u64,
 }
 
 impl AudioLog {
     /// Adds an entry stamped now.
-    pub fn push(&mut self, level: Level, message: impl Into<String>) {
+    pub fn push(&mut self, level: Level, message: impl Into<String>) -> u64 {
         let at_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-        self.push_at(at_ms, level, message.into());
+        self.push_at(at_ms, level, message.into())
     }
 
-    fn push_at(&mut self, at_ms: u64, level: Level, message: String) {
+    fn push_at(&mut self, at_ms: u64, level: Level, message: String) -> u64 {
         if self.entries.len() == LOG_CAPACITY {
             self.entries.pop_front();
         }
+        self.next_id += 1;
         self.entries.push_back(LogEntry {
+            id: self.next_id,
             at_ms,
             level,
             message,
         });
+        self.next_id
     }
 
     /// Every entry kept, oldest first.
@@ -80,8 +86,19 @@ mod tests {
         let json = serde_json::to_value(log.entries()).unwrap();
         assert_eq!(
             json,
-            serde_json::json!([{ "atMs": 7, "level": "warn", "message": "careful" }])
+            serde_json::json!([{ "id": 1, "atMs": 7, "level": "warn", "message": "careful" }])
         );
+    }
+
+    #[test]
+    fn identities_distinguish_identical_entries_and_survive_ring_eviction() {
+        let mut log = AudioLog::default();
+        for id in 1..=250 {
+            assert_eq!(log.push_at(7, Level::Warn, "same".into()), id);
+        }
+        assert_eq!(log.entries()[0].id, 51);
+        assert_eq!(log.entries()[199].id, 250);
+        assert_eq!(AudioLog::default().push(Level::Warn, "new launch"), 1);
     }
 
     #[test]
