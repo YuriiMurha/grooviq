@@ -29,6 +29,9 @@ export type AudioEventKind =
   | "lost"
   | "no-device"
   | "open-failed"
+  | "recovery-stopped"
+  | "recovery-failed"
+  | "recovery-reset"
   | "restarted"
   | "silenced";
 
