@@ -1552,8 +1552,9 @@ mod admitted_stop_red_v2 {
         let mut accepted = Vec::new();
         c.take_recorded(&mut accepted);
         assert!(
-            accepted.iter().any(|e| matches!(e,
-            RecordEvent::Note { key: 76, on: true, id: got, .. } if *got == id)),
+            matches!(accepted.as_slice(), [RecordEvent::Note {
+                key: 76, on: true, id: got, tick: 2, position: 2, take: 1, ..
+            }] if *got == id),
             "the original held note must have been positively recorded"
         );
         c.attempts = 3;
