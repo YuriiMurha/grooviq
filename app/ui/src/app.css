@@ -513,13 +513,17 @@ input[type="checkbox"] {
 
 .rack-head {
   display: flex;
+  flex: 0 0 40px;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px;
+  height: 40px;
+  min-width: 0;
+  padding: 0 12px;
   border-bottom: 1px solid var(--line-soft);
 }
 
 .rack-head h2 {
+  flex-shrink: 0;
   margin: 0;
   font-size: 14px;
   font-weight: 700;
@@ -529,6 +533,7 @@ input[type="checkbox"] {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  height: 32px;
   padding: 3px 8px;
   background: var(--raised);
   border-radius: var(--radius-s);
@@ -537,6 +542,34 @@ input[type="checkbox"] {
 
 .chip b {
   color: var(--text);
+}
+
+.meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 8px;
+  overflow: hidden;
+  background: var(--raised);
+  border-radius: var(--radius-s);
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.meta-chip b {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta-chip.pattern-length {
+  flex-shrink: 0;
 }
 
 .pattern-length input {
