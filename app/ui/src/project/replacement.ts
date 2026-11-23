@@ -39,6 +39,9 @@ export function isProjectReplacing(): boolean {
   return replacingNow || isProjectTransitioning();
 }
 
+/** Retire admitted work for New/Open/Restore, not for a Save waiting on that work. */
+export const isProjectReplacementPending = (): boolean => replacingNow;
+
 /** Call right before sending New, Open or Restore. Listeners run first, while they can still
  * reach the old project (to put the engine back where its project has it). */
 export function projectReplacing() {

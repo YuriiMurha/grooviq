@@ -42,10 +42,11 @@ export async function settlePattern(base?: PatternsView): Promise<PatternReply> 
     await new Promise<void>((resolve) => setTimeout(resolve, 16));
   }
 }
-async function action(base: PatternsView, edit: PatternEdit): Promise<PatternReply> {
+export async function patternAction(base: PatternsView, edit: PatternEdit,
+  settle: () => Promise<boolean> = settleProjectEdits): Promise<PatternReply> {
   const finish = beginProjectTransition();
   try {
-    if (!(await settleProjectEdits())) throw new Error("Pending edits were refused; the pattern change was aborted.");
+    if (!(await settle())) throw new Error("Pending edits were refused; the pattern change was aborted.");
     if (edit.kind === "select" || edit.kind === "delete") {
       const settled = await settlePattern(base);
       if (settled.status === "refused") return settled;
@@ -53,9 +54,9 @@ async function action(base: PatternsView, edit: PatternEdit): Promise<PatternRep
     return await patternEdit(base, edit);
   } finally { finish(); }
 }
-export const patternCreate = (base: PatternsView, name: string) => action(base, { kind: "create", name });
-export const patternDuplicate = (base: PatternsView, pattern: number) => action(base, { kind: "duplicate", pattern });
-export const patternRename = (base: PatternsView, pattern: number, name: string) => action(base, { kind: "rename", pattern, name });
-export const patternSelect = (base: PatternsView, pattern: number) => action(base, { kind: "select", pattern });
-export const patternDelete = (base: PatternsView, pattern: number) => action(base, { kind: "delete", pattern });
-export const patternMakeUnique = (base: PatternsView, clip: number) => action(base, { kind: "makeUnique", clip });
+export const patternCreate = (base: PatternsView, name: string) => patternAction(base, { kind: "create", name });
+export const patternDuplicate = (base: PatternsView, pattern: number) => patternAction(base, { kind: "duplicate", pattern });
+export const patternRename = (base: PatternsView, pattern: number, name: string) => patternAction(base, { kind: "rename", pattern, name });
+export const patternSelect = (base: PatternsView, pattern: number) => patternAction(base, { kind: "select", pattern });
+export const patternDelete = (base: PatternsView, pattern: number) => patternAction(base, { kind: "delete", pattern });
+export const patternMakeUnique = (base: PatternsView, clip: number) => patternAction(base, { kind: "makeUnique", clip });

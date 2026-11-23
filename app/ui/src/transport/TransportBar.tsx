@@ -18,10 +18,11 @@ interface Props {
   onSignature: (beats: number, unit: number) => void;
   /** More buttons after play and stop (record, metronome, the typing keyboard). */
   extra?: ReactNode;
+  modeControls?: ReactNode;
 }
 
 /** Play and stop, the tempo with its time signature under it, and the position. */
-export function TransportBar({ view, playing, latest, sampleRate, onPlay, onStop, onTempo, onSignature, extra }: Props) {
+export function TransportBar({ view, playing, latest, sampleRate, onPlay, onStop, onTempo, onSignature, extra, modeControls }: Props) {
   const { beats, unit } = view.timeSignature;
   const beatChoices = Array.from({ length: Math.max(BEATS_MAX, beats) }, (_, i) => i + 1);
   const unitChoices = UNITS.includes(unit) ? UNITS : [...UNITS, unit].sort((a, b) => a - b);
@@ -54,6 +55,7 @@ export function TransportBar({ view, playing, latest, sampleRate, onPlay, onStop
         </button>
         {extra}
       </div>
+      {modeControls}
       <div className="tempo">
         <BpmField bpm={view.bpm} onCommit={onTempo} />
         <span className="field-caption tempo-caption">

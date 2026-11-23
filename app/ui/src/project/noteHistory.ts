@@ -1,11 +1,16 @@
+import type { PatternStamp } from "../api/patterns";
 import type { NotesAck } from "../api/notes";
-import type { NotesCommand } from "../roll/commitQueue";
+import type { BarrierResult, NotesCommand } from "../roll/commitQueue";
 
 /** The open piano roll, as undo and redo see it. */
 export interface RollHistory {
   /** Runs the command in the roll's commit queue, after its edits in flight; the roll fetches
    * its notes again afterwards. */
   run(command: NotesCommand): void;
+  barrier?<Result>(command: (still: () => boolean) => Promise<Result>, activeDrag: () => boolean,
+    accepted?: (value: Result) => boolean): Promise<BarrierResult<Result>>;
+  detachBarriers?: () => void;
+  invalidateHistory?: (stamp: PatternStamp) => void;
 }
 
 let roll: RollHistory | null = null;
@@ -14,8 +19,10 @@ const pressed = new Set<number>();
 
 /** The piano roll registers itself while it is mounted; returns the unregister. */
 export function setRollHistory(r: RollHistory): () => void {
+  if (roll !== r) roll?.detachBarriers?.();
   roll = r;
   return () => {
+    r.detachBarriers?.();
     if (roll === r) roll = null;
   };
 }
@@ -57,3 +64,29 @@ export function stepNotesHistory(
   }
   return true;
 }
+
+export const historyDragActive = () => pressed.size > 0;
+/** Caller settles shared edit sources before this barrier; never flush from its callback. */
+export async function withRollHistoryBarrier<Result>(command: (still: () => boolean) => Promise<Result>,
+  current: () => boolean, accepted: (value: Result) => boolean = () => true): Promise<BarrierResult<Result>> {
+  if (!current()) return { status: "cancelled", reason: "stale" };
+  if (historyDragActive()) return { status: "cancelled", reason: "blocked" };
+  const opened = roll;
+  if (opened) {
+    if (!opened.barrier) return { status: "cancelled", reason: "stale" };
+    const result = await opened.barrier((still) => {
+      if (!current()) throw new Error("The project changed before history reached its turn.");
+      return command(() => still() && current());
+    }, historyDragActive, accepted);
+    return current() ? result : { status: "cancelled", reason: "stale" };
+  }
+  const still = () => current() && !historyDragActive() && roll === opened;
+  try {
+    if (!still()) return { status: "cancelled", reason: "stale" };
+    const value = await command(still);
+    return still() ? { status: "completed", value } : { status: "cancelled", reason: "stale" };
+  } catch (error) { return { status: "cancelled", reason: "failed", error }; }
+}
+
+/** Only the currently registered roll can consume the exact native effect target. */
+export function invalidateRollHistory(stamp: PatternStamp) { roll?.invalidateHistory?.(stamp); }

@@ -70,6 +70,9 @@ export interface ProjectView {
   canUndo: boolean;
   /** An undone note change can be made again (`notesRedo`). */
   canRedo: boolean;
+  /** Project-wide candidates (notes in any pattern, arrangement and sampler trim). */
+  projectCanUndo?: boolean;
+  projectCanRedo?: boolean;
   /** Counts projects: moves on with every New, Open and Restore. Edits carry the one they were
    * made in, and the engine refuses one made for a project that was replaced since. */
   generation: number;

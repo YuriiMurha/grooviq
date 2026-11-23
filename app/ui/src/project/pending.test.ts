@@ -1,5 +1,48 @@
 import { expect, it } from "vitest";
-import { ProjectCommandQueue, registerSettlement, settleProjectEdits } from "./pending";
+import { ProjectCommandQueue, registerSettlement, settleProjectEdits, TransitionWork } from "./pending";
+
+it("tracks intent before preflight without waiting on itself, and Save waits through publication", async () => {
+  const work = new TransitionWork();
+  const queue = new ProjectCommandQueue();
+  const offWork = registerSettlement(work.settle);
+  const offQueue = registerSettlement(() => queue.flush());
+  let release!: () => void;
+  let reply!: () => void;
+  const trace: string[] = [];
+  const prior = queue.enqueue(() => new Promise<void>((resolve) => { release = resolve; }));
+  try {
+    const mutation = work.run(async () => {
+      trace.push("intent");
+      expect(await work.settleOthers()).toBe(true);
+      trace.push("native");
+      await new Promise<void>((resolve) => { reply = resolve; });
+      trace.push("published");
+      return true;
+    }, Boolean);
+    expect(work.unsettled()).toBe(true);
+    const save = settleProjectEdits().then((ok) => { expect(ok).toBe(true); trace.push("save"); });
+    await Promise.resolve();
+    expect(trace).toEqual(["intent"]);
+    release(); await prior;
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    expect(trace).toEqual(["intent", "native"]);
+    reply(); await mutation; await save;
+    expect(trace).toEqual(["intent", "native", "published", "save"]);
+    expect(work.unsettled()).toBe(false);
+  } finally { offWork(); offQueue(); }
+});
+
+it("counts a refused transition once even when it completed before Save", async () => {
+  const work = new TransitionWork();
+  const off = registerSettlement(work.settle);
+  try {
+    expect(await work.run(async () => false, Boolean)).toBe(false);
+    expect(work.unsettled()).toBe(true);
+    expect(await settleProjectEdits()).toBe(false);
+    expect(work.unsettled()).toBe(false);
+    expect(await settleProjectEdits()).toBe(true);
+  } finally { off(); }
+});
 it("a held refused project command aborts save/open/select settlement", async () => {
   const queue = new ProjectCommandQueue();
   const dispose = registerSettlement(() => queue.flush());

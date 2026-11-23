@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject, type ReactNode } from "react";
 import { channelSelect } from "../api/notes";
 import { errorText, type ChannelView } from "../api/project";
 import { DeviceWindows } from "../devices/DeviceWindows";
@@ -16,6 +16,7 @@ import { SelectionContext, type Selection } from "./selection";
 const SPLIT_KEY_STEP = 0.05;
 
 interface Props {
+  picker?: ReactNode;
   latest: RefObject<LiveFrame | null>;
   sampleRate: number;
   onError: (message: string) => void;
@@ -27,9 +28,10 @@ interface Props {
 
 /** The channel rack and the piano roll, stacked, each toggled by its key (F6, F7), with a
  * splitter between them; the selected channel they and the typing keyboard share. */
-export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }: Props) {
+export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys, picker }: Props) {
   const { view, runFor, stamp } = useProject();
   const [panels, setPanels] = useState<Panels>(DEFAULT_PANELS);
+  const [playlistVisible, setPlaylistVisible] = useState(false);
   const [chosen, setChosen] = useState<number | null>(null);
   const area = useRef<HTMLDivElement>(null);
   const drag = useRef<{ y: number; start: number } | null>(null);
@@ -69,6 +71,16 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "F5" || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || modalIsOpen() || isTypingTarget(event.target)) return;
+      event.preventDefault();
+      if (!event.repeat) setPlaylistVisible((visible) => !visible);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   const both = panels.rack && panels.roll;
   const onSplitDown = (e: PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
@@ -97,6 +109,12 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }
 
   return (
     <SelectionContext.Provider value={selection}>
+      <div className="pattern-workspace">
+        {picker}
+        <div className="pattern-workspace-content">
+          {playlistVisible && <section className="pattern-playlist-shell" aria-label="Playlist">
+            <h2>Playlist</h2><p>Your patterns are ready. Timeline editing is not available yet. F5 hides the playlist.</p>
+          </section>}
       <div ref={area} className="workspace" style={{ "--split": `${panels.split * 100}%` } as CSSProperties}>
         {panels.rack && (
           <div className={`panel panel-rack${both ? " split" : ""}`}>
@@ -152,6 +170,8 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }
         {!panels.rack && !panels.roll && (
           <p className="workspace-empty">F6 shows the channel rack, F7 the piano roll.</p>
         )}
+      </div>
+        </div>
       </div>
       <DeviceWindows generation={view.generation} channels={view.channels} onError={onError} onRelink={relink} />
     </SelectionContext.Provider>
