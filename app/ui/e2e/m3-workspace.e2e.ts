@@ -312,6 +312,21 @@ test("T9 reduced: history admission refusal preserves real stacks, values, revis
 });
 for (const refused of [false, true]) test(`T9 mode transition fences new gestures and releases after refusal ${refused}`, async ({ app, mock }) => {
   const mode = app.getByRole("combobox", { name: "Playback mode" });
+  const hint = app.getByLabel("Hint");
+  const expectTransportHints = async (applied: "pattern" | "song") => {
+    const other = applied === "song" ? "pattern" : "song";
+    await app.mouse.move(0, 0);
+    const play = app.getByRole("button", { name: "Play", exact: true });
+    await play.focus();
+    await expect(play).toBeFocused();
+    await expect(hint).toContainText(new RegExp(`\\b${applied}\\b`));
+    await expect(hint).not.toContainText(new RegExp(`\\b${other}\\b`));
+    await app.getByRole("timer", { name: "Position" }).hover();
+    await expect(hint).toContainText(new RegExp(`\\b${applied}\\b`));
+    await expect(hint).not.toContainText(new RegExp(`\\b${other}\\b`));
+  };
+  await expect(mode).toHaveValue("pattern");
+  await expectTransportHints("pattern");
   const before = (await mock.calls("project_edit")).length;
   // A local tempo draft must enter the session queue before the mode's revision is read.
   await app.getByRole("textbox", { name: "BPM" }).fill("137");
@@ -320,6 +335,9 @@ for (const refused of [false, true]) test(`T9 mode transition fences new gesture
   if (refused) await mock.eval("(m) => m.refuseWorkspaceNext('generated mode admission refusal')");
   await mode.selectOption("song");
   await expect.poll(async () => (await mock.calls("arrangement_mode")).length).toBe(1);
+  await expect(mode).toBeDisabled();
+  expect((await arrangement(app)).playMode).toBe("pattern");
+  await expectTransportHints("pattern");
   const edits = (await mock.calls("project_edit")).length;
   expect(edits).toBe(before + 1);
   expect((await mock.view()).bpm).toBe(137);
@@ -331,6 +349,8 @@ for (const refused of [false, true]) test(`T9 mode transition fences new gesture
   await mock.eval("(m) => m.releaseCommand('arrangement_mode')");
   await expect(mode).toBeEnabled();
   await expect(mode).toHaveValue(refused ? "pattern" : "song");
+  expect((await arrangement(app)).playMode).toBe(refused ? "pattern" : "song");
+  await expectTransportHints(refused ? "pattern" : "song");
   if (refused) await expect(app.getByRole("status", { name: "Messages" })).toContainText("generated mode admission refusal");
   await clickCell(app, 0, 4);
   await expect.poll(async () => (await mock.calls("project_edit")).length).toBe(edits + 1);

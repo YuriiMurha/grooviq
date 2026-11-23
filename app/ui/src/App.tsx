@@ -446,6 +446,7 @@ export function App() {
               playing={playing}
               latest={latest}
               sampleRate={sampleRate}
+              playMode={patterns.mode}
               modeControls={<PatternModeControls picker={patterns} />}
               onPlay={play}
               onStop={stop}
