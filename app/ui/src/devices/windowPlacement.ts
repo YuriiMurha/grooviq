@@ -26,7 +26,8 @@ export function fitScale(viewW: number, viewH: number): number {
 export function initialPlacement(viewW: number, viewH: number, scale: number, index: number): Placement {
   const x = (viewW - DESIGN_W * scale) / 2 + index * CASCADE;
   const y = (viewH - DESIGN_H * scale) / 2 + index * CASCADE;
-  return clampPlacement({ x, y }, viewW, viewH, scale);
+  // Opening contains the full editor while preserving rounded cascade positions.
+  return containPlacement({ x: Math.round(x), y: Math.round(y) }, viewW, viewH, scale);
 }
 
 /** Keeps enough of the window, and all of its title bar's height, on screen. */
