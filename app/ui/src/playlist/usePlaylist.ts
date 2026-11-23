@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import { arrangementEdit, arrangementView } from "../api/arrangement";
-import { patternList } from "../api/patterns";
+import { patternEdit, patternList } from "../api/patterns";
 import { projectView, type ProjectView } from "../api/project";
 import type { ProjectStamp } from "../project/context";
 import { beginProjectTransition, registerSettlement } from "../project/pending";
@@ -27,6 +27,7 @@ class SessionPlaylistBinding {
       enqueueRead: command => this.session.enqueue(command),
       enqueueMutation: command => this.session.enqueueMutation(command),
       readPage: arrangementView, readPatterns: patternList, edit: arrangementEdit, readProject: projectView,
+      selectPattern: (base, pattern) => patternEdit(base, { kind: "select", pattern }),
       publishProject: (view, at) => {
         if (!current(at) || view.generation !== at.generation) return false;
         this.session.adopt(view);

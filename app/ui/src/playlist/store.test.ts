@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { ArrangementOperation, ArrangementPage, ArrangementReply } from "../api/arrangement";
 import type { ProjectView } from "../api/project";
+import type { PatternsView } from "../api/patterns";
 import { beginProjectTransition, ProjectCommandQueue, registerSettlement, settleProjectEdits } from "../project/pending";
 import { PlaylistController, readArrangement, type PlaylistAdapter, type PlaylistState } from "./store";
 
@@ -73,21 +74,31 @@ function rig() {
   let read = async (): Promise<ArrangementPage> => { effects.push("read-arrangement"); return snapshot; };
   let sources = async () => ({ generation: snapshot.generation, arrangementRevision: snapshot.revision,
     patterns: [{ id: 7, name: "Clip source", revision: 1, steps: 16 }, { id: 8, name: "Other pattern", revision: 1, steps: 4 }] });
+  let selected = 8;
+  let select: PlaylistAdapter["selectPattern"] = async (_base, pattern) => {
+    selected = pattern;
+    snapshot = { ...snapshot, revision: snapshot.revision + 1 };
+    return { status: "applied", state: await bank(), settlement: { recordingDisarmed: false, waiting: false } };
+  };
+  const project = () => ({ generation: 2, pattern: { id: selected } }) as ProjectView;
+  const bank = async (): Promise<PatternsView> => ({ ...await sources(), revision: snapshot.revision, selected, view: project() });
   const baseAdapter: Omit<PlaylistAdapter, "readPatterns"> = {
     origin: () => ({ ...origin }), current: at => current && at.generation === origin.generation && at.replacements === origin.replacements,
     blocked: () => blocked, beginTransition: beginProjectTransition,
     enqueueRead: command => queue.enqueue(command, false), enqueueMutation: command => queue.enqueue(command, true),
     readPage: () => read(), edit: (_stamp, ops) => invoke(ops),
-    readProject: async () => { effects.push("read-project"); return { generation: 2 } as ProjectView; },
+    selectPattern: (base, pattern) => select(base, pattern),
+    readProject: async () => { effects.push("read-project"); return project(); },
     publishProject: (_view, at) => { if (!current || at.generation !== 2) return false; effects.push("publish-project"); return true; },
     changed: state => { effects.push("publish-controller"); views.push(state); },
   };
-  const adapter = { ...baseAdapter, readPatterns: () => sources() };
+  const adapter = { ...baseAdapter, readPatterns: bank };
   const controller = new PlaylistController(adapter);
   cleanups.push(registerSettlement(() => queue.flush()), registerSettlement(controller.settle));
   return { controller, effects, views, current: (v: boolean) => { current = v; }, blocked: (v: boolean) => { blocked = v; },
     invoke: (fn: typeof invoke) => { invoke = fn; }, read: (fn: typeof read) => { read = fn; },
-    sources: (fn: typeof sources) => { sources = fn; }, replaceSnapshot: (v: ArrangementPage) => { snapshot = v; } };
+    sources: (fn: typeof sources) => { sources = fn; }, replaceSnapshot: (v: ArrangementPage) => { snapshot = v; },
+    select: (fn: typeof select) => { select = fn; }, selectNormally: select };
 }
 
 describe("playlist intent and native publication in the existing Session lane", () => {
@@ -237,5 +248,87 @@ describe("playlist intent and native publication in the existing Session lane", 
     expect(r.effects.filter(effect => effect === "read-arrangement")).toHaveLength(2);
     expect(r.effects).not.toContain("publish-project");
     expect(r.effects).not.toContain("read-project");
+  });
+});
+
+describe("Make unique through the playlist publication ticket", () => {
+  const makeUnique = [{ kind: "makeUnique", clip: 12 }] as const;
+  const at = { generation: 2, revision: 9 };
+  async function clonedRig(retarget = 20) {
+    const r = rig(); r.replaceSnapshot(page(0, 1, [12]));
+    expect(await r.controller.reload()).toBe(true);
+    r.effects.length = 0;
+    let revision = 10;
+    r.invoke(async ops => {
+      expect(ops).toEqual(makeUnique);
+      r.effects.push("native-clone");
+      const response = page(0, 1, [12]);
+      const [clip] = response.clips;
+      response.clips = [{ ...clip, content: { type: "pattern", pattern: retarget, offsetTick: 0, lengthTicks: 240 } }];
+      r.replaceSnapshot({ ...response, revision });
+      r.sources(async () => ({ generation: 2, arrangementRevision: revision,
+        patterns: [{ id: 7, name: "Clip source", revision: 1, steps: 16 }, { id: 8, name: "Other", revision: 1, steps: 4 },
+          { id: 20, name: "Clip source", revision: 1, steps: 16 }] }));
+      return { status: "applied", generation: 2, revision, changed: true, createdIds: [20], reload: false,
+        message: null, request: null, warnings: [] };
+    });
+    return { ...r, selected: (base: PatternsView, target: number) => { revision++; return r.selectNormally(base, target); } };
+  }
+
+  it("keeps Save behind the held clone selection and publishes only the completed edit", async () => {
+    const r = await clonedRig();
+    const started = deferred<void>(), release = deferred<void>();
+    r.select(async (base, target) => {
+      expect(target).toBe(20); expect(base.arrangementRevision).toBe(10);
+      r.effects.push("selection-started"); started.resolve(); await release.promise;
+      r.effects.push("selection-applied"); return r.selected(base, target);
+    });
+    const work = r.controller.mutate(at, makeUnique);
+    expect(await Promise.race([started.promise.then(() => "select"), work.then(() => "published-before-select")])).toBe("select");
+    const finish = beginProjectTransition(); cleanups.push(finish);
+    const saved = settleProjectEdits().then(ok => { r.effects.push("save"); return ok; });
+    expect(r.controller.unsettled()).toBe(true);
+    expect(r.effects).not.toContain("publish-project"); expect(r.effects).not.toContain("save");
+    release.resolve(); expect((await work).status).toBe("applied"); expect(await saved).toBe(true);
+    expect(r.effects.filter(e => ["native-clone", "selection-started", "selection-applied", "publish-project", "save"].includes(e)))
+      .toEqual(["native-clone", "selection-started", "selection-applied", "publish-project", "save"]);
+    expect(r.controller.state.snapshot?.revision).toBe(11);
+  });
+
+  it.each(["without", "with"] as const)("keeps the accepted clone recoverable %s an earlier Save attempt", async waiting => {
+    const r = await clonedRig();
+    r.select(async base => ({ status: "refused", state: base, reason: "engineBusy", message: "selection refused",
+      settlement: { recordingDisarmed: false, waiting: false } }));
+    expect(await r.controller.mutate(at, makeUnique)).toEqual({ status: "unpublished", native: "applied", message: "selection refused" });
+    expect(r.controller.state.requiresRefresh).toBe(true);
+    if (waiting === "with") expect(await settleProjectEdits()).toBe(false);
+    expect((await r.controller.mutate(at, makeUnique)).status).toBe("blocked");
+    expect(r.effects.filter(e => e === "native-clone")).toHaveLength(1);
+    expect(await r.controller.reload()).toBe(true);
+    expect(r.controller.state.snapshot?.clips[0].content).toMatchObject({ pattern: 20 });
+    expect(r.controller.state.requiresRefresh).toBe(false);
+    expect(await settleProjectEdits()).toBe(true);
+  });
+
+  it("never selects an acknowledgement ID absent from the captured clip's new source relation", async () => {
+    const r = await clonedRig(7);
+    r.select(async () => { r.effects.push("wrong-selection"); throw new Error("unexpected selection"); });
+    expect((await r.controller.mutate(at, makeUnique)).status).toBe("unpublished");
+    expect(r.effects).not.toContain("wrong-selection"); expect(r.effects).not.toContain("publish-project");
+    expect(r.controller.state.requiresRefresh).toBe(true);
+  });
+
+  it("retires a held source-selection reply when the project is replaced", async () => {
+    const r = await clonedRig();
+    const started = deferred<void>(), selection = deferred<Awaited<ReturnType<PlaylistAdapter["selectPattern"]>>>();
+    r.select(async () => { started.resolve(); return selection.promise; });
+    const work = r.controller.mutate(at, makeUnique);
+    expect(await Promise.race([started.promise.then(() => "select"), work.then(() => "finished")])).toBe("select");
+    r.current(false); r.controller.retire();
+    selection.reject(new Error("old selection reply"));
+    expect((await work).status).toBe("stale");
+    expect(r.controller.state.snapshot).toBeNull();
+    expect(r.controller.state.requiresRefresh).toBe(false);
+    expect(r.effects).not.toContain("publish-project");
   });
 });
