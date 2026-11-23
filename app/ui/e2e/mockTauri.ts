@@ -364,6 +364,8 @@ export function installMockTauri(seed: MockSeed): void {
       recording: s.recording,
       canUndo: s.history.undo.length > 0,
       canRedo: s.history.redo.length > 0,
+      projectCanUndo: noteHistories().some((history) => history.undo.length > 0) || trimUndo.length > 0,
+      projectCanRedo: noteHistories().some((history) => history.redo.length > 0) || trimRedo.length > 0,
       generation: s.generation,
       patternRevision: patternsRevision,
     };

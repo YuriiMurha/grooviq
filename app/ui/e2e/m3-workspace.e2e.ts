@@ -46,6 +46,128 @@ test.beforeEach(async ({ app, mock }) => {
   await expect.poll(async () => (await patterns(app)).generation).toBe(1);
   await expect(app.getByRole("combobox", { name: "Playback mode" })).toHaveValue("pattern");
 });
+for (const flow of ["new", "open"] as const) for (const answer of ["cancel", "save"] as const) {
+  test(`pending accepted picker mutation guards ${flow} with ${answer}`, async ({ app, mock }) => {
+    const rail = app.getByRole("complementary", { name: "Patterns" });
+    const command = flow === "new" ? "project_new" : "project_open";
+    const before = (await mock.calls(command)).length;
+    expect((await mock.view()).dirty).toBe(false);
+    await mock.eval("(m) => m.holdReply('pattern_edit')");
+    await rail.getByRole("button", { name: "New", exact: true }).click();
+    await expect.poll(async () => (await patterns(app)).patterns.length).toBe(3);
+    const created = (await patterns(app)).patterns.find((pattern) => pattern.name === "New pattern")!;
+    if (flow === "open") await mock.eval(`(m) => m.queueDialog('${file}')`);
+    if (answer === "save") await mock.eval(`(m) => m.holdCommand('${command}')`);
+    await app.keyboard.press(flow === "new" ? "ControlOrMeta+n" : "ControlOrMeta+o");
+    const prompt = app.getByRole("dialog", { name: "Save changes?" });
+    await expect(prompt).toBeVisible();
+    expect(await mock.calls(command)).toHaveLength(before);
+    await prompt.getByRole("button", { name: answer === "save" ? "Save" : "Cancel", exact: true }).click();
+    expect(await mock.calls(command)).toHaveLength(before);
+    expect(await mock.calls("project_save")).toHaveLength(0);
+    await mock.eval("(m) => m.releaseReply('pattern_edit')");
+    if (answer === "cancel") {
+      await expect(rail.getByRole("button", { name: "New", exact: true })).toBeEnabled();
+      expect((await patterns(app)).patterns.some((pattern) => pattern.id === created.id)).toBe(true);
+      expect((await mock.view()).dirty).toBe(true);
+      expect(await mock.calls(command)).toHaveLength(before);
+    } else {
+      await expect.poll(async () => (await mock.calls(command)).length).toBe(before + 1);
+      const saved = await mock.eval<{ project: { patterns: { id: number; name: string }[] } }>(`(m) => m.file('${file}')`);
+      expect(saved.project.patterns.some((pattern) => pattern.id === created.id && pattern.name === created.name)).toBe(true);
+      expect(await mock.calls("project_save")).toHaveLength(1);
+      await mock.eval(`(m) => m.releaseCommand('${command}')`);
+      await expect.poll(async () => (await patterns(app)).generation).toBe(2);
+    }
+  });
+}
+test("Save waits pending picker publication before its own snapshot and releases controls", async ({ app, mock }) => {
+  const rail = app.getByRole("complementary", { name: "Patterns" });
+  await mock.eval("(m) => { m.holdReply('pattern_edit'); m.holdCommand('project_save'); }");
+  await rail.getByRole("button", { name: "New", exact: true }).click();
+  await expect.poll(async () => (await patterns(app)).patterns.length).toBe(3);
+  await app.keyboard.press("ControlOrMeta+s");
+  expect(await mock.calls("project_save")).toHaveLength(0);
+  await mock.eval("(m) => m.releaseReply('pattern_edit')");
+  await expect.poll(async () => (await mock.calls("project_save")).length).toBe(1);
+  await expect(rail.getByRole("button", { name: "New pattern", exact: true })).toBeVisible();
+  await mock.eval("(m) => m.releaseCommand('project_save')");
+  await expect.poll(async () => (await mock.view()).dirty).toBe(false);
+  const saved = await mock.eval<{ project: { patterns: unknown[] } }>(`(m) => m.file('${file}')`);
+  expect(saved.project.patterns).toHaveLength(3);
+  await rail.getByRole("button", { name: "New", exact: true }).click();
+  await expect.poll(async () => (await patterns(app)).patterns.length).toBe(4);
+});
+test("a picker refusal during Save stays visible and blocks that snapshot", async ({ app, mock }) => {
+  const rail = app.getByRole("complementary", { name: "Patterns" });
+  const before = (await mock.calls("pattern_edit")).length;
+  await mock.eval("(m) => { m.holdCommand('pattern_edit'); m.refuseNext('pattern_edit','generated picker refusal'); }");
+  await rail.getByRole("button", { name: "New", exact: true }).click();
+  await expect.poll(async () => (await mock.calls("pattern_edit")).length).toBe(before + 1);
+  await app.keyboard.press("ControlOrMeta+s");
+  await mock.eval("(m) => m.releaseCommand('pattern_edit')");
+  await expect(rail.getByRole("alert")).toContainText("generated picker refusal");
+  await expect(app.getByRole("status", { name: "Messages" })).toContainText("not saved");
+  expect(await mock.calls("project_save")).toHaveLength(0);
+  expect((await patterns(app)).patterns).toHaveLength(2);
+  await rail.getByRole("button", { name: "New", exact: true }).click();
+  await expect.poll(async () => (await patterns(app)).patterns.length).toBe(3);
+});
+test("Save As cancellation does not strand a pending picker reply", async ({ app, mock }) => {
+  const rail = app.getByRole("complementary", { name: "Patterns" });
+  await mock.eval("(m) => { m.holdReply('pattern_edit'); m.queueDialog(null); }");
+  await rail.getByRole("button", { name: "New", exact: true }).click();
+  await expect.poll(async () => (await patterns(app)).patterns.length).toBe(3);
+  await app.keyboard.press("ControlOrMeta+Shift+s");
+  await expect.poll(async () => (await mock.calls("plugin:dialog|save")).length).toBe(1);
+  await mock.eval("(m) => m.releaseReply('pattern_edit')");
+  await expect(rail.getByRole("button", { name: "New", exact: true })).toBeEnabled();
+  expect(await mock.calls("project_save_as")).toHaveLength(0);
+  expect((await mock.view()).dirty).toBe(true);
+  await rail.getByRole("button", { name: "New", exact: true }).click();
+  await expect.poll(async () => (await patterns(app)).patterns.length).toBe(4);
+});
+test("native global menu availability follows inactive-pattern and trim history without changing legacy flags", async ({ app, mock }) => {
+  const rail = app.getByRole("complementary", { name: "Patterns" });
+  const aName = (await patterns(app)).patterns.find((pattern) => pattern.id === 0)!.name;
+  const availability = () => ipc<{ canUndo: boolean; canRedo: boolean; projectCanUndo: boolean; projectCanRedo: boolean }>(app, "project_view");
+  const enabled = async () => (await mock.calls("edit_history_enabled")).at(-1)?.args;
+  await rail.getByRole("heading", { name: "Patterns", exact: true }).click();
+  await expect.poll(enabled).toEqual({ undo: false, redo: false });
+  await rail.getByRole("button", { name: "B", exact: true }).click();
+  await expect.poll(async () => (await patterns(app)).selected).toBe(3);
+  await clickCell(app, 0, 2);
+  await rail.getByRole("button", { name: aName, exact: true }).click();
+  await expect.poll(async () => (await patterns(app)).selected).toBe(0);
+  expect(await availability()).toMatchObject({ canUndo: false, projectCanUndo: true, projectCanRedo: false });
+  await expect.poll(enabled).toEqual({ undo: true, redo: false });
+  await mock.eval("(m) => m.emit('edit-history', false)");
+  await expect.poll(async () => (await snapshot(mock)).patterns.find((pattern) => pattern.id === 3)!.notes.length).toBe(0);
+  expect((await patterns(app)).selected).toBe(0);
+  await expect.poll(enabled).toEqual({ undo: false, redo: true });
+  await mock.eval("(m) => m.emit('edit-history', true)");
+  await expect.poll(async () => (await snapshot(mock)).patterns.find((pattern) => pattern.id === 3)!.notes.length).toBe(1);
+  await expect.poll(enabled).toEqual({ undo: true, redo: false });
+  await reset(app);
+  await app.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => (await ipc<TrimState>(app, "sampler_trim_view", { channel: 2 })).undo).toBeNull();
+  expect(await availability()).toMatchObject({ canUndo: false, canRedo: false, projectCanUndo: true, projectCanRedo: true });
+  await expect.poll(enabled).toEqual({ undo: true, redo: true });
+});
+test("native menu is enabled for a trim-only inverse and returns to empty Undo after taking it", async ({ app, mock }) => {
+  const enabled = async () => (await mock.calls("edit_history_enabled")).at(-1)?.args;
+  const original = await ipc<TrimState>(app, "sampler_trim_view", { channel: 2 });
+  await app.getByRole("button", { name: "Edit the B sampler" }).click();
+  await app.getByRole("dialog", { name: "B sampler" }).getByRole("button", { name: "Use whole sample" }).click();
+  await expect.poll(async () => (await ipc<TrimState>(app, "sampler_trim_view", { channel: 2 })).start).toBe(0);
+  await app.getByRole("complementary", { name: "Patterns" }).getByRole("heading", { name: "Patterns", exact: true }).click();
+  await expect.poll(enabled).toEqual({ undo: true, redo: false });
+  await mock.eval("(m) => m.emit('edit-history', false)");
+  await expect.poll(async () => (await ipc<TrimState>(app, "sampler_trim_view", { channel: 2 })).start).toBe(original.start);
+  expect((await ipc<TrimState>(app, "sampler_trim_view", { channel: 2 })).end).toBe(original.end);
+  await expect.poll(enabled).toEqual({ undo: false, redo: true });
+  expect((await snapshot(mock)).patterns.every((pattern) => pattern.notes.length === 0)).toBe(true);
+});
 for (const roll of [false, true]) test(`T9 UI global Undo targets inactive B while A stays selected with roll ${roll}`, async ({ app, mock }) => {
   const rail = app.getByRole("complementary", { name: "Patterns" });
   const aName = (await patterns(app)).patterns.find((pattern) => pattern.id === 0)!.name;

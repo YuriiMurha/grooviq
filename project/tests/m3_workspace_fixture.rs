@@ -198,6 +198,42 @@ fn step_trace(r: &mut Rig, undo: bool, observations: &mut Vec<Value>) -> History
 }
 
 #[test]
+fn project_menu_availability_includes_inactive_notes_and_trim_without_changing_legacy_flags() {
+    let mut r = rig();
+    let empty = r.s.view();
+    assert!(!empty.project_can_undo && !empty.project_can_redo);
+    r.select(r.other);
+    r.apply(Edit::ToggleStep {
+        channel: r.channels[0],
+        step: 2,
+    });
+    r.select(0);
+    let view = r.s.view();
+    assert!(!view.can_undo && !view.can_redo);
+    assert!(view.project_can_undo && !view.project_can_redo);
+    assert!(matches!(r.step(true), HistoryEffect::Notes { pattern } if pattern == r.other));
+    let view = r.s.view();
+    assert!(!view.can_undo && !view.can_redo);
+    assert!(!view.project_can_undo && view.project_can_redo);
+    assert_eq!(r.s.patterns().selected, 0);
+    r.reset(r.channels[1]);
+    let view = r.s.view();
+    assert!(!view.can_undo && !view.can_redo);
+    assert!(view.project_can_undo && !view.project_can_redo);
+    assert!(
+        matches!(r.step(true), HistoryEffect::SamplerTrim { channel } if channel == r.channels[1])
+    );
+    let view = r.s.view();
+    assert!(!view.project_can_undo && view.project_can_redo);
+    assert_eq!(
+        r.s.project().channels[1].sampler["start"].to_bits(),
+        0.6f32.to_bits()
+    );
+    assert!(matches!(r.step(false), HistoryEffect::SamplerTrim { .. }));
+    assert!(r.s.view().project_can_undo);
+}
+
+#[test]
 fn selected_pattern_history_and_global_history_keep_distinct_native_targets() {
     let mut r = rig();
     let channel = r.channels[0];

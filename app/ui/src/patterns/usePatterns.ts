@@ -1,21 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { patternCreate, patternDuplicate, patternList, patternRename, patternSelect, type PatternsView } from "../api/patterns";
+import { patternAction, patternList, type PatternsView } from "../api/patterns";
 import { arrangementMode, arrangementView, type ArrangementPage } from "../api/arrangement";
 import { errorText, projectView, type ProjectView } from "../api/project";
 import type { ProjectStamp } from "../project/context";
-import { beginProjectTransition, settleProjectEdits } from "../project/pending";
-import { isProjectReplacing, onProjectReplacing, onProjectReplaceFailed, projectGeneration } from "../project/replacement";
+import { beginProjectTransition, registerSettlement, TransitionWork } from "../project/pending";
+import { isProjectReplacing, isProjectReplacementPending, onProjectReplacing, onProjectReplaceFailed, projectGeneration } from "../project/replacement";
 import { acceptPickerReply, canPublishPatterns, performPickerAction, pickerIntent, type PickerAction, type PickerState } from "./lifecycle";
 
 interface SessionAdapter {
   view: ProjectView | null;
-  publishPatterns: (state: PatternsView, origin: ProjectStamp) => boolean;
+  publishPatterns: (state: PatternsView, origin: ProjectStamp, publication?: "admitted") => boolean;
   enqueue: <Result>(command: () => Promise<Result>) => Promise<Result>;
   run: (command: () => Promise<ProjectView>) => Promise<boolean>;
 }
 const EMPTY: PickerState = { canonical: null, pending: null, refusal: null };
 
 export function usePatterns({ view, publishPatterns, enqueue, run }: SessionAdapter) {
+  const [work] = useState(() => new TransitionWork());
+  useEffect(() => registerSettlement(work.settle), [work]);
   const [state, setState] = useState<PickerState>(EMPTY);
   const current = useRef(state);
   const [loading, setLoading] = useState(true);
@@ -29,7 +31,7 @@ export function usePatterns({ view, publishPatterns, enqueue, run }: SessionAdap
   const notesRevision = view?.notesRevision;
   const selected = view?.pattern.id;
   const update = useCallback((next: PickerState) => { current.current = next; setState(next); }, []);
-  const still = useCallback((at: ProjectStamp) => !isProjectReplacing() && projectGeneration() === at.replacements, []);
+  const still = useCallback((at: ProjectStamp) => !isProjectReplacementPending() && projectGeneration() === at.replacements, []);
 
   useEffect(() => onProjectReplacing(() => {
     request.current = null; modeRequest.current = null;
@@ -63,29 +65,25 @@ export function usePatterns({ view, publishPatterns, enqueue, run }: SessionAdap
     update({ ...current.current, pending: intent, refusal: null });
     const at = { generation: intent.generation, replacements: intent.replacements };
     const isCurrent = () => still(at) && current.current.pending?.identity === intent.identity;
-    try {
-      const reply = await performPickerAction(intent, { isCurrent, canonical: () => current.current.canonical,
-        action: (canonical, edit) => {
-          switch (edit.kind) {
-            case "create": return patternCreate(canonical, edit.name);
-            case "duplicate": return patternDuplicate(canonical, edit.pattern);
-            case "rename": return patternRename(canonical, edit.pattern, edit.name);
-            case "select": return patternSelect(canonical, edit.pattern);
-          }
-        } });
-      if (!reply || !isCurrent()) return false;
-      const next = acceptPickerReply(current.current, intent, projectGeneration(), reply);
-      const accepted = next.canonical !== null && publishPatterns(next.canonical, at);
-      update({ ...next, canonical: accepted ? next.canonical : current.current.canonical });
-      if (reply.status === "refused") setMessage(reply.message);
-      return accepted && reply.status === "applied";
-    } catch (error) {
-      if (isCurrent()) setMessage(errorText(error));
-      return false;
-    } finally {
-      if (isCurrent()) update({ ...current.current, pending: null });
-    }
-  }, [still, update, publishPatterns]);
+    return work.run(async () => {
+      try {
+        const reply = await performPickerAction(intent, { isCurrent, canonical: () => current.current.canonical,
+          action: (canonical, edit) => patternAction(canonical, edit, work.settleOthers) });
+        if (!reply || !isCurrent()) return false;
+        const next = acceptPickerReply(current.current, intent, projectGeneration(), reply);
+        // Save waits this ticket through publication; an admitted reply cannot arrive after its clean view.
+        const accepted = next.canonical !== null && publishPatterns(next.canonical, at, "admitted");
+        update({ ...next, canonical: accepted ? next.canonical : current.current.canonical });
+        if (reply.status === "refused") setMessage(reply.message);
+        return accepted && reply.status === "applied";
+      } catch (error) {
+        if (isCurrent()) setMessage(errorText(error));
+        return false;
+      } finally {
+        if (current.current.pending?.identity === intent.identity) update({ ...current.current, pending: null });
+      }
+    }, (accepted) => accepted);
+  }, [still, update, publishPatterns, work]);
 
   useEffect(() => {
     if (generation === undefined) return;
@@ -100,34 +98,35 @@ export function usePatterns({ view, publishPatterns, enqueue, run }: SessionAdap
     if (generation === undefined || modeRequest.current || current.current.pending || isProjectReplacing()) return;
     const at = { generation, replacements: projectGeneration() }; const identity = {};
     modeRequest.current = identity; setModePending(true); setMessage(null);
-    const finish = beginProjectTransition();
-    // This command owns the transition fence. Replacement invalidates its request identity;
-    // runFor would reject the command for its own fence before reaching the existing queue.
     const currentMode = () => projectGeneration() === at.replacements && modeRequest.current === identity;
-    try {
-      if (!await settleProjectEdits()) throw new Error("Pending edits were refused. The playback mode was not changed.");
-      const applied = await run(async () => {
-        if (!currentMode()) throw new Error("The project changed before the mode change.");
-        const base = await arrangementView();
-        if (!currentMode() || base.generation !== generation) throw new Error("The project changed before the mode change.");
-        const reply = await arrangementMode(base, next);
-        if (!currentMode() || reply.generation !== generation) throw new Error("The project changed during the mode change.");
-        if (reply.status === "refused") throw new Error(reply.message ?? "The playback mode was refused.");
-        const canonical = await arrangementView();
-        if (!currentMode() || canonical.generation !== generation) throw new Error("The project changed during the mode change.");
-        const fresh = await projectView();
-        if (!currentMode() || fresh.generation !== generation) throw new Error("The project changed during the mode change.");
-        setMode(canonical.playMode);
-        return fresh;
-      });
-      if (!applied && currentMode()) setMessage("The playback mode could not be changed. Refresh patterns and try again.");
-    } catch (error) { if (currentMode()) setMessage(errorText(error)); }
-    finally {
-      finish();
-      if (modeRequest.current === identity) { modeRequest.current = null; setModePending(false); }
-    }
-  }, [generation, run]);
+    return work.run(async () => {
+      const finish = beginProjectTransition();
+      try {
+        if (!await work.settleOthers()) throw new Error("Pending edits were refused. The playback mode was not changed.");
+        const applied = await run(async () => {
+          if (!currentMode()) throw new Error("The project changed before the mode change.");
+          const base = await arrangementView();
+          if (!currentMode() || base.generation !== generation) throw new Error("The project changed before the mode change.");
+          const reply = await arrangementMode(base, next);
+          if (!currentMode() || reply.generation !== generation) throw new Error("The project changed during the mode change.");
+          if (reply.status === "refused") throw new Error(reply.message ?? "The playback mode was refused.");
+          const canonical = await arrangementView();
+          if (!currentMode() || canonical.generation !== generation) throw new Error("The project changed during the mode change.");
+          const fresh = await projectView();
+          if (!currentMode() || fresh.generation !== generation) throw new Error("The project changed during the mode change.");
+          setMode(canonical.playMode);
+          return fresh;
+        });
+        if (!applied && currentMode()) setMessage("The playback mode could not be changed. Refresh patterns and try again.");
+        return applied;
+      } catch (error) { if (currentMode()) setMessage(errorText(error)); return false; }
+      finally {
+        finish();
+        if (modeRequest.current === identity) { modeRequest.current = null; setModePending(false); }
+      }
+    }, (accepted) => accepted);
+  }, [generation, run, work]);
 
-  return { state, loading, message, mode, modePending, act, reload, changeMode };
+  return { state, loading, message, mode, modePending, act, reload, changeMode, unsettled: work.unsettled };
 }
 export type PatternPicker = ReturnType<typeof usePatterns>;

@@ -49,8 +49,12 @@ pub enum RecordEvent {
 pub(crate) struct Recorder {
     tx: Producer<RecordEvent>,
     on: bool,
+    /// A note accepted in the current take, not a later backpressured empty take.
+    take_has_note: bool,
     /// A take end that must precede the next barrier and all later notes.
     pending_end: Option<RecordEvent>,
+    /// An accepted barrier already ahead of the original retained End.
+    preceding_end_mark: Option<u32>,
     /// A mark that did not fit in the queue yet.
     pending_mark: Option<u32>,
     /// The running (or next) take's number (see [`RecordEvent::Note`]).
@@ -62,7 +66,9 @@ impl Recorder {
         Self {
             tx,
             on: false,
+            take_has_note: false,
             pending_end: None,
+            preceding_end_mark: None,
             pending_mark: None,
             take: 0,
         }
@@ -78,6 +84,12 @@ impl Recorder {
     /// Flushes a retained take End before its barrier. Called before each block/event and
     /// by the control poller while detached, so consumer progress can release both.
     pub(crate) fn flush_mark(&mut self) {
+        if let Some(id) = self.preceding_end_mark {
+            if self.tx.push(RecordEvent::Mark { id }).is_err() {
+                return;
+            }
+            self.preceding_end_mark = None;
+        }
         if let Some(end) = self.pending_end {
             if self.tx.push(end).is_err() {
                 return;
@@ -101,6 +113,7 @@ impl Recorder {
     /// engine never got was cancelled).
     pub(crate) fn set(&mut self, on: bool, transport: &TransportClock, at: u64, live: &LiveShared) {
         if on {
+            self.take_has_note = false;
             self.take = self.take.wrapping_add(1);
         } else {
             self.end(transport, at, live);
@@ -115,12 +128,16 @@ impl Recorder {
             self.flush_mark();
             // No later note can pass a parked boundary. A subsequent empty take needs
             // no new End; preserve the first accepted take's original ending tick.
-            if self.pending_end.is_none() && self.pending_mark.is_none() {
+            if self.pending_end.is_none() && (self.pending_mark.is_none() || self.take_has_note) {
+                // A same-take barrier may itself be backpressured. Retain it
+                // ahead of this End, and keep the later completion mark behind.
+                self.preceding_end_mark = self.pending_mark.take();
                 let end = RecordEvent::End { tick, position };
-                if self.tx.push(end).is_err() {
+                if self.preceding_end_mark.is_some() || self.tx.push(end).is_err() {
                     self.pending_end = Some(end);
                 }
             }
+            self.take_has_note = false;
             // The next take's notes carry the next number.
             self.take = self.take.wrapping_add(1);
         }
@@ -162,6 +179,8 @@ impl Recorder {
         if self.pending_end.is_some() || self.pending_mark.is_some() || self.tx.push(event).is_err()
         {
             live.count_record_drop();
+        } else {
+            self.take_has_note = true;
         }
     }
 }
@@ -247,5 +266,132 @@ mod tests {
             1,
             "only the later refused note is dropped"
         );
+    }
+}
+
+#[cfg(test)]
+mod boundary_witness_v2 {
+    use super::*;
+
+    #[test]
+    fn accepted_take_end_precedes_mark_with_backpressure() {
+        let (tx, mut rx) = rtrb::RingBuffer::new(2);
+        let live = LiveShared::default();
+        let mut recorder = Recorder::new(tx);
+        let mut clock = TransportClock::new(48_000.0, 120.0);
+        clock.start(0, None);
+        recorder.set(true, &clock, 0, &live);
+        recorder.note(
+            &clock,
+            100,
+            &live,
+            (ChannelId(1), 76, 0.8, true, NoteId(701)),
+        );
+        recorder.note(
+            &clock,
+            100,
+            &live,
+            (ChannelId(1), 77, 0.8, true, NoteId(702)),
+        );
+        recorder.end(&clock, 200, &live);
+        clock.stop();
+        recorder.set(false, &clock, 200, &live);
+        recorder.mark(41);
+        assert!(
+            matches!(
+                rx.pop(),
+                Ok(RecordEvent::Note {
+                    id: NoteId(701),
+                    on: true,
+                    ..
+                })
+            ),
+            "positively accepted original held note"
+        );
+        recorder.flush_mark(); // One free slot delivers original End, Mark remains parked.
+        clock.start(400, None);
+        recorder.set(true, &clock, 400, &live);
+        recorder.note(
+            &clock,
+            400,
+            &live,
+            (ChannelId(1), 78, 0.8, true, NoteId(703)),
+        );
+        assert!(matches!(
+            rx.pop(),
+            Ok(RecordEvent::Note {
+                id: NoteId(702),
+                ..
+            })
+        ));
+        recorder.flush_mark();
+        assert_eq!(
+            rx.pop(),
+            Ok(RecordEvent::End {
+                tick: 8,
+                position: 8
+            })
+        );
+        assert_eq!(rx.pop(), Ok(RecordEvent::Mark { id: 41 }));
+        assert!(rx.pop().is_err());
+        assert_eq!(
+            live.record_dropped(),
+            1,
+            "only later note is explicitly refused"
+        );
+    }
+}
+
+#[cfg(test)]
+mod recovery_prefix_boundary_tests {
+    use super::*;
+    #[test]
+    fn full_record_fifo_keeps_earlier_barrier_before_original_end_and_recovery_mark() {
+        for earlier in [&[10_u32][..], &[9_u32, 10][..]] {
+            let (tx, mut rx) = rtrb::RingBuffer::new(2);
+            let live = LiveShared::default();
+            let mut recorder = Recorder::new(tx);
+            let mut clock = TransportClock::new(48_000.0, 120.0);
+            clock.start(0, None);
+            recorder.set(true, &clock, 0, &live);
+            for id in [1, 2] {
+                recorder.note(
+                    &clock,
+                    100,
+                    &live,
+                    (ChannelId(1), 76, 0.8, true, NoteId(id)),
+                );
+            }
+            for id in earlier {
+                recorder.mark(*id);
+            } // Existing pending-mark coalescing remains.
+            recorder.flush_mark(); // Zero free slots cannot deliver a boundary.
+            recorder.end(&clock, 200, &live);
+            clock.stop();
+            recorder.set(false, &clock, 200, &live);
+            recorder.mark(11); // Recovery completion must not swallow the original End.
+            assert!(matches!(
+                rx.pop(),
+                Ok(RecordEvent::Note { id: NoteId(1), .. })
+            ));
+            recorder.flush_mark(); // One free slot: preceding barrier only.
+            assert!(matches!(
+                rx.pop(),
+                Ok(RecordEvent::Note { id: NoteId(2), .. })
+            ));
+            recorder.flush_mark();
+            assert_eq!(rx.pop(), Ok(RecordEvent::Mark { id: 10 }));
+            assert_eq!(
+                rx.pop(),
+                Ok(RecordEvent::End {
+                    tick: 8,
+                    position: 8
+                })
+            );
+            recorder.flush_mark();
+            assert_eq!(rx.pop(), Ok(RecordEvent::Mark { id: 11 }));
+            assert!(rx.pop().is_err());
+            assert_eq!(live.record_dropped(), 0);
+        }
     }
 }

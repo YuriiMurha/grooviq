@@ -170,6 +170,9 @@ pub struct ProjectView {
     pub can_undo: bool,
     /// An undone note change can be made again ([`Session::redo_notes`]).
     pub can_redo: bool,
+    /// Candidate history exists in any project domain, as used by global dispatch.
+    pub project_can_undo: bool,
+    pub project_can_redo: bool,
     /// Counts projects ([`Session::generation`]): requests that edit the project carry it, so
     /// one made for a project that was replaced since is refused.
     pub generation: u64,
@@ -1576,6 +1579,14 @@ impl Session {
             recording: self.recording,
             can_undo: self.history.can_undo(),
             can_redo: self.history.can_redo(),
+            project_can_undo: self.history.can_undo()
+                || self.pattern_histories.values().any(|h| h.can_undo())
+                || !self.arrangement_history.undo.is_empty()
+                || !self.trim_history.undo.is_empty(),
+            project_can_redo: self.history.can_redo()
+                || self.pattern_histories.values().any(|h| h.can_redo())
+                || !self.arrangement_history.redo.is_empty()
+                || !self.trim_history.redo.is_empty(),
             generation: self.generation,
             pattern_revision: self.patterns_revision,
         }

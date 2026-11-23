@@ -133,7 +133,7 @@ export function App() {
     enqueue: session.enqueue,
     toast,
     stopIfPlaying,
-    unsettled: () => session.unsettled() || rollEditsUnsettled(),
+    unsettled: () => session.unsettled() || rollEditsUnsettled() || patterns.unsettled(),
     settle: settleProjectEdits,
   });
   const { perform, modalOpen } = flows;
@@ -233,8 +233,8 @@ export function App() {
     const sync = () => {
       const text = isTypingTarget(document.activeElement);
       void invoke("edit_history_enabled", {
-        undo: text ? (document.queryCommandEnabled?.("undo") ?? false) : Boolean(view?.canUndo),
-        redo: text ? (document.queryCommandEnabled?.("redo") ?? false) : Boolean(view?.canRedo),
+        undo: text ? (document.queryCommandEnabled?.("undo") ?? false) : Boolean(view?.projectCanUndo),
+        redo: text ? (document.queryCommandEnabled?.("redo") ?? false) : Boolean(view?.projectCanRedo),
       }).catch(() => {});
     };
     sync();
@@ -246,7 +246,7 @@ export function App() {
       document.removeEventListener("input", sync);
       document.removeEventListener("selectionchange", sync);
     };
-  }, [view?.canUndo, view?.canRedo]);
+  }, [view?.projectCanUndo, view?.projectCanRedo]);
   useEffect(() => {
     const router = installMenuHistory(document, (redo) => menuHistoryAction.current(redo), () => modalIsOpen());
     let disposed = false;

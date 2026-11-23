@@ -473,7 +473,7 @@ impl State {
         if let Some(processor) = self.processor.as_mut() {
             // No stream owns it: deliver retained take boundaries even with no callback
             // and no device available for another rebuild attempt.
-            processor.flush_recording_boundaries();
+            lock(&self.controller).settle_recovery_stop(processor);
         }
         let mut seen = lock(&shared.seen);
         seen.devices = devices;

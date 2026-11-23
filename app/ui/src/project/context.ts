@@ -3,7 +3,7 @@ import { createContext, useContext } from "react";
 import type { Edit, ProjectView } from "../api/project";
 
 export interface ProjectContextValue {
-  publishPatterns?: (state: import("../api/patterns").PatternsView, origin: ProjectStamp) => boolean;
+  publishPatterns?: (state: import("../api/patterns").PatternsView, origin: ProjectStamp, publication?: "admitted") => boolean;
   trim?: (channel: number, action: import("../api/samplerTrim").TrimAction, still: () => boolean) => Promise<import("../api/samplerTrim").TrimReply | null>;
   /** The current project, `null` until the first `project_view` arrives. */
   view: ProjectView | null;

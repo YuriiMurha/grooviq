@@ -5,9 +5,40 @@ export function registerSettlement(source: () => Promise<boolean>): () => void {
   sources.add(source);
   return () => sources.delete(source);
 }
-export async function settleProjectEdits(): Promise<boolean> {
-  const answers = await Promise.all([...sources].map((source) => source()));
+export async function settleProjectEdits(except?: () => Promise<boolean>): Promise<boolean> {
+  const answers = await Promise.all([...sources].filter((source) => source !== except).map((source) => source()));
   return answers.every(Boolean);
+}
+
+/** A transition owns its intent before preflight; only its own preflight excludes that intent. */
+export class TransitionWork {
+  private active = new Set<Promise<void>>();
+  private failures = 0;
+  private acknowledged = 0;
+  unsettled = () => this.active.size > 0 || this.failures > this.acknowledged;
+  settle = async (): Promise<boolean> => {
+    const before = this.acknowledged;
+    await Promise.all([...this.active]);
+    this.acknowledged = this.failures;
+    return before === this.failures;
+  };
+  settleOthers = () => settleProjectEdits(this.settle);
+  async run<Result>(command: () => Promise<Result>, accepted: (result: Result) => boolean): Promise<Result> {
+    let finish!: () => void;
+    const completion = new Promise<void>((resolve) => { finish = resolve; });
+    this.active.add(completion);
+    try {
+      const result = await command();
+      if (!accepted(result)) this.failures++;
+      return result;
+    } catch (error) {
+      this.failures++;
+      throw error;
+    } finally {
+      this.active.delete(completion);
+      finish();
+    }
+  }
 }
 export class ProjectCommandQueue {
   private tail: Promise<unknown> = Promise.resolve();

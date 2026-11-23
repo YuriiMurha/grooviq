@@ -113,9 +113,10 @@ export function useSession(onError: (message: string) => void) {
   }, [enqueue, enqueueMutation, adopt]);
 
   // Pattern actions settle this queue externally; publication must not enqueue the action again.
-  const publishPatterns = useCallback((next: PatternsView, at: ProjectStamp): boolean => {
+  const publishPatterns = useCallback((next: PatternsView, at: ProjectStamp, publication?: "admitted"): boolean => {
     const shown = latest.current.view;
-    if (isProjectReplacing() || projectGeneration() !== at.replacements || next.generation !== at.generation ||
+    if ((publication === "admitted" ? isProjectReplacementPending() : isProjectReplacing()) ||
+      projectGeneration() !== at.replacements || next.generation !== at.generation ||
       next.view.generation !== at.generation || next.view.pattern.id !== next.selected ||
       !next.patterns.some((pattern) => pattern.id === next.selected)) return false;
     if (shown && (shown.generation !== at.generation || (shown.patternRevision ?? 0) > next.revision ||
