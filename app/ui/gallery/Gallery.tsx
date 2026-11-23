@@ -6,8 +6,13 @@ import { Knob as RackKnob } from '../src/rack/Knob';
 import { RecordButton } from '../src/transport/RecordButton';
 import { KeyboardToggle } from '../src/transport/KeyboardToggle';
 import { MetronomeButton } from '../src/transport/MetronomeButton';
+import { BpmField } from '../src/transport/BpmField';
+import { OutputChip } from '../src/output/OutputChip';
+import type { Output } from '../src/audio';
 import { useLatest, type ParamControl } from '../src/devices/controls/gesture';
 import { references, stateContract, themes } from './contract';
+import { catalog, referencePolicy } from './catalog';
+import { gallerySeed } from './seed';
 import type { ReactNode } from 'react';
 
 function Reference({ id, children }: { id: string; children: ReactNode }) {
@@ -20,7 +25,7 @@ function Reference({ id, children }: { id: string; children: ReactNode }) {
 
 // Local preview only: no engine, project history, persistence or cancellation-proof claim.
 function Numeric({ field = false }: { field?: boolean }) {
-  const [value, setValue] = useState(0.5);
+  const [value, setValue] = useState<number>(gallerySeed.numeric);
   const latest = useLatest(value);
   const control: ParamControl = {
     set: setValue,
@@ -42,13 +47,50 @@ function Numeric({ field = false }: { field?: boolean }) {
     variant={field ? 'field' : 'knob'} />;
 }
 
+function Tempo() {
+  const [bpm, setBpm] = useState<number>(gallerySeed.tempo);
+  const [commits, setCommits] = useState(0);
+  return <>
+    <BpmField bpm={bpm} onCommit={async (next) => { setBpm(next); setCommits((count) => count + 1); return true; }} />
+    <div className="gallery-fixture-witness">Local accepted value: <output aria-label="Accepted gallery tempo">{bpm.toFixed(2)}</output>
+      {' · '}commits: <output aria-label="Gallery tempo commits">{commits}</output></div>
+  </>;
+}
+
+type OutputMode = "none" | "headphones" | "speakers" | "long-name";
+const generatedOutputs: Record<Exclude<OutputMode, "none">, Output> = {
+  headphones: { id: "gallery-headphones", name: "Generated headphones", kind: "headphones", isDefault: true, current: true, sampleRate: 48000 },
+  speakers: { id: "gallery-speakers", name: "Generated speakers", kind: "speakers", isDefault: false, current: true, sampleRate: 48000 },
+  "long-name": { id: "gallery-long", name: "Generated headphones with an intentionally long interface name for compact coverage", kind: "headphones", isDefault: false, current: true, sampleRate: 48000 },
+};
+
+function OutputStatus() {
+  const [mode, setMode] = useState<OutputMode>(gallerySeed.output);
+  const [requests, setRequests] = useState(0);
+  return <>
+    <OutputChip output={mode === "none" ? null : generatedOutputs[mode]} latencyMs={8} open={false}
+      onToggle={() => setRequests((count) => count + 1)} />
+    <label className="gallery-scenario">Generated output state
+      <select aria-label="Generated output state" value={mode} onChange={(event) => {
+        const next = event.currentTarget.value;
+        if (next === "none" || next === "headphones" || next === "speakers" || next === "long-name") setMode(next);
+      }}>
+        <option value="none">No output</option><option value="headphones">Headphones</option>
+        <option value="speakers">Speakers warning</option><option value="long-name">Long name</option>
+      </select>
+    </label>
+    <div className="gallery-fixture-witness">Opener requests: <output aria-label="Output opener requests">{requests}</output></div>
+    <p className="gallery-fixture-note">Callback recorder only. No output dialog, MIDI settings or device selection is mounted.</p>
+  </>;
+}
+
 export function Gallery() {
-  const [enabled, setEnabled] = useState(false);
-  const [wave, setWave] = useState(0);
-  const [volume, setVolume] = useState(0.5);
-  const [recording, setRecording] = useState(false);
-  const [typing, setTyping] = useState(false);
-  const [metronome, setMetronome] = useState(false);
+  const [enabled, setEnabled] = useState<boolean>(gallerySeed.switches);
+  const [wave, setWave] = useState<number>(gallerySeed.waveIndex);
+  const [volume, setVolume] = useState<number>(gallerySeed.numeric);
+  const [recording, setRecording] = useState<boolean>(gallerySeed.switches);
+  const [typing, setTyping] = useState<boolean>(gallerySeed.switches);
+  const [metronome, setMetronome] = useState<boolean>(gallerySeed.switches);
   return <main className="gallery" data-reference-status="candidate" data-theme="riso">
     <header><h1>Grooviq control reference</h1><p>Riso Ink · Manrope · generated local values</p>
       <p>Live production controls. Captures are reference candidates until reviewed.</p></header>
@@ -77,9 +119,25 @@ export function Gallery() {
         <Reference id="transport.metronome"><MetronomeButton on={metronome} onToggle={() => setMetronome(!metronome)} /></Reference></div>
       <p>These controls change local state only. No sound or keyboard instrument is connected.</p>
     </section>
+    <section aria-labelledby="tempo-output-heading" data-case="tempo-output">
+      <h2 id="tempo-output-heading">Tempo and output status</h2>
+      <div className="gallery-strip"><Reference id="transport.tempo"><Tempo /></Reference>
+        <Reference id="output.status"><OutputStatus /></Reference></div>
+    </section>
     <footer><h2>Reference coverage</h2><p>{stateContract.disabled}</p><p>{stateContract.error}</p>
       <p>Whole-screen errors, repair, Undo, window lifetime and compact workspace geometry have separate app-fixture coverage.</p>
       <p>{themes.map((theme) => `${theme.name}: ${theme.status}`).join(' · ')}</p>
-      <p>Built-in controls only. Plugin hosting is not represented.</p></footer>
+      <p>Built-in controls only. Plugin hosting is not represented.</p>
+      <details className="gallery-catalog"><summary>Semantic family catalog</summary>
+        <p>{referencePolicy.direction} {referencePolicy.status} {referencePolicy.stateScope}</p>
+        <dl>{catalog.map((family) => <div key={family.id}>
+          <dt>{family.title} <small>{family.referenceScope}</small></dt>
+          <dd><p>{family.semantics}</p><p>Applicable states: {family.states.join(', ') || 'not implemented'}.</p>
+            <p>Gallery specimens: {family.specimenIds.join(', ') || 'none; app-fixture or capability work remains'}.</p>
+            <p>Source: {family.sources.join(', ') || 'not implemented'}.</p>
+            {Object.entries(family.notApplicable).map(([state, reason]) => <p key={state}>{state}: {reason}</p>)}
+          </dd>
+        </div>)}</dl>
+      </details></footer>
   </main>;
 }

@@ -3,6 +3,7 @@ import { writeFileSync } from "node:fs";
 import { test as base, expect, type Browser, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { captureContext } from "./captureContext";
 import { references } from "./contract";
+import { referencePolicy } from "./catalog";
 
 const test = base.extend<{ galleryErrors: string[] }>({
   galleryErrors: [async ({ page }, runTest) => {
@@ -39,7 +40,7 @@ async function tabTo(page: Page, target: Locator) {
 async function capture(page: Page, browser: Browser, info: TestInfo,
   reference: typeof references[number], state: string, errors: readonly string[]) {
   const frame = page.locator(`[data-reference="${reference.id}"]`);
-  const control = frame.getByRole(reference.role, { name: reference.name, exact: true });
+  const control = frame.getByRole(reference.role, { name: reference.name, exact: reference.exact ?? true });
   await expect(frame).toHaveCount(1);
   await frame.scrollIntoViewIfNeeded();
   if (state === "hover") await control.hover();
@@ -48,10 +49,18 @@ async function capture(page: Page, browser: Browser, info: TestInfo,
   expect(cropBounds).not.toBeNull();
   const context = await control.evaluate((element) => {
     const box = element.getBoundingClientRect();
+    const figure = element.closest(".gallery-reference");
+    const witness = (label: string) => figure?.querySelector(`output[aria-label="${label}"]`)?.textContent ?? null;
     return { box: { x: box.x, y: box.y, width: box.width, height: box.height },
       cssViewport: { width: innerWidth, height: innerHeight }, dpr: devicePixelRatio,
       focusVisible: element.matches(":focus-visible"), focused: element === document.activeElement,
       hovered: element.matches(":hover"), value: element.getAttribute("aria-valuenow"),
+      inputValue: element instanceof HTMLInputElement ? element.value : null,
+      expanded: element.getAttribute("aria-expanded"), disabled: element.matches(":disabled"),
+      classes: element.getAttribute("class"), visibleText: element.textContent, title: element.getAttribute("title"),
+      fixture: { acceptedTempo: witness("Accepted gallery tempo"), tempoCommits: witness("Gallery tempo commits"),
+        outputRequests: witness("Output opener requests"),
+        outputMode: figure?.querySelector<HTMLSelectElement>('select[aria-label="Generated output state"]')?.value ?? null },
       pressed: element.getAttribute("aria-pressed"), checked: element.getAttribute("aria-checked"),
       selectedOptions: [...(element.closest('[role="radiogroup"]')?.querySelectorAll('[role="radio"][aria-checked="true"]') ?? [])]
         .map((option) => option.getAttribute("aria-label") ?? option.textContent),
@@ -65,12 +74,15 @@ async function capture(page: Page, browser: Browser, info: TestInfo,
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   const png = await frame.screenshot({ animations: "disabled", scale: "css" });
   const name = `${reference.id}.${state}`;
+  const capturePhase = process.env.GROOVIQ_GALLERY_CASE_PHASE ?? "candidate";
   const path = info.outputPath(`${name}.png`);
   writeFileSync(path, png, { flag: "wx" });
   const manifest = {
-    schemaVersion: 1,
-    captureId: `${info.project.name}.${reference.id}.${state}.${context.cssViewport.width}x${context.cssViewport.height}`,
-    semanticId: reference.id, sourceComponent: reference.source, state,
+    schemaVersion: 2,
+    captureId: `${capturePhase}.${info.project.name}.${reference.id}.${state}.${context.cssViewport.width}x${context.cssViewport.height}`,
+    capturePhase,
+    semanticId: reference.id, semanticFamily: reference.family, sourceComponent: reference.source, state,
+    approvedPixelReference: referencePolicy.approvedPixelReference,
     variant: reference.id === "device.parameter.field" ? "field" : reference.id === "device.parameter.knob" ? "knob" : "default",
     support: "actual imported component", source,
     errorsObservedBeforeCapture: [...errors], completeCaseErrorAttachment: "gallery-errors",
@@ -95,7 +107,7 @@ for (const [width, height] of [[1280, 800], [1440, 900], [1920, 1080], [900, 560
       await page.setViewportSize({ width, height });
       for (const reference of references) {
         const frame = page.locator(`[data-reference="${reference.id}"]`);
-        const control = frame.getByRole(reference.role, { name: reference.name, exact: true });
+        const control = frame.getByRole(reference.role, { name: reference.name, exact: reference.exact ?? true });
         if (state === "keyboard-focus") {
           await tabTo(page, control);
           await expect(control).toBeFocused();
@@ -156,5 +168,81 @@ test("actual controls update generated state", async ({ page, browser, galleryEr
   await tabTo(page, rack);
   await page.keyboard.press("End");
   await expect(rack).toHaveAttribute("aria-valuenow", "1");
-  for (const reference of references) await capture(page, browser, info, reference, "interaction-result", galleryErrors);
+  for (const reference of references.filter((reference) => reference.id !== "transport.tempo" && reference.id !== "output.status")) {
+    await capture(page, browser, info, reference, "interaction-result", galleryErrors);
+  }
+});
+
+test("tempo edits commit accepted local values and discard invalid drafts", async ({ page, browser, galleryErrors }, info) => {
+  const reference = references.find((item) => item.id === "transport.tempo");
+  if (!reference) throw new Error("Tempo reference is missing");
+  const field = page.getByRole("textbox", { name: "BPM", exact: true });
+  const accepted = page.getByLabel("Accepted gallery tempo", { exact: true });
+  const commits = page.getByLabel("Gallery tempo commits", { exact: true });
+  await expect(field).toHaveValue("120.00");
+  await expect(accepted).toHaveText("120.00");
+  await expect(commits).toHaveText("0");
+  await tabTo(page, field);
+  await field.fill("132,5");
+  await capture(page, browser, info, reference, "editing-draft", galleryErrors);
+  await field.press("Enter");
+  await expect(field, "tempo Enter committed accepted local value").toHaveValue("132.50");
+  await expect(accepted).toHaveText("132.50");
+  await expect(commits).toHaveText("1");
+  await expect(field).not.toBeFocused();
+  await capture(page, browser, info, reference, "committed-enter", galleryErrors);
+  await field.fill("160");
+  await field.press("Escape");
+  await expect(field).toHaveValue("132.50");
+  await expect(accepted).toHaveText("132.50");
+  await expect(commits).toHaveText("1");
+  await field.fill("not a tempo");
+  await capture(page, browser, info, reference, "invalid-draft", galleryErrors);
+  await field.press("Tab");
+  await expect(field).toHaveValue("132.50");
+  await expect(commits).toHaveText("1");
+  await field.fill("144.25");
+  await field.press("Tab");
+  await expect(accepted).toHaveText("144.25");
+  await expect(field).toHaveValue("144.25");
+  await expect(commits).toHaveText("2");
+  await capture(page, browser, info, reference, "committed-blur", galleryErrors);
+});
+
+test("output status shows generated device states and records opener requests only", async ({ page, browser, galleryErrors }, info) => {
+  const reference = references.find((item) => item.id === "output.status");
+  if (!reference) throw new Error("Output reference is missing");
+  const frame = page.locator('[data-reference="output.status"]');
+  const button = frame.getByRole("button");
+  const scenario = frame.getByRole("combobox", { name: "Generated output state", exact: true });
+  const requests = frame.getByLabel("Output opener requests", { exact: true });
+  await expect(button).toHaveAccessibleName("No output");
+  await expect(button).toHaveAttribute("aria-expanded", "false");
+  await expect(requests).toHaveText("0");
+  await capture(page, browser, info, reference, "empty", galleryErrors);
+  await tabTo(page, button);
+  await button.press("Enter");
+  await expect(requests, "generated output opener callback delivered").toHaveText("1");
+  await expect(button).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await scenario.selectOption("headphones");
+  await expect(button).toHaveAccessibleName(/Generated headphones/);
+  await expect(frame.locator(".chip-latency")).toHaveText("8 ms");
+  await expect(button).not.toHaveClass(/warn/);
+  await capture(page, browser, info, { ...reference, name: "Generated headphones", exact: false }, "headphones", galleryErrors);
+  await scenario.selectOption("speakers");
+  await expect(button).toHaveClass(/warn/);
+  await expect(button).toHaveAttribute("title", "Playing on speakers: the room can hear it");
+  await capture(page, browser, info, { ...reference, name: "Generated speakers", exact: false }, "warning", galleryErrors);
+  await page.setViewportSize({ width: 900, height: 560 });
+  await scenario.selectOption("long-name");
+  await expect(button).toHaveAccessibleName(/Generated headphones with an intentionally long interface name/);
+  await button.scrollIntoViewIfNeeded();
+  const bounds = await button.boundingBox();
+  if (!bounds) throw new Error("Generated output chip has no bounds");
+  expect(bounds.height).toBe(32);
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(900);
+  await expect(requests).toHaveText("1");
+  await capture(page, browser, info, { ...reference, name: "Generated headphones", exact: false }, "long-name-compact", galleryErrors);
 });
