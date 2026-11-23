@@ -295,9 +295,13 @@ input[type="checkbox"] {
   touch-action: none;
 }
 
-.splitter:hover,
+.splitter:hover {
+  background: var(--raised);
+}
+
 .splitter:focus-visible {
   background: var(--raised);
+  box-shadow: inset 0 0 0 2px var(--select);
   outline: none;
 }
 
