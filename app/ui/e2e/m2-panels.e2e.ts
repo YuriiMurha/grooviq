@@ -336,6 +336,9 @@ test.describe("roll channels in the rack", () => {
   });
 
   test("f6_and_f7_toggle_the_panels_and_the_splitter_resizes", async ({ app }, info) => {
+    // This gesture proves pointer tracking with room to move; compact fitting is
+    // covered separately and must keep at least 112px for notes.
+    await app.setViewportSize({ width: 1920, height: 1080 });
     const rack = app.getByRole("region", { name: "Channel rack" });
     const roll = app.getByRole("region", { name: "Piano roll" });
     await nameButton(app, "Snare").focus();
@@ -343,6 +346,10 @@ test.describe("roll channels in the rack", () => {
     await expect(roll).toBeVisible();
     // F7 opens the roll for the selected channel.
     await expect(roll).toContainText("Snare");
+    const noteBody = roll.locator(".roll-body");
+    const noteCanvas = roll.getByLabel("Piano roll notes", { exact: true });
+    expect((await noteBody.boundingBox())!.height).toBeGreaterThanOrEqual(212);
+    expect((await noteCanvas.boundingBox())!.height).toBeGreaterThanOrEqual(212);
     const splitter = app.getByRole("separator");
     const s = (await splitter.boundingBox())!;
     await app.mouse.move(s.x + s.width / 2, s.y + 3);
@@ -351,6 +358,8 @@ test.describe("roll channels in the rack", () => {
     await app.mouse.up();
     // The rack's panel grows with the drag: the splitter follows the pointer.
     await expect.poll(async () => (await splitter.boundingBox())!.y).toBeCloseTo(s.y + 100, -1);
+    expect((await noteBody.boundingBox())!.height).toBeGreaterThanOrEqual(112);
+    expect((await noteCanvas.boundingBox())!.height).toBeGreaterThanOrEqual(112);
     await splitter.focus();
     const v = Number(await splitter.getAttribute("aria-valuenow"));
     await app.keyboard.press("ArrowUp");

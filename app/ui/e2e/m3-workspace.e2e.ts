@@ -425,7 +425,8 @@ test("T9 F5 preserves the open roll, selected channel and requested split", asyn
   const splitter = app.getByRole("separator", { name: "Resize the channel rack and the piano roll" });
   await splitter.focus();
   await splitter.press("ArrowDown");
-  const requested = await splitter.getAttribute("aria-valuenow");
+  const requested = await app.locator(".workspace").evaluate((node) => (node as HTMLElement).style.getPropertyValue("--split"));
+  expect(parseFloat(requested)).toBeGreaterThan(0);
   const workspace = await app.locator(".workspace").elementHandle();
   expect(workspace).not.toBeNull();
   for (const visible of [true, false, true, false]) {
@@ -435,7 +436,15 @@ test("T9 F5 preserves the open roll, selected channel and requested split", asyn
     expect(await workspace!.evaluate((node) => node.isConnected)).toBe(true);
     await expect(roll).toBeVisible();
     await expect(channel).toHaveAttribute("aria-current", "true");
-    await expect(splitter).toHaveAttribute("aria-valuenow", requested!);
+    expect(await workspace!.evaluate((node) => (node as HTMLElement).style.getPropertyValue("--split"))).toBe(requested);
+    // ARIA describes the fitted display; the requested preference survives F5 and
+    // returns when the playlist gives the inner viewport its height back.
+    await expect.poll(async () => {
+      const rackHeight = (await app.locator(".panel-rack").boundingBox())!.height;
+      const contentHeight = (await app.locator(".workspace").boundingBox())!.height;
+      return Math.abs(Number(await splitter.getAttribute("aria-valuenow")) - rackHeight / contentHeight * 100);
+    }).toBeLessThanOrEqual(0.05);
+    if (!visible) await expect.poll(async () => Number(await splitter.getAttribute("aria-valuenow"))).toBe(Math.round(parseFloat(requested) * 10) / 10);
   }
 });
 test("T9 reduced: absent original trim entries survive inverse and failed Open preserves capabilities", async ({ app, mock }) => {
