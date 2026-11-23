@@ -328,7 +328,9 @@ fn flush_until<S: Read + Write, C: WriteClock>(ws: &mut WebSocket<DeadlineIo<'_,
             return false;
         }
         match ws.flush() {
-            Ok(()) => return ws.get_ref().check().is_ok(),
+            // Output is complete. A late wake after successful I/O cannot make
+            // the peer a stalled writer; shutdown still ends the connection.
+            Ok(()) => return !ws.get_ref().stop.load(SeqCst),
             Err(Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {
                 let remaining = ws
                     .get_ref()
@@ -740,6 +742,103 @@ mod tests {
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn successful_ready_flush_is_not_reported_as_failed_output() {
+        struct ReadyWriter<'a> {
+            clock: std::rc::Rc<std::cell::Cell<Instant>>,
+            after_flush: Duration,
+            wire: Vec<u8>,
+            flushed: bool,
+            stop: &'a AtomicBool,
+            request_stop: bool,
+        }
+        impl Read for ReadyWriter<'_> {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+        }
+        impl Write for ReadyWriter<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.wire.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushed = true;
+                // Model descheduling after the socket completed its flush, before
+                // the caller next observes time. No blocked or partial write.
+                self.clock.set(self.clock.get() + self.after_flush);
+                if self.request_stop {
+                    self.stop.store(true, SeqCst);
+                }
+                Ok(())
+            }
+        }
+        for (after_flush, request_stop) in [
+            (Duration::ZERO, false),
+            (Duration::from_millis(50), false),
+            (Duration::from_millis(50), true),
+        ] {
+            let now = Instant::now();
+            let clock = std::rc::Rc::new(std::cell::Cell::new(now));
+            let stop = AtomicBool::new(false);
+            let io = DeadlineIo {
+                inner: ReadyWriter {
+                    clock: clock.clone(),
+                    after_flush,
+                    wire: Vec::new(),
+                    flushed: false,
+                    stop: &stop,
+                    request_stop,
+                },
+                clock: TestClock(clock.clone()),
+                deadline: now,
+                stop: &stop,
+            };
+            let mut ws = WebSocket::from_raw_socket(io, tungstenite::protocol::Role::Server, None);
+            let accepted = send_frame(&mut ws, vec![0x5a; 40]);
+            let writer = &ws.get_ref().inner;
+            // Independent wire oracle: final unmasked binary frame, short length,
+            // and every payload byte. Check completion before the behavior claim.
+            assert_eq!(writer.wire.len(), 42);
+            assert_eq!(&writer.wire[..2], &[0x82, 40]);
+            assert_eq!(&writer.wire[2..], &[0x5a; 40]);
+            assert!(writer.flushed);
+            assert_eq!(clock.get() - now, after_flush);
+            if request_stop {
+                assert!(!accepted, "completed flush must not hide shutdown");
+            } else {
+                assert!(
+                    accepted,
+                    "complete ready output must not be treated as a blocked client: {after_flush:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_output_still_expires_at_the_original_deadline() {
+        for dribble in [false, true] {
+            let now = Instant::now();
+            let clock = std::rc::Rc::new(std::cell::Cell::new(now));
+            let stop = AtomicBool::new(false);
+            let io = DeadlineIo {
+                inner: SlowWriter {
+                    clock: clock.clone(),
+                    bytes: 0,
+                    dribble,
+                },
+                clock: TestClock(clock.clone()),
+                deadline: now,
+                stop: &stop,
+            };
+            let mut ws = WebSocket::from_raw_socket(io, tungstenite::protocol::Role::Server, None);
+            assert!(!send_frame(&mut ws, vec![0x5a; 40]));
+            assert_eq!(clock.get() - now, Duration::from_millis(50));
+            assert_eq!(ws.get_ref().inner.bytes, if dribble { 5 } else { 0 });
+            assert!(ws.get_ref().inner.bytes < 42, "wire output is incomplete");
         }
     }
 
