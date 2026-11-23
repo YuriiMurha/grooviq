@@ -1,6 +1,6 @@
 import type { ArrangementOperation, ArrangementPage, ArrangementReply, ArrangementStamp } from "../api/arrangement";
 import type { ProjectView } from "../api/project";
-import type { PatternsView } from "../api/patterns";
+import type { PatternReply, PatternsView } from "../api/patterns";
 import type { ProjectStamp } from "../project/context";
 import { settleProjectEdits, TransitionWork } from "../project/pending";
 
@@ -25,7 +25,8 @@ export type PlaylistAdapter = Readonly<{
   enqueueRead: <T>(command: () => Promise<T>) => Promise<T>;
   enqueueMutation: <T>(command: () => Promise<T>) => Promise<T>;
   readPage: (offset: number, limit: number) => Promise<ArrangementPage>;
-  readPatterns: () => Promise<Pick<PatternsView, "generation" | "arrangementRevision" | "patterns">>;
+  readPatterns: () => Promise<PatternsView>;
+  selectPattern: (base: PatternsView, pattern: number) => Promise<PatternReply>;
   edit: (stamp: ArrangementStamp, operations: readonly ArrangementOperation[]) => Promise<ArrangementReply>;
   readProject: () => Promise<ProjectView>;
   publishProject: (view: ProjectView, origin: ProjectStamp) => boolean;
@@ -93,7 +94,7 @@ export class PlaylistController {
   private current(origin: ProjectStamp, epoch: number): boolean { return this.epoch === epoch && this.adapter.current(origin); }
   retire = (): void => { this.epoch++; this.set(EMPTY_PLAYLIST); };
 
-  private async readSnapshot(current: () => boolean): Promise<PlaylistSnapshot> {
+  private async observe(current: () => boolean): Promise<{ snapshot: PlaylistSnapshot; patterns: PatternsView }> {
     const snapshot = await readArrangement(this.adapter.readPage, current);
     const sources = await this.adapter.readPatterns();
     requireProject(current);
@@ -104,7 +105,29 @@ export class PlaylistController {
       sourcePeriods[source.id] = source.steps * 240;
     }
     if (snapshot.clips.some(clip => clip.content.type === "pattern" && !Object.hasOwn(sourcePeriods, clip.content.pattern))) throw new Error("A playlist pattern source is unavailable; refresh it");
-    return { ...snapshot, sourcePeriods };
+    return { snapshot: { ...snapshot, sourcePeriods }, patterns: sources };
+  }
+
+  private async selectUniqueSource(clipId: number, reply: ArrangementReply, current: () => boolean) {
+    const { snapshot, patterns } = await this.observe(current);
+    const [pattern] = reply.createdIds;
+    const target = snapshot.clips.find(clip => clip.id === clipId);
+    if (!reply.changed || reply.createdIds.length !== 1 || !integer(pattern, 0xffffffff) ||
+        snapshot.generation !== reply.generation || snapshot.revision !== reply.revision ||
+        target?.content.type !== "pattern" || target.content.pattern !== pattern ||
+        Object.hasOwn(this.value.snapshot?.sourcePeriods ?? {}, pattern)) {
+      throw new Error("The unique pattern could not be confirmed. Refresh the playlist.");
+    }
+    const selection = await this.adapter.selectPattern(patterns, pattern);
+    requireProject(current);
+    if (selection.status === "refused") throw new Error(selection.message);
+    const selected = selection.state;
+    if (selected.generation !== reply.generation || selected.selected !== pattern ||
+        selected.view.generation !== reply.generation || selected.view.pattern.id !== pattern ||
+        selected.arrangementRevision < snapshot.revision) {
+      throw new Error("The unique pattern selection could not be confirmed. Refresh the playlist.");
+    }
+    return { pattern, revision: selected.arrangementRevision };
   }
 
   reload = async (): Promise<boolean> => {
@@ -115,7 +138,7 @@ export class PlaylistController {
     try {
       return await this.adapter.enqueueRead(async () => {
         const current = () => this.current(origin, epoch);
-        const snapshot = await this.readSnapshot(current);
+        const { snapshot } = await this.observe(current);
         if (snapshot.generation !== origin.generation) throw new Error("The project changed before the playlist loaded");
         if (recoverPublication) {
           const view = await this.adapter.readProject();
@@ -143,6 +166,7 @@ export class PlaylistController {
     const captured = { ...expected }, origin = { ...this.adapter.origin() }, epoch = this.epoch;
     if (captured.generation !== origin.generation || !this.current(origin, epoch)) return Promise.resolve({ status: "stale" });
     const batch = structuredClone(operations);
+    const unique = batch.length === 1 && batch[0].kind === "makeUnique" ? batch[0] : null;
     // run() registers this unsaved intent synchronously before the first await or native I/O.
     return this.work.run(async (): Promise<PlaylistResult> => {
       this.set({ ...this.value, busy: true, message: null });
@@ -166,13 +190,28 @@ export class PlaylistController {
           }
           if (reply.status !== "applied" || (reply.changed && reply.revision === captured.revision)) throw new Error("Invalid native playlist outcome");
           applied = true;
-          const snapshot = await this.readSnapshot(() => this.current(origin, epoch));
-          if (snapshot.generation !== captured.generation || snapshot.revision < reply.revision) throw new Error("Playlist acknowledgement is not yet observable");
-          const view = await this.adapter.readProject();
-          if (!this.current(origin, epoch)) throw new PlaylistOutcome({ status: "stale" });
-          if (view.generation !== origin.generation || !this.adapter.publishProject(view, origin)) throw new Error("The accepted playlist edit could not be published");
-          this.set({ snapshot, busy: true, requiresRefresh: false, message: null });
-          return { status: "applied", reply };
+          const current = () => this.current(origin, epoch);
+          try {
+            // Save waits for this ticket, including the source switch after an accepted clone.
+            const selection = unique ? await this.selectUniqueSource(unique.clip, reply, current) : null;
+            const { snapshot } = await this.observe(current);
+            if (snapshot.generation !== captured.generation || snapshot.revision < reply.revision) throw new Error("Playlist acknowledgement is not yet observable");
+            const view = await this.adapter.readProject();
+            if (!current()) throw new PlaylistOutcome({ status: "stale" });
+            if (selection && (snapshot.revision !== selection.revision || view.pattern.id !== selection.pattern)) {
+              throw new Error("The unique pattern changed before publication. Refresh the playlist.");
+            }
+            if (view.generation !== origin.generation || !this.adapter.publishProject(view, origin)) throw new Error("The accepted playlist edit could not be published");
+            this.set({ snapshot, busy: true, requiresRefresh: false, message: null });
+            return { status: "applied", reply };
+          } catch (error) {
+            if (!unique || !current()) throw error;
+            // The clone already committed. Let its explicit readback resolve the obligation
+            // instead of recording a second, unrelated refusal in the shared command queue.
+            const message = messageOf(error);
+            this.set({ ...this.value, requiresRefresh: true, message });
+            return { status: "unpublished", native: "applied", message };
+          }
         });
       } catch (error) {
         if (error instanceof PlaylistOutcome) return error.result;
@@ -184,6 +223,7 @@ export class PlaylistController {
         finish?.();
         if (this.current(origin, epoch)) this.set({ ...this.value, busy: false });
       }
-    }, result => result.status === "applied");
+    }, result => result.status === "applied" ||
+      (unique !== null && result.status === "unpublished" && result.native === "applied"));
   };
 }

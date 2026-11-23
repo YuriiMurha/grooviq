@@ -256,7 +256,8 @@ export function installMockTauri(seed: MockSeed): void {
 
   type History = typeof s.history;
   const emptyHistory = (): History => ({ undo: [], redo: [], notes: 0, base: 0, log: [], nextId: 0 });
-  const patternBank = new Map<number, { pattern: Project["pattern"]; revision: number; history: History }>();
+  type PatternEntry = { pattern: Project["pattern"]; revision: number; history: History };
+  const patternBank = new Map<number, PatternEntry>();
   let patternsRevision = 0;
   let historyOrder = 0;
   let arrangementRevision = 0;
@@ -265,7 +266,8 @@ export function installMockTauri(seed: MockSeed): void {
   let trimUndo: TrimChange[] = [];
   let trimRedo: TrimChange[] = [];
   type Arrangement = NonNullable<Project["arrangement"]>;
-  type ClipChange = { order: number; before: Arrangement; after: Arrangement };
+  type AddedPattern = { initial: Project["pattern"]; dormant?: PatternEntry };
+  type ClipChange = { order: number; before: Arrangement; after: Arrangement; addedPatterns: AddedPattern[] };
   let clipUndo: ClipChange[] = [], clipRedo: ClipChange[] = [];
   let workspaceRefusal: string | null = null;
   const workspaceTrace: { command: string; generation: number; revision: number; status: string; effect?: unknown }[] = [];
@@ -1263,9 +1265,9 @@ export function installMockTauri(seed: MockSeed): void {
     if (args.revision !== arrangementRevision) throw "Stale arrangement revision; reload arrangement";
     if (arrangementRevision >= Number.MAX_SAFE_INTEGER) throw "Arrangement revisions exhausted; reopen project";
   };
-  const workspaceAdmit = (candidate: Project, scoped = true) => {
+  const workspaceAdmit = (candidate: Project, scoped = true, patterns = allPatterns()) => {
     if (scoped && workspaceRefusal !== null) { const error = workspaceRefusal; workspaceRefusal = null; throw error; }
-    if (new TextEncoder().encode(JSON.stringify({ ...candidate, patterns: allPatterns() })).length > 64 * 1024 * 1024) throw "The project is too big to save.";
+    if (new TextEncoder().encode(JSON.stringify({ ...candidate, patterns })).length > 64 * 1024 * 1024) throw "The project is too big to save.";
   };
   const admitTrimInverse = (entry: TrimChange, undo: boolean, scoped = true) => {
     if (trimView(entry.channel).stamp !== entry.stamp) throw "Sample or trim changed; reload trim";
@@ -1309,7 +1311,35 @@ export function installMockTauri(seed: MockSeed): void {
       let effect: { kind: "empty" } | { kind: "arrangement" } | { kind: "notes"; pattern: number } | { kind: "samplerTrim"; channel: number } = { kind: "empty" };
       if (clip && (!note || earlier(clip.order, note.change.order ?? 0)) && (!trim || earlier(clip.order, trim.order))) {
         const candidate = clone(s.project); candidate.arrangement = clone(undo ? clip.before : clip.after);
-        workspaceAdmit(candidate); s.project.arrangement = candidate.arrangement;
+        const bank = new Map(patternBank);
+        for (const added of clip.addedPatterns) {
+          const id = added.initial.id;
+          if (undo) {
+            if (!bank.delete(id)) throw "Unique source no longer exists";
+          } else {
+            if (bank.has(id)) throw "Unique source already exists";
+            const floor = added.dormant;
+            const pattern = clone(added.initial);
+            pattern.nextNoteId = Math.max(pattern.nextNoteId ?? 1, floor?.pattern.nextNoteId ?? 1);
+            bank.set(id, { pattern, revision: (floor?.revision ?? 1) + 1, history: floor?.history ?? emptyHistory() });
+          }
+        }
+        const selected = bank.get(candidate.pattern.id) ?? bank.values().next().value;
+        if (!selected) throw "No pattern remains";
+        candidate.pattern = selected.pattern;
+        workspaceAdmit(candidate, true, [...bank.values()].map(entry => entry.pattern));
+        if (clip.addedPatterns.length) {
+          for (const added of clip.addedPatterns) {
+            if (undo) added.dormant = patternBank.get(added.initial.id);
+          }
+          patternBank.clear();
+          for (const [id, entry] of bank) patternBank.set(id, entry);
+          s.project.pattern = selected.pattern;
+          s.notesRevision = selected.revision;
+          s.history = selected.history;
+          patternsRevision++;
+        }
+        s.project.arrangement = candidate.arrangement;
         if (undo) { clipUndo = clipUndo.filter(entry => entry !== clip); clipRedo.push(clip); }
         else { clipRedo = clipRedo.filter(entry => entry !== clip); clipUndo.push(clip); }
         changed(); effect = { kind: "arrangement" };
@@ -1343,6 +1373,8 @@ export function installMockTauri(seed: MockSeed): void {
       const before: Arrangement = clone(s.project.arrangement ?? { tracks: [], clips: [], audioAssets: [], loopRegion: null });
       if (before.audioAssets.length || before.loopRegion) throw "Audio/automation editing is outside the finite pattern fixture";
       const candidate = clone(s.project); const arrangement = clone(before); candidate.arrangement = arrangement;
+      const addedPatterns = new Map<number, PatternEntry>();
+      const sourcePattern = (id: number) => addedPatterns.get(id) ?? patternBank.get(id);
       let next = candidate.nextId; const issued = new Set([...candidate.channels.map(c => c.id), ...patternBank.keys(), ...arrangement.tracks.map(t => t.id), ...arrangement.clips.map(c => c.id)]);
       const ids: number[] = [], tracksByOperation = new Map<number, number>();
       const allocate = () => { while (next < 0xffffffff && issued.has(next)) next++; if (next >= 0xffffffff) throw "Project ids exhausted"; const id = next++; issued.add(id); return id; };
@@ -1351,7 +1383,7 @@ export function installMockTauri(seed: MockSeed): void {
       const content = (value: unknown): Arrangement["clips"][number]["content"] => {
         if (!value || typeof value !== "object" || !("type" in value) || value.type !== "pattern" || !("pattern" in value) || !("offsetTick" in value) || !("lengthTicks" in value)) throw "Only pattern content is supported by this finite fixture";
         const pattern = int(value.pattern, 0xffffffff), offsetTick = int(value.offsetTick), lengthTicks = int(value.lengthTicks);
-        if (!patternBank.has(pattern) || lengthTicks < 1) throw "Invalid pattern source or length";
+        if (!sourcePattern(pattern) || lengthTicks < 1) throw "Invalid pattern source or length";
         return { type: "pattern", pattern, offsetTick, lengthTicks };
       };
       const track = (value: unknown) => { const id = int(value, 0xffffffff); if (!arrangement.tracks.some(t => t.id === id)) throw "Unknown track"; return id; };
@@ -1372,7 +1404,7 @@ export function installMockTauri(seed: MockSeed): void {
         } else if (op.kind === "slice") {
           const source = clip(op.clip), tick = int(op.tick), cut = tick - source.startTick;
           if (op.audioFirstFrames != null || cut <= 0 || cut >= source.content.lengthTicks) throw "Invalid musical slice";
-          const period = patternBank.get(source.content.pattern)!.pattern.steps * STEP_TICKS;
+          const period = sourcePattern(source.content.pattern)!.pattern.steps * STEP_TICKS;
           const right = clone(source); right.id = allocate(); right.startTick = tick;
           right.content.offsetTick = (source.content.offsetTick + cut) % period;
           right.content.lengthTicks -= cut; source.content.lengthTicks = cut;
@@ -1380,7 +1412,7 @@ export function installMockTauri(seed: MockSeed): void {
         } else if (op.kind === "resize") {
           const source = clip(op.clip), resized = content(op.content);
           if (source.content.pattern !== resized.pattern) throw "Resize cannot retarget its source";
-          const duration = patternBank.get(source.content.pattern)!.pattern.steps * STEP_TICKS;
+          const duration = sourcePattern(source.content.pattern)!.pattern.steps * STEP_TICKS;
           const phase = ((source.content.offsetTick + int(op.startTick) - source.startTick) % duration + duration) % duration;
           if (resized.offsetTick !== phase) throw "Resize must preserve pattern source phase";
           source.content = resized; source.startTick = int(op.startTick);
@@ -1391,12 +1423,24 @@ export function installMockTauri(seed: MockSeed): void {
         } else if (op.kind === "deleteClip") {
           const source = clip(op.clip);
           arrangement.clips = arrangement.clips.filter(candidate => candidate.id !== source.id);
+        } else if (op.kind === "makeUnique") {
+          const target = clip(op.clip);
+          const source = sourcePattern(target.content.pattern);
+          if (!source) throw "Unknown pattern source";
+          const id = allocate();
+          addedPatterns.set(id, { pattern: { ...clone(source.pattern), id }, revision: 1, history: emptyHistory() });
+          target.content.pattern = id;
+          ids.push(id);
         } else throw "This arrangement operation is outside the finite pattern fixture";
       });
       if (arrangement.tracks.length > 256 || arrangement.clips.length > 100_000 || arrangement.clips.some(c => c.startTick + c.content.lengthTicks > 38_400_000)) throw "Arrangement bounds exceeded";
-      if (JSON.stringify(before) === JSON.stringify(arrangement)) return { status: "applied", generation: s.generation, revision: arrangementRevision, request: null, createdIds: [], changed: false, reload: false, message: null, warnings: [] };
-      candidate.nextId = next; workspaceAdmit(candidate);
-      clearWorkspaceRedo(); clipUndo.push({ order: historyOrder++, before, after: clone(arrangement) });
+      if (!addedPatterns.size && JSON.stringify(before) === JSON.stringify(arrangement)) return { status: "applied", generation: s.generation, revision: arrangementRevision, request: null, createdIds: [], changed: false, reload: false, message: null, warnings: [] };
+      candidate.nextId = next;
+      workspaceAdmit(candidate, true, [...allPatterns(), ...Array.from(addedPatterns.values(), entry => entry.pattern)]);
+      clearWorkspaceRedo();
+      clipUndo.push({ order: historyOrder++, before, after: clone(arrangement), addedPatterns: Array.from(addedPatterns.values(), entry => ({ initial: clone(entry.pattern) })) });
+      for (const [id, entry] of addedPatterns) patternBank.set(id, entry);
+      if (addedPatterns.size) patternsRevision++;
       s.project.arrangement = arrangement; s.project.nextId = next; pruneWorkspaceHistory(); changed();
       return { status: "applied", generation: s.generation, revision: arrangementRevision, request: null, createdIds: ids, changed: true, reload: false, message: null, warnings: [] };
     } catch (error) { return { status: "refused", generation: s.generation, revision: arrangementRevision, request: null, createdIds: [], changed: false, reload: true, message: String(error), warnings: [] }; }
@@ -2040,6 +2084,7 @@ export function installMockTauri(seed: MockSeed): void {
     recordingStopsItself: (dropped: number) => stopsItself(dropped),
     /** The notes as the engine holds them. */
     notes: () => clone(s.project.pattern.notes),
+    patterns: allPatterns,
     /** Live notes sounding now, as "channel:key". */
     live: () => [...s.live.keys()],
     autosave: () => {
