@@ -1,5 +1,5 @@
 # Repeatable commands. `make help` lists them. macOS or Linux shell.
-.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan bench bench-instructions profile build-app install-app qa-ui qa-app
+.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan bench bench-roll-operations bench-instructions profile build-app install-app qa-ui qa-app
 
 # rustup installs cargo into ~/.cargo/bin, which is often not on PATH.
 export PATH := $(HOME)/.cargo/bin:$(PATH)
@@ -63,6 +63,9 @@ rtsan: ## The no_alloc tests under RealtimeSanitizer (macOS/Linux; downloads LLV
 bench: ## Render speed, block times and determinism of the reference scenes, then DSP kernel timings
 	$(CARGO) bench -p grooviq-golden --bench render
 	$(CARGO) bench -p grooviq-dsp --bench kernels
+
+bench-roll-operations: ## The six piano-roll timing budgets, without work counters (run on a quiet host)
+	GROOVIQ_ROLL_PERF=1 npm --prefix $(UI) test -- --run src/roll/budgets.test.ts --maxWorkers=1 --disableConsoleIntercept
 
 bench-instructions: ## Instruction counts (Linux only: needs valgrind and gungraun-runner)
 	$(CARGO) bench -p grooviq-golden --bench instructions
