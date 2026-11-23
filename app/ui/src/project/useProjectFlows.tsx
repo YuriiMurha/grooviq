@@ -154,6 +154,8 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
         projectReplaced();
         return result;
       } catch (e) {
+        // The old project survives. Its observers must run after our admission fence opens.
+        finish();
         projectReplaceFailed();
         throw e;
       } finally { finish(); }

@@ -7,8 +7,10 @@ export type PatternStamp = { generation: number; patternId: number; revision: nu
 export interface PatternsView {
   generation: number;
   revision: number;
+  /** Binds source lengths to the same observation as arrangement_view. */
+  arrangementRevision: number;
   selected: number;
-  patterns: { id: number; name: string; revision: number }[];
+  patterns: { id: number; name: string; revision: number; steps: number }[];
   view: ProjectView;
 }
 export type PatternEdit =

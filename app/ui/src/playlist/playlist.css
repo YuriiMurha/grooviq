@@ -1,0 +1,30 @@
+.playlist { position: relative; display: flex; flex-direction: column; flex: 0 0 clamp(190px, 34vh, 320px); min-height: 0; min-width: 0; border-bottom: 1px solid var(--line); background: var(--bg); color: var(--text); font: 12px var(--font); }
+.playlist-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.playlist-tools h2 { margin: 0 8px 0 0; font-size: 13px; }
+.playlist-tools [role="group"] { display: flex; gap: 4px; }
+.playlist button, .playlist select { font: inherit; color: var(--text); background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 4px 8px; min-height: 28px; }
+.playlist button[aria-pressed="true"] { border-color: var(--select); color: var(--select); }
+.playlist button:hover:not(:disabled) { background: var(--line-soft); }
+.playlist button:active:not(:disabled) { background: var(--line); }
+.playlist button:disabled, .playlist select:disabled { color: var(--faint); cursor: default; }
+.playlist :focus-visible { outline: 2px solid var(--select); outline-offset: -2px; }
+.playlist ::selection { background: var(--select); color: var(--bg); }
+.playlist-tools label { display: flex; gap: 6px; align-items: center; color: var(--muted); }
+.playlist input { accent-color: var(--accent); width: 90px; }
+.playlist-snap { color: var(--muted); font-variant-numeric: tabular-nums; }
+.playlist-ruler { position: relative; height: 20px; flex-shrink: 0; overflow: hidden; border-bottom: 1px solid var(--line); background: var(--panel); color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.playlist-ruler span { position: absolute; padding-left: 4px; top: 2px; border-left: 1px solid var(--line); }
+.playlist-scroll { flex: 1; min-width: 0; min-height: 64px; overflow: auto; scrollbar-color: var(--line) var(--panel); overscroll-behavior: contain; }
+.playlist-space { position: relative; }
+.playlist-camera { position: absolute; }
+.playlist canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.playlist-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.playlist-labels span { position: absolute; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 10px; color: var(--text); }
+.playlist-labels .playlist-track-name { color: var(--muted); max-width: 150px; }
+.playlist-status { display: flex; justify-content: space-between; gap: 12px; padding: 5px 8px; color: var(--muted); font-size: 10px; }
+.playlist-selection { display: flex; gap: 8px; align-items: center; padding: 0 8px 6px; color: var(--muted); }
+.playlist-selection select { min-width: 0; max-width: 320px; flex: 1; }
+.playlist-error { margin: 0; padding: 6px 8px; color: var(--text); background: var(--panel); overflow-wrap: anywhere; }
+.playlist-readonly { margin: 0; padding: 4px 8px; color: var(--muted); font-size: 11px; }
+.playlist-empty { position: absolute; pointer-events: none; top: 96px; left: 20px; max-width: 32ch; margin: 0; color: var(--muted); }
+@media (max-width: 960px) { .playlist-tools { gap: 4px; } .playlist-snap { display: none; } .playlist-status { flex-wrap: wrap; gap: 4px; } }
