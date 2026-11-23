@@ -685,6 +685,7 @@ pub type PrecommitValidator = Arc<dyn Fn(&Project) -> Result<(), String> + Send 
 pub struct PatternsView {
     pub generation: u64,
     pub revision: u64,
+    pub arrangement_revision: u64,
     pub selected: u32,
     pub patterns: Vec<PatternSummary>,
     pub view: ProjectView,
@@ -695,6 +696,7 @@ pub struct PatternSummary {
     pub id: u32,
     pub name: String,
     pub revision: u32,
+    pub steps: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1413,6 +1415,7 @@ impl Session {
         PatternsView {
             generation: self.generation,
             revision: self.patterns_revision,
+            arrangement_revision: self.arrangement_revision,
             selected: self.project.current_pattern,
             patterns: self
                 .project
@@ -1422,6 +1425,7 @@ impl Session {
                     id: p.id,
                     name: p.name.clone(),
                     revision: p.revision,
+                    steps: p.steps,
                 })
                 .collect(),
             view: self.view(),

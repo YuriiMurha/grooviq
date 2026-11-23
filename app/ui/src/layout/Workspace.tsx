@@ -81,6 +81,7 @@ function usePanelMeasurement(viewport: RefObject<HTMLDivElement | null>, area: R
 
 interface Props {
   picker?: ReactNode;
+  playlist?: ReactNode;
   latest: RefObject<LiveFrame | null>;
   sampleRate: number;
   onError: (message: string) => void;
@@ -92,7 +93,7 @@ interface Props {
 
 /** The channel rack and the piano roll, stacked, each toggled by its key (F6, F7), with a
  * splitter between them; the selected channel they and the typing keyboard share. */
-export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys, picker }: Props) {
+export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys, picker, playlist }: Props) {
   const { view, runFor, stamp } = useProject();
   const [panels, setPanels] = useState<Panels>(DEFAULT_PANELS);
   const [playlistVisible, setPlaylistVisible] = useState(false);
@@ -208,9 +209,9 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys, 
       <div className="pattern-workspace">
         {picker}
         <div className="pattern-workspace-content">
-          {playlistVisible && <section className="pattern-playlist-shell" aria-label="Playlist">
+          {playlistVisible && (playlist ?? <section className="pattern-playlist-shell" aria-label="Playlist">
             <h2>Playlist</h2><p>Your patterns are ready. Timeline editing is not available yet. F5 hides the playlist.</p>
-          </section>}
+          </section>)}
       <div ref={viewport} className="workspace-viewport" onScroll={retireDrag}>
       <div ref={area} className="workspace" style={{ "--split": `${panels.split * 100}%`,
         "--workspace-content-height": contentHeight === undefined ? "100%" : `${contentHeight}px`,
