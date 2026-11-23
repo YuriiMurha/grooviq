@@ -1319,3 +1319,77 @@ fn sampler_trim_pair_never_allocates_or_frees_on_the_callback() {
         realtime(|| p.process(&mut buf, 2));
     }
 }
+
+#[test]
+#[cfg(feature = "test-hooks")]
+fn exhaustion_completion_tag_is_allocation_free() {
+    let (mut c, mut p) = engine(EngineConfig { sample_rate: SR });
+    c.add_channel(ChannelSetup::synth(
+        ChannelId(1),
+        vec![],
+        ChannelMix::default(),
+    ))
+    .unwrap();
+    c.send(Command::SetTempo { bpm: 120.0 }).unwrap();
+    c.send(Command::SetRecording { on: true }).unwrap();
+    c.send(Command::Play).unwrap();
+    let mut buf = [0.0; grooviq_engine::BLOCK * 2];
+    p.process(&mut buf, 2);
+    c.send(Command::ChannelNote {
+        channel: ChannelId(1),
+        key: 76,
+        velocity: 0.8,
+        on: true,
+        id: NoteId(9001),
+    })
+    .unwrap();
+    p.process(&mut buf, 2);
+    let mut events = Vec::new();
+    c.take_recorded(&mut events);
+    assert!(matches!(
+        events.as_slice(),
+        [RecordEvent::Note {
+            id: NoteId(9001),
+            on: true,
+            ..
+        }]
+    ));
+    // Fault unwinding intentionally allocates. Exercise it outside realtime(),
+    // then guard only the non-panicking callback carrying the new completion tag.
+    for delay in [0, 260, 510] {
+        c.send(Command::InjectPanic).unwrap();
+        p.process(&mut buf, 2);
+        thread::sleep(Duration::from_millis(delay));
+        assert!(
+            c.check_health()
+                .iter()
+                .any(|e| matches!(e, grooviq_engine::HealthEvent::Restarted { .. }))
+        );
+        p.process(&mut buf, 2);
+    }
+    c.send(Command::InjectPanic).unwrap();
+    p.process(&mut buf, 2);
+    thread::sleep(Duration::from_millis(1010));
+    assert!(
+        c.check_health()
+            .iter()
+            .any(|e| matches!(e, grooviq_engine::HealthEvent::Stopped { .. }))
+    );
+    let mark = c.recovery_stop_mark().unwrap();
+    let tick = c.live().frames * 120 * u64::from(grooviq_engine::PPQ) / (60 * 48_000);
+    realtime(|| p.process(&mut buf, 2));
+    assert!(!c.live().playing);
+    assert!(!c.recording_armed());
+    events.clear();
+    c.take_recorded(&mut events);
+    assert_eq!(
+        events,
+        vec![
+            RecordEvent::End {
+                tick,
+                position: tick as u32
+            },
+            RecordEvent::Mark { id: mark }
+        ]
+    );
+}

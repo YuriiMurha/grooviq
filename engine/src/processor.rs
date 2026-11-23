@@ -104,6 +104,7 @@ pub struct AudioProcessor {
     guard_hits: u32,
     meter: [f32; 2],
     meter_release: f32,
+    completed_recovery_stop: Option<u32>,
 }
 
 impl AudioProcessor {
@@ -141,6 +142,7 @@ impl AudioProcessor {
             guard_hits: 0,
             meter: [0.0; 2],
             meter_release: meter_release(sample_rate),
+            completed_recovery_stop: None,
         }
     }
 
@@ -334,12 +336,16 @@ impl AudioProcessor {
     /// note): synth notes in `events`, channel notes in their channel's buffer. Every other
     /// command applies now, at the block start. Returns the synth's event count.
     fn drain(&mut self, start: u64, end: u64) -> usize {
+        self.drain_commands(start, end, false)
+    }
+
+    fn drain_commands(&mut self, start: u64, end: u64, detached: bool) -> usize {
         // First: no event recorded in this block may go ahead of a waiting barrier.
         self.recorder.flush_mark();
         let mut count = 0;
         let mut last_offset = 0;
         // Bounded: a producer that keeps pushing cannot hold the audio thread here.
-        for _ in 0..QUEUE_CAPACITY {
+        for _ in 0..if detached { 1 } else { QUEUE_CAPACITY } {
             let Ok(next) = self.commands.peek() else {
                 break;
             };
@@ -362,12 +368,27 @@ impl AudioProcessor {
                 // What it replaces or removes needs a free spot to go to.
                 other => other.makes_trash() && self.unsent.is_some(),
             };
-            if wait {
+            if wait && !detached {
                 break;
             }
             let Ok(msg) = self.commands.pop() else {
                 break;
             };
+            // Exhaustion supersedes starts accepted before its transaction. A later
+            // explicit start stays queued because settlement stops at RecoveryStop.
+            if detached
+                && matches!(
+                    msg,
+                    Msg::Command {
+                        cmd: Command::Play
+                            | Command::PlayLoops { .. }
+                            | Command::SetRecording { on: true },
+                        ..
+                    }
+                )
+            {
+                continue;
+            }
             // `due < end`, so the offset is below BLOCK.
             let mut offset = |due: u64| {
                 let offset = (due.saturating_sub(start) as u32).max(last_offset);
@@ -377,6 +398,10 @@ impl AudioProcessor {
             match msg {
                 Msg::ReplaceGraph(graph) => self.replace_graph(graph, start),
                 Msg::RecordMark(id) => self.recorder.mark(id),
+                Msg::RecoveryStop(id) => {
+                    self.recorder.mark(id);
+                    self.completed_recovery_stop = Some(id);
+                }
                 Msg::AddChannel(node) => {
                     let refused = if self.faulted {
                         Some(node)
@@ -412,7 +437,7 @@ impl AudioProcessor {
                     mode_changed,
                     loop_changed,
                 } => {
-                    if !self.faulted {
+                    if !self.faulted || detached {
                         self.timeline_transport(
                             start,
                             bpm,
@@ -439,6 +464,19 @@ impl AudioProcessor {
                         if let Some(id) = update.remove_channel {
                             removed = self.graph.remove_channel(id);
                         }
+                        self.timeline_transport(
+                            start,
+                            update.bpm,
+                            update.mode,
+                            update.region,
+                            mode_changed,
+                            loop_changed,
+                        );
+                    }
+                    // Even a faulted graph must retain accepted transport chronology.
+                    // DSP payload mutations stay guarded, but its stop/disarm precedes
+                    // any subsequent seek and the exhaustion completion tag.
+                    else if detached {
                         self.timeline_transport(
                             start,
                             update.bpm,
@@ -485,7 +523,7 @@ impl AudioProcessor {
                         on,
                         id,
                     } => {
-                        if !self.faulted {
+                        if !self.faulted && !detached {
                             self.events[count] = NoteEvent {
                                 offset: offset(due),
                                 key,
@@ -504,7 +542,7 @@ impl AudioProcessor {
                         on,
                         id,
                     } => {
-                        if !self.faulted {
+                        if !self.faulted && !detached {
                             let event = NoteEvent {
                                 offset: offset(due),
                                 key,
@@ -679,13 +717,13 @@ impl AudioProcessor {
         self.graph.playback_mode = mode;
         if loop_changed || self.graph.song_loop != region {
             let tick = self.graph.position(self.transport.position_ticks(start));
-            self.graph.transport_stopped();
+            self.with_graph(Graph::transport_stopped);
             self.transport.seek(
                 start,
                 region.map_or(tick, |r| tick.clamp(r.start_tick, r.end_tick - 1)),
             );
             self.graph.song_loop = region;
-            self.graph.reset_audio();
+            self.with_graph(Graph::reset_audio);
         }
     }
 
@@ -704,11 +742,31 @@ impl AudioProcessor {
         self.recorder.flush_mark();
     }
 
+    pub(crate) fn recovery_stop_completed(&self, mark: u32) -> bool {
+        self.completed_recovery_stop == Some(mark)
+    }
+
+    /// Consume one accepted prefix message without rendering or advancing the clock.
+    /// The controller drains retirement between calls, so the parked trash slot is free.
+    pub(crate) fn recovery_prefix_step(&mut self) -> bool {
+        let before = self.commands.slots();
+        self.retry_trash();
+        self.drain_commands(self.clock, self.clock + BLOCK as u64, true);
+        self.live.publish_transport(
+            self.transport.playing(),
+            self.graph
+                .position(self.transport.position_ticks(self.clock)),
+        );
+        self.commands.slots() < before
+    }
+
+    #[cfg(test)]
     pub(crate) fn finish_recovery_stop(&mut self, mark: u32) {
         self.stop(self.clock);
         self.recorder
             .set(false, &self.transport, self.clock, &self.live);
         self.recorder.mark(mark);
+        self.completed_recovery_stop = Some(mark);
         // Rebuilding may fail while the callback remains detached.
         self.live.publish_transport(
             self.transport.playing(),

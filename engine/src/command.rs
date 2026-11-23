@@ -303,6 +303,8 @@ pub(crate) enum Msg {
     },
     /// Queues [`crate::RecordEvent::Mark`] with this id in the recording queue.
     RecordMark(u32),
+    /// Completion identity for an exhausted recovery transaction.
+    RecoveryStop(u32),
 }
 
 impl Msg {
@@ -311,7 +313,10 @@ impl Msg {
     pub(crate) fn makes_trash(&self) -> bool {
         !matches!(
             self,
-            Self::Command { .. } | Self::RecordMark(_) | Self::TimelineRebuilt { .. }
+            Self::Command { .. }
+                | Self::RecordMark(_)
+                | Self::RecoveryStop(_)
+                | Self::TimelineRebuilt { .. }
         )
     }
 }
@@ -371,6 +376,10 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
             }
             transport @ Msg::TimelineRebuilt { .. } => {
                 kept.push(transport);
+                continue;
+            }
+            recovery @ Msg::RecoveryStop(_) => {
+                kept.push(recovery);
                 continue;
             }
             Msg::RecordMark(id) => {
