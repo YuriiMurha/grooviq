@@ -743,8 +743,12 @@ fn a_waiting_recording_barrier_never_allocates() {
     c.check_health();
     taken.clear();
     c.take_recorded(&mut taken);
+    assert!(
+        matches!(taken.first(), Some(RecordEvent::End { .. })),
+        "{taken:?}"
+    );
     assert_eq!(
-        taken.first(),
+        taken.get(1),
         Some(&RecordEvent::Mark { id: mark }),
         "{taken:?}"
     );

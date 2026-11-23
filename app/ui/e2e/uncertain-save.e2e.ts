@@ -2,7 +2,7 @@ import { expect, test } from "./fixture";
 import { project, soundsFor } from "./fixture";
 
 const KIT = ["Kick", "Snare", "Hat"];
-test.use({ seed: { project: project(KIT, { 1: [0] }), files: soundsFor(KIT) } });
+test.use({ seed: { audioLog: [], project: project(KIT, { 1: [0] }), files: soundsFor(KIT) } });
 
 test("a post-rename directory warning adopts the written path, stays dirty, and Save retries in place", async ({ app, mock }, info) => {
   await app.getByRole("button", { name: "Mute Kick" }).click();

@@ -24,6 +24,8 @@ pub struct OutputDto {
 /// The `audio-event` payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AudioEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<OutputDto>,
@@ -106,6 +108,7 @@ pub fn from_output(event: &OutputEvent, current: Option<&OutputInfo>) -> (Level,
         ),
     };
     let event = AudioEvent {
+        id: None,
         kind,
         output: output.map(|o| output_dto(o, current)),
         message,
@@ -120,12 +123,27 @@ pub fn from_health(event: HealthEvent) -> (Level, AudioEvent) {
             "restarted",
             format!("The sound engine hit an error and restarted ({faults} so far)"),
         ),
+        HealthEvent::Stopped { faults } => (
+            "recovery-stopped",
+            format!(
+                "Sound engine stopped after repeated errors ({faults}). Reopen the project or restart the app to retry."
+            ),
+        ),
+        HealthEvent::RecoveryFailed { faults } => (
+            "recovery-failed",
+            format!("Sound engine rebuild failed ({faults}); project settings were preserved."),
+        ),
+        HealthEvent::RecoveryReset => (
+            "recovery-reset",
+            "Sound engine recovery budget reset.".into(),
+        ),
         HealthEvent::DeviceSilenced { total } => (
             "silenced",
             format!("A device produced invalid audio and was muted for a moment ({total} so far)"),
         ),
     };
     let event = AudioEvent {
+        id: None,
         kind,
         output: None,
         message,
