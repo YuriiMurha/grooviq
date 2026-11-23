@@ -1,7 +1,12 @@
+import { arrangementHistory, arrangementView } from "./api/arrangement";
+import { dispatchGlobalHistory } from "./project/globalHistory";
+import { projectGeneration } from "./project/replacement";
+import { usePatterns } from "./patterns/usePatterns";
+import { PickerRail, PatternModeControls } from "./patterns/PickerRail";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { installMenuHistory } from "./project/menuHistory";
-import { isProjectReplacing } from "./project/replacement";
+import { isProjectReplacing, isProjectReplacementPending } from "./project/replacement";
 import { settleProjectEdits } from "./project/pending";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -35,11 +40,11 @@ import { Meter } from "./meter/Meter";
 import { OutputChip } from "./output/OutputChip";
 import { OutputPopover } from "./output/OutputPopover";
 import { ProjectContext } from "./project/context";
-import { metronomeSet, notesRedo, notesUndo, onRecordingStopped, recordSet } from "./api/notes";
+import { metronomeSet, onRecordingStopped, recordSet } from "./api/notes";
 import { Workspace } from "./layout/Workspace";
 import { ProjectMenu } from "./project/ProjectMenu";
 import { SaveState } from "./project/SaveState";
-import { stepNotesHistory, trackDrags } from "./project/noteHistory";
+import { historyDragActive, invalidateRollHistory, withRollHistoryBarrier, trackDrags } from "./project/noteHistory";
 import { rollEditsUnsettled } from "./roll/commitQueue";
 import { isTypingTarget, modalIsOpen, shortcutFor } from "./project/shortcuts";
 import { useProjectFlows } from "./project/useProjectFlows";
@@ -111,6 +116,7 @@ export function App() {
 
   const session = useSession(useCallback((message: string) => toast(message, true), [toast]));
   const { view } = session;
+  const patterns = usePatterns({ view, publishPatterns: session.publishPatterns, enqueue: session.enqueue, run: session.context.run });
 
   // A project that is replaced must not go on playing, nor keep notes held on its channels.
   const stopIfPlaying = useCallback(async () => {
@@ -191,31 +197,35 @@ export function App() {
       listening.then((stop) => stop());
     };
   }, [runCommand, toast]);
-  // Undo and redo of note changes: in the project's queue (behind step edits) and, with the
-  // piano roll open, in its queue too (behind note edits). Ignored during a drag.
-  const { enqueueMutation: enqueue, adopt } = session;
-  const shown = session.latest;
-  const stepHistory = useCallback(
-    (redo: boolean) => {
-      if (isProjectReplacing()) return;
-      // For the project shown now: if another replaced it before the command's turn, the engine
-      // refuses it.
-      const origin = { generation: shown.current.view?.generation ?? 0, patternId: shown.current.view?.pattern.id ?? 0, revision: shown.current.view?.notesRevision ?? 1 };
-      stepNotesHistory(
-        (queuedOrigin = origin) => enqueue(async () => {
-          const stamp = session.resolvePatternStamp(queuedOrigin);
-          const ack = await (redo ? notesRedo : notesUndo)(stamp);
-          if (ack && ack.view.generation === stamp.generation && ack.view.pattern.id === stamp.patternId) {
-            session.acceptPatternStamp(stamp, ack.revision);
-          }
-          return ack;
-        }),
-        (ack) => adopt(ack.view),
-        (e: unknown) => toast(errorText(e), true),
-      );
-    },
-    [enqueue, adopt, shown, toast, session],
-  );
+  // Text/menu routing stays outside this shared project-history command.
+  const stepHistory = useCallback((redo: boolean) => {
+    if (isProjectReplacing() || historyDragActive()) return;
+    const origin = session.context.stamp();
+    const current = () => !isProjectReplacementPending() && projectGeneration() === origin.replacements &&
+      session.latest.current.view?.generation === origin.generation;
+    void dispatchGlobalHistory(origin, redo, {
+      isCurrent: current,
+      blocked: historyDragActive,
+      settle: settleProjectEdits,
+      ordered: async (command) => {
+        const result = await withRollHistoryBarrier(
+          (still) => session.history(origin, command, still, invalidateRollHistory), current,
+          (reply) => reply.status === "applied",
+        );
+        if (result.status === "completed") return result.value;
+        if (result.error) throw result.error;
+        return { status: result.reason === "blocked" ? "blocked" : "stale" };
+      },
+      stamp: arrangementView,
+      invoke: arrangementHistory,
+      // Native view adoption + synchronous roll invalidation happen in session.history.
+      refresh: async () => {},
+    }).then((reply) => {
+      if (!current()) return;
+      if (reply.status === "refused") toast(reply.message, true);
+      else if (reply.status === "unsettled") toast("Pending edits were refused. History was not changed.", true);
+    }, (error: unknown) => { if (current()) toast(errorText(error), true); });
+  }, [session, toast]);
   useEffect(() => trackDrags(window), []);
   const menuHistoryAction = useRef(stepHistory);
   useLayoutEffect(() => { menuHistoryAction.current = stepHistory; }, [stepHistory]);
@@ -436,6 +446,7 @@ export function App() {
               playing={playing}
               latest={latest}
               sampleRate={sampleRate}
+              modeControls={<PatternModeControls picker={patterns} />}
               onPlay={play}
               onStop={stop}
               onTempo={(bpm) => session.apply({ kind: "setTempo", bpm })}
@@ -477,7 +488,7 @@ export function App() {
           </div>
         </header>
         <main className="stage">
-          {view && <Workspace latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
+          {view && <Workspace picker={<PickerRail key={view.generation} picker={patterns} />} latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
         </main>
         <HintBar />
         <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />

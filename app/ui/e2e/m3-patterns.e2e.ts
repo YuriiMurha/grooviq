@@ -23,10 +23,11 @@ for (const roll of [false, true]) {
       await app.keyboard.press("F7");
       await expect(app.getByLabel("Piano roll notes")).toBeVisible();
     }
-    for (const [command, shortcut, remaining] of [
-      ["notes_undo", "ControlOrMeta+z", 1],
-      ["notes_redo", "ControlOrMeta+Shift+z", 3],
+    for (const [undo, shortcut, remaining] of [
+      [true, "ControlOrMeta+z", 1],
+      [false, "ControlOrMeta+Shift+z", 3],
     ] as const) {
+      const command = "arrangement_history";
       const before = (await mock.calls(command)).length;
       await mock.eval(`(m) => m.holdCommand('${command}')`);
       await app.keyboard.press(shortcut);
@@ -35,6 +36,7 @@ for (const roll of [false, true]) {
       expect((await mock.calls(command)).length).toBe(before + 1);
       await mock.eval(`(m) => m.releaseCommand('${command}')`);
       await expect.poll(async () => (await mock.calls(command)).length).toBe(before + 2);
+      expect((await mock.calls(command)).slice(before).map((call) => call.args.undo)).toEqual([undo, undo]);
       await expect.poll(() => mock.eval("(m) => m.notes().length")).toBe(remaining);
     }
   });
