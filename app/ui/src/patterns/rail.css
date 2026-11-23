@@ -24,3 +24,11 @@
 .pattern-playlist-shell h2 { color: var(--text); font-size: 14px; margin: 0 0 8px; }
 .pattern-playlist-shell p { margin: 0; font-size: 12px; }
 @media (max-width: 960px) { .pattern-rail { flex-basis: 150px; padding: 8px; } .pattern-current { max-width: 72px; } }
+@media (max-width: 1000px) {
+  .toolbar:has(.pattern-mode-controls) .save-state { overflow: hidden; text-overflow: ellipsis; }
+  .transport:has(.pattern-mode-controls) { gap: 4px; }
+  .pattern-mode-controls { flex: 0 0 72px; flex-direction: column; align-items: stretch; gap: 0; width: 72px; }
+  .pattern-mode-controls label { gap: 0; }
+  .pattern-mode-controls select { width: 100%; min-width: 0; min-height: 24px; height: 24px; padding: 2px 4px; }
+  .pattern-mode-controls .pattern-current { max-width: 72px; line-height: 14px; }
+}

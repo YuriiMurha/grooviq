@@ -67,7 +67,8 @@ export function PatternModeControls({ picker }: { picker: PatternPicker }) {
       {picker.mode === null && <option value="">Loading…</option>}
       <option value="pattern">Pattern</option><option value="song">Song</option>
     </select></label>
-    <span className="pattern-current" title={pattern?.name}>{pattern?.name ?? "Loading patterns…"}</span>
-    {picker.modePending && <span role="status">Changing mode…</span>}
+    <span className="pattern-current" title={pattern?.name} role={picker.modePending ? "status" : undefined}>
+      {picker.modePending ? "Changing mode…" : pattern?.name ?? "Loading patterns…"}
+    </span>
   </div>;
 }
