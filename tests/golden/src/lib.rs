@@ -13,6 +13,7 @@ pub mod drums;
 pub mod nested;
 pub mod notes;
 pub mod perf;
+pub mod song;
 pub mod synth_presets;
 
 pub use drums::{KIT, LOOPS, decode_samples, drums_4ch_project, kit_dir};
