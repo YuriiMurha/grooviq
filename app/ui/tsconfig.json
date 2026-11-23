@@ -16,5 +16,5 @@
     "noEmit": true,
     "types": ["node", "vite/client"]
   },
-  "include": ["src", "e2e", "bench", "vite.config.ts", "playwright.config.ts", "playwright.replay.config.ts"]
+  "include": ["src", "e2e", "bench", "gallery", "vite.config.ts", "playwright.config.ts", "playwright.replay.config.ts"]
 }
