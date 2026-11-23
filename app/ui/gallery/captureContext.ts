@@ -4,6 +4,7 @@ import { lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "
 import { homedir, platform, release } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gallerySeed } from "./seed";
 
 const ui = fileURLToPath(new URL("..", import.meta.url));
 const repo = resolve(ui, "../..");
@@ -54,7 +55,7 @@ export function captureContext() {
   const fontRoot = resolve(ui, "node_modules/@fontsource-variable/manrope/files");
   const fonts = Object.fromEntries(readdirSync(fontRoot).filter((name) => name.endsWith(".woff2"))
     .sort().map((name) => [name, filePin(resolve(fontRoot, name))]));
-  const seed = { id: "gallery-local-v1", numeric: 0.5, wave: "Sine", switches: false };
+  const seed = gallerySeed;
   const context = {
     head, branch, dirtyPaths: dirty.split("\n").filter(Boolean), dirtyPatchSha256: hash(patch),
     capturedSourceScope: paths, sourceFingerprint: hash(JSON.stringify(sources)), sources,
