@@ -33,7 +33,7 @@ function historyLane() {
   const queue = new ProjectCommandQueue(); const view = nativeView();
   const invalidate = vi.fn(); const adopt = vi.fn();
   const readPatterns = vi.fn(async (): Promise<PatternsView> => ({ generation: 7, revision: 1, selected: 1,
-    patterns: [{ id: 1, name: "A", revision: 8 }, { id: 2, name: "B", revision: 42 }], view }));
+    arrangementRevision: 12, patterns: [{ id: 1, name: "A", revision: 8, steps: 16 }, { id: 2, name: "B", revision: 42, steps: 16 }], view }));
   const adapter = { enqueueMutation: (command: () => Promise<HistoryResult>) => queue.enqueue(command),
     current: () => true, readView: async () => view, readPatterns, adopt, invalidate };
   return { queue, view, adapter, adopt, invalidate, readPatterns };

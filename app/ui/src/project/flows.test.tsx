@@ -115,7 +115,7 @@ beforeEach(() => {
   const patterns = () => {
     const view = mocks.currentView ?? VIEW;
     return { generation: view.generation, revision: view.patternRevision ?? 0, selected: view.pattern.id,
-      patterns: [{ id: view.pattern.id, name: view.pattern.name, revision: view.notesRevision }], view };
+      arrangementRevision: 0, patterns: [{ id: view.pattern.id, name: view.pattern.name, revision: view.notesRevision, steps: view.pattern.steps }], view };
   };
   reply("pattern_list", patterns);
   // These project-flow scenes have an empty Pattern-mode arrangement; the picker reads it.
