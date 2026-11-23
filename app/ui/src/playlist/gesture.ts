@@ -2,7 +2,7 @@ import type { ArrangementOperation, ArrangementStamp } from "../api/arrangement"
 import { integer, MAX_SONG_TICKS, resizePattern, snapTick, validatePattern, type PatternPreview } from "./geometry";
 
 export type GestureInput = Readonly<{
-  kind: "place" | "move" | "copy" | "resizeStart" | "resizeEnd";
+  kind: "place" | "move" | "copy" | "resizeStart" | "resizeEnd" | "slice";
   pointerId: number; stamp: ArrangementStamp; replacements: number;
   originTick: number; originTrack: number; quantum: number;
   tracks: readonly Readonly<{ id: number }>[];
@@ -17,6 +17,7 @@ const copy = (clip: PatternPreview): PatternPreview => ({ ...clip, content: { ..
 export class PatternGesture {
   private readonly input: GestureInput;
   private value: PatternPreview;
+  private cut: number | null = null;
   private closed = false;
 
   constructor(input: GestureInput) {
@@ -40,13 +41,20 @@ export class PatternGesture {
     this.input = { ...input, stamp: { ...input.stamp }, tracks: input.tracks.map(track => ({ ...track })), clip: copy(input.clip) };
     this.value = copy(input.clip);
     if (input.kind === "copy") this.value = { ...this.value, id: null };
+    if (input.kind === "slice") this.update(input.originTick, input.originTrack);
   }
   get preview(): PatternPreview { return copy(this.value); }
+  get sliceTick(): number | null { return this.cut; }
   cancel(): void { this.closed = true; }
 
   update(tick: number, trackIndex: number): void {
     if (this.closed) return;
     const { input } = this;
+    if (input.kind === "slice") {
+      const tickOnGrid = snapTick(tick, input.quantum);
+      this.cut = tickOnGrid > input.clip.startTick && tickOnGrid < input.clip.startTick + input.clip.content.lengthTicks ? tickOnGrid : null;
+      return;
+    }
     const delta = snapTick(tick - input.originTick, input.quantum, -MAX_SONG_TICKS);
     integer(trackIndex, "pointer track", 0, Number.MAX_SAFE_INTEGER);
     if (input.kind === "resizeStart" || input.kind === "resizeEnd") {
@@ -73,6 +81,7 @@ export class PatternGesture {
     }
     const id = input.clip.id;
     if (id === null) throw new Error("Missing captured native clip");
+    if (input.kind === "slice") return this.cut === null ? [] : [{ kind: "slice", clip: id, tick: this.cut, audioFirstFrames: null }];
     if (input.kind === "move" || input.kind === "copy") {
       if (input.kind === "move" && value.trackIndex === input.clip.trackIndex && value.startTick === input.clip.startTick) return [];
       return [{ kind: input.kind, clip: id, track: input.tracks[value.trackIndex].id, startTick: value.startTick }];

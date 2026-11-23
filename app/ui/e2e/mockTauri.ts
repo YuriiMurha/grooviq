@@ -1369,6 +1369,14 @@ export function installMockTauri(seed: MockSeed): void {
           const source = clip(op.clip), destination = track(op.track), start = int(op.startTick);
           if (op.kind === "copy") { const copy = clone(source); copy.id = allocate(); copy.track = destination; copy.startTick = start; arrangement.clips.push(copy); ids.push(copy.id); }
           else { source.track = destination; source.startTick = start; }
+        } else if (op.kind === "slice") {
+          const source = clip(op.clip), tick = int(op.tick), cut = tick - source.startTick;
+          if (op.audioFirstFrames != null || cut <= 0 || cut >= source.content.lengthTicks) throw "Invalid musical slice";
+          const period = patternBank.get(source.content.pattern)!.pattern.steps * STEP_TICKS;
+          const right = clone(source); right.id = allocate(); right.startTick = tick;
+          right.content.offsetTick = (source.content.offsetTick + cut) % period;
+          right.content.lengthTicks -= cut; source.content.lengthTicks = cut;
+          arrangement.clips.push(right); ids.push(right.id);
         } else if (op.kind === "resize") {
           const source = clip(op.clip), resized = content(op.content);
           if (source.content.pattern !== resized.pattern) throw "Resize cannot retarget its source";

@@ -128,3 +128,69 @@ describe("one native batch per released playlist gesture", () => {
     expect(() => new PatternGesture({ ...input, kind: "place", tracks: [], clip: { ...input.clip, id: null, trackIndex: 5 } })).toThrow();
   });
 });
+
+describe("single pattern Slice", () => {
+  const captured: GestureInput = { ...input, kind: "slice", quantum: 960, originTick: 2940,
+    clip: { ...input.clip, startTick: 1050, content: { ...input.clip.content, lengthTicks: 7680 } } };
+
+  it("snaps absolute song time and sends one original-ID slice without moving or retargeting", () => {
+    const gesture = new PatternGesture(captured);
+    gesture.update(2940, 1);
+    expect(gesture.preview).toEqual(captured.clip);
+    expect(gesture.take(current)).toEqual([{ kind: "slice", clip: 12, tick: 2880, audioFirstFrames: null }]);
+    expect(gesture.take(current)).toBeNull();
+    expect(captured.clip.startTick).toBe(1050);
+  });
+
+  it.each([0, 960, 9600, 100000])("refuses snapped endpoint or outside cut %s rather than clamping a fragment", tick => {
+    const gesture = new PatternGesture(captured);
+    gesture.update(tick, 0);
+    expect(gesture.take(current)).toEqual([]);
+  });
+
+  it("uses the snapped interior position even when the pointer lies just past an off-grid end", () => {
+    const gesture = new PatternGesture(captured); gesture.update(9000, 0);
+    expect(gesture.take(current)).toEqual([{ kind: "slice", clip: 12, tick: 8640, audioFirstFrames: null }]);
+  });
+
+  it.each([960, 8640])("does not cut at an exact aligned endpoint %s", tick => {
+    const gesture = new PatternGesture({ ...captured, clip: { ...captured.clip, startTick: 960 } });
+    gesture.update(tick, 0); expect(gesture.take(current)).toEqual([]);
+  });
+
+  it("does not invent an interior tick for a one-tick loaded clip", () => {
+    const gesture = new PatternGesture({ ...captured, clip: { ...captured.clip,
+      startTick: 960, content: { ...captured.clip.content, lengthTicks: 1 } } });
+    gesture.update(960.5, 0);
+    expect(gesture.take(current)).toEqual([]);
+  });
+
+  it("captures ID and stamp before a caller changes its source, selection or object", () => {
+    const mutable = { ...captured, stamp: { ...captured.stamp }, clip: { ...captured.clip, content: { ...captured.clip.content } } };
+    const gesture = new PatternGesture(mutable);
+    mutable.clip.id = 99; mutable.clip.content.pattern = 88; mutable.stamp.revision = 30;
+    gesture.update(2940, 1);
+    expect(gesture.take(current)).toEqual([{ kind: "slice", clip: 12, tick: 2880, audioFirstFrames: null }]);
+  });
+
+  it("a foreign pointer cannot consume the original cut", () => {
+    const gesture = new PatternGesture(captured); gesture.update(2940, 0);
+    expect(gesture.take({ ...current, pointerId: 11 })).toBeNull();
+    expect(gesture.take(current)).toEqual([{ kind: "slice", clip: 12, tick: 2880, audioFirstFrames: null }]);
+  });
+
+  it.each([
+    { domain: "generation", guard: { ...current, stamp: { generation: 3, revision: 9 } } },
+    { domain: "revision", guard: { ...current, stamp: { generation: 2, revision: 10 } } },
+    { domain: "replacement", guard: { ...current, replacements: 5 } },
+  ])("a stale $domain permanently retires a cut", ({ guard }) => {
+    const gesture = new PatternGesture(captured); gesture.update(2940, 0);
+    expect(gesture.take(guard)).toBeNull(); expect(gesture.take(current)).toBeNull();
+  });
+
+  it("cancellation cannot release or later revive a cut", () => {
+    const gesture = new PatternGesture(captured); gesture.update(2940, 0);
+    gesture.cancel(); gesture.update(4800, 0);
+    expect(gesture.take(current)).toBeNull();
+  });
+});
