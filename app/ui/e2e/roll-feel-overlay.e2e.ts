@@ -29,11 +29,11 @@ async function held(p: Page, el: Locator) {
   await p.mouse.move(b.x + b.width / 2, b.y + b.height / 2 - 24, { steps: 4 });
   await expect(el).not.toHaveAttribute("aria-valuenow", "30");
 }
-async function unchanged(p: Page, mock: Mock, before: number[][]) {
+async function unchanged(p: Page, mock: Mock, before: number[][], cause = "dismissal") {
   expect(await sessionNotes(mock)).toEqual(before);
   expect((await mock.view()).canUndo).toBe(false);
   await open(p);
-  await expect(spread(p)).toHaveAttribute("aria-valuenow", "30");
+  await expect(spread(p), `Feel ${cause} cancellation`).toHaveAttribute("aria-valuenow", "30");
 }
 
 for (const mode of ["native", "fallback"] as const) {
@@ -107,12 +107,16 @@ for (const mode of ["native", "fallback"] as const) {
         await held(app, spread(app));
         if (cause === "Escape") await app.keyboard.press("Escape");
         else if (cause === "outside") await app.getByRole("textbox", { name: "BPM", exact: true }).focus().then(() => app.getByRole("textbox", { name: "BPM", exact: true }).dispatchEvent("pointerdown"));
-        else await trigger(app).evaluate(el => (el as HTMLElement).click());
+        else await trigger(app).evaluate(el => {
+          (el as HTMLElement).click();
+          // Release before the queued details toggle so dismissal cannot win by timing luck.
+          el.closest("details")!.querySelector('[data-param="spread"]')!.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1 }));
+        });
         await app.mouse.up();
         await expect(panel(app)).not.toBeVisible();
         if (cause === "Escape") await expect(trigger(app)).toBeFocused();
         if (cause === "outside") await expect(app.getByRole("textbox", { name: "BPM", exact: true })).toBeFocused();
-        await unchanged(app, mock, before);
+        await unchanged(app, mock, before, cause);
         await app.keyboard.press("Escape");
       }
       await open(app);

@@ -86,6 +86,11 @@ export function useFeelPopover({ detailsRef, panelRef, cancelAmounts }: Options)
       if (!details.open || !(event.target instanceof Element) || details.contains(event.target)) return;
       if (event.target.closest("[role='menu'], [role='dialog'], [role='alertdialog'], [data-device-window]")) close();
     };
+    const activateSummary = () => {
+      // The default click closes details now; its queued toggle is too late to retire
+      // a held gesture before a pointer release in the same task.
+      if (details.open) cancelAmounts();
+    };
     const sync = () => {
       if (disposed) return;
       if (!details.open || !details.isConnected || !panel.isConnected) { hide(); return; }
@@ -107,6 +112,7 @@ export function useFeelPopover({ detailsRef, panelRef, cancelAmounts }: Options)
       }
     };
     synchronizeRef.current = sync;
+    summary.addEventListener("click", activateSummary);
     panel.addEventListener("beforetoggle", onNativeClosing);
     window.addEventListener("focusin", focus);
     window.addEventListener("blur", close);
@@ -115,6 +121,7 @@ export function useFeelPopover({ detailsRef, panelRef, cancelAmounts }: Options)
       close();
       disposed = true;
       synchronizeRef.current = () => {};
+      summary.removeEventListener("click", activateSummary);
       panel.removeEventListener("beforetoggle", onNativeClosing);
       window.removeEventListener("focusin", focus);
       window.removeEventListener("blur", close);
