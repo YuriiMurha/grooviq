@@ -21,6 +21,7 @@
 .playlist-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .playlist-labels span { position: absolute; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 10px; color: var(--text); }
 .playlist-labels .playlist-track-name { color: var(--muted); max-width: 150px; }
+.playlist-slice-guide { position: absolute; width: 2px; background: var(--select); }
 .playlist-status { display: flex; justify-content: space-between; gap: 12px; padding: 5px 8px; color: var(--muted); font-size: 10px; }
 .playlist-selection { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 0 8px 6px; color: var(--muted); }
 .playlist-selection select { min-width: 0; max-width: 320px; flex: 1; }
