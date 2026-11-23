@@ -143,7 +143,7 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, onOpenRoll
     >
       <header className="rack-head">
         <h2>Channel rack</h2>
-        <span className="chip" data-hint="The pattern the rack shows and edits.">
+        <span className="meta-chip" data-hint="The pattern the rack shows and edits.">
           Pattern <b>{pattern.name}</b>
         </span>
         <PatternLength key={`${view.generation}:${pattern.id}`} steps={pattern.steps} onCommit={(steps, origin) => void apply({ kind: "setPatternLength", steps }, undefined, origin)} />
@@ -226,7 +226,7 @@ function PatternLength({ steps, onCommit }: { steps: number; onCommit: (steps: n
     } else if (e.key === "Escape") setDraft(null);
   };
   return (
-    <label className="chip pattern-length" data-hint="How many steps the pattern has, 1 to 256. A step is a sixteenth.">
+    <label className="meta-chip pattern-length" data-hint="How many steps the pattern has, 1 to 256. A step is a sixteenth.">
       <input
         type="number"
         min={STEPS_MIN}

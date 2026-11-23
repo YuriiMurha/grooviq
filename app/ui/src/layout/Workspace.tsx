@@ -134,7 +134,7 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys }
             <header className="rack-head">
               <h2>Piano roll</h2>
               {rollChannel && (
-                <span className="chip" style={{ "--ink": `var(--ink-${rollChannel.color + 1})` } as CSSProperties}>
+                <span className="meta-chip" style={{ "--ink": `var(--ink-${rollChannel.color + 1})` } as CSSProperties}>
                   <b>{rollChannel.name}</b>
                 </span>
               )}
