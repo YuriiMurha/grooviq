@@ -270,6 +270,21 @@ input[type="checkbox"] {
   flex-direction: column;
 }
 
+.workspace-viewport {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--line) var(--panel);
+}
+
+.workspace-viewport > .workspace {
+  flex: none;
+  width: 100%;
+  height: var(--workspace-content-height);
+}
+
 .panel {
   flex: 1 1 0;
   min-height: 0;
@@ -277,7 +292,7 @@ input[type="checkbox"] {
 }
 
 .panel-rack.split {
-  flex: 0 0 var(--split);
+  flex: 0 0 var(--rack-height, var(--split));
 }
 
 .panel-roll {
@@ -319,6 +334,7 @@ input[type="checkbox"] {
 }
 
 .roll-tools {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;

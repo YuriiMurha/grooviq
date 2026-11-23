@@ -97,6 +97,13 @@ const emit = (name: string, payload: unknown) =>
   });
 
 beforeEach(() => {
+  // jsdom has no layout/ResizeObserver. These scenes prove project commands;
+  // actual pane geometry is exercised by the browser fixture.
+  vi.stubGlobal("ResizeObserver", class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  });
   mocks.calls.length = 0;
   mocks.handlers.clear();
   mocks.listeners.clear();
