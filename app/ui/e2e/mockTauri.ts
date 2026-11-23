@@ -1376,6 +1376,13 @@ export function installMockTauri(seed: MockSeed): void {
           const phase = ((source.content.offsetTick + int(op.startTick) - source.startTick) % duration + duration) % duration;
           if (resized.offsetTick !== phase) throw "Resize must preserve pattern source phase";
           source.content = resized; source.startTick = int(op.startTick);
+        } else if (op.kind === "setClip") {
+          const source = clip(op.clip);
+          if (typeof op.muted !== "boolean") throw "Invalid muted flag";
+          source.name = name(op.name); source.muted = op.muted;
+        } else if (op.kind === "deleteClip") {
+          const source = clip(op.clip);
+          arrangement.clips = arrangement.clips.filter(candidate => candidate.id !== source.id);
         } else throw "This arrangement operation is outside the finite pattern fixture";
       });
       if (arrangement.tracks.length > 256 || arrangement.clips.length > 100_000 || arrangement.clips.some(c => c.startTick + c.content.lengthTicks > 38_400_000)) throw "Arrangement bounds exceeded";
