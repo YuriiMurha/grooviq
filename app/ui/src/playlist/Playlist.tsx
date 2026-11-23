@@ -130,16 +130,16 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       if (id !== undefined) setSelected({ generation: result.reply.generation, id });
     }
   };
-  const selectedAction = async (action: "mute" | "delete") => {
+  const selectedAction = async (action: "mute" | "delete" | "makeUnique") => {
     if (busy || !snapshot || !selectedClip || isProjectReplacing() || modalIsOpen()) return;
     const id = selectedClip.id, generation = snapshot.generation;
     const stamp = { generation, revision: snapshot.revision };
-    const operations: Parameters<typeof mutate>[1] = action === "delete"
-      ? [{ kind: "deleteClip", clip: id }]
-      : [{ kind: "setClip", clip: id, name: selectedClip.name, muted: !selectedClip.muted }];
+    const operation = action === "mute"
+      ? { kind: "setClip" as const, clip: id, name: selectedClip.name, muted: !selectedClip.muted }
+      : { kind: action === "delete" ? "deleteClip" as const : "makeUnique" as const, clip: id };
     // A key action during a held preview owns that input: its later release sends nothing.
     cancel();
-    const result = await mutate(stamp, operations);
+    const result = await mutate(stamp, [operation]);
     if (action === "delete" && result.status === "applied") {
       setSelected(current => current?.generation === generation && current.id === id ? null : current);
     }
@@ -237,6 +237,7 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     <div className="playlist-status"><span id="playlist-help">Drag patterns here. F5 closes the playlist; Escape cancels a drag.</span><span role="status">{state.busy ? "Updating playlist…" : `${snapshot?.total ?? 0} clips`}</span></div>
     <div className="playlist-selection"><label htmlFor="selected-playlist-clip">Selected clip</label><select id="selected-playlist-clip" aria-label="Selected playlist clip" value={selected ?? ""} disabled={state.busy} onChange={event => { cancel(); setSelected(event.target.value ? { generation: snapshot?.generation ?? 0, id: Number(event.target.value) } : null); }}><option value="">None</option>{clips.filter(clip => clip.id === selected || visibleLabels.some(visible => visible.id === clip.id)).map(clip => <option key={clip.id} value={clip.id ?? ""}>{clip.name} · Track {clip.trackIndex + 1} · {clip.startTick} ticks</option>)}</select>
       <button type="button" aria-label={selectedClip?.muted ? "Unmute selected clip" : "Mute selected clip"} disabled={busy || !selectedClip} onClick={() => { void selectedAction("mute"); }}>{selectedClip?.muted ? "Unmute" : "Mute"}</button>
+      <button type="button" aria-label="Make selected clip unique" disabled={busy || !selectedClip} onClick={() => { void selectedAction("makeUnique"); }}>Make unique</button>
       <button type="button" aria-label="Delete selected clip" disabled={busy || !selectedClip} onClick={() => { void selectedAction("delete"); }}>Delete</button>
     </div>
     {(state.message || displayError || projection.error) && <p role="alert" className="playlist-error">{state.message ?? displayError ?? projection.error}</p>}

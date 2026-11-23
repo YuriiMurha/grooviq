@@ -39,19 +39,23 @@ export function usePatterns({ view, publishPatterns, enqueue, run }: SessionAdap
   }), [update]);
 
   const reload = useCallback(async () => {
-    if (generation === undefined || isProjectReplacing() || current.current.pending) return;
+    if (generation === undefined || isProjectReplacementPending() || current.current.pending) return;
     const identity = {}; request.current = identity;
     const at = { generation, replacements: projectGeneration() };
+    const isCurrent = () => request.current === identity && still(at) && !current.current.pending;
     setLoading(true);
     try {
-      const reply = await enqueue(patternList);
-      if (request.current !== identity || !still(at)) return;
-      const previous = current.current.canonical;
-      if (canPublishPatterns(previous, reply, generation) && publishPatterns(reply, at)) {
-        update({ ...current.current, canonical: reply });
-      }
+      // Keep readback and publication in the same lane as Save, including during a transition.
+      await enqueue(async () => {
+        if (!isCurrent()) return;
+        const reply = await patternList();
+        if (!isCurrent()) return;
+        if (canPublishPatterns(current.current.canonical, reply, generation) && publishPatterns(reply, at, "admitted")) {
+          update({ ...current.current, canonical: reply });
+        }
+      });
     } catch (error) {
-      if (request.current === identity && still(at)) setMessage(errorText(error));
+      if (isCurrent()) setMessage(errorText(error));
     } finally { if (request.current === identity) setLoading(false); }
   }, [generation, enqueue, publishPatterns, still, update]);
   useEffect(() => onProjectReplaceFailed(() => { void reload(); }), [reload]);
