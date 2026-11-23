@@ -1,0 +1,13 @@
+/* Gallery layout only. Shipping control selectors and tokens stay authoritative. */
+.gallery { max-width: 960px; margin: 0 auto; padding: 32px; }
+.gallery header { margin-bottom: 32px; }
+.gallery h1 { font-size: 24px; margin: 0 0 8px; }
+.gallery h2 { font-size: 15px; margin: 0 0 12px; }
+.gallery p { color: var(--muted); max-width: 72ch; margin: 8px 0 16px; }
+.gallery section { padding: 24px 0; border-top: 1px solid var(--line-soft); }
+.gallery-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 24px; min-height: 64px; }
+.gallery-reference { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; margin: 0; padding: 4px; min-width: 0; }
+.gallery-reference figcaption { color: var(--muted); font-size: 12px; }
+.gallery ::selection { color: var(--bg); background: var(--select); }
+.gallery footer { border-top: 1px solid var(--line-soft); padding-top: 24px; }
+@media (max-width: 920px) { .gallery { padding: 20px; } }

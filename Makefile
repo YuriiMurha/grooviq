@@ -54,6 +54,21 @@ replay-update: ## Regenerate the real-Session transcript intentionally, then ver
 qa-ui: ui-install ## Playwright on the web build with the mock engine (WebKit and Chromium); shots in app/ui/e2e-results
 	cd $(UI) && npx playwright install chromium webkit && npm run e2e
 
+GALLERY_PORT ?= 4795
+.PHONY: ui-gallery ui-gallery-build ui-gallery-check ui-gallery-capture
+ui-gallery: ## Serve actual controls with generated state; installed UI dependencies required
+	cd $(UI) && node node_modules/vite/bin/vite.js --config gallery/vite.config.mts --host 127.0.0.1 --port $(GALLERY_PORT) --strictPort
+
+ui-gallery-build: ## Build the additive control gallery without installing dependencies
+	cd $(UI) && node node_modules/vite/bin/vite.js build --config gallery/vite.config.mts
+
+ui-gallery-check: ## Typecheck and lint the control gallery against its real imported APIs
+	cd $(UI) && node node_modules/typescript/bin/tsc --project gallery/tsconfig.json --noEmit
+	cd $(UI) && node node_modules/eslint/bin/eslint.js gallery --max-warnings 0
+
+ui-gallery-capture: ## Capture managed gallery URL (GROOVIQ_GALLERY_URL); no server or install implied
+	cd $(UI) && node node_modules/@playwright/test/cli.js test --config gallery/playwright.config.mts
+
 golden-update: ## Rewrite the golden reference WAVs on purpose; say why in the PR
 	GOLDEN_UPDATE=1 $(CARGO) test -p grooviq-golden
 
