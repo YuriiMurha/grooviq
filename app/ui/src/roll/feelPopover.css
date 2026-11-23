@@ -1,0 +1,22 @@
+.roll-feel { position: relative; }
+.roll-feel summary { cursor: pointer; }
+
+.roll-feel-panel {
+  position: fixed;
+  z-index: var(--z-overlay);
+  inset: auto;
+  margin: 0;
+  width: max-content;
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+}
+
+.roll-feel-panel[popover]:not(:popover-open) { display: none; }
+.roll-feel:not([open]) .roll-feel-panel { display: none; }
+.roll-feel-panel .dctl { flex: none; min-width: 90px; }

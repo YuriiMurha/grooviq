@@ -1,4 +1,6 @@
 import { Knob } from "../devices/controls/Knob";
+import { useFeelPopover } from "./useFeelPopover";
+import "./feelPopover.css";
 import { useEffect, useRef } from "react";
 import { AMOUNT_RANGES, type TransformAmount } from "./transformAmounts";
 import type { useTransformAmounts } from "./useTransformAmounts";
@@ -42,6 +44,8 @@ interface Props {
 export function RollToolbar(p: Props) {
   const feel = useRef<HTMLDetailsElement>(null);
   const cancelAmounts = p.amounts.cancel;
+  const feelPanel = useRef<HTMLDivElement>(null);
+  const { synchronize } = useFeelPopover({ detailsRef: feel, panelRef: feelPanel, cancelAmounts });
   useEffect(() => {
     const close = (returnFocus: boolean) => {
       if (!feel.current?.open) return;
@@ -156,9 +160,9 @@ export function RollToolbar(p: Props) {
       </div>
       <div className="roll-group">
         {act("Quantize", "Move the starts of the selected notes (all notes with none selected) onto the snap grid (Alt+Q).", p.onQuantize)}
-        <details ref={feel} className="roll-feel" onToggle={() => { if (!feel.current?.open) cancelAmounts(); }}>
+        <details ref={feel} className="roll-feel" onToggle={() => { if (!feel.current?.open) cancelAmounts(); synchronize(); }}>
           <summary className="roll-tool">Feel</summary>
-          <div className="roll-feel-panel" role="group" aria-label="Transform amounts">
+          <div ref={feelPanel} className="roll-feel-panel" role="group" aria-label="Transform amounts">
             {([ ["spread", "Strum spread"], ["timing", "Humanize timing"], ["velocity", "Humanize velocity"] ] as [TransformAmount, string][]).map(([id, label]) => (
               <Knob key={id} id={id} param={AMOUNT_RANGES[id]} value={p.amounts.values[id]}
                 control={p.amounts.control(id)} label={label} name={label} size={36}
