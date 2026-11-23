@@ -435,7 +435,7 @@ test.describe("record and metronome", () => {
 });
 
 test.describe("removing a channel (#69)", () => {
-  test.use({ seed: kitSeed });
+  test.use({ seed: { ...kitSeed, audioLog: [] } });
 
   test("delete_on_a_focused_row_or_the_context_menu_removes_the_channel_after_confirming", async ({ app, mock }, info) => {
     const snare = nameButton(app, "Snare");

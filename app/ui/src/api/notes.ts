@@ -165,9 +165,9 @@ export function onMidiInputsChanged(handler: () => void): Promise<UnlistenFn> {
   return listen<null>("midi-inputs-changed", () => handler());
 }
 
-/** Recording switched itself off because recorded notes did not fit in the pattern. */
+/** Recording switched itself off after admission or engine recovery failed. */
 export interface RecordingStopped {
-  reason: "noteCap" | "noteIds" | "engineBusy" | "error";
+  reason: "noteCap" | "noteIds" | "engineBusy" | "engineRecovery" | "error";
   /** Recorded notes that were not added. */
   dropped: number;
   /** A sentence to show. */

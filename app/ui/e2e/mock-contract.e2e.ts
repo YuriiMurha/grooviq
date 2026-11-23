@@ -182,7 +182,7 @@ test.describe("settings the shell keeps", () => {
 });
 
 test.describe("autosave trouble at startup", () => {
-  test.use({ seed: { autosave: { disabled: "Autosave is off in this window.", failure: "Autosave is failing." } } });
+  test.use({ seed: { audioLog: [], autosave: { disabled: "Autosave is off in this window.", failure: "Autosave is failing." } } });
 
   test("the_ui_warns_of_a_disabled_and_a_failing_autosave", async ({ app }) => {
     const warnings = app.getByRole("status", { name: "Messages" }).locator(".toast.warn");
@@ -197,7 +197,7 @@ test.describe("recording when the pattern's note ids run out", () => {
   // One id left (session.rs `collect_recorded`: u32::MAX is never handed out).
   const lastId = twoChannels([]);
   lastId.pattern.nextNoteId = 0xffff_fffe;
-  test.use({ seed: { project: lastId } });
+  test.use({ seed: { audioLog: [], project: lastId } });
 
   test("keeps_what_fits_switches_recording_off_and_counts_the_rest", async ({ app, mock }) => {
     const stops = await app.evaluate(async () => {
@@ -285,4 +285,20 @@ test("play_while_playing_preserves_the_clock_and_held_position", async ({ app, m
   expect(await mock.eval("(m) => m.state.transport.playing")).toBe(true);
   expect(await mock.eval("(m) => m.state.transport.held")).toBeNull();
   expect(await mock.eval("(m) => m.state.transport.startTicks")).toBe(0);
+});
+
+
+test.describe("autosave initialization failure", () => {
+  const disabled = "Autosave and recovery could not start: startup-probe. Your changes are not being backed up; save the project to keep them.";
+  test.use({ seed: { audioLog: [], autosave: { disabled } } });
+
+  test("retains unavailable status and warns once at startup", async ({ app }) => {
+    const warnings = app.getByRole("status", { name: "Messages" }).locator(".toast.warn");
+    await expect(warnings).toHaveCount(1);
+    await expect(warnings).toContainText([disabled]);
+    for (let i = 0; i < 3; i++) {
+      expect(await call(app, "autosave_status")).toEqual({ disabled, failure: null });
+    }
+    await expect(warnings).toHaveCount(1);
+  });
 });

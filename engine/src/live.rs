@@ -29,6 +29,7 @@ pub struct LiveSnapshot {
 /// layer writes the latency.
 #[derive(Debug, Default)]
 pub struct LiveShared {
+    recovery: AtomicU64,
     pub(crate) synth: crate::synth_meter::SynthMeterShared,
     peak_l: AtomicU32,
     peak_r: AtomicU32,
@@ -45,12 +46,23 @@ pub struct LiveShared {
 }
 
 impl LiveShared {
+    pub(crate) fn publish_recovery(&self, faults: u32, blocks: u32) {
+        self.recovery
+            .store((u64::from(faults) << 32) | u64::from(blocks), Relaxed);
+    }
+
+    pub(crate) fn recovery(&self) -> (u32, u32) {
+        let word = self.recovery.load(Relaxed);
+        ((word >> 32) as u32, word as u32)
+    }
+
     /// Renews a bounded display lease and reads only this channel instance.
     pub fn synth_meter(&self, instance: u64) -> Option<crate::SynthMeter> {
         self.synth
             .request(instance, self.frames.load(Relaxed).saturating_add(24000));
         self.synth.read(instance)
     }
+
     /// Reads every field. Never blocks; safe from any thread at any rate.
     pub fn snapshot(&self) -> LiveSnapshot {
         LiveSnapshot {

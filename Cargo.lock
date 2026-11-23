@@ -1448,6 +1448,7 @@ version = "0.1.0"
 dependencies = [
  "grooviq-engine",
  "grooviq-project",
+ "libc",
  "midir",
  "objc2",
  "serde",
@@ -1515,6 +1516,16 @@ dependencies = [
  "serde_json",
  "tempfile",
  "zip",
+]
+
+[[package]]
+name = "grooviq-qa-fixture"
+version = "0.1.0"
+dependencies = [
+ "grooviq-engine",
+ "grooviq-project",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

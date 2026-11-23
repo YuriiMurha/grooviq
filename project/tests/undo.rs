@@ -974,8 +974,8 @@ fn fill_the_recording_queue(
     }
 }
 
-/// Holds key 71 from early in take A, fills the queue so A's End is dropped, takes A's notes
-/// in, then records take B (key 72, held for `b_blocks`) and collects it before 71 lets go.
+/// Holds key 71 from early in take A and explicitly omits A's End to model a legacy/lost
+/// event stream (the engine now retains End under pressure), then records take B (key 72, held for `b_blocks`) and collects it before 71 lets go.
 /// Returns the session after 71's late completion is collected.
 fn late_completion(b_blocks: usize) -> (Session, Arc<Mutex<Controller>>, AudioProcessor, u32) {
     late_completion_after(b_blocks, |_| {})
@@ -1001,7 +1001,7 @@ fn late_completion_after(
     controller.lock().unwrap().take_recorded(&mut events);
     assert!(
         !events.iter().any(|e| matches!(e, RecordEvent::End { .. })),
-        "A's End was dropped"
+        "A's End is still waiting behind the full queue"
     );
     session.collect_recorded(&events, Instant::now());
     // Take B, collected while 71 (of take A) is still down.
@@ -1010,7 +1010,22 @@ fn late_completion_after(
     render(&mut processor, b_blocks);
     session.live_note_off(ch, 72, press10).unwrap();
     render(&mut processor, 2);
-    collect(&mut session, &controller).revision.unwrap();
+    // Preserve this fixture's missing-End premise explicitly; it tests Session's legacy
+    // late-take bookkeeping, independently of the engine's reliable boundary delivery.
+    let mut later = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut later);
+    assert_eq!(
+        later
+            .iter()
+            .filter(|e| matches!(e, RecordEvent::End { .. }))
+            .count(),
+        1
+    );
+    later.retain(|e| !matches!(e, RecordEvent::End { .. }));
+    session
+        .collect_recorded(&later, Instant::now())
+        .revision
+        .unwrap();
     assert!(keys(&session).contains(&72) && !keys(&session).contains(&71));
     let b_steps = session.view().pattern.steps;
     assert_eq!(
@@ -1752,4 +1767,95 @@ fn nested_presses_of_one_key_record_their_own_lengths_and_each_take_undoes_in_on
     // Each take is one step.
     assert_eq!(undo_all(&mut session), 2);
     assert!(notes(&session).is_empty());
+}
+
+#[test]
+fn recovery_exhaustion_finishes_the_actual_take_and_preserves_undo() {
+    let (mut session, controller, mut processor, ch, before) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    record_chord(&mut session, &controller, &mut processor, ch, &[70, 74]);
+    let _held = session.live_note_on(ch, 76, 0.8).unwrap();
+    render(&mut processor, 6);
+    for delay in [0, 250, 500, 1000] {
+        controller
+            .lock()
+            .unwrap()
+            .send(Command::InjectPanic)
+            .unwrap();
+        render(&mut processor, 1);
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        controller.lock().unwrap().check_health();
+        render(&mut processor, 1);
+    }
+    let stopped = collect(&mut session, &controller).stopped.unwrap();
+    assert_eq!(stopped.reason, "engineRecovery");
+    assert_eq!(stopped.dropped, 0);
+    render(&mut processor, 2);
+    assert!(collect(&mut session, &controller).stopped.is_none());
+    assert!(!controller.lock().unwrap().live().playing);
+    assert!(!session.view().recording);
+    assert!(
+        session.settle_recording().is_ok(),
+        "the End barrier must settle the take"
+    );
+    assert_eq!(notes(&session).len(), before.len() + 3);
+    assert!(session.view().dirty);
+    undo(&mut session);
+    assert_eq!(notes(&session), before);
+    assert!(controller.lock().unwrap().reconfigure(
+        &mut processor,
+        EngineConfig {
+            sample_rate: 48_000.0
+        }
+    ));
+    render(&mut processor, 2);
+    assert!(!controller.lock().unwrap().live().playing);
+    controller.lock().unwrap().send(Command::Play).unwrap();
+    render(&mut processor, 2);
+    session.live_note_on(ch, 79, 0.8).unwrap();
+    render(&mut processor, 3);
+    let mut events = Vec::new();
+    controller.lock().unwrap().take_recorded(&mut events);
+    assert!(!events.iter().any(|e| matches!(e, RecordEvent::Note { .. })));
+}
+
+#[test]
+fn recovery_exhaustion_preserves_accepted_notes_with_a_full_recording_fifo() {
+    let (mut session, controller, mut processor, ch, before) = three_notes();
+    session.set_recording(true).unwrap();
+    start_take(&mut session, &controller, &mut processor);
+    let _held = session.live_note_on(ch, 76, 0.8).unwrap();
+    render(&mut processor, 6);
+    collect(&mut session, &controller);
+    // Exactly fill the recording FIFO with 512 completed notes. No events are refused.
+    for _ in 0..512 {
+        play_key(&session, &mut processor, ch, 70);
+    }
+    assert_eq!(controller.lock().unwrap().record_dropped(), 0);
+    for delay in [0, 250, 500, 1000] {
+        controller
+            .lock()
+            .unwrap()
+            .send(Command::InjectPanic)
+            .unwrap();
+        render(&mut processor, 1);
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        controller.lock().unwrap().check_health();
+        render(&mut processor, 1);
+    }
+    let stopped = collect(&mut session, &controller).stopped.unwrap();
+    assert_eq!(stopped.reason, "engineRecovery");
+    render(&mut processor, 2);
+    collect(&mut session, &controller);
+    assert!(!controller.lock().unwrap().live().playing);
+    assert!(!session.view().recording);
+    assert_eq!(
+        notes(&session).len(),
+        before.len() + 513,
+        "R5: recovery End must retain the already accepted held note through a full recorder"
+    );
+    assert!(session.settle_recording().is_ok(), "R5: take must settle");
+    undo(&mut session);
+    assert_eq!(notes(&session), before);
 }

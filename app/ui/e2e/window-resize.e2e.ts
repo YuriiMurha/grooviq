@@ -37,7 +37,7 @@ async function contained(dialog: Locator) {
   expect(blocked).toEqual([]);
 }
 
-test.use({ seed: { project: seed, files: soundsFor(["Kick"]) } });
+test.use({ seed: { audioLog: [], project: seed, files: soundsFor(["Kick"]) } });
 for (const device of ["Kick sampler", "Bass synth"]) {
   for (const [width, height] of [[1280, 800], [1440, 900], [1920, 1080]]) {
     test(`${device} remains reachable after ${width} resize`, async ({ app, mock }, info) => {

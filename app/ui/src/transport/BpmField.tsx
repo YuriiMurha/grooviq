@@ -1,4 +1,7 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type WheelEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type WheelEvent } from "react";
+import { TempoCommit } from "./tempoCommit";
+import { registerProjectDraft } from "../project/pending";
+import { isProjectReplacing, onProjectReplaced } from "../project/replacement";
 import { BPM_MAX, BPM_MIN } from "../api/project";
 
 /** Pixels of dragging for one BPM; a wheel notch is about this many `deltaY` units. */
@@ -11,7 +14,7 @@ const clamp = (n: number) => Math.min(BPM_MAX, Math.max(BPM_MIN, n));
 interface Props {
   bpm: number;
   /** Called with a new tempo (clamped, two decimals) when it differs from `bpm`. */
-  onCommit: (bpm: number) => void;
+  onCommit: (bpm: number) => Promise<boolean>;
 }
 
 /** The tempo: type it (Enter or leaving the field sets it, and Enter leaves it; Escape gives up),
@@ -19,29 +22,43 @@ interface Props {
 export function BpmField({ bpm, onCommit }: Props) {
   const [draft, setDraft] = useState<string | null>(null);
   // What the tempo is meant to be right now: `bpm` lags a round trip behind drags and scrolls.
-  const target = useRef(bpm);
+  const tempo = useRef(new TempoCommit(bpm));
+  const draftRef = useRef<string | null>(null);
+  const updateDraft = (value: string | null) => { draftRef.current = value; setDraft(value); };
   const drag = useRef<{ y: number; start: number; moved: boolean } | null>(null);
   const wheel = useRef(0);
   // Set when the field is left on purpose without keeping what was typed (Escape, a drag).
   const discard = useRef(false);
 
-  useEffect(() => {
-    target.current = bpm;
-  }, [bpm]);
+  useEffect(() => { tempo.current.observe(bpm); }, [bpm]);
 
   const send = (value: number) => {
-    const next = round2(clamp(value));
-    if (next === target.current) return;
-    target.current = next;
-    onCommit(next);
+    if (isProjectReplacing()) return;
+    void tempo.current.send(round2(clamp(value)), onCommit);
   };
 
   const commitText = (text: string) => {
-    setDraft(null);
+    updateDraft(null);
     const value = Number(text.trim().replace(",", "."));
     if (text.trim() === "" || !Number.isFinite(value)) return;
     send(value);
   };
+
+  useLayoutEffect(() => registerProjectDraft(() => {
+    drag.current = null;
+    if (draftRef.current !== null) commitText(draftRef.current);
+  }, () => {
+    const text = draftRef.current?.trim();
+    if (!text) return false;
+    const value = Number(text.replace(",", "."));
+    return Number.isFinite(value) && round2(clamp(value)) !== bpm;
+  }));
+  useEffect(() => onProjectReplaced(() => {
+    tempo.current.reset(bpm);
+    updateDraft(null);
+    drag.current = null;
+    wheel.current = 0;
+  }), [bpm]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     const step = e.shiftKey ? 0.1 : 1;
@@ -52,12 +69,12 @@ export function BpmField({ bpm, onCommit }: Props) {
       e.currentTarget.blur();
     } else if (e.key === "Escape") {
       discard.current = true;
-      setDraft(null);
+      updateDraft(null);
       e.currentTarget.blur();
     } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
       e.preventDefault();
-      setDraft(null);
-      send(target.current + (e.key === "ArrowUp" ? step : -step));
+      updateDraft(null);
+      send(tempo.current.target + (e.key === "ArrowUp" ? step : -step));
     }
   };
 
@@ -67,11 +84,11 @@ export function BpmField({ bpm, onCommit }: Props) {
     if (notches === 0) return;
     wheel.current -= notches * WHEEL_UNITS;
     // Scrolling up raises the tempo.
-    send(target.current - notches * (e.shiftKey ? 0.1 : 1));
+    send(tempo.current.target - notches * (e.shiftKey ? 0.1 : 1));
   };
 
   const onPointerDown = (e: PointerEvent<HTMLInputElement>) => {
-    drag.current = { y: e.clientY, start: target.current, moved: false };
+    drag.current = { y: e.clientY, start: tempo.current.target, moved: false };
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
@@ -87,7 +104,7 @@ export function BpmField({ bpm, onCommit }: Props) {
       d.moved = true;
       // A drag is not an edit: leave the text field.
       discard.current = true;
-      setDraft(null);
+      updateDraft(null);
       e.currentTarget.blur();
     }
     const unit = e.shiftKey ? 0.1 : 1;
@@ -106,7 +123,7 @@ export function BpmField({ bpm, onCommit }: Props) {
       data-hint="The tempo in beats per minute, 20 to 400. Type it, scroll over it, or drag it up and down. Hold Shift for fine steps."
       value={draft ?? bpm.toFixed(2)}
       onFocus={(e) => e.currentTarget.select()}
-      onChange={(e) => setDraft(e.target.value)}
+      onChange={(e) => updateDraft(e.target.value)}
       onBlur={(e) => {
         if (discard.current) discard.current = false;
         else if (draft !== null) commitText(e.currentTarget.value);
