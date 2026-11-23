@@ -133,6 +133,7 @@ pub struct Controller {
     stopped: bool,
     stop_owed: bool,
     recovery_stop_mark: Option<u32>,
+    pending_recovery_stop: Option<u32>,
     reset_owed: bool,
     /// Test switch: this many replays of the state panic, as a device bug in `set_param` would.
     #[cfg(test)]
@@ -173,6 +174,7 @@ impl Controller {
             stopped: false,
             stop_owed: false,
             recovery_stop_mark: None,
+            pending_recovery_stop: None,
             reset_owed: false,
             #[cfg(test)]
             replay_panics: std::cell::Cell::new(0),
@@ -638,8 +640,9 @@ impl Controller {
             });
             debug_assert!(queued.is_ok());
         }
-        let queued = self.commands.push(Msg::RecordMark(self.record_mark));
+        let queued = self.commands.push(Msg::RecoveryStop(self.record_mark));
         debug_assert!(queued.is_ok());
+        self.pending_recovery_stop = Some(self.record_mark);
         self.recording_armed = false;
         self.recovery_stop_mark = Some(self.record_mark);
         self.stop_owed = false;
@@ -703,39 +706,41 @@ impl Controller {
         events
     }
 
+    /// Called only while the output coordinator exclusively owns the detached processor.
+    pub(crate) fn settle_recovery_stop(&mut self, processor: &mut AudioProcessor) {
+        processor.flush_recording_boundaries();
+        if self.stop_owed {
+            // Make room in FIFO order until the original transaction can be admitted.
+            while self.commands.slots() < 3 {
+                self.free_trash();
+                assert!(
+                    processor.recovery_prefix_step(),
+                    "missing pending recovery transaction"
+                );
+            }
+            self.flush_recovery_stop();
+        }
+        if let Some(mark) = self.pending_recovery_stop {
+            while !processor.recovery_stop_completed(mark) {
+                self.free_trash();
+                assert!(
+                    processor.recovery_prefix_step(),
+                    "missing pending recovery transaction"
+                );
+            }
+            self.pending_recovery_stop = None;
+        }
+        processor.flush_recording_boundaries();
+        self.free_trash();
+    }
+
     /// Switches the engine to a new sample rate, rebuilding the graph from the controller's
     /// state (which also recovers a graph that panicked; the next `check_health` still reports
     /// the panic). Call it with the audio callback stopped (it needs the processor itself),
     /// never on the audio thread. Returns false if construction failed; the processor stays
     /// silent and the previous rate, state and queued commands are retained.
     pub fn reconfigure(&mut self, processor: &mut AudioProcessor, config: EngineConfig) -> bool {
-        // The consumer may have drained while the callback was detached. A retry must
-        // deliver retained take boundaries even if constructing the graph fails again.
-        processor.flush_recording_boundaries();
-        if self.stop_owed {
-            // The callback is stopped: settle directly even when its command FIFO is full.
-            // Earlier transport starts cannot overtake the exhaustion decision on rebuild.
-            for msg in processor.take_queued() {
-                if matches!(
-                    msg,
-                    Msg::Command {
-                        cmd: Command::Play
-                            | Command::PlayLoops { .. }
-                            | Command::SetRecording { on: true },
-                        ..
-                    }
-                ) {
-                    continue;
-                }
-                let queued = self.commands.push(msg);
-                debug_assert!(queued.is_ok());
-            }
-            self.record_mark = self.record_mark.wrapping_add(1);
-            processor.finish_recovery_stop(self.record_mark);
-            self.recording_armed = false;
-            self.recovery_stop_mark = Some(self.record_mark);
-            self.stop_owed = false;
-        }
+        self.settle_recovery_stop(processor);
         // The fresh graph is built from the state every queued message already updated, so a
         // message that only changes the graph would land in it a second time: a channel built
         // for the old rate, a removal of the rebuilt channel, a parameter for a project that
@@ -1191,6 +1196,7 @@ mod tests {
         );
         assert_eq!(c.state, state);
         assert_eq!(c.instances, instances);
+        c.send(Command::Stop).unwrap(); // Unrelated command after the recovery barrier.
         let queued = c.commands.slots();
         assert_eq!(
             c.load_state(EngineState::default()),
@@ -1209,7 +1215,9 @@ mod tests {
         assert_eq!(c.sample_rate, 48_000.0);
         assert_eq!(c.generation, generation);
         assert_eq!(c.state, state);
-        assert_eq!(c.commands.slots(), queued);
+        // Only the admitted Stop/disarm/completion-tag prefix was consumed.
+        assert_eq!(c.commands.slots(), queued + 3);
+        assert_eq!(c.pending_recovery_stop, None);
         c.replay_panics.set(0);
         c.reconfigure(
             &mut p,
@@ -1493,5 +1501,364 @@ mod sampler_trim_tests {
             before - 1,
             "a multi-message prefix must never become callback-visible"
         );
+    }
+}
+
+#[cfg(all(test, feature = "test-hooks"))]
+mod admitted_stop_red_v2 {
+    use super::*;
+    use crate::{
+        AudioOutput, AudioSlot, BLOCK, ChannelId, ChannelMix, ChannelSetup, EngineConfig,
+        HealthEvent, LiveSnapshot, NoteId, OutputBackend, OutputChoice, OutputInfo, PPQ,
+        RecordEvent, engine,
+    };
+    use std::sync::{Arc, Mutex};
+
+    struct NoOutput;
+    impl OutputBackend for NoOutput {
+        fn outputs(&self) -> Vec<OutputInfo> {
+            Vec::new()
+        }
+        fn open(&mut self, _: &OutputInfo, _: Arc<AudioSlot>) -> Result<u32, String> {
+            panic!("this fake NoOutput must never open a device")
+        }
+        fn close(&mut self) {}
+    }
+
+    fn admitted_failed_rebuild() -> (Controller, AudioProcessor, u32, u64) {
+        let (mut c, mut p) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        c.send(Command::SetTempo { bpm: 120.0 }).unwrap();
+        c.add_channel(ChannelSetup::synth(
+            ChannelId(1),
+            Vec::new(),
+            ChannelMix::default(),
+        ))
+        .unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
+        c.send(Command::Play).unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        let id = NoteId::live();
+        c.send(Command::ChannelNote {
+            channel: ChannelId(1),
+            key: 76,
+            velocity: 0.8,
+            on: true,
+            id,
+        })
+        .unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        let mut accepted = Vec::new();
+        c.take_recorded(&mut accepted);
+        assert!(
+            accepted.iter().any(|e| matches!(e,
+            RecordEvent::Note { key: 76, on: true, id: got, .. } if *got == id)),
+            "the original held note must have been positively recorded"
+        );
+        c.attempts = 3;
+        c.send(Command::InjectPanic).unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert_eq!(c.live().frames, (3 * BLOCK) as u64);
+        assert!(
+            c.commands.slots() >= 3,
+            "exercise available command FIFO, not the old full-FIFO branch"
+        );
+        assert_eq!(c.check_health(), [HealthEvent::Stopped { faults: 1 }]);
+        assert!(!c.stop_owed, "the exhaustion transaction has been ADMITTED");
+        let mark = c.recovery_stop_mark().expect("original exhaustion mark");
+        assert_eq!(c.record_mark(), mark);
+        assert!(!c.recording_armed());
+        c.fail_replays(1);
+        assert!(
+            !c.reconfigure(
+                &mut p,
+                EngineConfig {
+                    sample_rate: 96_000.0
+                }
+            ),
+            "this is an intentionally refused build, not recovery success"
+        );
+        // 48kHz,120BPM, zero latency, no seek/resize/tempo change: original stop at frame192.
+        let end_tick = (3 * BLOCK) as u64 * 120 * u64::from(PPQ) / (60 * 48_000);
+        (c, p, mark, end_tick)
+    }
+
+    #[test]
+    fn admitted_stop_retry_keeps_original_identity_and_later_play() {
+        let (mut c, mut p, mark, tick) = admitted_failed_rebuild();
+        let mut events = Vec::new();
+        c.take_recorded(&mut events);
+        assert_eq!(
+            events,
+            vec![
+                RecordEvent::End {
+                    tick,
+                    position: tick as u32
+                },
+                RecordEvent::Mark { id: mark }
+            ]
+        );
+        c.send(Command::Play).unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
+        c.fail_replays(2);
+        for _ in 0..2 {
+            assert!(!c.reconfigure(
+                &mut p,
+                EngineConfig {
+                    sample_rate: 96_000.0
+                }
+            ));
+            assert_eq!(c.record_mark(), mark);
+            c.settle_recovery_stop(&mut p);
+        }
+        assert!(c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 48_000.0
+            }
+        ));
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert!(
+            c.live().playing,
+            "explicitly accepted later Play survives retries"
+        );
+        assert!(c.recording_armed());
+        events.clear();
+        c.take_recorded(&mut events);
+        assert!(
+            events.is_empty(),
+            "the original End and Mark are not repeated"
+        );
+    }
+
+    #[test]
+    fn callback_completed_stop_does_not_stop_later_play_on_reconfigure() {
+        let (mut c, mut p) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        c.send(Command::Play).unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        c.attempts = 3;
+        c.send(Command::InjectPanic).unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert_eq!(c.check_health().len(), 1);
+        let mark = c.recovery_stop_mark().unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert!(!c.live().playing);
+        c.send(Command::Play).unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert!(c.live().playing);
+        assert!(c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 96_000.0
+            }
+        ));
+        assert!(
+            c.live().playing,
+            "completed identity must not trigger another Stop"
+        );
+        assert_eq!(c.record_mark(), mark);
+        let mut events = Vec::new();
+        c.take_recorded(&mut events);
+        assert_eq!(events, vec![RecordEvent::Mark { id: mark }]);
+    }
+
+    #[test]
+    fn detached_stop_preserves_full_record_fifo_end_before_original_mark() {
+        let (mut c, mut p) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        c.send(Command::SetTempo { bpm: 120.0 }).unwrap();
+        c.add_channel(ChannelSetup::synth(
+            ChannelId(1),
+            Vec::new(),
+            ChannelMix::default(),
+        ))
+        .unwrap();
+        c.send(Command::SetRecording { on: true }).unwrap();
+        c.send(Command::Play).unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        for _ in 0..crate::record::RECORD_CAPACITY {
+            c.send(Command::ChannelNote {
+                channel: ChannelId(1),
+                key: 60,
+                velocity: 0.8,
+                on: true,
+                id: NoteId::live(),
+            })
+            .unwrap();
+            p.process(&mut [0.0; BLOCK * 2], 2);
+        }
+        assert_eq!(c.recorded.slots(), crate::record::RECORD_CAPACITY);
+        c.attempts = 3;
+        c.send(Command::InjectPanic).unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        assert_eq!(c.check_health().len(), 1);
+        let mark = c.recovery_stop_mark().unwrap();
+        let frames = c.live().frames;
+        let tick = frames * 120 * u64::from(PPQ) / (60 * 48_000);
+        c.settle_recovery_stop(&mut p);
+        assert!(!c.live().playing);
+        let mut prefix = Vec::new();
+        c.take_recorded(&mut prefix);
+        assert_eq!(prefix.len(), crate::record::RECORD_CAPACITY);
+        assert!(prefix.iter().all(|e| matches!(e, RecordEvent::Note { .. })));
+        c.settle_recovery_stop(&mut p);
+        c.settle_recovery_stop(&mut p);
+        let mut ending = Vec::new();
+        c.take_recorded(&mut ending);
+        assert_eq!(
+            ending,
+            vec![
+                RecordEvent::End {
+                    tick,
+                    position: tick as u32
+                },
+                RecordEvent::Mark { id: mark }
+            ]
+        );
+        assert_eq!(c.live().frames, frames);
+    }
+
+    #[test]
+    fn detached_prefix_keeps_barrier_mode_tempo_seek_chronology() {
+        let (mut c, mut p) = crate::engine_with(
+            EngineConfig {
+                sample_rate: 48_000.0,
+            },
+            EngineState {
+                bpm: 120.0,
+                channels: vec![ChannelSetup::synth(
+                    ChannelId(1),
+                    vec![],
+                    ChannelMix::default(),
+                )],
+                song: crate::SongData {
+                    end_tick: 960,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        c.send(Command::SetRecording { on: true }).unwrap();
+        c.send(Command::Play).unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        c.send(Command::ChannelNote {
+            channel: ChannelId(1),
+            key: 76,
+            velocity: 0.8,
+            on: true,
+            id: NoteId(7001),
+        })
+        .unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        let mut events = Vec::new();
+        c.take_recorded(&mut events);
+        assert!(matches!(
+            events.as_slice(),
+            [RecordEvent::Note {
+                id: NoteId(7001),
+                ..
+            }]
+        ));
+        c.attempts = 3;
+        c.send(Command::InjectPanic).unwrap();
+        p.process(&mut [0.0; BLOCK * 2], 2);
+        let before = c.send_marked(Command::SetTempo { bpm: 60.0 }).unwrap();
+        c.set_timeline(crate::TimelineUpdate {
+            pattern: Box::new(c.state.pattern.clone()),
+            song: Box::new(c.state.song.clone()),
+            bpm: 90.0,
+            mode: crate::PlaybackMode::Song,
+            region: None,
+            remove_channel: None,
+        })
+        .unwrap();
+        c.send(Command::Seek { tick: 96 }).unwrap();
+        c.check_health();
+        let mark = c.recovery_stop_mark().unwrap();
+        c.fail_replays(1);
+        assert!(!c.reconfigure(
+            &mut p,
+            EngineConfig {
+                sample_rate: 96_000.0
+            }
+        ));
+        events.clear();
+        c.take_recorded(&mut events);
+        assert_eq!(
+            events,
+            vec![
+                RecordEvent::Mark { id: before },
+                RecordEvent::End {
+                    tick: 7,
+                    position: 7
+                },
+                RecordEvent::Mark { id: mark }
+            ],
+            "mode transition ends original take BEFORE later seek, without a callback"
+        );
+        assert!(!c.live().playing);
+        assert!(!c.recording_armed());
+        assert_eq!(c.live().frames, (3 * BLOCK) as u64);
+    }
+
+    fn detached_facts() -> (LiveSnapshot, bool, Vec<RecordEvent>, u32, u64) {
+        let (c, p, mark, tick) = admitted_failed_rebuild();
+        let shared = Arc::new(Mutex::new(c));
+        let output = AudioOutput::start(
+            Box::new(NoOutput),
+            Arc::clone(&shared),
+            p,
+            OutputChoice::SystemDefault,
+            false,
+            Box::new(|_| {}),
+        );
+        output.poll_now();
+        output.poll_now();
+        let facts = {
+            let mut c = shared.lock().unwrap();
+            let mut events = Vec::new();
+            c.take_recorded(&mut events);
+            (c.live(), c.recording_armed(), events, mark, tick)
+        };
+        // Join the actual coordinator poller BEFORE any behavioral assertion can unwind.
+        drop(output);
+        facts
+    }
+
+    #[test]
+    fn admitted_failed_rebuild_stops_without_callback() {
+        let (live, armed, _, _, _) = detached_facts();
+        assert!(
+            !live.playing,
+            "R6 admitted Stop must COMPLETE without another callback"
+        );
+        assert!(!armed);
+        assert_eq!(
+            live.frames,
+            (3 * BLOCK) as u64,
+            "no synthetic callback or clock advancement"
+        );
+    }
+
+    #[test]
+    fn admitted_failed_rebuild_ends_original_take_without_callback() {
+        let (_, armed, events, mark, tick) = detached_facts();
+        // Deliberately no playing assertion here: it must not mask the independent End witness.
+        assert_eq!(
+            events,
+            vec![
+                RecordEvent::End {
+                    tick,
+                    position: tick as u32
+                },
+                RecordEvent::Mark { id: mark }
+            ],
+            "R6 original take End must precede its ORIGINAL Mark exactly once"
+        );
+        assert!(!armed);
     }
 }
