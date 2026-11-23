@@ -8,13 +8,14 @@ interface Props {
   signature: Signature;
   /** The output's rate, for the latency shift. */
   sampleRate: number;
+  playMode: "pattern" | "song" | null;
 }
 
 const IDLE = "1.1.01";
 
 /** "bar.beat.step" from the live stream. It reads the latest frame once per animation frame and
  * writes the text itself, so playing never re-renders React. */
-export function PositionReadout({ latest, bpm, signature, sampleRate }: Props) {
+export function PositionReadout({ latest, bpm, signature, sampleRate, playMode }: Props) {
   const text = useRef<HTMLSpanElement>(null);
   // What the animation loop needs, kept current without restarting it.
   const params = useRef({ bpm, signature, sampleRate });
@@ -46,7 +47,7 @@ export function PositionReadout({ latest, bpm, signature, sampleRate }: Props) {
   }, [latest]);
 
   return (
-    <div className="position" data-hint="Where the pattern is now: bar, beat and step (a sixteenth).">
+    <div className="position" data-hint={playMode ? `Where the ${playMode} is now: bar, beat and step (a sixteenth).` : "Current playback position: bar, beat and step (a sixteenth)."}>
       <span ref={text} className="position-value" role="timer" aria-label="Position">
         {IDLE}
       </span>
