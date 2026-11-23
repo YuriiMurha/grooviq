@@ -128,6 +128,20 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       if (id !== undefined) setSelected({ generation: result.reply.generation, id });
     }
   };
+  const selectedAction = async (action: "mute" | "delete") => {
+    if (busy || !snapshot || !selectedClip || isProjectReplacing() || modalIsOpen()) return;
+    const id = selectedClip.id, generation = snapshot.generation;
+    const stamp = { generation, revision: snapshot.revision };
+    const operations: Parameters<typeof mutate>[1] = action === "delete"
+      ? [{ kind: "deleteClip", clip: id }]
+      : [{ kind: "setClip", clip: id, name: selectedClip.name, muted: !selectedClip.muted }];
+    // A key action during a held preview owns that input: its later release sends nothing.
+    cancel();
+    const result = await mutate(stamp, operations);
+    if (action === "delete" && result.status === "applied") {
+      setSelected(current => current?.generation === generation && current.id === id ? null : current);
+    }
+  };
   const down = (event: PointerEvent<HTMLCanvasElement>) => {
     if (event.button !== 0 || busy || !snapshot || isProjectReplacing() || modalIsOpen() || event.ctrlKey || event.metaKey) return;
     event.preventDefault(); event.currentTarget.focus();
@@ -177,6 +191,13 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
   };
   const key = (event: KeyboardEvent<HTMLCanvasElement>) => {
     if (event.key === "Escape") { event.preventDefault(); cancel(); return; }
+    if ((event.key === "Delete" || event.key === "Backspace") && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      // This focused editor owns the key even while busy: a repeated Backspace must not
+      // become WebKit history navigation after the first press admitted an edit.
+      event.preventDefault(); event.stopPropagation();
+      if (!event.repeat) void selectedAction("delete");
+      return;
+    }
     if (busy || !snapshot || !selectedClip || isProjectReplacing() || modalIsOpen() || event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault(); const direction = event.key === "ArrowLeft" ? -quantum : quantum;
@@ -209,7 +230,10 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       </div>
     </div></div>
     <div className="playlist-status"><span id="playlist-help">Drag patterns here. F5 closes the playlist; Escape cancels a drag.</span><span role="status">{state.busy ? "Updating playlist…" : `${snapshot?.total ?? 0} clips`}</span></div>
-    <label className="playlist-selection">Selected clip<select aria-label="Selected playlist clip" value={selected ?? ""} disabled={state.busy} onChange={event => { cancel(); setSelected(event.target.value ? { generation: snapshot?.generation ?? 0, id: Number(event.target.value) } : null); }}><option value="">None</option>{clips.filter(clip => clip.id === selected || visibleLabels.some(visible => visible.id === clip.id)).map(clip => <option key={clip.id} value={clip.id ?? ""}>{clip.name} · Track {clip.trackIndex + 1} · {clip.startTick} ticks</option>)}</select></label>
+    <div className="playlist-selection"><label htmlFor="selected-playlist-clip">Selected clip</label><select id="selected-playlist-clip" aria-label="Selected playlist clip" value={selected ?? ""} disabled={state.busy} onChange={event => { cancel(); setSelected(event.target.value ? { generation: snapshot?.generation ?? 0, id: Number(event.target.value) } : null); }}><option value="">None</option>{clips.filter(clip => clip.id === selected || visibleLabels.some(visible => visible.id === clip.id)).map(clip => <option key={clip.id} value={clip.id ?? ""}>{clip.name} · Track {clip.trackIndex + 1} · {clip.startTick} ticks</option>)}</select>
+      <button type="button" aria-label={selectedClip?.muted ? "Unmute selected clip" : "Mute selected clip"} disabled={busy || !selectedClip} onClick={() => { void selectedAction("mute"); }}>{selectedClip?.muted ? "Unmute" : "Mute"}</button>
+      <button type="button" aria-label="Delete selected clip" disabled={busy || !selectedClip} onClick={() => { void selectedAction("delete"); }}>Delete</button>
+    </div>
     {(state.message || displayError || projection.error) && <p role="alert" className="playlist-error">{state.message ?? displayError ?? projection.error}</p>}
     {selected !== null && !selectedClip && <p className="playlist-readonly">This clip is visible here; its editing controls are not available yet.</p>}
     {!state.busy && snapshot?.total === 0 && <p className="playlist-empty">Choose a pattern in the rail, then draw it on the timeline.</p>}
