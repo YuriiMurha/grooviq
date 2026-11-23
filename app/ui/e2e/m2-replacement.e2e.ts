@@ -449,7 +449,7 @@ test.describe("after a refused flush (pre-merge)", () => {
       await expect.poll(() => sessionNotes(mock)).toEqual([[1, 480, 240, 65]]);
 
       // The roll's next request is held, then refused; Save waits for it.
-      const cmd = kind === "undo" ? "notes_undo" : kind === "redo" ? "notes_redo" : "notes_edit";
+      const cmd = kind === "undo" || kind === "redo" ? "arrangement_history" : "notes_edit";
       const why = kind === "busy" ? "The audio engine did not take the change (busy)." : "Refused for the test.";
       await mock.eval(`(m) => { m.holdCommand("${cmd}"); m.refuseNext("${cmd}", "${why}"); }`);
       const sent = (await mock.calls(cmd)).length;
@@ -460,6 +460,7 @@ test.describe("after a refused flush (pre-merge)", () => {
         await app.mouse.click(p.x, p.y);
       }
       await expect.poll(async () => (await mock.calls(cmd)).length).toBe(sent + 1);
+      if (kind === "undo" || kind === "redo") expect((await mock.calls(cmd)).at(-1)?.args.undo).toBe(kind === "undo");
       const before = await warnings(app).count();
       await app.keyboard.press("ControlOrMeta+s");
       await nextFrame(app);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isProjectReplacing,
+  isProjectReplacementPending,
   onProjectReplaced,
   onProjectReplacing,
   projectGeneration,
@@ -8,8 +9,22 @@ import {
   projectReplaced,
   projectReplacing,
 } from "./replacement";
+import { beginProjectTransition } from "./pending";
 
 describe("project replacement", () => {
+  it("Save fences new admission without retiring work it is waiting to settle", () => {
+    const finish = beginProjectTransition();
+    try {
+      expect(isProjectReplacing()).toBe(true);
+      expect(isProjectReplacementPending()).toBe(false);
+      projectReplacing();
+      expect(isProjectReplacementPending()).toBe(true);
+      projectReplaceFailed();
+      expect(isProjectReplacementPending()).toBe(false);
+      expect(isProjectReplacing()).toBe(true);
+    } finally { projectReplaceFailed(); finish(); }
+    expect(isProjectReplacing()).toBe(false);
+  });
   it("listeners_hear_before_and_after_and_the_generation_moves_on_success_only", () => {
     const heard: string[] = [];
     const offA = onProjectReplacing(() => heard.push(`before ${projectGeneration()} ${isProjectReplacing()}`));

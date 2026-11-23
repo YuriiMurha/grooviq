@@ -39,7 +39,11 @@ registerSettlement(rollEditsSettled);
 
 /** What waits in the queue: an edit of the roll's, or a command, each for the project it was
  * made in (its generation). */
-type Queued = ({ edit: LocalEdit } | { command: NotesCommand }) & { stamp: PatternStamp };
+export type BarrierResult<Result> = { status: "completed"; value: Result } |
+  { status: "cancelled"; reason: "stale" | "blocked" | "detached" | "priorFailure" | "failed"; error?: unknown };
+type BarrierEntry = { epoch: number; valid: () => boolean; execute: () => Promise<void>;
+  cancel: (reason: Extract<BarrierResult<never>, { status: "cancelled" }>["reason"]) => void };
+type Queued = ({ edit: LocalEdit } | { command: NotesCommand } | { barrier: BarrierEntry }) & { stamp: PatternStamp };
 
 /** Sends the piano roll's edits to the engine one at a time, in order. Each edit shows in the
  * store at once; added notes keep temporary negative ids until the engine's reply names them,
@@ -53,6 +57,8 @@ type Queued = ({ edit: LocalEdit } | { command: NotesCommand }) & { stamp: Patte
  * notes) is only stale: the edit still goes, and the notes are fetched again. */
 export class CommitQueue {
   private pending: Queued[] = [];
+  private barriers = new Set<BarrierEntry>();
+  private historyInvalidation: { stamp: PatternStamp; epoch: number } | null = null;
   private busy = false;
   /** Temporary id → the engine's id. */
   private real = new Map<number, number>();
@@ -149,11 +155,53 @@ export class CommitQueue {
     this.pump();
   }
 
+  /** One entry in this queue; settlement must happen BEFORE requesting it. */
+  barrier<Result>(command: (still: () => boolean) => Promise<Result>, activeDrag: () => boolean,
+    accepted: (value: Result) => boolean = () => true): Promise<BarrierResult<Result>> {
+    if (this.closed) return Promise.resolve({ status: "cancelled", reason: "stale" });
+    if (activeDrag()) return Promise.resolve({ status: "cancelled", reason: "blocked" });
+    const stamp = this.stamp(); const epoch = this.epoch;
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (result: BarrierResult<Result>) => {
+        if (settled) return;
+        settled = true; this.barriers.delete(entry); resolve(result);
+      };
+      const valid = () => !settled && !this.closed && this.epoch === epoch &&
+        this.generation === stamp.generation && this.patternId === stamp.patternId && !activeDrag();
+      const entry: BarrierEntry = { epoch, valid,
+        cancel: (reason) => { if (!settled) { this.failures++; finish({ status: "cancelled", reason }); } },
+        execute: async () => {
+          if (!valid()) { entry.cancel(activeDrag() ? "blocked" : "stale"); return; }
+          try {
+            const value = await command(valid);
+            if (!valid()) { entry.cancel(activeDrag() ? "blocked" : "stale"); return; }
+            if (!accepted(value)) this.failures++;
+            finish({ status: "completed", value });
+          } catch (error) {
+            if (!settled) { this.failures++; finish({ status: "cancelled", reason: "failed", error }); }
+          }
+        } };
+      this.barriers.add(entry);
+      this.pending.push({ barrier: entry, stamp }); this.pump();
+    });
+  }
+
+  /** Detaching the view cancels only barriers; ordinary unmounted note edits still settle. */
+  detachBarriers() {
+    for (const barrier of [...this.barriers]) barrier.cancel("detached");
+  }
+  private cancelPendingBarriers(reason: "stale" | "priorFailure") {
+    for (const next of this.pending) if ("barrier" in next) next.barrier.cancel(reason);
+  }
+
   /** A New, Open or Restore is about to be sent: what is queued for this project is dropped, a
    * reply still out is ignored when it comes, and nothing goes out until [`reopened`]. */
   replacing() {
     this.closed = true;
+    for (const barrier of [...this.barriers]) barrier.cancel("stale");
     this.epoch += 1;
+    this.historyInvalidation = null;
     this.pending = [];
     this.real.clear();
     this.ownRevisions.clear();
@@ -183,6 +231,13 @@ export class CommitQueue {
   }
 
   /** The engine announced a notes revision (`notes-changed`). */
+  /** Native effect target only. Do not certify the store's stale notes as this revision. */
+  invalidateHistory(stamp: PatternStamp) {
+    if (this.closed || stamp.generation !== this.generation || stamp.patternId !== this.patternId) return;
+    this.historyInvalidation = { stamp: { ...stamp }, epoch: this.epoch };
+    if (!this.busy) this.pump();
+  }
+
   notesChanged(revision: number) {
     if (revision > this.announced) this.announced = revision;
     this.pump();
@@ -211,12 +266,24 @@ export class CommitQueue {
   private pump() {
     this.track();
     if (this.busy || this.closed) return;
+    const invalidation = this.historyInvalidation;
+    this.historyInvalidation = null;
+    if (invalidation && invalidation.epoch === this.epoch &&
+      invalidation.stamp.generation === this.generation && invalidation.stamp.patternId === this.patternId) {
+      this.reload = true;
+      this.announced = Math.max(this.announced, invalidation.stamp.revision);
+    }
     // Made in a project that is not the open one: never sent (the engine would refuse it too).
     while (this.pending.length && (this.pending[0].stamp.generation !== this.generation || this.pending[0].stamp.patternId !== this.patternId)) {
-      this.pending.shift(); this.failures += 1;
+      const dropped = this.pending.shift();
+      if (dropped && "barrier" in dropped) dropped.barrier.cancel("stale");
+      this.failures += 1;
     }
     const next = this.pending.shift();
-    if (next && "command" in next) {
+    if (next && "barrier" in next) {
+      this.runBarrier(next.barrier);
+      this.track();
+    } else if (next && "command" in next) {
       this.runNow(next.command, next.stamp);
       this.track();
     } else if (next) {
@@ -279,7 +346,7 @@ export class CommitQueue {
         this.sending = false;
         if ((ack.view.generation !== undefined && ack.view.generation !== stamp.generation) ||
             (ack.view.pattern && ack.view.pattern.id !== stamp.patternId)) {
-          this.failures += 1; this.pending = []; this.reload = true; this.done(); return;
+          this.failures += 1; this.cancelPendingBarriers("priorFailure"); this.pending = []; this.reload = true; this.done(); return;
         }
         if (ack.revision !== edit.baseRevision) this.ownRevisions.set(edit.baseRevision, ack.revision);
         if (this.ownRevisions.size > 200) this.ownRevisions.delete(this.ownRevisions.keys().next().value!);
@@ -301,11 +368,21 @@ export class CommitQueue {
         this.failures += 1;
         this.hooks.onError(errorText(e));
         // What was built on the failed edit cannot be sent: the engine's notes replace it all.
+        this.cancelPendingBarriers("priorFailure");
         this.pending = [];
         this.reload = true;
         this.done();
       },
     );
+  }
+
+  private runBarrier(barrier: BarrierEntry) {
+    this.busy = true; this.sending = true;
+    void barrier.execute().finally(() => {
+      // A late old-project answer cannot release a newer epoch's in-flight command.
+      if (this.epoch !== barrier.epoch) return;
+      this.sending = false; this.done();
+    });
   }
 
   private runNow(command: NotesCommand, origin: PatternStamp) {
@@ -320,7 +397,7 @@ export class CommitQueue {
         if (ack) {
           if ((ack.view.generation !== undefined && ack.view.generation !== stamp.generation) ||
               (ack.view.pattern && ack.view.pattern.id !== stamp.patternId)) {
-            this.failures += 1; this.pending = []; this.reload = true; this.done(); return;
+            this.failures += 1; this.cancelPendingBarriers("priorFailure"); this.pending = []; this.reload = true; this.done(); return;
           }
           if (ack.revision !== stamp.revision) this.ownRevisions.set(stamp.revision, ack.revision);
           this.store.revision = ack.revision;
@@ -336,6 +413,7 @@ export class CommitQueue {
         this.sending = false;
         this.failures += 1;
         this.hooks.onError(errorText(e));
+        this.cancelPendingBarriers("priorFailure");
         this.done();
       },
     );

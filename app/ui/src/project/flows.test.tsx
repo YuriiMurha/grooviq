@@ -111,6 +111,10 @@ beforeEach(() => {
       patterns: [{ id: view.pattern.id, name: view.pattern.name, revision: view.notesRevision }], view };
   };
   reply("pattern_list", patterns);
+  // These project-flow scenes have an empty Pattern-mode arrangement; the picker reads it.
+  reply("arrangement_view", () => ({ generation: (mocks.currentView ?? VIEW).generation, revision: 0,
+    offset: 0, total: 0, clips: [], tracks: [], audioAssets: [], loopRegion: null, playMode: "pattern",
+    songError: null, pendingRequests: [], warnings: [] }));
   reply("pattern_edit", (args: Args) => {
     if ((args?.edit as {kind?:string})?.kind !== "settle") throw new Error("This flow fixture only settles patterns.");
     return { status: "applied", state: patterns(), settlement: { recordingDisarmed: false, waiting: false } };

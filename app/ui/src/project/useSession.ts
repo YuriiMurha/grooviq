@@ -1,10 +1,12 @@
+import { runHistoryLane, type HistoryResult } from "./globalHistory";
+import { patternList, type PatternStamp as HistoryPatternStamp } from "../api/patterns";
 import { samplerTrim, type TrimAction } from "../api/samplerTrim";
 import { PatternRevisionChain, ProjectCommandQueue, registerSettlement } from "./pending";
-import type { PatternStamp } from "../api/patterns";
+import type { PatternsView, PatternStamp } from "../api/patterns";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorText, projectEdit, projectView, type Edit, type ProjectView } from "../api/project";
 import type { ProjectContextValue, ProjectStamp } from "./context";
-import { isProjectReplacing, projectGeneration } from "./replacement";
+import { isProjectReplacing, isProjectReplacementPending, projectGeneration } from "./replacement";
 
 /** An edit whose project was replaced before its turn came: dropped without a toast. */
 const STALE = new Error("stale edit");
@@ -110,6 +112,33 @@ export function useSession(onError: (message: string) => void) {
     } finally { if (action.kind !== "view") unanswered.current--; }
   }, [enqueue, enqueueMutation, adopt]);
 
-  const context: ProjectContextValue = { view: state.view, apply, run, setView: adopt, stamp, runFor, trim };
-  return { view: state.view, cleanSince: state.cleanSince, latest, adopt, enqueue, enqueueMutation, resolvePatternStamp: (origin: PatternStamp) => revisions.current.resolve(origin), acceptPatternStamp: (origin: PatternStamp, revision: number) => revisions.current.accepted(origin, revision), apply, unsettled, context };
+  // Pattern actions settle this queue externally; publication must not enqueue the action again.
+  const publishPatterns = useCallback((next: PatternsView, at: ProjectStamp, publication?: "admitted"): boolean => {
+    const shown = latest.current.view;
+    if ((publication === "admitted" ? isProjectReplacementPending() : isProjectReplacing()) ||
+      projectGeneration() !== at.replacements || next.generation !== at.generation ||
+      next.view.generation !== at.generation || next.view.pattern.id !== next.selected ||
+      !next.patterns.some((pattern) => pattern.id === next.selected)) return false;
+    if (shown && (shown.generation !== at.generation || (shown.patternRevision ?? 0) > next.revision ||
+      (shown.pattern.id === next.selected && shown.notesRevision > next.view.notesRevision))) return false;
+    adopt(next.view);
+    return true;
+  }, [adopt]);
+
+  const history = useCallback(async (at: ProjectStamp, command: () => Promise<HistoryResult>,
+    still: () => boolean, invalidate: (stamp: HistoryPatternStamp) => void): Promise<HistoryResult> => {
+    const captured = { ...at };
+    unanswered.current++;
+    try {
+      return await runHistoryLane(captured, command, {
+        enqueueMutation,
+        current: () => still() && !isProjectReplacementPending() && projectGeneration() === captured.replacements &&
+          latest.current.view?.generation === captured.generation,
+        readView: projectView, readPatterns: patternList, adopt, invalidate,
+      });
+    } finally { unanswered.current--; }
+  }, [enqueueMutation, adopt]);
+
+  const context: ProjectContextValue = { view: state.view, apply, run, setView: adopt, stamp, runFor, trim, publishPatterns };
+  return { view: state.view, cleanSince: state.cleanSince, latest, adopt, enqueue, enqueueMutation, resolvePatternStamp: (origin: PatternStamp) => revisions.current.resolve(origin), acceptPatternStamp: (origin: PatternStamp, revision: number) => revisions.current.accepted(origin, revision), apply, unsettled, publishPatterns, history, context };
 }

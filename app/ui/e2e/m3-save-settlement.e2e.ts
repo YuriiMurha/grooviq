@@ -80,14 +80,17 @@ for (const roll of [false, true]) {
     await app.mouse.click(box.x + 50, box.y + 18);
     await expect.poll(() => mock.eval('(m) => m.notes().length')).toBe(2);
     if (roll) { await app.keyboard.press('F7'); await expect(app.getByLabel('Piano roll notes')).toBeVisible(); }
-    await mock.eval("(m) => m.holdCommand('notes_undo')");
+    await mock.eval("(m) => m.holdCommand('arrangement_history')");
     await app.keyboard.press('ControlOrMeta+z');
-    await expect.poll(async () => (await mock.calls('notes_undo')).length).toBe(1);
+    await expect.poll(async () => (await mock.calls('arrangement_history')).length).toBe(1);
     await app.keyboard.press('ControlOrMeta+z');
     await mock.eval('(m) => m.addNote({channel:1,tick:2400,length:240,key:70,velocity:0.8})');
-    await mock.eval("(m) => m.releaseCommand('notes_undo')");
-    await expect.poll(async () => (await mock.calls('notes_undo')).length).toBe(2);
-    await expect(app.getByRole('status', {name:'Messages'})).toContainText('pattern changed');
+    await mock.eval("(m) => m.releaseCommand('arrangement_history')");
+    await expect(app.getByRole('status', {name:'Messages'})).toContainText('Stale arrangement revision');
+    await expect(app.getByRole('status', {name:'Messages'})).toContainText('Pending edits were refused');
+    // Failed settlement aborts the second intent before another native history call.
+    expect(await mock.calls('arrangement_history')).toHaveLength(1);
+    expect((await mock.calls('arrangement_history'))[0].args.undo).toBe(true);
     expect(await mock.eval('(m) => m.notes().length')).toBe(3);
     // Let the canonical view/fetch recover before a new deliberate action.
     await app.evaluate(() => new Promise<void>(r => requestAnimationFrame(() => requestAnimationFrame(() => r()))));

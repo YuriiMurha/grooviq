@@ -9,6 +9,8 @@ const REDO = "ControlOrMeta+Shift+z";
 
 const cmds = async (mock: Mock) => (await mock.calls()).map((c) => c.cmd);
 const count = async (mock: Mock, cmd: string) => (await mock.calls(cmd)).length;
+const historyCount = async (mock: Mock, undo: boolean) =>
+  (await mock.calls("arrangement_history")).filter((call) => call.args.undo === undo).length;
 const hold = (mock: Mock, cmd: string) => mock.eval(`(m) => m.holdCommand("${cmd}")`);
 const release = (mock: Mock, cmd: string) => mock.eval(`(m) => m.releaseCommand("${cmd}")`);
 
@@ -36,16 +38,16 @@ test.describe("undo and redo", () => {
     await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 240, 60], [1, 960, 240, 60]]);
 
     // An undo pressed while a step edit is still on its way waits for it.
-    const gridUndos = await count(mock, "notes_undo");
+    const gridUndos = await historyCount(mock, true);
     await hold(mock, "project_edit");
     await clickCell(app, 0, 8);
     await app.keyboard.press(UNDO);
     await nextFrame(app);
-    expect(await count(mock, "notes_undo")).toBe(gridUndos);
+    expect(await historyCount(mock, true)).toBe(gridUndos);
     await release(mock, "project_edit");
-    await expect.poll(() => count(mock, "notes_undo")).toBe(gridUndos + 1);
-    const order = (await cmds(mock)).filter((c) => c === "project_edit" || c === "notes_undo");
-    expect(order.slice(-2)).toEqual(["project_edit", "notes_undo"]);
+    await expect.poll(() => historyCount(mock, true)).toBe(gridUndos + 1);
+    const order = (await cmds(mock)).filter((c) => c === "project_edit" || c === "arrangement_history");
+    expect(order.slice(-2)).toEqual(["project_edit", "arrangement_history"]);
     await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 240, 60], [1, 960, 240, 60]]);
 
     // The piano roll: a drawn note goes and comes back, and the roll shows it each time.
@@ -71,17 +73,17 @@ test.describe("undo and redo", () => {
     await app.mouse.click(...xy(await at(app, 2_880, 67)));
     await app.keyboard.press(UNDO);
     await nextFrame(app);
-    const undos = await count(mock, "notes_undo");
+    const undos = await historyCount(mock, true);
     expect(undos).toBe(gridUndos + 2);
     await release(mock, "notes_edit");
-    await expect.poll(() => count(mock, "notes_undo")).toBe(undos + 1);
+    await expect.poll(() => historyCount(mock, true)).toBe(undos + 1);
     // The new note was made, then undone: the three notes from before stay.
     await expect.poll(() => sessionNotes(mock).then((n) => n.length)).toBe(3);
-    const order2 = (await cmds(mock)).filter((c) => c === "notes_edit" || c === "notes_undo");
-    expect(order2.slice(-2)).toEqual(["notes_edit", "notes_undo"]);
+    const order2 = (await cmds(mock)).filter((c) => c === "notes_edit" || c === "arrangement_history");
+    expect(order2.slice(-2)).toEqual(["notes_edit", "arrangement_history"]);
 
     // During a drag, undo is ignored.
-    const before = await count(mock, "notes_undo");
+    const before = await historyCount(mock, true);
     const from = await at(app, 1_960, 64);
     await app.mouse.move(from.x, from.y);
     await app.mouse.down();
@@ -89,7 +91,7 @@ test.describe("undo and redo", () => {
     await app.keyboard.press(UNDO);
     await app.mouse.up();
     await nextFrame(app);
-    expect(await count(mock, "notes_undo")).toBe(before);
+    expect(await historyCount(mock, true)).toBe(before);
   });
 
   test("a_recorded_take_undoes_in_one_step", async ({ app, mock }) => {
@@ -149,8 +151,8 @@ test.describe("undo and redo", () => {
     await app.keyboard.press(REDO);
     await nextFrame(app);
     // The field kept the key for its own text; no note change was undone.
-    expect(await count(mock, "notes_undo")).toBe(0);
-    expect(await count(mock, "notes_redo")).toBe(0);
+    expect(await historyCount(mock, true)).toBe(0);
+    expect(await historyCount(mock, false)).toBe(0);
     expect(await sessionNotes(mock)).toEqual([[1, 0, 240, 60]]);
     await bpm.press("Escape");
     // Outside the field the same keys undo.
