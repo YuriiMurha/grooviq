@@ -10,7 +10,7 @@ import { PatternGesture, type GestureInput } from "./gesture";
 import { createPlaylistRenderer, readPlaylistPalette, type PlaylistRenderer, type PlaylistScene } from "./renderer";
 import type { PlaylistModel } from "./usePlaylist";
 import { extent, hitClip, projectClips, viewport, type RenderClip } from "./viewport";
-import { LoopGesture, rulerTick } from "./ruler";
+import { keyboardLoop, LoopGesture, rulerTick } from "./ruler";
 import "./playlist.css";
 
 type Props = Readonly<{ model: PlaylistModel; patterns: PatternsView | null; bpm: number; beats: number; unit: number }>;
@@ -220,7 +220,7 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
   const loopDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || busy || !snapshot || isProjectReplacing() || modalIsOpen() || event.ctrlKey || event.metaKey) return;
     cancel(); event.currentTarget.focus();
-    const tick = rulerTick(event.clientX, event.currentTarget.getBoundingClientRect(), view);
+    const tick = rulerTick(event.clientX, event.currentTarget.getBoundingClientRect(), event.currentTarget.clientWidth, view);
     loopActive.current = { gesture: new LoopGesture({ pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration() }, tick, quantum, event.clientX, snapshot.loopRegion?.enabled ?? true), pointerId: event.pointerId, stamp: snapshot };
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch { cancel(); }
   };
@@ -228,10 +228,24 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     const owned = loopActive.current;
     if (!owned || owned.pointerId !== event.pointerId) return;
     if (busy || !snapshot || isProjectReplacing() || modalIsOpen() || !event.currentTarget.hasPointerCapture(event.pointerId)) { cancel(); return; }
-    setLoopPreview(owned.gesture.update(rulerTick(event.clientX, event.currentTarget.getBoundingClientRect(), view), event.clientX));
+    const tick = rulerTick(event.clientX, event.currentTarget.getBoundingClientRect(), event.currentTarget.clientWidth, view);
+    setLoopPreview(owned.gesture.update(tick, event.clientX));
     if (!release) return;
     const batch = owned.gesture.take({ pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration() });
     cancel(); if (batch) void commit(owned.stamp, batch, false);
+  };
+  const loopKey = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") { event.preventDefault(); cancel(); return; }
+    if (!event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (!["Home", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (busy || !snapshot || isProjectReplacing() || modalIsOpen() || event.repeat) return;
+    const previous = snapshot.loopRegion;
+    const region = keyboardLoop(event.key, previous, view.scrollTick, quantum);
+    if (!region || (previous?.startTick === region.startTick && previous.endTick === region.endTick)) return;
+    cancel();
+    void commit(snapshot, [{ kind: "setLoop", region }], false);
   };
   const shownLoop = loopPreview ?? snapshot?.loopRegion;
   const labelPreview: RenderClip | null = preview ? { id: preview.id, name: preview.name, kind: "pattern", trackIndex: preview.trackIndex, startTick: preview.startTick, lengthTicks: preview.content.lengthTicks, ink: 0, muted: preview.muted } : null;
@@ -251,8 +265,10 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       <button type="button" disabled={state.busy} onClick={() => { cancel(); void reload(); }}>Refresh playlist</button>
     </header>
     <div ref={ruler} className="playlist-ruler" role="group" aria-label="Playlist loop ruler" tabIndex={0} aria-disabled={busy}
+      aria-description="Shift+Home sets a loop. Hold Shift and use up or down to adjust its start, or left or right to adjust its end."
+      data-hint="Drag to set a loop. Shift+Home sets a loop. With Shift held, up/down adjusts the start and left/right adjusts the end."
       onPointerDown={loopDown} onPointerMove={event => loopMove(event)} onPointerUp={event => loopMove(event, true)} onPointerCancel={cancel} onLostPointerCapture={cancel}
-      onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); cancel(); } }}>
+      onKeyDown={loopKey}>
       {shownLoop && <div className="playlist-loop" data-enabled={shownLoop.enabled} style={{ left: (shownLoop.startTick - view.scrollTick) * view.tickWidth, width: (shownLoop.endTick - shownLoop.startTick) * view.tickWidth }} /> }{Array.from({ length: Math.min(128, Math.ceil(view.width / pixelsPerBar) + 2) }, (_, index) => {
       const bar = Math.floor(view.scrollTick / barTicks) + index; return <span key={bar} style={{ left: (bar * barTicks - view.scrollTick) * view.tickWidth }}>{bar + 1}</span>;
     })}</div>

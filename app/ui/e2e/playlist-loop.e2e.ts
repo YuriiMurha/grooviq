@@ -3,6 +3,23 @@ import type { ArrangementPage } from "../src/api/arrangement";
 import type { Page } from "@playwright/test";
 const read = (page: Page) => page.evaluate(() => (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: object) => Promise<ArrangementPage> } }).__TAURI_INTERNALS__.invoke("arrangement_view", { offset: 0, limit: 256 }));
 
+test("focused ruler creates and adjusts a loop without a pointer", async ({ app, mock }) => {
+  await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
+  await app.keyboard.press("F5");
+  const ruler = app.getByRole("group", { name: "Playlist loop ruler" });
+  await expect(ruler).toHaveAttribute("aria-disabled", "false");
+  await ruler.focus();
+  await app.keyboard.press("Shift+Home");
+  await expect.poll(async () => (await read(app)).loopRegion).toEqual({ startTick: 0, endTick: 960, enabled: true });
+  await expect(ruler).toHaveAttribute("aria-disabled", "false");
+  await app.keyboard.press("Shift+ArrowRight");
+  await expect.poll(async () => (await read(app)).loopRegion).toEqual({ startTick: 0, endTick: 1920, enabled: true });
+  await expect(ruler).toHaveAttribute("aria-disabled", "false");
+  await app.keyboard.press("Shift+ArrowUp");
+  await expect.poll(async () => (await read(app)).loopRegion).toEqual({ startTick: 960, endTick: 1920, enabled: true });
+  expect(await mock.calls("arrangement_edit")).toHaveLength(3);
+});
+
 test("ruler commits one canonical loop on release and uses Session undo/redo", async ({ app, mock }) => {
   await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
   await app.keyboard.press("F5");

@@ -2,9 +2,26 @@ import type { ArrangementOperation, LoopRegion } from "../api/arrangement";
 import type { GestureGuard } from "./gesture";
 import { MAX_SONG_TICKS, snapTick, tickAtX, type PlaylistView } from "./geometry";
 
-export function rulerTick(clientX: number, rect: { left: number; width: number }, view: PlaylistView): number {
-  if (!(rect.width > 0)) throw new RangeError("Ruler has no input area");
-  return tickAtX((clientX - rect.left) * view.width / rect.width, view);
+export const RULER_DRAG_THRESHOLD = 4;
+
+export function rulerTick(clientX: number, rect: { left: number; width: number }, layoutWidth: number, view: PlaylistView): number {
+  if (!(rect.width > 0) || !(layoutWidth > 0)) throw new RangeError("Ruler has no input area");
+  return tickAtX((clientX - rect.left) * layoutWidth / rect.width, view);
+}
+
+export function keyboardLoop(key: string, region: LoopRegion | null, visibleStart: number, quantum: number): LoopRegion | null {
+  if (key === "Home") {
+    const startTick = snapTick(visibleStart, quantum, 0, MAX_SONG_TICKS - quantum);
+    return { startTick, endTick: startTick + quantum, enabled: region?.enabled ?? true };
+  }
+  if (!region) return null;
+  switch (key) {
+    case "ArrowLeft": return { ...region, endTick: Math.max(region.startTick + 1, region.endTick - quantum) };
+    case "ArrowRight": return { ...region, endTick: Math.min(MAX_SONG_TICKS, region.endTick + quantum) };
+    case "ArrowDown": return { ...region, startTick: Math.max(0, region.startTick - quantum) };
+    case "ArrowUp": return { ...region, startTick: Math.min(region.endTick - 1, region.startTick + quantum) };
+    default: return null;
+  }
 }
 export class LoopGesture {
   private closed = false;
@@ -21,7 +38,7 @@ export class LoopGesture {
   }
   update(tick: number, clientX: number): LoopRegion | null {
     if (this.closed) return null;
-    this.moved ||= Math.abs(clientX - this.clientX) >= 3;
+    this.moved ||= Math.abs(clientX - this.clientX) >= RULER_DRAG_THRESHOLD;
     this.region = this.interval(tick);
     return this.moved ? this.region : null;
   }
