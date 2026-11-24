@@ -19,6 +19,7 @@
 .pattern-rail p[role="alert"] { color: var(--text); }
 .pattern-mode-controls { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11px; }
 .pattern-mode-controls label { display: grid; gap: 2px; color: var(--muted); }
+.pattern-mode-controls select { color-scheme: dark; }
 .pattern-current { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pattern-playlist-shell { padding: 16px; border-bottom: 1px solid var(--line); color: var(--muted); background: var(--bg); }
 .pattern-playlist-shell h2 { color: var(--text); font-size: 14px; margin: 0 0 8px; }
