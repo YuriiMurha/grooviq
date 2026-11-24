@@ -3,10 +3,10 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export const allowed = new Set([
-  'MIT', 'Apache-2.0', 'Apache-2.0 WITH LLVM-exception', 'BlueOak-1.0.0', 'CC-BY-4.0', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD', 'ISC',
+  'MIT', 'Apache-2.0', 'Apache-2.0 WITH LLVM-exception', 'BlueOak-1.0.0', 'CC-BY-4.0', 'BSD-1-Clause', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD', 'ISC',
   'MPL-2.0', 'Zlib', 'Unicode-3.0', 'Unicode-DFS-2016',
   'LGPL-2.1-only', 'LGPL-2.1-or-later', 'LGPL-3.0-only', 'LGPL-3.0-or-later',
-  'GPL-2.0-only', 'GPL-2.0-or-later', 'GPL-3.0-only', 'GPL-3.0-or-later', 'OFL-1.1',
+  'GPL-2.0-or-later', 'GPL-3.0-only', 'GPL-3.0-or-later', 'OFL-1.1',
 ]);
 
 // Parse the complete expression even when an OR branch already passes.
@@ -76,7 +76,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       const lock = JSON.parse(readFileSync(`${ui}/package-lock.json`, 'utf8'));
       console.log('# npm dependency licences\n\nPackage path | Version | Licence | Scope\n--- | --- | --- | ---');
       for (const [path, pkg] of Object.entries(lock.packages)) {
-        console.log(`${path || '(root)'} | ${pkg.version} | ${pkg.license ?? 'UNKNOWN'} | ${pkg.dev ? 'build/test only' : 'production dependency (bundling varies)'}`);
+        console.log(`${path || '(root)'} | ${pkg.version} | ${pkg.license ?? 'UNKNOWN'} | ${(pkg.dev || pkg.devOptional) ? 'build/test only' : 'production dependency (bundling varies)'}`);
       }
       process.exitCode = licenseFailures(lock).length ? 1 : 0;
       process.exit(process.exitCode);

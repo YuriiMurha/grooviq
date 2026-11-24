@@ -4,7 +4,9 @@ The dependency-policy workflow publishes the current npm licence inventory and
 Rust package metadata as artifacts. Preserve upstream copyright and licence files
 when distributing dependencies; this inventory does not replace their terms.
 
-Root approved these exact additions under issue #464:
+Root approved these three explicit licence expressions for the allowlist under
+issue #464 (not just these current packages). The inventory reports every
+dependency on each CI run; the following identifies current attribution:
 
 BlueOak-1.0.0 (https://spdx.org/licenses/BlueOak-1.0.0.html):
 - @isaacs/nonrecursive-glob-match 1.1.0
