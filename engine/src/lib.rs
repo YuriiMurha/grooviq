@@ -174,3 +174,5 @@ pub use command::TimelineUpdate;
 pub mod media_budget;
 
 pub use sample_file::decode_sample_budgeted;
+
+pub mod mixer;
