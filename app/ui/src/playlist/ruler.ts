@@ -42,6 +42,7 @@ export class LoopGesture {
     this.region = this.interval(tick);
     return this.moved ? this.region : null;
   }
+  get dragging(): boolean { return this.moved; }
   cancel(): void { this.closed = true; }
   take(guard: GestureGuard): readonly ArrangementOperation[] | null {
     if (this.closed) return null;
@@ -49,4 +50,15 @@ export class LoopGesture {
     if (!this.moved || guard.pointerId !== this.guard.pointerId || guard.stamp.generation !== this.guard.stamp.generation || guard.stamp.revision !== this.guard.stamp.revision || guard.replacements !== this.guard.replacements) return null;
     return [{ kind: "setLoop", region: this.region }];
   }
+}
+
+/** Targets stay transport-only; native owns Song extent and active-loop clamping. */
+export function seekTarget(tick: number, quantum: number): number {
+  return snapTick(tick, quantum);
+}
+export function keyboardSeek(key: string, position: number, quantum: number): number | null {
+  if (!Number.isSafeInteger(position) || position < 0) return null;
+  if (key === "Home") return 0;
+  const direction = key === "ArrowLeft" || key === "ArrowDown" ? -1 : key === "ArrowRight" || key === "ArrowUp" ? 1 : 0;
+  return direction ? Math.max(0, Math.min(MAX_SONG_TICKS, position + direction * quantum)) : null;
 }

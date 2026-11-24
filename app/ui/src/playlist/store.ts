@@ -28,6 +28,7 @@ export type PlaylistAdapter = Readonly<{
   readPatterns: () => Promise<PatternsView>;
   selectPattern: (base: PatternsView, pattern: number) => Promise<PatternReply>;
   edit: (stamp: ArrangementStamp, operations: readonly ArrangementOperation[]) => Promise<ArrangementReply>;
+  seek: (stamp: ArrangementStamp, tick: number) => Promise<ArrangementReply>;
   readProject: () => Promise<ProjectView>;
   publishProject: (view: ProjectView, origin: ProjectStamp) => boolean;
   changed: (state: PlaylistState) => void;
@@ -155,6 +156,33 @@ export class PlaylistController {
       return false;
     } finally {
       if (this.current(origin, epoch)) this.set({ ...this.value, busy: false });
+    }
+  };
+
+  seek = async (expected: ArrangementStamp, tick: number): Promise<void> => {
+    if (this.value.busy || this.value.requiresRefresh || this.adapter.blocked()) return;
+    if (!this.value.snapshot || !stampEquals(expected, this.value.snapshot)) return;
+    requireStamp(expected);
+    if (!integer(tick, 38_400_000)) return;
+    const captured = { ...expected }, origin = { ...this.adapter.origin() }, epoch = this.epoch;
+    const current = () => this.current(origin, epoch) && captured.generation === origin.generation &&
+      !!this.value.snapshot && stampEquals(captured, this.value.snapshot);
+    if (!current()) return;
+    try {
+      await this.adapter.enqueueRead(async () => {
+        if (!current() || this.adapter.blocked()) return;
+        const reply = await this.adapter.seek(captured, tick);
+        if (!current()) return;
+        requireStamp(reply);
+        if (reply.status === "refused") {
+          this.set({ ...this.value, message: reply.message ?? "Seek refused" });
+          return;
+        }
+        if (reply.status !== "applied" || !stampEquals(reply, captured) || reply.changed) throw new Error("Invalid native seek acknowledgement");
+        this.set({ ...this.value, message: null });
+      });
+    } catch (error) {
+      if (current()) this.set({ ...this.value, message: messageOf(error) });
     }
   };
 

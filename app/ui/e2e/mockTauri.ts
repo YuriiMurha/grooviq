@@ -1455,6 +1455,23 @@ export function installMockTauri(seed: MockSeed): void {
   };
   // Clip/media editing remains native-only. Reduced workspace history above applies
   // only real note/trim inverses; it cannot skip unsupported arrangement operations.
+  const seekArrangementTransport = (args: Record<string, unknown>) => {
+    try {
+      workspaceStamp(args);
+      if (workspaceRefusal !== null) { const error = workspaceRefusal; workspaceRefusal = null; throw error; }
+      if (s.project.playMode !== "song") throw "Seek requires Song mode";
+      let tick = Number(args.tick);
+      if (!Number.isSafeInteger(tick) || tick < 0) throw "Invalid seek tick";
+      const arrangement = s.project.arrangement;
+      const loop = arrangement?.loopRegion;
+      if (loop?.enabled) tick = Math.max(loop.startTick, Math.min(loop.endTick - 1, tick));
+      const end = Math.max(0, ...(arrangement?.clips ?? []).map(c => c.startTick + (c.content.type === "pattern" ? c.content.lengthTicks : 0)));
+      if (tick > end) throw "Seek outside Song extent";
+      s.transport.startTicks = tick; s.transport.startMs = performance.now();
+      if (s.transport.held !== null) s.transport.held = tick;
+      return { status: "applied", generation: s.generation, revision: arrangementRevision, changed: false, request: null, createdIds: [], reload: false, message: null, warnings: [] };
+    } catch (error) { return { status: "refused", generation: s.generation, revision: arrangementRevision, changed: false, request: null, createdIds: [], reload: true, message: String(error), warnings: [] }; }
+  };
   const nativeArrangementOnly = () => { throw "Arrangement/media commands are not simulated by this browser fixture; use native offline acceptance."; };
   const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
     arrangement_view: workspaceView,
@@ -1467,7 +1484,7 @@ export function installMockTauri(seed: MockSeed): void {
     arrangement_waveform: nativeArrangementOnly,
     arrangement_mode: workspaceMode,
     arrangement_loop: nativeArrangementOnly,
-    arrangement_seek: nativeArrangementOnly,
+    arrangement_seek: seekArrangementTransport,
     // Native menu state has no platform menu in this headless fixture.
     edit_history_enabled: () => null,
     // commands.rs
