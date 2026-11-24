@@ -85,6 +85,9 @@ fn levels_and_gather_order_are_canonical() {
     }
     assert_eq!(expected.tracks[3].inputs[2].tap, Tap::PreFader);
     assert_eq!(expected.tracks[3].inputs[2].gain, 0.5);
+    let main = &expected.tracks[3].inputs[0];
+    assert_eq!(main.tap, Tap::PostFader);
+    assert_eq!(main.gain, 1.0);
 }
 
 #[test]
@@ -105,7 +108,7 @@ fn insert_sequence_and_sidechain_dependency_survive_compile() {
     m.sidechains.push(Sidechain {
         from: MixerTrackId(1),
         to: InsertId(2),
-        tap: Tap::PostFader,
+        tap: Tap::PreFader,
     });
     let c = checked(&m);
     assert_eq!(c.tracks[3].track.inserts, m.tracks[1].inserts);
@@ -117,6 +120,8 @@ fn insert_sequence_and_sidechain_dependency_survive_compile() {
             ..
         }
     ));
+    assert_eq!(c.tracks[3].inputs[3].tap, Tap::PreFader);
+    assert_eq!(c.tracks[3].inputs[3].gain, 1.0);
     // A sidechain is a scheduling dependency even though it is not audible.
     m.sidechains[0].from = MASTER;
     assert_eq!(
@@ -194,6 +199,12 @@ fn invalid_references_and_identities_are_refused() {
             Err(CompileError::InvalidGain(SendId(8)))
         );
     }
+    for value in [0.0, 4.0] {
+        let mut m = base.clone();
+        m.sends[0].gain = value;
+        let c = checked(&m);
+        assert_eq!(c.tracks[3].inputs[2].gain, value);
+    }
 }
 
 #[test]
@@ -204,17 +215,22 @@ fn every_aggregate_budget_has_an_exact_boundary() {
         latency_frames: 10,
         memory_bytes: 128,
     });
+    m.sidechains.push(Sidechain {
+        from: MixerTrackId(1),
+        to: InsertId(1),
+        tap: Tap::PreFader,
+    });
     let r = checked(&m).resources;
     assert_eq!(
         r,
         Resources {
             nodes: 7,
-            edges: 7,
-            buffers: 28,
+            edges: 8,
+            buffers: 29,
             latency_frames: 10,
-            // 14 compiler records * 1024 + 28 stereo blocks * 64 * 8
-            // + 7 compensation lines * 10 * 8 + 128 device bytes.
-            memory_bytes: 29_360,
+            // 15 compiler records * 1024 + 29 stereo blocks * 64 * 8
+            // + 8 compensation lines * 10 * 8 + 128 device bytes.
+            memory_bytes: 30_976,
         }
     );
     let exact = Budget {
@@ -255,9 +271,17 @@ fn long_chains_are_iterative_and_insert_counts_are_aggregate() {
         tracks: vec![track(0, None)],
         ..Mixer::default()
     };
-    for id in 1..=2000 {
+    let last = Budget::default().nodes - 1;
+    for id in 1..=last {
         m.tracks.push(track(id, Some(id - 1)));
     }
+    let c = checked(&m);
+    assert_eq!(c.levels.len() as u64, last + 1);
+    assert_eq!(c.resources.nodes, Budget::default().nodes);
+    m.tracks[1].output = Some(MixerTrackId(last));
+    assert_eq!(compile(&m, Budget::default()), Err(CompileError::Cycle));
+
+    let mut m = fixture();
     m.tracks[1].inserts = (0..100)
         .map(|id| Insert {
             id: InsertId(id),
@@ -266,10 +290,7 @@ fn long_chains_are_iterative_and_insert_counts_are_aggregate() {
         })
         .collect();
     let c = checked(&m);
-    assert_eq!(c.levels.len(), 2001);
-    assert_eq!(c.tracks[1].track.inserts.len(), 100);
-    m.tracks[1].output = Some(MixerTrackId(2000));
-    assert_eq!(compile(&m, Budget::default()), Err(CompileError::Cycle));
+    assert_eq!(c.tracks[3].track.inserts.len(), 100);
 }
 
 #[test]

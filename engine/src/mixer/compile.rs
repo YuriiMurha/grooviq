@@ -25,6 +25,8 @@ pub struct Input {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompiledTrack {
     pub track: Track,
+    /// Includes scheduling-only `InputId::Sidechain` entries. The runtime must
+    /// route those to the named insert's detector, never sum them into audible audio.
     pub inputs: Vec<Input>,
 }
 #[derive(Clone, Debug, PartialEq)]
