@@ -201,6 +201,7 @@ mod tests {
     fn prefilter_preserves_quiet_tail_before_quantization() {
         let mut d = fixture(0);
         prime(&mut d.channels[0].pre, 1.0e-5);
+        d.channels[0].remaining = 0.0;
         let mut left = [0.0];
         d.process(&mut left, &mut [0.0], None, &[]);
         let expected = (second_impulse_sample(1.0e-5) * 8388608.0).round() / 8388608.0;
