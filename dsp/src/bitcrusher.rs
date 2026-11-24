@@ -169,3 +169,81 @@ impl Device for Bitcrusher {
         self.fresh = true;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(seed: u32) -> Bitcrusher {
+        let mut d = Bitcrusher::with_seed(48000.0, seed);
+        for (i, v) in [(0, 24.0), (1, 1.0), (2, 1.0)] {
+            d.set_param(i, v);
+        }
+        d
+    }
+
+    fn prime(poles: &mut [OnePole; 2], amplitude: f32) {
+        let gain = onepole_gain(19200.0, 48000.0);
+        let first = poles[0].lp(amplitude, gain);
+        poles[1].lp(first, gain);
+    }
+
+    // H(z) = k(1 + z^-1)/(1 - (1-2k)z^-1). For H(z)^2,
+    // the impulse response at sample 1 is 4 k^2 (1-k).
+    // Use f64 trig independently of the production f32 coefficient/loop.
+    fn second_impulse_sample(amplitude: f64) -> f32 {
+        let t = libm::tan(std::f64::consts::PI * 0.4);
+        let k = t / (1.0 + t);
+        (amplitude * 4.0 * k * k * (1.0 - k)) as f32
+    }
+
+    #[test]
+    fn prefilter_preserves_quiet_tail_before_quantization() {
+        let mut d = fixture(0);
+        prime(&mut d.channels[0].pre, 1.0e-5);
+        let mut left = [0.0];
+        d.process(&mut left, &mut [0.0], None, &[]);
+        let expected = (second_impulse_sample(1.0e-5) * 8388608.0).round() / 8388608.0;
+        assert!(expected > 1.0e-6);
+        assert_eq!(d.channels[0].held, expected);
+    }
+
+    #[test]
+    fn postfilter_preserves_quiet_tail_when_held_sample_is_zero() {
+        let mut d = fixture(0);
+        prime(&mut d.channels[0].post, 1.0e-5);
+        d.channels[0].remaining = 10.0;
+        let mut left = [0.0];
+        d.process(&mut left, &mut [0.0], None, &[]);
+        let expected = second_impulse_sample(1.0e-5);
+        assert!(expected > 1.0e-6);
+        assert!(
+            (left[0] - expected).abs() < 1.0e-11,
+            "{} vs {expected}",
+            left[0]
+        );
+    }
+
+    #[test]
+    fn subthreshold_prefilter_residue_does_not_enable_dither() {
+        for seed in 0..32 {
+            let mut d = fixture(seed);
+            d.set_param(4, 1.0);
+            prime(&mut d.channels[0].pre, 1.0e-13);
+            let mut left = [0.0];
+            d.process(&mut left, &mut [0.0], None, &[]);
+            assert_eq!(d.channels[0].held, 0.0, "seed {seed}");
+            assert_eq!(left[0], 0.0, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn subthreshold_postfilter_residue_clears_to_exact_zero() {
+        let mut d = fixture(0);
+        prime(&mut d.channels[0].post, 1.0e-13);
+        d.channels[0].remaining = 10.0;
+        let mut left = [0.0];
+        d.process(&mut left, &mut [0.0], None, &[]);
+        assert_eq!(left[0], 0.0);
+    }
+}
