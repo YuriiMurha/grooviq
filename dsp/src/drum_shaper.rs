@@ -149,6 +149,20 @@ impl Device for DrumShaper {
 mod tests {
     use super::*;
     #[test]
+    fn sharp_retains_sub_ulp_envelope_contrast() {
+        let mut d = DrumShaper::new(48000.0);
+        for (index, value) in [(1, 12.0), (2, 2.0), (3, 0.0)] {
+            d.set_param(index, value);
+        }
+        d.fast = [0.5; 3];
+        // One quarter of the f32 step below 0.5. Rounding the slow state
+        // before subtraction would erase this small but real contrast.
+        d.slow = [0.5 - 1.0 / 134_217_728.0; 3];
+        d.gain = 12.0;
+        d.process(&mut [0.5; 128], &mut [0.125; 128], None, &[]);
+        assert!(d.gain < 11.999 && d.gain > 11.99, "gain {}", d.gain);
+    }
+    #[test]
     fn slow_follower_converges_and_flushes_subnormal_state() {
         let mut d = DrumShaper::new(192000.0);
         for _ in 0..3000 {

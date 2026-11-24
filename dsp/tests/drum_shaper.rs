@@ -179,11 +179,12 @@ fn drum_input(n: usize) -> Vec<f32> {
 #[test]
 fn steady_tones_keep_sustain_without_retriggering() {
     for sr in [22050.0, 44100.0, 48000.0, 96000.0, 192000.0] {
-        for hz in [43.0, 43.7, 55.0, 65.4, 110.0, 200.0] {
+        for hz in [43.0, 43.7, 55.0, 65.4, 110.0, 200.0, 490.0] {
             for amp in [0.5, libm::powf(10.0, -70.0 / 20.0)] {
                 for (label, params) in [
                     ("kick", vec![(0, 6.0), (1, -3.0), (3, 0.0)]),
                     ("sustain", vec![(1, 12.0)]),
+                    ("bus_sharp_sustain", vec![(1, 12.0), (2, 2.0), (3, 0.0)]),
                 ] {
                     let frames = (sr * 2.0) as usize;
                     let input: Vec<f32> = (0..frames)
@@ -207,8 +208,16 @@ fn steady_tones_keep_sustain_without_retriggering() {
                         "{sr}Hz {hz}Hz amp={amp:e} {label}: gain={lo:.6}..{hi:.6} ripple={:.6}dB",
                         hi - lo
                     );
-                    assert!(hi - lo < 0.02, "{sr}Hz {hz}Hz {label}: ripple {}", hi - lo);
-                    if label == "sustain" {
+                    // Sharp's square root resolves tiny sampled-peak rises that
+                    // the old rounded lag floor hid. Keep the old limits, while
+                    // allowing 0.03 dB for this finite-window Bus/Sharp fixture.
+                    let bound = if label == "bus_sharp_sustain" {
+                        0.03
+                    } else {
+                        0.02
+                    };
+                    assert!(hi - lo < bound, "{sr}Hz {hz}Hz {label}: ripple {}", hi - lo);
+                    if label != "kick" {
                         assert!(lo > 11.9, "{sr}Hz {hz}Hz quiet sustain lost: {lo}");
                     }
                 }
@@ -348,7 +357,7 @@ fn steady_sustain_reaches_requested_gain_at_every_rate_mode_and_curve() {
                 }
                 let gain = 20.0 * libm::log10f(l[127] / 0.5);
                 assert!(
-                    (gain - 12.0).abs() < 0.01,
+                    (gain - 12.0).abs() < 0.001,
                     "{sr} mode={mode} curve={curve}: {gain}"
                 );
                 assert_eq!(l[127], r[127] * 4.0);
