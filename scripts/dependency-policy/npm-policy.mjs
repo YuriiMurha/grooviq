@@ -3,14 +3,14 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export const allowed = new Set([
-  'MIT', 'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD', 'ISC',
+  'MIT', 'Apache-2.0', 'Apache-2.0 WITH LLVM-exception', 'BlueOak-1.0.0', 'CC-BY-4.0', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD', 'ISC',
   'MPL-2.0', 'Zlib', 'Unicode-3.0', 'Unicode-DFS-2016',
   'LGPL-2.1-only', 'LGPL-2.1-or-later', 'LGPL-3.0-only', 'LGPL-3.0-or-later',
   'GPL-2.0-only', 'GPL-2.0-or-later', 'GPL-3.0-only', 'GPL-3.0-or-later', 'OFL-1.1',
 ]);
 
 // Parse the complete expression even when an OR branch already passes.
-// Unsupported SPDX exceptions and non-SPDX metadata fail closed.
+// Unapproved SPDX exceptions and non-SPDX metadata fail closed.
 export function licenseAllowed(expression) {
   if (typeof expression !== 'string') return false;
   const tokens = expression.match(/\(|\)|[^\s()]+/g) ?? [];
@@ -23,7 +23,14 @@ export function licenseAllowed(expression) {
       return value;
     }
     if (!token || ['AND', 'OR', ')'].includes(token)) throw new Error('Expected licence');
-    return allowed.has(token);
+    let license = token;
+    if (tokens[position] === 'WITH') {
+      position++;
+      const exception = tokens[position++];
+      if (!exception || ['AND', 'OR', 'WITH', '(', ')'].includes(exception)) throw new Error('Expected exception');
+      license += ` WITH ${exception}`;
+    }
+    return allowed.has(license);
   }
   function and() {
     let value = atom();
@@ -65,12 +72,20 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     let failures;
     if (process.argv[2] === 'licenses') {
       failures = licenseFailures(JSON.parse(readFileSync(`${ui}/package-lock.json`, 'utf8')));
+    } else if (process.argv[2] === 'report') {
+      const lock = JSON.parse(readFileSync(`${ui}/package-lock.json`, 'utf8'));
+      console.log('# npm dependency licences\n\nPackage path | Version | Licence | Scope\n--- | --- | --- | ---');
+      for (const [path, pkg] of Object.entries(lock.packages)) {
+        console.log(`${path || '(root)'} | ${pkg.version} | ${pkg.license ?? 'UNKNOWN'} | ${pkg.dev ? 'build/test only' : 'production dependency (bundling varies)'}`);
+      }
+      process.exitCode = licenseFailures(lock).length ? 1 : 0;
+      process.exit(process.exitCode);
     } else if (process.argv[2] === 'audit') {
       // npm includes dev and optional dependencies; no severity downgrade or omit flag.
       const result = spawnSync('npm', ['audit', '--json', '--include=dev', '--include=optional', '--registry=https://registry.npmjs.org', '--fetch-retries=0', '--fetch-timeout=60000'], { cwd: ui, encoding: 'utf8' });
       if (result.error) throw result.error;
       failures = auditFailures(JSON.parse(result.stdout), result.status);
-    } else throw new Error('Usage: node scripts/dependency-policy/npm-policy.mjs licenses|audit');
+    } else throw new Error('Usage: node scripts/dependency-policy/npm-policy.mjs licenses|audit|report');
     if (failures.length) throw new Error(failures.join('\n'));
     console.log('Dependency policy passed');
   } catch (error) { console.error(error.message); process.exitCode = 1; }

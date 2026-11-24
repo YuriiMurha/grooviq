@@ -9,7 +9,7 @@ test('allowed licences and SPDX boolean expressions', () => {
   }
 });
 test('prohibited, unknown and malformed licences fail closed', () => {
-  for (const license of [undefined, '', 'Proprietary', 'BlueOak-1.0.0', 'CC-BY-4.0', 'MIT AND Proprietary', 'MIT WITH Unknown', 'MIT OR', '(MIT', 'MIT)', 'MIT junk']) {
+  for (const license of [undefined, '', 'Proprietary', 'MIT AND Proprietary', 'MIT WITH Unknown', 'MIT OR', '(MIT', 'MIT)', 'MIT junk', 'MIT WITH LLVM-exception', 'Apache-2.0 WITH Unknown', 'Apache-2.0 WITH LLVM-exception WITH LLVM-exception', 'Apache-2.0 WITH', 'BlueOak-1.0.1', 'CC-BY-3.0']) {
     assert.equal(licenseAllowed(license), false, String(license));
   }
   assert.throws(() => licenseFailures({}));
@@ -32,4 +32,10 @@ test('registry failures and unusable audit reports never pass', () => {
   }
   for (const status of [null, 2, 1]) assert.throws(() => auditFailures(report(), status));
   assert.throws(() => auditFailures({ ...report(), metadata: { vulnerabilities: { total: 1 } } }, 0));
+});
+
+test('approved exception composes with SPDX operators without broadening permission', () => {
+  assert.equal(licenseAllowed('(Apache-2.0 WITH LLVM-exception OR MIT) AND ISC'), true);
+  assert.equal(licenseAllowed('Apache-2.0 WITH LLVM-exception AND Proprietary'), false);
+  assert.equal(licenseAllowed('MIT WITH LLVM-exception AND ISC'), false);
 });

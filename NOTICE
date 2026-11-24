@@ -1,0 +1,35 @@
+Additional dependency licence notices
+
+The dependency-policy workflow publishes the current npm licence inventory and
+Rust package metadata as artifacts. Preserve upstream copyright and licence files
+when distributing dependencies; this inventory does not replace their terms.
+
+Root approved these exact additions under issue #464:
+
+BlueOak-1.0.0 (https://spdx.org/licenses/BlueOak-1.0.0.html):
+- @isaacs/nonrecursive-glob-match 1.1.0
+- minimatch 10.2.6 (nested under @typescript-eslint/typescript-estree)
+- minimatch 11.0.8
+- lru-cache 11.5.3 (nested under jsdom)
+  Upstream maintainer: Isaac Z. Schlueter and contributors.
+  Sources: https://github.com/isaacs/nonrecursive-glob-match
+           https://github.com/isaacs/minimatch
+           https://github.com/isaacs/node-lru-cache
+  All are build/test-only dependencies in app/ui/package-lock.json.
+
+CC-BY-4.0 (https://spdx.org/licenses/CC-BY-4.0.html):
+- caniuse-lite 1.0.30001826, build-only browser compatibility data.
+  Source and attribution: https://github.com/browserslist/caniuse-lite
+  Data originates from Can I Use: https://caniuse.com/
+  It is marked dev in the lockfile, rather than a runtime app dependency.
+
+Apache-2.0 WITH LLVM-exception
+(https://spdx.org/licenses/LLVM-exception.html):
+- target-lexicon 0.12.16, Dan Gohman and contributors.
+  Source: https://github.com/bytecodealliance/target-lexicon
+  Used by cfg-expr/system-deps during native dependency build configuration.
+- linux-raw-sys 0.12.1, rustix 1.1.6, wasi 0.11.1+wasi-snapshot-preview1,
+  wasip2 1.0.4+wasi-0.2.12, wit-bindgen 0.57.1 also offer this expression
+  alongside Apache-2.0 OR MIT. These are target/feature-dependent dependencies
+  and may form part of runtime binaries; the existing MIT/Apache alternatives
+  already satisfied policy. Rust metadata retains their authors and sources.

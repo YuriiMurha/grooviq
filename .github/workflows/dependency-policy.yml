@@ -21,6 +21,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Versioned upstream CLI; no floating installer or advisory exclusions.
       - run: cargo install cargo-deny --version 0.22.1 --locked
+      - name: Record Rust licence inventory
+        run: cargo metadata --locked --all-features --format-version 1 > rust-licenses.json
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: rust-licenses
+          path: rust-licenses.json
       - run: cargo deny --locked check licenses
       - if: ${{ !cancelled() }}
         run: cargo deny --locked check advisories
@@ -33,6 +40,13 @@ jobs:
         with:
           node-version: 24
       - run: node --test scripts/dependency-policy/npm-policy.test.mjs
+      - name: Record npm licence inventory
+        run: node scripts/dependency-policy/npm-policy.mjs report > npm-licenses.md
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: npm-licenses
+          path: npm-licenses.md
       - run: node scripts/dependency-policy/npm-policy.mjs licenses
       - if: ${{ !cancelled() }}
         run: node scripts/dependency-policy/npm-policy.mjs audit
