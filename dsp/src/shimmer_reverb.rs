@@ -199,7 +199,7 @@ mod tests {
                     let mut reverb = ShimmerReverb::new(sr);
                     let line = &mut reverb.lines[0];
                     // Nonconstant history distinguishes the two addresses and
-                    // interpolation fractions, including reads across the ring seam.
+                    // interpolation fractions, including negative-index ring wrap.
                     for (i, sample) in line.data.iter_mut().enumerate() {
                         *sample = (libm::sin(i as f64 * 0.017) + 0.3 * libm::cos(i as f64 * 0.043))
                             as f32;
@@ -238,6 +238,8 @@ mod tests {
                                     + (1. - first_weight) * sample_at(q));
                         }
                         let actual = f64::from(line.shifted(mode, 0.7, -0.4));
+                        // Margin for f32 address rounding; observed reference error
+                        // stays below 5.2e-5 for these rates and coordinates.
                         assert!(
                             (actual - expected).abs() < 0.0002,
                             "dual-head sample: rate {sr}, phase {phase}, mode {mode}, step {step}: {actual} vs {expected}"
