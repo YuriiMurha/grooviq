@@ -178,8 +178,8 @@ fn drum_input(n: usize) -> Vec<f32> {
 }
 #[test]
 fn steady_tones_keep_sustain_without_retriggering() {
-    for sr in [44100.0, 48000.0] {
-        for hz in [43.0, 55.0, 65.4, 110.0] {
+    for sr in [22050.0, 44100.0, 48000.0, 96000.0, 192000.0] {
+        for hz in [43.0, 43.7, 55.0, 65.4, 110.0, 200.0] {
             for amp in [0.5, libm::powf(10.0, -70.0 / 20.0)] {
                 for (label, params) in [
                     ("kick", vec![(0, 6.0), (1, -3.0), (3, 0.0)]),
@@ -256,34 +256,37 @@ fn right_only_onset_shapes_quiet_left() {
 }
 #[test]
 fn automation_is_exact_at_the_same_sample_across_partitions() {
-    let input = drum_input(24000);
-    let render = |block| {
-        let mut d = DrumShaper::new(48000.0);
-        for (i, v) in preset("Kick Punch").unwrap() {
-            d.set_param(i, v);
+    for sr in [22050.0, 44100.0, 48000.0, 96000.0, 192000.0] {
+        let input = drum_input(24000);
+        let render = |block| {
+            let mut d = DrumShaper::new(sr);
+            for (i, v) in preset("Kick Punch").unwrap() {
+                d.set_param(i, v);
+            }
+            let mut l = input.clone();
+            let mut r: Vec<f32> = input.iter().map(|v| -v * 0.7).collect();
+            process_chunks(&mut d, &mut l[..4736], &mut r[..4736], block);
+            for (i, v) in [
+                (0, -9.0),
+                (1, 8.0),
+                (2, 2.0),
+                (3, 2.0),
+                (4, 0.7),
+                (5, 0.5),
+                (6, 3.0),
+            ] {
+                d.set_param(i, v);
+            }
+            process_chunks(&mut d, &mut l[4736..], &mut r[4736..], block);
+            (l, r)
+        };
+        let a = render(128);
+        for block in [1, 7, 37, 64, 127] {
+            assert_eq!(a, render(block), "block {block}");
         }
-        let mut l = input.clone();
-        let mut r: Vec<f32> = input.iter().map(|v| -v * 0.7).collect();
-        process_chunks(&mut d, &mut l[..4736], &mut r[..4736], block);
-        for (i, v) in [
-            (0, -9.0),
-            (1, 8.0),
-            (2, 2.0),
-            (3, 2.0),
-            (4, 0.7),
-            (5, 0.5),
-            (6, 3.0),
-        ] {
-            d.set_param(i, v);
-        }
-        process_chunks(&mut d, &mut l[4736..], &mut r[4736..], block);
-        (l, r)
-    };
-    let a = render(128);
-    for block in [1, 7, 37, 64, 127] {
-        assert_eq!(a, render(block), "block {block}");
     }
 }
+
 #[test]
 fn each_control_step_is_smoothed_on_nonconstant_onsets() {
     let input = drum_input(8000);
@@ -322,5 +325,34 @@ fn each_control_step_is_smoothed_on_nonconstant_onsets() {
             worst > 1e-7,
             "control {index}: stimulus never exercised control"
         );
+    }
+}
+
+#[test]
+fn steady_sustain_reaches_requested_gain_at_every_rate_mode_and_curve() {
+    // A constant envelope has zero transient weight after settling, independently
+    // of the detector's lag. Sharp must not amplify a rounded follower floor.
+    for sr in [22050.0, 44100.0, 48000.0, 96000.0, 192000.0] {
+        for mode in [0.0, 0.5, 1.0, 1.5, 2.0] {
+            for curve in [0.0, 1.0, 2.0] {
+                let mut d = DrumShaper::new(sr);
+                for (i, v) in [(1, 12.0), (2, mode), (3, curve)] {
+                    d.set_param(i, v);
+                }
+                let mut l = [0.5; 128];
+                let mut r = [0.125; 128];
+                for _ in 0..(sr as usize * 2).div_ceil(128) {
+                    l.fill(0.5);
+                    r.fill(0.125);
+                    assert_no_alloc::assert_no_alloc(|| d.process(&mut l, &mut r, None, &[]));
+                }
+                let gain = 20.0 * libm::log10f(l[127] / 0.5);
+                assert!(
+                    (gain - 12.0).abs() < 0.01,
+                    "{sr} mode={mode} curve={curve}: {gain}"
+                );
+                assert_eq!(l[127], r[127] * 4.0);
+            }
+        }
     }
 }
