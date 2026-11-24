@@ -187,6 +187,10 @@ impl Drive {
 }
 
 impl Device for Drive {
+    fn latency_frames(&self) -> u32 {
+        self.latency() as u32
+    }
+
     fn set_param(&mut self, index: u32, value: f32) {
         let Some(v) = clamp_param(&SPEC, index, value) else {
             return;
