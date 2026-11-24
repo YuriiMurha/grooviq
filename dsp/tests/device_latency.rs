@@ -94,6 +94,13 @@ fn default_zero_is_processing_latency_not_creative_wet_timing() {
         "reverb",
         "algorithmic_reverb",
         "shimmer_reverb",
+        "ott",
+        "fattener",
+        "drum_shaper",
+        "bitcrusher",
+        "lofi_colour",
+        "synth",
+        "sampler",
     ] {
         let mut device = create(id, 48000.).unwrap();
         assert_eq!(device.latency_frames(), 0, "{id}");
