@@ -17,7 +17,7 @@ async function setup(page: Page) {
   await playlist.getByRole("button", { name: "Select", exact: true }).click();
   await page.mouse.move(box.x + 10, box.y + 8); await page.mouse.down();
   await page.mouse.move(box.x + 490, box.y + 62, { steps: 6 }); await page.mouse.up();
-  await expect(playlist.getByRole("status")).toContainText("2 selected");
+  await expect(playlist.getByText("2 selected", { exact: true })).toBeVisible();
   return { playlist, canvas, box };
 }
 test("marquee group move and Alt-copy send one release batch and Undo restores both", async ({ app, mock }) => {
@@ -35,7 +35,7 @@ test("marquee group move and Alt-copy send one release batch and Undo restores b
   await app.keyboard.down("Alt"); await app.mouse.move(box.x + 140, box.y + 40); await app.mouse.down();
   await app.mouse.move(box.x + 188, box.y + 40); await app.mouse.up(); await app.keyboard.up("Alt");
   await expect.poll(async () => (await state(app)).total).toBe(4);
-  await expect(playlist.getByRole("status")).toContainText("2 selected");
+  await expect(playlist.getByText("2 selected", { exact: true })).toBeVisible();
   await app.keyboard.press("ControlOrMeta+z");
   await expect.poll(async () => (await state(app)).clips).toEqual(before.clips);
 });
@@ -56,7 +56,7 @@ test("modifier toggles and sub-threshold clicks do not edit; group destructive c
   await expect(playlist.getByRole("button", { name: "Delete selected clip" })).toBeDisabled();
   for (const modifier of ["Shift", "ControlOrMeta"]) {
     await app.keyboard.down(modifier); await app.mouse.click(box.x + 140, box.y + 40); await app.keyboard.up(modifier);
-    await expect(playlist.getByRole("status")).toContainText(modifier === "Shift" ? "1 selected" : "2 selected");
+    await expect(playlist.getByText(modifier === "Shift" ? "1 selected" : "2 selected", { exact: true })).toBeVisible();
   }
   await app.mouse.move(box.x + 140, box.y + 40); await app.mouse.down(); await app.mouse.move(box.x + 143, box.y + 40); await app.mouse.up();
   expect(await mock.calls("arrangement_edit")).toHaveLength(calls.length);
@@ -66,7 +66,7 @@ test("Save cancels held group input before saving canonical clips", async ({ app
   await mock.eval("m => m.queueDialog('/qa/projects/group.grooviq')");
   await app.mouse.move(box.x + 140, box.y + 40); await app.mouse.down(); await app.mouse.move(box.x + 188, box.y + 40);
   await app.keyboard.press("ControlOrMeta+s");
-  await expect.poll(async () => (await mock.calls("project_save")).length).toBe(1);
+  await expect.poll(async () => (await mock.calls("project_save_as")).length).toBe(1);
   await app.mouse.up();
   expect((await state(app)).clips).toEqual(before.clips);
   expect(await mock.calls("arrangement_edit")).toHaveLength(calls.length);
@@ -79,7 +79,7 @@ test("replacement retires group capture and selection", async ({ app, mock }) =>
   await app.mouse.up();
   await app.getByRole("button", { name: "Don't save", exact: true }).click();
   await expect.poll(async () => (await state(app)).generation).toBe(before.generation + 1);
-  await expect(playlist.getByRole("status")).toContainText("0 selected");
+  await expect(playlist.getByText("0 selected", { exact: true })).toBeVisible();
   expect(await mock.calls("arrangement_edit")).toHaveLength(calls.length);
 });
 test("native refusal preserves all group members", async ({ app, mock }) => {
@@ -88,4 +88,80 @@ test("native refusal preserves all group members", async ({ app, mock }) => {
   await app.mouse.move(box.x + 140, box.y + 40); await app.mouse.down(); await app.mouse.move(box.x + 188, box.y + 40); await app.mouse.up();
   await expect(playlist.getByRole("alert")).toContainText("group refusal");
   expect((await state(app)).clips).toEqual(before.clips);
+});
+
+test("marquee release inside the threshold uses the returned rectangle", async ({ app, mock }) => {
+  const { box, playlist } = await setup(app);
+  const before = await state(app), calls = await mock.calls("arrangement_edit");
+  await app.mouse.move(box.x + 10, box.y + 8);
+  await app.mouse.down();
+  await app.mouse.move(box.x + 490, box.y + 62, { steps: 6 });
+  await app.mouse.move(box.x + 12, box.y + 9);
+  await expect(playlist.locator(".playlist-marquee")).toHaveCSS("width", "2px");
+  await app.mouse.up();
+  await expect(playlist.getByText("0 selected", { exact: true })).toBeVisible();
+  await app.keyboard.press("ArrowRight");
+  expect(await mock.calls("arrangement_edit")).toHaveLength(calls.length);
+  expect((await state(app)).clips).toEqual(before.clips);
+});
+
+test.describe("dense group preview", () => {
+  const denseCount = 1600;
+  const content = { type: "pattern" as const, pattern: 0, offsetTick: 0, lengthTicks: 3840 };
+  test.use({ seed: { project: project(["Kick"], {}, { nextId: 2001, arrangement: {
+    tracks: [{ id: 2, name: "Track 1", color: 0, mute: false }],
+    clips: [...Array.from({ length: denseCount }, (_, index) => ({
+      id: 3 + index, track: 2, name: `Beat ${index + 1}`, startTick: 960, muted: false, content,
+    })), { id: 2000, track: 2, name: "Later clip", startTick: 120960, muted: false, content }],
+    audioAssets: [], loopRegion: null,
+  } }), files: soundsFor(["Kick"]) } });
+
+  test("keeps dense group labels and canonical uploads bounded while previewing and scrolling", async ({ app, mock }) => {
+    await app.evaluate(() => {
+      const scope = window as unknown as { playlistCanonicalUploads: number };
+      scope.playlistCanonicalUploads = 0;
+      if (typeof WebGL2RenderingContext === "undefined") return;
+      const prototype = WebGL2RenderingContext.prototype;
+      prototype.bufferData = new Proxy(prototype.bufferData, {
+        apply(original, context: WebGL2RenderingContext, args) {
+          if (args[2] === context.STATIC_DRAW && args[1] instanceof Float32Array && args[1].length >= 1600 * 8) {
+            scope.playlistCanonicalUploads++;
+          }
+          return Reflect.apply(original, context, args);
+        },
+      });
+    });
+    const uploads = () => app.evaluate(() => (window as unknown as { playlistCanonicalUploads: number }).playlistCanonicalUploads);
+    await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
+    await app.keyboard.press("F5");
+    const playlist = app.getByRole("region", { name: "Playlist", exact: true });
+    const canvas = playlist.getByRole("application", { name: "Playlist clips" });
+    await expect(canvas).toHaveAttribute("aria-disabled", "false");
+    await expect(playlist.getByRole("status")).toHaveText("1601 clips");
+    const box = await canvas.boundingBox();
+    if (!box) throw new Error("Missing playlist canvas");
+    await playlist.getByRole("button", { name: "Select", exact: true }).click();
+    await app.mouse.move(box.x + 15, box.y + 9);
+    await app.mouse.down();
+    await app.mouse.move(box.x + 245, box.y + 63, { steps: 5 });
+    await app.mouse.up();
+    await expect(playlist.getByText("1600 selected", { exact: true })).toBeVisible();
+    const canonicalUploads = await uploads();
+    if (await canvas.getAttribute("data-renderer") === "webgl2") expect(canonicalUploads).toBeGreaterThan(0);
+    const calls = await mock.calls("arrangement_edit");
+    await app.mouse.move(box.x + 140, box.y + 39);
+    await app.mouse.down();
+    await app.mouse.move(box.x + 188, box.y + 39, { steps: 5 });
+    await expect(playlist.locator(".playlist-labels").getByText("Beat 1", { exact: true })).toHaveCSS("left", "102px");
+    expect(await uploads()).toBe(canonicalUploads);
+    expect(await playlist.locator(".playlist-labels span").count()).toBeLessThanOrEqual(1025);
+    expect(await mock.calls("arrangement_edit")).toHaveLength(calls.length);
+    await app.keyboard.press("Escape");
+    await app.mouse.up();
+    await playlist.locator(".playlist-scroll").evaluate(element => { element.scrollLeft = 6000; });
+    await expect(playlist.locator(".playlist-labels").getByText("Later clip", { exact: true })).toBeVisible();
+    await expect(playlist.locator(".playlist-labels").getByText(/^Beat /)).toHaveCount(0);
+    await expect(playlist.getByText("1600 selected", { exact: true })).toBeVisible();
+    expect(await uploads()).toBe(canonicalUploads);
+  });
 });
