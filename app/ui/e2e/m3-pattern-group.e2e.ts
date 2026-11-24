@@ -20,6 +20,77 @@ async function setup(page: Page) {
   await expect(playlist.getByText("2 selected", { exact: true })).toBeVisible();
   return { playlist, canvas, box };
 }
+
+test.describe("existing clip order", () => {
+  const content = { type: "pattern" as const, pattern: 0, offsetTick: 0, lengthTicks: 3840 };
+  test.use({ seed: { project: project(["Kick"], {}, { nextId: 5, arrangement: {
+    tracks: [{ id: 2, name: "Track 1", color: 0, mute: false }],
+    clips: [
+      { id: 3, track: 2, name: "Lower clip", startTick: 960, muted: false, content },
+      { id: 4, track: 2, name: "Upper clip", startTick: 2880, muted: false, content },
+    ],
+    audioAssets: [], loopRegion: null,
+  } }), files: soundsFor(["Kick"]) } });
+
+  test("reverse selection order preserves the overlapping copy stack", async ({ app, mock }) => {
+    await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
+    await app.keyboard.press("F5");
+    const playlist = app.getByRole("region", { name: "Playlist", exact: true });
+    const canvas = playlist.getByRole("application", { name: "Playlist clips" });
+    await expect(canvas).toHaveAttribute("aria-disabled", "false");
+    const box = await canvas.boundingBox();
+    if (!box) throw new Error("Missing playlist canvas");
+    await playlist.getByRole("button", { name: "Select", exact: true }).click();
+    await app.mouse.click(box.x + 275, box.y + 40);
+    await app.keyboard.down("Shift");
+    await app.mouse.click(box.x + 100, box.y + 40);
+    await app.keyboard.up("Shift");
+    await expect(playlist.getByText("2 selected", { exact: true })).toBeVisible();
+    await app.keyboard.down("Alt");
+    await app.mouse.move(box.x + 175, box.y + 40);
+    await app.mouse.down();
+    await app.mouse.move(box.x + 271, box.y + 40);
+    await app.mouse.up();
+    await app.keyboard.up("Alt");
+    await expect.poll(async () => (await state(app)).clips.slice(2).map(clip => clip.name)).toEqual(["Lower clip", "Upper clip"]);
+    expect(await mock.calls("arrangement_edit")).toHaveLength(1);
+    await expect(canvas).toHaveAttribute("aria-disabled", "false");
+    await app.mouse.click(box.x + 300, box.y + 40);
+    await expect(playlist.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("6");
+  });
+});
+
+test("a loaded read-only clip does not join a pattern group preview", async ({ app, mock }) => {
+  const { box, playlist, canvas } = await setup(app);
+  await mock.eval(`m => m.state.project.arrangement.clips.push({
+    id: 100, track: m.state.project.arrangement.tracks[0].id, name: "Automation",
+    startTick: 10560, muted: false, content: { type: "automation",
+      target: { type: "channelVolume", channel: 1 }, priority: 100,
+      offsetTick: 0, lengthTicks: 1920, points: [] }
+  })`);
+  await playlist.getByRole("button", { name: "Refresh playlist" }).click();
+  await expect(canvas).toHaveAttribute("aria-disabled", "false");
+  await expect(playlist.getByRole("status")).toHaveText("3 clips");
+  const original = (await state(app)).clips.find(clip => clip.id === 100);
+  const label = playlist.locator(".playlist-labels").getByText("Automation · automation", { exact: true });
+  await expect(label).toHaveCSS("left", "534px");
+  await app.mouse.click(box.x + 560, box.y + 40);
+  await expect(playlist.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("100");
+  await app.keyboard.down("Shift");
+  await app.mouse.click(box.x + 140, box.y + 40);
+  await app.mouse.click(box.x + 380, box.y + 40);
+  await app.keyboard.up("Shift");
+  await expect(playlist.getByText("2 selected", { exact: true })).toBeVisible();
+  const calls = await mock.calls("arrangement_edit");
+  await app.mouse.move(box.x + 140, box.y + 40);
+  await app.mouse.down();
+  await app.mouse.move(box.x + 188, box.y + 40);
+  await expect(label).toHaveCSS("left", "534px");
+  expect(await mock.calls("arrangement_edit")).toHaveLength(calls.length);
+  await app.mouse.up();
+  await expect.poll(async () => (await mock.calls("arrangement_edit")).length).toBe(calls.length + 1);
+  expect((await state(app)).clips.find(clip => clip.id === 100)).toEqual(original);
+});
 test("marquee group move and Alt-copy send one release batch and Undo restores both", async ({ app, mock }) => {
   const { box, playlist } = await setup(app);
   const before = await state(app), calls = await mock.calls("arrangement_edit");

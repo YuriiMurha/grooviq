@@ -34,6 +34,8 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
   const marquee = useRef<{ pointerId: number; start: Point; clientStart: Point; moved: boolean; stamp: ArrangementStamp; replacements: number } | null>(null);
   const [selectionRect, setSelectionRect] = useState<Rect | null>(null);
   const [groupPreview, setGroupPreview] = useState<GroupPreview | null>(null);
+  const [capturedMembers, setCapturedMembers] = useState<ReadonlySet<number> | null>(null);
+  const previewMembers = capturedMembers ?? selection;
   const [preview, setPreview] = useState<PatternPreview | null>(null);
   const [previewIndex, setPreviewIndex] = useState(-1);
   const [sliceGuide, setSliceGuide] = useState<{ tick: number; trackIndex: number } | null>(null);
@@ -65,7 +67,7 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
   const cancel = useCallback(() => {
     const owned = active.current;
     const pointerId = owned?.pointerId ?? marquee.current?.pointerId;
-    marquee.current = null; setSelectionRect(null); setGroupPreview(null);
+    marquee.current = null; setSelectionRect(null); setGroupPreview(null); setCapturedMembers(null);
     active.current = null; owned?.gesture.cancel(); setPreview(null); setPreviewIndex(-1); setSliceGuide(null);
     const element = canvas.current;
     if (pointerId !== undefined && element?.hasPointerCapture(pointerId)) element.releasePointerCapture(pointerId);
@@ -99,7 +101,7 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     return () => { element.removeEventListener("webglcontextlost", lost); display.dispose(); renderer.current = null; };
   }, [cancel]);
   useEffect(() => { renderer.current?.setClips(clips); }, [clips]);
-  useEffect(() => { renderer.current?.setGroupSelection(selection.size > 1 ? selection : new Set()); }, [selection]);
+  useEffect(() => { renderer.current?.setGroupSelection(previewMembers.size > 1 ? previewMembers : new Set()); }, [previewMembers]);
   useEffect(() => {
     const container = scroll.current; if (!container) return;
     const measure = () => {
@@ -123,7 +125,7 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     draw.current = render;
     const frame = requestAnimationFrame(render);
     return () => cancelAnimationFrame(frame);
-  }, [clips, selectedIndex, preview, previewIndex, snapshot, view, barTicks, groupPreview, selection]);
+  }, [clips, selectedIndex, preview, previewIndex, snapshot, view, barTicks, groupPreview, previewMembers]);
   useEffect(() => {
     const observer = new MutationObserver(() => draw.current()); observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "data-theme", "style"] });
     const redraw = () => draw.current(); window.addEventListener("resize", redraw);
@@ -144,7 +146,7 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     if (gesture instanceof PatternGesture) {
       setPreview(gesture.preview); setPreviewIndex(index);
       setSliceGuide(gesture.sliceTick === null ? null : { tick: gesture.sliceTick, trackIndex: input.clip.trackIndex });
-    }
+    } else setCapturedMembers(gesture.memberIds);
   };
   const commit = async (stamp: ArrangementStamp, operations: Parameters<typeof mutate>[1], selectCreated = true, createdCount = 1) => {
     const result = await mutate(stamp, operations);
@@ -177,7 +179,10 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       const id = hit.clip.id; if (id === null) return;
       const clip = patternClips.get(id);
       if (tool === "select" && togglesSelection(event)) {
-        if (clip) setSelected({ generation: snapshot.generation, ids: toggleSelection(selectedIds, id) });
+        if (clip) {
+          const previousPatterns = selectedIds.filter(member => patternClips.has(member));
+          setSelected({ generation: snapshot.generation, ids: toggleSelection(previousPatterns, id) });
+        }
         return;
       }
       const keepGroup = tool !== "draw" && selection.has(id);
@@ -185,10 +190,8 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       if (!keepGroup) setSelected({ generation: snapshot.generation, ids });
       if (!clip || (tool === "slice" && ids.length > 1)) return;
       const kind = tool === "slice" ? "slice" : event.altKey ? "copy" : ids.length === 1 && selected === id && hit.edge ? hit.edge === "start" ? "resizeStart" : "resizeEnd" : "move";
-      const members = ids.length > 1 ? ids.flatMap(id => {
-        const member = patternClips.get(id);
-        return member ? [member] : [];
-      }) : [];
+      // The renderer paints in playlist order and native copy appends in batch order.
+      const members = ids.length > 1 ? patternsOnly.filter(member => selection.has(member.id)) : [];
       begin({ kind, pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration(), originTick: tick, originTrack: row, quantum, tracks: snapshot.tracks,
         sourceTicks: snapshot.sourcePeriods[clip.content.pattern], clip }, kind === "copy" ? -1 : clips.findIndex(c => c.id === id), { x: event.clientX, y: event.clientY }, members);
       return;
@@ -270,10 +273,7 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     if (busy || !snapshot || !selectedIds.length || isProjectReplacing() || modalIsOpen() || event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault(); cancel();
-      const members = selectedIds.flatMap(id => {
-        const member = patternClips.get(id);
-        return member ? [member] : [];
-      });
+      const members = patternsOnly.filter(member => selection.has(member.id));
       if (!members.length) return;
       const gesture = new PatternGroupGesture({ kind: "move", pointerId: 0, stamp: snapshot, replacements: projectGeneration(), originTick: 0, originTrack: 0, quantum, tracks: snapshot.tracks, clip: members[0] }, members);
       gesture.update(event.key === "ArrowLeft" ? -quantum : quantum, 0);
@@ -296,18 +296,18 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     };
     for (let index = 0; index < clips.length && labels.length < 1024; index++) {
       const clip = clips[index];
-      const offset = groupPreview?.kind === "move" && clip.id !== null && selection.has(clip.id) ? groupPreview : undefined;
+      const offset = groupPreview?.kind === "move" && clip.id !== null && previewMembers.has(clip.id) ? groupPreview : undefined;
       include(index === previewIndex && single ? single : clip, offset);
     }
     if (single && previewIndex === -1) include(single);
     if (groupPreview?.kind === "copy" && labels.length < 1024) {
       for (const clip of clips) {
-        if (clip.id !== null && selection.has(clip.id)) include(clip, groupPreview);
+        if (clip.id !== null && previewMembers.has(clip.id)) include(clip, groupPreview);
         if (labels.length >= 1024) break;
       }
     }
     return labels;
-  }, [clips, preview, previewIndex, view, groupPreview, selection]);
+  }, [clips, preview, previewIndex, view, groupPreview, previewMembers]);
   const visibleIds = useMemo(() => new Set(visibleLabels.map(clip => clip.id)), [visibleLabels]);
   return <section className="playlist" aria-label="Playlist" aria-busy={state.busy}>
     <header className="playlist-tools"><h2>Playlist</h2>

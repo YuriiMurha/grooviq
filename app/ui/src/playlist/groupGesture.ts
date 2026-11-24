@@ -21,6 +21,7 @@ export type GroupPreview = Readonly<{ kind: "move" | "copy"; deltaTicks: number;
 
 /** One shared constrained delta: independently clamping each clip would deform the group. */
 export class PatternGroupGesture {
+  readonly memberIds: ReadonlySet<number>;
   private readonly input: GestureGuard & Pick<GestureInput, "originTick" | "originTrack" | "quantum">;
   private readonly clips: readonly { id: number; startTick: number; trackIndex: number }[];
   private readonly tracks: readonly number[];
@@ -30,23 +31,26 @@ export class PatternGroupGesture {
 
   constructor(input: GestureInput, clips: readonly PatternPreview[]) {
     const kind = input.kind;
-    if (!clips.length || (kind !== "move" && kind !== "copy") || new Set(clips.map(clip => clip.id)).size !== clips.length) {
+    if (!clips.length || (kind !== "move" && kind !== "copy")) {
       throw new RangeError("Invalid pattern group");
     }
     this.tracks = input.tracks.map(track => track.id);
     this.input = { pointerId: input.pointerId, stamp: { ...input.stamp }, replacements: input.replacements,
       originTick: input.originTick, originTrack: input.originTrack, quantum: input.quantum };
     let firstTick = MAX_SONG_TICKS, lastTick = 0, firstTrack = this.tracks.length, lastTrack = 0;
+    const ids = new Set<number>();
     this.clips = clips.map(clip => {
       validatePattern(clip);
       const { id, startTick, trackIndex } = clip;
-      if (id === null || trackIndex >= this.tracks.length) throw new RangeError("Invalid pattern group member");
+      if (id === null || ids.has(id) || trackIndex >= this.tracks.length) throw new RangeError("Invalid pattern group member");
+      ids.add(id);
       firstTick = Math.min(firstTick, startTick);
       lastTick = Math.max(lastTick, startTick + clip.content.lengthTicks);
       firstTrack = Math.min(firstTrack, trackIndex);
       lastTrack = Math.max(lastTrack, trackIndex);
       return { id, startTick, trackIndex };
     });
+    this.memberIds = ids;
     this.bounds = { minTick: -firstTick, maxTick: MAX_SONG_TICKS - lastTick, minTrack: -firstTrack, maxTrack: this.tracks.length - 1 - lastTrack };
     this.value = { kind, deltaTicks: 0, deltaTracks: 0 };
   }
