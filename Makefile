@@ -130,7 +130,13 @@ qa-driver-build: ui-install ## Build the optional macOS QA driver app
 qa-driver: ## Control QA_HOME's silent automation app; SCRIPT=<trusted JS file>
 	python3 scripts/qa-driver.py --home "$(QA_HOME)" $(if $(SCRIPT),--script "$(SCRIPT)",)
 
-.PHONY: qa-driver-stop
+.PHONY: qa-driver-stop qa-driver-quit test-qa-driver
+test-qa-driver: ## Test private QA command separation without launching the app
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_qa_driver.py -v
+
+qa-driver-quit: ## Request normal Quit in QA_HOME, including the unsaved-close prompt
+	python3 scripts/qa-driver.py --home "$(QA_HOME)" --quit
+
 qa-driver-stop: ## Stop QA_HOME's automation app without a native dialog
 	python3 scripts/qa-driver.py --home "$(QA_HOME)" --shutdown
 
