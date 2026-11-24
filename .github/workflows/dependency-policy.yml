@@ -1,0 +1,38 @@
+name: dependency-policy
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: dependency-policy-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  rust-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # Versioned upstream CLI; no floating installer or advisory exclusions.
+      - run: cargo install cargo-deny --version 0.22.1 --locked
+      - run: cargo deny --locked check licenses
+      - if: ${{ !cancelled() }}
+        run: cargo deny --locked check advisories
+  npm-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: node --test scripts/dependency-policy/npm-policy.test.mjs
+      - run: node scripts/dependency-policy/npm-policy.mjs licenses
+      - if: ${{ !cancelled() }}
+        run: node scripts/dependency-policy/npm-policy.mjs audit
