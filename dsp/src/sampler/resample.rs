@@ -207,11 +207,18 @@ mod tests {
                     (127.25, false),
                     (17.25, true),
                     (109.75, true),
-                    (110.75, true),
                 ] {
+                    // A wrapped loop plays between the loop bounds: forward ends at `hi`,
+                    // reverse starts at `lo`.
+                    let (start, end) = match (looping, direction > 0.0) {
+                        (true, true) => (0.0, 110.0),
+                        (true, false) => (17.0, sample.len() as f64),
+                        _ => (0.0, sample.len() as f64),
+                    };
                     let voice = Voice {
                         pos,
-                        end: sample.len() as f64,
+                        start,
+                        end,
                         step: direction * step,
                         looping,
                         wrapped: true,
