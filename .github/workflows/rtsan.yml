@@ -8,7 +8,7 @@ name: rtsan
 
 on:
   push:
-    branches: [main]
+    branches: [main, merge-train/batch]
   pull_request:
 
 permissions:
@@ -42,6 +42,7 @@ jobs:
           script: |
             const { shouldRun } = require('./scripts/optional-rust-checks.cjs');
             return await shouldRun({
+              workflow: 'rtsan',
               eventName: context.eventName,
               pullRequest: context.payload.pull_request,
               repo: context.repo,
