@@ -40,6 +40,8 @@ export interface MockChannel {
   /** The project holds the sample's bytes (every saved sample is embedded). `false`: they are
    * missing from the project file, so the channel shows "Missing" until relinked. */
   embedded?: boolean;
+  /** Encoded bytes exist but cannot be decoded. */
+  decodeFailed?: boolean;
   volume: number;
   pan: number;
   mute: boolean;
@@ -324,7 +326,7 @@ export function installMockTauri(seed: MockSeed): void {
   const plain = (n: MockNote) => n.tick % STEP_TICKS === 0 && n.length === STEP_TICKS && n.key === 60 && !n.slide;
   const isRoll = (id: number) => s.project.pattern.notes.some((n) => n.channel === id && !plain(n));
   // session.rs: missing = a sample reference without decoded bytes. The path is never opened.
-  const missing = (c: MockChannel) => c.sample !== null && c.embedded === false;
+  const missing = (c: MockChannel) => c.sample !== null && (c.embedded === false || c.decodeFailed === true);
   /** A sample file's length (a second unless the file says otherwise). */
   const sampleSeconds = (path: string) => {
     const f = files.get(path);
@@ -351,6 +353,8 @@ export function installMockTauri(seed: MockSeed): void {
         name: c.name,
         color: c.color,
         sampleName: c.sample ? fileName(c.sample) : null,
+        sampleNameBasis: c.sample === null ? null : c.embedded === false ? "storedReference" : "availableFile",
+        sampleReference: c.sample,
         missing: missing(c),
         // session.rs: the decoded sample's length; none while it is missing.
         sampleFrames: c.sample === null || missing(c) ? null : (c.frames ?? Math.round(48_000 * sampleSeconds(c.sample))),
@@ -1529,6 +1533,7 @@ export function installMockTauri(seed: MockSeed): void {
       const c = s.project.channels[channelIndex(a.channel)];
       c.sample = path;
       c.embedded = true;
+      delete c.decodeFailed;
       // session.rs: the length is the new file's (a seeded length belonged to the old one).
       delete c.frames;
       invalidateTrim(c.id,true);
@@ -1604,7 +1609,7 @@ export function installMockTauri(seed: MockSeed): void {
     },
     channel_waveform: (a) => {
       const c = s.project.channels[channelIndex(a.channel)];
-      if (c.kind === "synth" || c.sample === null || c.embedded === false) throw `${c.name} has no sample to draw.`;
+      if (c.kind === "synth" || c.sample === null || missing(c)) throw `${c.name} has no sample to draw.`;
       // session.rs `waveform_peaks`: 1..=MAX_WAVEFORM_POINTS points.
       const points = clamp(a.points as number, 1, 16_384);
       const buf = new ArrayBuffer(points * 8);
