@@ -34,13 +34,14 @@ class FetchTests(unittest.TestCase):
                 fake = Path(tmp) / 'cargo.py'
                 calls = Path(tmp) / 'calls'
                 fake.write_text('import pathlib, sys\n'
-                                f'pathlib.Path({str(calls)!r}).write_text(repr(sys.argv[1:]))\n'
+                                f'with pathlib.Path({str(calls)!r}).open("a") as log:\n'
+                                ' log.write(repr(sys.argv[1:]) + "\\n")\n'
                                 f'print({message!r}, file=sys.stderr)\nsys.exit(101)\n')
                 errors = io.StringIO()
                 with contextlib.redirect_stderr(errors):
                     result = fetch.prepare(cargo=[sys.executable, str(fake)])
                 self.assertNotEqual(result, 0)
-                self.assertEqual(calls.read_text(), "['fetch', '--locked']")
+                self.assertEqual(calls.read_text().splitlines(), ["['fetch', '--locked']"])
                 self.assertIn('infrastructure', errors.getvalue())
                 self.assertIn('no benchmark results', errors.getvalue())
 
