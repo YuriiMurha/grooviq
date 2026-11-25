@@ -44,12 +44,15 @@ export function createCanvasRenderer(canvas: HTMLCanvasElement): GridRenderer {
       ctx.setTransform(dpr, 0, 0, dpr, EDGE * dpr, EDGE * dpr);
       const [ox, oy] = palette.offset;
 
-      for (let o = 0; o < instances.length; o += STRIDE) {
-        const velocity = instances[o + 5];
-        if (velocity < 0 || instances[o + 6] & FLAG_BAR) continue;
-        ctx.fillStyle = css(palette.inksB[instances[o + 4]] ?? palette.inksB[0]);
-        roundRect(ctx, instances[o] + ox, instances[o + 1] + oy, instances[o + 2], instances[o + 3], RADIUS);
-        ctx.fill();
+      // A coincident shadow would show through the antialiased corners of the fill.
+      if (ox !== 0 || oy !== 0) {
+        for (let o = 0; o < instances.length; o += STRIDE) {
+          const velocity = instances[o + 5];
+          if (velocity < 0 || instances[o + 6] & FLAG_BAR) continue;
+          ctx.fillStyle = css(palette.inksB[instances[o + 4]] ?? palette.inksB[0]);
+          roundRect(ctx, instances[o] + ox, instances[o + 1] + oy, instances[o + 2], instances[o + 3], RADIUS);
+          ctx.fill();
+        }
       }
 
       for (let o = 0; o < instances.length; o += STRIDE) {

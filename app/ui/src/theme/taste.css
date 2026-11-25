@@ -12,6 +12,7 @@
   --accent: #f7d772;
   --select: #faf7ee;
   --ok: #f7d772;
+  --error: #ff8279;
   --ink-1: #fe9199; --ink-1b: #491e22;
   --ink-2: #64c0f9; --ink-2b: #02324a;
   --ink-3: #a3c463; --ink-3b: #27330e;
@@ -32,8 +33,8 @@
   --step-b: #070c12;
   --step-lit: #1d2730; /* raised display glass above the velocity fill */
   --knob-track: #2a3139;
-  --reg-x: 2px;
-  --reg-y: 2px;
+  --reg-x: 0px;
+  --reg-y: 0px;
 
   --roll-row: #101922;
   --roll-row-black: #0b1219;

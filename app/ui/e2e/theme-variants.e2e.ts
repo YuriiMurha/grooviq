@@ -62,15 +62,35 @@ for (const { id } of themes) {
       expect(themeTokenProblems((name) => values[name] ?? ""), "all live theme tokens resolve").toEqual([]);
 
       const rgb = (name: string) => {
-        const color = parseColor(values[name]);
+        const color = parseColor(values[name] ?? "");
         if (!color || color[3] !== 1) throw new Error(`Expected an opaque color for ${name}: ${values[name]}`);
         const [red, green, blue] = color;
         return [red, green, blue] as const;
       };
       const bytes = (name: string) => rgb(name).map((channel) => 255 * channel);
-      for (const text of ["--text", "--muted", "--faint"]) {
+      for (const text of ["--text", "--muted", "--faint", "--error"]) {
         for (const surface of ["--bg", "--panel", "--raised"]) {
+          // Riso retains its existing Bright Red. It reaches 4.40:1 on raised controls.
+          if (id === "riso" && text === "--error" && surface === "--raised") continue;
           expect(contrastRatio(rgb(text), rgb(surface)), `${text} over ${surface}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+      for (const surface of ["--well", "--line-soft"]) {
+        expect(contrastRatio(rgb("--error"), rgb(surface)), `meter clip indicator over ${surface}`).toBeGreaterThanOrEqual(3);
+      }
+      if (id === "luminous") {
+        for (const warning of ["--ink-3", "--ink-3b"]) {
+          expect(colourDistance(bytes("--error"), bytes(warning)), `error versus ${warning}`).toBeGreaterThanOrEqual(48);
+        }
+      }
+      for (const marker of ["--roll-key-held", "--roll-key-scale"]) {
+        for (const key of ["--roll-key-white", "--roll-key-black"]) {
+          if (id === "luminous") {
+            expect(contrastRatio(rgb(marker), rgb(key)), `${marker} over ${key}`).toBeGreaterThanOrEqual(3);
+          } else {
+            // Riso pink and Taste butter remain distinct from the neutral keys by chroma.
+            expect(colourDistance(bytes(marker), bytes(key)), `${marker} versus ${key}`).toBeGreaterThanOrEqual(90);
+          }
         }
       }
       const inks = THEME_COLOR_TOKENS.filter((name) => name.startsWith("--ink-"));
@@ -93,7 +113,19 @@ for (const { id } of themes) {
       expect(colourDistance(lit, bytes("--ink-1")), "lit Kick step").toBeLessThan(8);
       expect(colourDistance(cap, bytes("--step-lit")), "unfilled top of the lit step").toBeLessThan(8);
       expect(colourDistance(empty, bytes("--step-a")), "empty step").toBeLessThan(8);
-      if (renderer === "webgl2") await app.screenshot({ path: info.outputPath("rack.png"), scale: "css", animations: "disabled" });
+      if (id !== "riso") {
+        expect(values["--reg-x"]).toBe("0px");
+        expect(values["--reg-y"]).toBe("0px");
+        const [right, below, clearRight, clearBelow] = await pixelsAt(app, stepGrid, [
+          { ...kick, x: kick.x + 15 },
+          { ...kick, y: kick.y + 15 },
+          { ...cellPoint(2, 1), x: cellPoint(2, 1).x + 15 },
+          { ...cellPoint(2, 1), y: cellPoint(2, 1).y + 15 },
+        ]);
+        expect(colourDistance(right, clearRight), "no second ink in the gap to the right").toBeLessThan(8);
+        expect(colourDistance(below, clearBelow), "no second ink in the gap below").toBeLessThan(8);
+      }
+      await app.screenshot({ path: info.outputPath("rack.png"), scale: "css", animations: "disabled" });
 
       const ring = { ...kick, x: kick.x - 16 };
       const ringDistance = async (color: string) => {
@@ -135,7 +167,18 @@ for (const { id } of themes) {
       await boxSelect(app, 400, 61, 1250, 59);
       const [selectedBar] = await pixelsAt(app, lane(app), [velocity]);
       expect(colourDistance(selectedBar, bytes("--roll-select")), "selected velocity bar").toBeLessThan(8);
-      if (renderer === "webgl2") await app.screenshot({ path: info.outputPath("roll.png"), scale: "css", animations: "disabled" });
+      if (renderer === "webgl2") {
+        await app.screenshot({ path: info.outputPath("roll.png"), scale: "css", animations: "disabled" });
+        await app.getByRole("combobox", { name: "Key", exact: true }).selectOption({ label: "C" });
+        await expect(app.getByRole("combobox", { name: "Scale", exact: true })).toHaveValue("major");
+        await expect.poll(async () => (await stats(app)).scaleMask).toBe(0b101010110101);
+        const keys = app.getByRole("group", { name: "Piano keys" });
+        for (const [key, name] of [[60, "root C4"], [62, "in-scale D4"]] as const) {
+          const [marker] = await pixelsAt(app, keys.locator(`[data-key="${key}"]`), [{ x: 1, y: 5 }]);
+          expect(colourDistance(marker, bytes("--roll-key-scale")), `${name} scale stripe`).toBeLessThan(8);
+        }
+        await app.screenshot({ path: info.outputPath("roll-c-major.png"), scale: "css", animations: "disabled" });
+      }
     });
   }
 }

@@ -12,6 +12,7 @@
   --accent: #f6f3ec;
   --select: #47b9ff; /* a clearer blue edge next to the periwinkle channel */
   --ok: #5fe3b8;
+  --error: #ff787f;
   --ink-1: #ff8b78; --ink-1b: #f0476d;
   --ink-2: #93a7ff; --ink-2b: #6a5cf5;
   --ink-3: #ffd27c; --ink-3b: #f39a45;
@@ -32,8 +33,8 @@
   --step-b: #0f1015;
   --step-lit: #25262e; /* lit graphite above the velocity fill */
   --knob-track: #393a41; /* 10% white on raised graphite */
-  --reg-x: 2px;
-  --reg-y: 2px;
+  --reg-x: 0px;
+  --reg-y: 0px;
 
   --roll-row: #15161c;
   --roll-row-black: #101116;
@@ -44,6 +45,8 @@
   --roll-box: rgba(71, 185, 255, 0.10);
   --roll-key-white: #dcdee4;
   --roll-key-black: #23252c;
+  --roll-key-held: #147bbd;
+  --roll-key-scale: var(--roll-key-held);
 
   --dev-card: #222329; /* lit glass over the graphite panel */
   --dev-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10), 0 0 0 1px var(--line),

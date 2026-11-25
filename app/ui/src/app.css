@@ -146,7 +146,7 @@ input {
 }
 
 .meter-bar.clip {
-  background: var(--ink-3b);
+  background: var(--error);
 }
 
 /* ---------------- popover ---------------- */
@@ -254,7 +254,7 @@ input[type="checkbox"] {
 }
 
 .log-error span {
-  color: var(--ink-3b);
+  color: var(--error);
 }
 
 .log-empty {
@@ -741,7 +741,7 @@ input[type="checkbox"] {
 }
 
 .channel-missing {
-  color: var(--ink-3b);
+  color: var(--error);
   font-size: 11px;
   font-weight: 700;
 }
@@ -1342,5 +1342,5 @@ label.field {
   }
 }
 
-.roll-key.in-scale { box-shadow: inset 3px 0 var(--accent), inset 0 0 0 100px color-mix(in srgb, var(--accent) 12%, transparent); }
-.roll-key.root { box-shadow: inset 6px 0 var(--accent); }
+.roll-key.in-scale { box-shadow: inset 3px 0 var(--roll-key-scale), inset 0 0 0 100px color-mix(in srgb, var(--roll-key-scale) 12%, transparent); }
+.roll-key.root { box-shadow: inset 6px 0 var(--roll-key-scale); }
