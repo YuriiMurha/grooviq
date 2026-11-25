@@ -220,6 +220,69 @@ describe("piano roll budgets", () => {
   });
 });
 
+function nativeWorkDelta(run: () => void): number {
+  const restore = countNativeWork();
+  const before = work;
+  try {
+    run();
+    return work - before;
+  } finally {
+    restore();
+  }
+}
+
+describe.skipIf(performanceGate)("counted native work", () => {
+  it.each([
+    { kind: "Array", prototype: Array.prototype, sample: () => [2, 4, 6] },
+    { kind: "TypedArray", prototype: Reflect.getPrototypeOf(Int32Array.prototype)!, sample: () => new Int32Array([2, 4, 6]) },
+  ])("charges $kind methods by length except the constant-time methods", ({ kind, prototype, sample }) => {
+    // This exemption list is the test's contract, independent of the wrapper's list.
+    const exempt = new Set<PropertyKey>(["at", "push", "pop", "subarray"]);
+    const callback = () => 1;
+    const argsByMethod = new Map<PropertyKey, unknown[]>([
+      ["every", [callback]], ["filter", [callback]], ["find", [callback]],
+      ["findIndex", [callback]], ["findLast", [callback]], ["findLastIndex", [callback]],
+      ["flatMap", [callback]], ["forEach", [callback]], ["map", [callback]],
+      ["reduce", [callback]], ["reduceRight", [callback]], ["some", [callback]],
+      ["push", [8]], ["set", [[8]]], ["with", [0, 8]],
+    ]);
+
+    for (const name of Reflect.ownKeys(prototype)) {
+      const original: unknown = Object.getOwnPropertyDescriptor(prototype, name)?.value;
+      if (typeof original !== "function") continue;
+      const label = `${kind}.${String(name)}`;
+      if (name === "constructor") {
+        let activeConstructor: unknown;
+        nativeWorkDelta(() => { activeConstructor = Reflect.get(prototype, name); });
+        expect(activeConstructor, label).toBe(original);
+        continue;
+      }
+      const receiver = sample();
+      const length = receiver.length;
+      const args = argsByMethod.get(name) ?? [];
+      // Native toString also calls the receiver's wrapped join.
+      const expected = exempt.has(name) ? 0 : name === "toString" ? 2 * length : length;
+      expect(nativeWorkDelta(() => {
+        Reflect.apply(Reflect.get(prototype, name), receiver, args);
+      }), label).toBe(expected);
+    }
+  });
+
+  it.each([
+    { kind: "Map", collection: new Map([[1, 2], [3, 4], [5, 6]]) },
+    { kind: "Set", collection: new Set([2, 4, 6]) },
+  ])("charges $kind iteration by size", ({ kind, collection }) => {
+    const { size } = collection;
+    for (const method of [Symbol.iterator, "entries", "keys", "values"] as const) {
+      expect(nativeWorkDelta(() => { collection[method](); }), `${kind}.${String(method)}`).toBe(size);
+    }
+    expect(nativeWorkDelta(() => { collection.forEach(() => undefined); }), `${kind}.forEach`).toBe(size);
+    expect(nativeWorkDelta(() => {
+      for (const entry of collection) void entry;
+    }), `${kind} for...of`).toBe(size);
+    expect(nativeWorkDelta(() => { void [...collection]; }), `${kind} spread`).toBe(size);
+  });
+});
 
 describe.skipIf(performanceGate)("counted typed-array aliases", () => {
   it("observes forEach callback arrays and preserves the callback receiver", () => {
