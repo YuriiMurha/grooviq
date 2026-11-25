@@ -454,6 +454,32 @@ test.describe("arrangement media contract", () => {
     expect(await call(app, "audio_import", importArgs(before))).toMatchObject({ status: "applied", request: 3 });
   });
 
+  test("relinking identical bytes keeps a held waveform valid", async ({ app, mock }) => {
+    const pcm = { rate: 24000, samples: [-16384, 32767, -8192, 4096] };
+    await mock.registerAudio(path, generatedWav(pcm));
+    await mock.registerAudio(replacementPath, generatedWav(pcm));
+    await call(app, "audio_import", importArgs(await view(app)));
+    const imported = await view(app);
+    const request = { generation: imported.generation, asset: 2, request: 551, start: 0, end: 4, bins: 2 };
+    await mock.holdWaveform(request.request);
+    await mock.eval(`() => {
+      window.__waveformReply = window.__TAURI_INTERNALS__.invoke("arrangement_waveform", ${JSON.stringify(request)})
+        .then(packet => Array.from(new Uint8Array(packet)), String);
+    }`);
+    const reply = await call(app, "audio_relink", { ...stamp(imported), asset: 2, path: replacementPath });
+    expect(reply).toMatchObject({ status: "applied", changed: true, revision: imported.revision + 1 });
+    expect((await view(app)).audioAssets[0].sample).toEqual({ path: "replacement.wav", file: null });
+    await mock.releaseWaveform(request.request);
+    const bytes = await mock.eval<number[] | string>("() => window.__waveformReply");
+    if (typeof bytes === "string") throw new Error(bytes);
+    const packet = decodeWaveform(Uint8Array.from(bytes).buffer);
+    expect(packet).toMatchObject({ asset: 2, rate: 24000, frames: 4, channels: 2, request: 551n });
+    expect(Array.from(packet.peaks)).toEqual([
+      -0.5, 32767 / 32768, -0.5, 32767 / 32768,
+      -0.25, 0.125, -0.25, 0.125,
+    ]);
+  });
+
   test("relink preserves provenance, has its own undo step and invalidates a held waveform", async ({ app, mock }) => {
     const provenance = { id: 2, sample: { path: "lost.wav", file: null }, sourceFrames: 8, sourceRate: 32000,
       originalTempo: 123, originalKey: { root: 2, scale: "major" } };

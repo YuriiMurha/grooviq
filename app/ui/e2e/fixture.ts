@@ -61,12 +61,16 @@ export function soundsFor(names: string[]): MockSeed["files"] {
   return Object.fromEntries(names.map((n) => [`/qa/sounds/${n}.wav`, { kind: "sample" as const }]));
 }
 
-/** Small, canonical stereo PCM16 WAV. Samples are signed integer amplitudes. */
+/** Canonical RIFF/WAVE with a 44-byte header and no metadata chunks. Pass signed PCM16
+ * integers for mono or pairs for stereo; the default specimen is stereo. */
 export function generatedWav({
   rate = 32000,
   samples = [[32767, -32768], [-16384, 16384], [8192, -8192], [0, 4096], [24576, 8192], [-8192, -24576], [8192, 0], [-32768, 32767]],
-}: { rate?: number; samples?: readonly (readonly [number, number])[] } = {}): number[] {
-  const bytes = new ArrayBuffer(44 + samples.length * 4);
+}: { rate?: number; samples?: readonly number[] | readonly (readonly [number, number])[] } = {}): number[] {
+  const channels = typeof samples[0] === "number" ? 1 : 2;
+  const bytesPerFrame = channels * 2;
+  const dataBytes = samples.length * bytesPerFrame;
+  const bytes = new ArrayBuffer(44 + dataBytes);
   const header = new DataView(bytes);
   const mark = (offset: number, fourcc: string) => {
     for (let index = 0; index < fourcc.length; index++) header.setUint8(offset + index, fourcc.charCodeAt(index));
@@ -76,16 +80,17 @@ export function generatedWav({
   mark(8, "WAVEfmt ");
   header.setUint32(16, 16, true);
   header.setUint16(20, 1, true);
-  header.setUint16(22, 2, true);
+  header.setUint16(22, channels, true);
   header.setUint32(24, rate, true);
-  header.setUint32(28, rate * 4, true);
-  header.setUint16(32, 4, true);
+  header.setUint32(28, rate * bytesPerFrame, true);
+  header.setUint16(32, bytesPerFrame, true);
   header.setUint16(34, 16, true);
   mark(36, "data");
-  header.setUint32(40, samples.length * 4, true);
-  samples.forEach(([left, right], index) => {
-    header.setInt16(44 + index * 4, left, true);
-    header.setInt16(46 + index * 4, right, true);
+  header.setUint32(40, dataBytes, true);
+  samples.forEach((sample, index) => {
+    const offset = 44 + index * bytesPerFrame;
+    header.setInt16(offset, typeof sample === "number" ? sample : sample[0], true);
+    if (typeof sample !== "number") header.setInt16(offset + 2, sample[1], true);
   });
   return Array.from(new Uint8Array(bytes));
 }

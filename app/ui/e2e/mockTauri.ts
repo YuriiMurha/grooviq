@@ -274,7 +274,7 @@ export function installMockTauri(seed: MockSeed): void {
   let trimRedo: TrimChange[] = [];
   type Arrangement = NonNullable<Project["arrangement"]>;
   type AddedPattern = { initial: Project["pattern"]; dormant?: PatternEntry };
-  type AudioSource = { bytes: number[]; data: DataView; rate: number; frames: number; channels: number };
+  type AudioSource = { bytes: number[]; data: DataView; rate: number; frames: number; channels: number; fromWorker: boolean };
   type ClipChange = { order: number; before: Arrangement; after: Arrangement; addedPatterns: AddedPattern[];
     media?: { asset: number; before: AudioSource | undefined; after: AudioSource } };
   const audioSources = new Map<number, AudioSource>();
@@ -1456,7 +1456,6 @@ export function installMockTauri(seed: MockSeed): void {
       const operations: Record<string, unknown>[] = JSON.parse(raw);
       if (!Array.isArray(operations) || operations.length > 100_000) throw "Invalid arrangement batch";
       const before: Arrangement = clone(s.project.arrangement ?? emptyArrangement());
-      if (before.audioAssets.length) throw "Audio/automation editing is outside the finite pattern fixture";
       const candidate = clone(s.project); const arrangement = clone(before); candidate.arrangement = arrangement;
       const addedPatterns = new Map<number, PatternEntry>();
       const sourcePattern = (id: number) => addedPatterns.get(id) ?? patternBank.get(id);
@@ -1472,7 +1471,14 @@ export function installMockTauri(seed: MockSeed): void {
         return { type: "pattern", pattern, offsetTick, lengthTicks };
       };
       const track = (value: unknown) => { const id = int(value, 0xffffffff); if (!arrangement.tracks.some(t => t.id === id)) throw "Unknown track"; return id; };
-      const clip = (value: unknown) => { const id = int(value, 0xffffffff); const result = arrangement.clips.find(c => c.id === id); if (!result) throw "Unknown clip"; return result; };
+      const clip = (value: unknown) => {
+        const id = int(value, 0xffffffff);
+        const result = arrangement.clips.find(c => c.id === id);
+        if (!result) throw "Unknown clip";
+        // Session::edit_arrangement allows pattern operations in the presence of audio assets.
+        if (result.content.type !== "pattern") throw "Only pattern content is supported by this finite fixture";
+        return result;
+      };
       operations.forEach((op, index) => {
         if (!op || typeof op !== "object") throw "Invalid arrangement operation";
         if (op.kind === "setLoop") {
@@ -1492,7 +1498,6 @@ export function installMockTauri(seed: MockSeed): void {
           const id = allocate(); arrangement.clips.push({ id, track: target, name: name(op.name), startTick: int(op.startTick), muted: op.muted, content: content(op.content) }); ids.push(id);
         } else if (op.kind === "move" || op.kind === "copy") {
           const source = clip(op.clip), destination = track(op.track), start = int(op.startTick);
-          if (source.content.type !== "pattern") throw "Only pattern content is supported by this finite fixture";
           if (op.kind === "copy") { const copy = clone(source); copy.id = allocate(); copy.track = destination; copy.startTick = start; arrangement.clips.push(copy); ids.push(copy.id); }
           else { source.track = destination; source.startTick = start; }
         } else if (op.kind === "slice") {
@@ -1540,9 +1545,9 @@ export function installMockTauri(seed: MockSeed): void {
       return arrangementReply(null, true, ids);
     } catch (error) { return arrangementReply(null, false, [], String(error)); }
   };
-  // Deliberately finite decoder for fixture-generated PCM16 WAVs. Real container probing and
-  // worker/budget behaviour are covered by the offline Rust decoder and Session replay.
-  const decodeAudio = (bytes: number[] | null | undefined): AudioSource => {
+  // Canonical RIFF/WAVE only: 44-byte header, 16-byte PCM fmt, then mono or stereo PCM16 data.
+  // No metadata chunks; media.rs initializes tempo/key to null on import and preserves them on relink.
+  const decodeAudio = (bytes: number[] | null | undefined, fromWorker: boolean): AudioSource => {
     const invalid = 'Media preparation failed: Decode("This file is not a sound Grooviq can open; use WAV, AIFF, FLAC, MP3 or OGG.")';
     if (!bytes || bytes.length < 44) throw invalid;
     const data = new DataView(Uint8Array.from(bytes).buffer);
@@ -1555,16 +1560,25 @@ export function installMockTauri(seed: MockSeed): void {
         data.getUint32(36) !== 0x64617461 || (channels !== 1 && channels !== 2) ||
         rate < 8000 || rate > 384000 || !Number.isInteger(frames) || frames < 1 ||
         44 + frames * channels * 2 !== bytes.length) throw invalid;
-    return { bytes, data, rate, frames, channels };
+    return { bytes, data, rate, frames, channels, fromWorker };
   };
   const sameAudioBytes = (left: number[], right: number[]) =>
     left === right || (left.length === right.length && left.every((value, index) => value === right[index]));
-  const sourceCache: WeakRef<AudioSource>[] = [];
+  const retainedAudioSource = (bytes: number[]) => {
+    const retained = [...audioSources.values()];
+    for (const change of [...clipUndo, ...clipRedo]) {
+      if (change.media?.before) retained.push(change.media.before);
+      if (change.media) retained.push(change.media.after);
+    }
+    // Match the worker's equal-byte reuse while a worker-decoded source is still owned.
+    // Open decodes archive bytes separately from the worker.
+    return retained.find(source => source.fromWorker && sameAudioBytes(source.bytes, bytes));
+  };
   const openArrangementMedia = () => {
     audioSources.clear();
     for (const asset of s.project.arrangement?.audioAssets ?? []) {
       const bytes = s.project.arrangementMedia?.[asset.id];
-      if (asset.sample.file !== null && bytes) audioSources.set(asset.id, decodeAudio(bytes));
+      if (asset.sample.file !== null && bytes) audioSources.set(asset.id, decodeAudio(bytes, false));
       else asset.sample.file = null;
     }
   };
@@ -1596,7 +1610,7 @@ export function installMockTauri(seed: MockSeed): void {
       // Pause at the worker's receive/publication boundary. Outcome is deterministic per path.
       const held = mediaHolds.get(path);
       const decoded = held ? await held.promise : true;
-      const prepared = decodeAudio(decoded && file.kind === "sample" ? file.wav : undefined);
+      const prepared = decodeAudio(decoded && file.kind === "sample" ? file.wav : undefined, true);
       workspaceStamp(args);
       if (pendingMedia.get(key) !== request) throw "Media request cancelled or superseded";
       const candidate = clone(s.project);
@@ -1638,16 +1652,7 @@ export function installMockTauri(seed: MockSeed): void {
         entry.sample = sample;
       }
       workspaceAdmit(candidate);
-      // The native worker reuses decoded buffers for equal original bytes while retained.
-      const existing = sourceCache.find(ref => {
-        const source = ref.deref();
-        return source && sameAudioBytes(source.bytes, prepared.bytes);
-      })?.deref();
-      const source = existing ?? prepared;
-      if (!existing) {
-        if (sourceCache.length === 32) sourceCache.shift();
-        sourceCache.push(new WeakRef(source));
-      }
+      const source = retainedAudioSource(prepared.bytes) ?? prepared;
       clearWorkspaceRedo();
       clipUndo.push({ order: historyOrder++, before, after: arrangement, addedPatterns: [],
         media: { asset, before: audioSources.get(asset), after: source } });

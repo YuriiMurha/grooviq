@@ -105,7 +105,7 @@ pub(super) fn verify() {
                 Ok(reply(&session, result, None))
             }
             "arrangement_view" => {
-                // The replay contains only audio clips, whose full serde shape equals IPC.
+                // Pattern and audio clips have the same serde and IPC shapes.
                 let stamp = session.arrangement_view();
                 let arrangement = &stamp.arrangement;
                 let (offset, limit) = (n("offset") as usize, n("limit") as usize);
