@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { decodeSynthMeter, readSynthMeter, type SynthMeter } from "../../api/synthMeter";
 import { isProjectReplacing, onProjectReplacing } from "../../project/replacement";
+import { subscribeThemeChange } from "../../theme/changes";
 
 import { envelopeMeter, lfoMeter } from "./meterGeometry";
 import "./meterMotion.css";
@@ -23,6 +24,12 @@ export function OutputScope({ channel, active, generation }: { channel: number; 
     let levels = SILENT_LEVELS;
     let motion: SynthMeter["motion"] = null;
     const clear = () => { scope = SILENT_SCOPE; levels = SILENT_LEVELS; motion = null; };
+    const scopeCanvas = canvas.current;
+    if (!scopeCanvas) return;
+    let strokeColour = getComputedStyle(scopeCanvas).color;
+    const unsubscribeTheme = subscribeThemeChange(() => {
+      strokeColour = getComputedStyle(scopeCanvas).color;
+    });
     const unsubscribe = onProjectReplacing(clear);
     const draw = (now: number) => {
       const visible = active && !document.hidden && !isProjectReplacing();
@@ -49,7 +56,7 @@ export function OutputScope({ channel, active, generation }: { channel: number; 
       const ctx = c?.getContext("2d");
       if (c && ctx) {
         ctx.clearRect(0, 0, c.width, c.height);
-        ctx.strokeStyle = getComputedStyle(c).color;
+        ctx.strokeStyle = strokeColour;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         scope.forEach((v, i) => {
@@ -89,7 +96,7 @@ export function OutputScope({ channel, active, generation }: { channel: number; 
       if (active) frame = requestAnimationFrame(draw);
     };
     draw(performance.now());
-    return () => { disposed = true; cancelAnimationFrame(frame); unsubscribe(); };
+    return () => { disposed = true; cancelAnimationFrame(frame); unsubscribe(); unsubscribeTheme(); };
   }, [channel, active, generation]);
   return <section className="dwell synth-output" aria-label="Live synth output"><div className="dcard-head"><b className="dcard-title">Output</b><span ref={status} className="synth-output-status" /></div><canvas ref={canvas} width={660} height={48} style={{ width: "100%", height: 48, color: "var(--kc, var(--accent))" }} aria-label="Synth output waveform" /></section>;
 }
