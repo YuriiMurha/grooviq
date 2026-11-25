@@ -86,6 +86,31 @@ fn assert_crossover_hz(actual: f32, expected: f32) {
     );
 }
 
+/// Meters 6/7 report the snapped splits with no processing: after construction, after
+/// parameters are set before the first block (project load), and after `reset()`.
+#[test]
+fn crossover_meters_follow_the_fresh_snap_and_reset() {
+    let rate = 22_050.0f32;
+    let expect = |low: f32, high: f32| effective_splits(low as f64, high as f64, rate as f64);
+    let check = |d: &dyn Device, (low, high): (f64, f64)| {
+        assert_crossover_hz(d.meter(6), low as f32);
+        assert_crossover_hz(d.meter(7), high as f32);
+    };
+    let mut d = create("ott", rate).unwrap();
+    check(&*d, expect(SPEC[7].2, SPEC[8].2));
+    d.set_param(7, 1000.0);
+    d.set_param(8, 1000.0);
+    check(&*d, expect(1000.0, 1000.0));
+    d.set_param(8, 12_000.0);
+    check(&*d, expect(1000.0, 12_000.0));
+    // Once processing has started a change glides; reset() snaps it, and the meters follow.
+    d.process(&mut [0.0; 128], &mut [0.0; 128], None, &[]);
+    d.set_param(7, 300.0);
+    d.set_param(8, 4000.0);
+    d.reset();
+    check(&*d, expect(300.0, 4000.0));
+}
+
 #[test]
 fn crossover_meters_report_spacing_without_moving_the_low_split() {
     for (low, high, effective_high) in [

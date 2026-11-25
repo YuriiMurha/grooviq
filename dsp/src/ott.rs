@@ -132,7 +132,9 @@ pub fn preset(name: &str) -> Option<Vec<(u32, f32)>> {
 /// Constrains the low/mid and mid/high splits in Hz at the device sample rate.
 /// Caps both inputs at 45% of the rate before enforcing the 1.5× spacing above the capped low.
 /// Pass the smoothed frequencies to reproduce the active coefficients, or the requested
-/// frequencies to estimate where they will settle.
+/// frequencies to estimate where they will settle. An estimate expects values within `SPEC` and
+/// the device's clamped rate, and can differ from a running device's meters 6/7 by about 1e-4 Hz
+/// (the device's f32 log2/exp2 round trip), so compare with a tolerance or read the meters.
 pub fn effective_splits(low_hz: f64, high_hz: f64, sample_rate: f64) -> (f64, f64) {
     let limit = 0.45 * sample_rate;
     let low = low_hz.min(limit);
