@@ -48,7 +48,20 @@ export function Mixer(props: MixerProps) {
   });
   useEffect(() => {
     gestures.resume();
-    return () => gestures.dispose();
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && gestures.cancelAll()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    const blur = () => { gestures.cancelAll(); };
+    window.addEventListener("keydown", keydown, true);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", keydown, true);
+      window.removeEventListener("blur", blur);
+      gestures.dispose();
+    };
   }, [gestures]);
 
   // ---------------- windowing ----------------

@@ -229,7 +229,15 @@ interface Active {
   token: number;
   target: ParamTarget;
   origin: number;
+  originPending?: number;
   heard: boolean;
+}
+
+interface Pending {
+  seq: number;
+  target: ParamTarget;
+  value: number;
+  visible: boolean;
 }
 
 /** The mixer's continuous controls. Every gesture is bound to the target it began on: once that
@@ -238,7 +246,7 @@ interface Active {
 export class MixerGestures {
   private active = new Map<string, Active>();
   private moving = new Map<string, number>();
-  private pending = new Map<string, number>();
+  private pending = new Map<string, Pending>();
   private nextToken = 1;
   private seq = 1;
   private closed = false;
@@ -251,7 +259,10 @@ export class MixerGestures {
 
   /** The value to show instead of the host's, if any. */
   shown(t: ParamTarget): number | undefined {
-    return this.moving.get(targetKey(t));
+    if (this.host.locked(t)) return undefined;
+    const key = targetKey(t);
+    const pending = this.pending.get(key);
+    return this.moving.get(key) ?? (pending?.visible ? pending.value : undefined);
   }
 
   begin(t: ParamTarget): Gesture {
@@ -260,9 +271,15 @@ export class MixerGestures {
     if (stored === undefined) return DEAD_GESTURE;
     const key = targetKey(t);
     const before = this.active.get(key);
+    const pending = this.pending.get(key);
     const token = this.nextToken++;
     // A gesture already on the target (a wheel turn, then a drag) hands over and keeps its start.
-    this.active.set(key, { token, target: t, origin: before?.origin ?? this.moving.get(key) ?? stored, heard: before?.heard ?? false });
+    this.active.set(key, {
+      token, target: t,
+      origin: before?.origin ?? (pending?.visible ? pending.value : stored),
+      originPending: before ? before.originPending : pending?.seq,
+      heard: before?.heard ?? false,
+    });
     const mine = () => !this.closed && this.active.get(key)?.token === token;
     return {
       alive: mine,
@@ -297,20 +314,40 @@ export class MixerGestures {
     if (stored === undefined) return;
     const key = targetKey(t);
     if (this.active.has(key)) this.end(key, true);
-    if (value === (this.moving.get(key) ?? stored)) return;
+    if (value === (this.shown(t) ?? stored)) return;
     this.store(t, value);
   }
 
   /** Call after every host update: ends gestures on removed targets silently, and cancels (on
    * their own ids) gestures on tracks that became pending. */
   retain() {
+    for (const [key, p] of [...this.pending]) {
+      if (this.host.stored(p.target) === undefined) this.drop(key);
+      else if (this.host.locked(p.target) && p.visible) {
+        // Once the host takes control, an old preview must not reappear on unlock.
+        p.visible = false;
+        this.host.changed();
+      }
+    }
     for (const [key, a] of [...this.active]) {
-      if (this.host.stored(a.target) === undefined) this.drop(key);
-      else if (this.host.locked(a.target)) this.end(key, true);
+      const stored = this.host.stored(a.target);
+      if (stored === undefined) this.drop(key);
+      else if (this.host.locked(a.target)) {
+        a.origin = stored;
+        a.originPending = undefined;
+        this.end(key, true);
+      }
     }
     for (const key of [...this.moving.keys()]) {
-      if (!this.active.has(key) && !this.pending.has(key)) this.moving.delete(key);
+      if (!this.active.has(key)) this.unshow(key);
     }
+  }
+
+  /** End live gestures while keeping already-issued commits and future input intact. */
+  cancelAll(): boolean {
+    const hadActive = this.active.size > 0;
+    for (const key of [...this.active.keys()]) if (this.active.has(key)) this.end(key, true);
+    return hadActive;
   }
 
   /** Takes gestures again after `dispose` (a remount). */
@@ -320,7 +357,7 @@ export class MixerGestures {
 
   /** Cancels everything and refuses new gestures (the mixer unmounted). */
   dispose() {
-    for (const key of [...this.active.keys()]) this.end(key, true);
+    this.cancelAll();
     this.closed = true;
   }
 
@@ -344,19 +381,26 @@ export class MixerGestures {
     const a = this.active.get(key)!;
     this.active.delete(key);
     if (restore && a.heard) void this.host.emit({ target: a.target, value: a.origin, phase: "cancel" });
-    if (!this.pending.has(key)) this.unshow(key);
+    this.unshow(key);
   }
 
   private store(t: ParamTarget, value: number) {
     const key = targetKey(t);
     const seq = this.seq++;
-    this.pending.set(key, seq);
-    this.show(key, value);
+    this.pending.set(key, { seq, target: t, value, visible: true });
+    this.moving.delete(key);
+    this.host.changed();
     const result = this.host.emit({ target: t, value, phase: "commit" });
     const settle = () => {
-      if (this.pending.get(key) !== seq) return;
+      if (this.pending.get(key)?.seq !== seq) return;
       this.pending.delete(key);
-      if (!this.active.has(key)) this.unshow(key);
+      const active = this.active.get(key);
+      if (active?.originPending === seq) {
+        // The older commit may have been refused: only the settled host value is authoritative.
+        active.origin = this.host.stored(t) ?? active.origin;
+        active.originPending = undefined;
+      }
+      this.host.changed();
     };
     if (result && typeof result.then === "function") result.then(settle, settle);
     else settle();

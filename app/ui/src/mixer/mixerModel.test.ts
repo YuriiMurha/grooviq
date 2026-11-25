@@ -272,4 +272,87 @@ describe("MixerGestures", () => {
     expect(h.g.begin(level("a")).alive()).toBe(false);
     expect(h.shownChanges()).toBeGreaterThan(0);
   });
+
+  it("cancelling a newer drag restores the outstanding commit preview", async () => {
+    const h = host({ "a.level": 0 });
+    h.useAsync();
+    h.g.set(level("a"), -2);
+    const drag = h.g.begin(level("a"));
+    drag.input(-4);
+    drag.cancel();
+    expect(h.sent.at(-1)).toEqual({ target: level("a"), value: -2, phase: "cancel" });
+    expect(h.g.shown(level("a"))).toBe(-2);
+    h.settle(false);
+    await flush();
+    expect(h.g.shown(level("a"))).toBeUndefined();
+  });
+
+  it("a refused earlier commit cannot become a newer drag's cancel value", async () => {
+    const h = host({ "a.level": 0 });
+    h.useAsync();
+    h.g.set(level("a"), -2);
+    const drag = h.g.begin(level("a"));
+    drag.input(-4);
+    h.settle(false);
+    await flush();
+    drag.cancel();
+    expect(h.sent.at(-1)).toEqual({ target: level("a"), value: 0, phase: "cancel" });
+    expect(h.g.shown(level("a"))).toBeUndefined();
+  });
+
+  it("an accepted earlier commit becomes the authoritative cancel value", async () => {
+    const h = host({ "a.level": 0 });
+    h.useAsync();
+    h.g.set(level("a"), -2);
+    const drag = h.g.begin(level("a"));
+    drag.input(-4);
+    h.stored.set("a.level", -2);
+    h.settle(true);
+    await flush();
+    drag.cancel();
+    expect(h.sent.at(-1)).toEqual({ target: level("a"), value: -2, phase: "cancel" });
+    expect(h.g.shown(level("a"))).toBeUndefined();
+  });
+
+  it("pending host state suppresses an outstanding commit preview without another command", async () => {
+    const h = host({ "a.level": 0 });
+    h.useAsync();
+    h.g.set(level("a"), -8);
+    h.locked.add("a");
+    h.g.retain();
+    expect(h.g.shown(level("a"))).toBeUndefined();
+    expect(h.sent).toEqual([{ target: level("a"), value: -8, phase: "commit" }]);
+    h.locked.delete("a");
+    h.g.retain();
+    expect(h.g.shown(level("a"))).toBeUndefined();
+    h.settle(false);
+    await flush();
+    expect(h.g.shown(level("a"))).toBeUndefined();
+  });
+
+
+  it("cancelAll ends live gestures but accepts new input and keeps issued commits", async () => {
+    const h = host({ "a.level": 0, "b.level": 0 });
+    h.useAsync();
+    h.g.set(level("a"), -2);
+    const drag = h.g.begin(level("a"));
+    drag.input(-4);
+    const other = h.g.begin(level("b"));
+    other.input(-6);
+    expect(h.g.cancelAll()).toBe(true);
+    expect(h.g.cancelAll()).toBe(false);
+    drag.commit(-4);
+    other.commit(-6);
+    expect(h.g.shown(level("a"))).toBe(-2);
+    expect(h.g.shown(level("b"))).toBeUndefined();
+    expect(h.sent.filter(c => c.phase === "commit")).toHaveLength(1);
+    h.settle(false);
+    await flush();
+    expect(h.g.shown(level("a"))).toBeUndefined();
+    const next = h.g.begin(level("b"));
+    expect(next.input(-1)).toBe(true);
+    next.commit(-1);
+    expect(h.sent.at(-1)).toEqual({ target: level("b"), value: -1, phase: "commit" });
+  });
+
 });

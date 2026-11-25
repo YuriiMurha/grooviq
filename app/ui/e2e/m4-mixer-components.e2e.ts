@@ -353,6 +353,99 @@ test("a large list draws a bounded window and still reaches every strip", async 
   expect((await log(page)).at(-1)).toEqual({ type: "mute", nodeId: "n-5000", on: true });
 });
 
+for (const settleDuringDrag of [false, true]) {
+  test(`an earlier refused host commit and a newer cancelled drag (settle during drag: ${settleDuringDrag})`, async ({ fixture }) => {
+    const page = await fixture();
+    await strip(page, "Kick").getByRole("button", { name: "Kick", exact: true }).click();
+    await clearLog(page);
+    await page.evaluate(() => window.mixerFixture.deferNextCommit());
+    const fader = page.getByRole("slider", { name: "Kick level" });
+    await fader.focus();
+    await page.keyboard.press("ArrowDown");
+    const issued = (await log(page)).find((c): c is Extract<MixerCommand, { type: "param" }> => c.type === "param" && c.phase === "commit")!;
+    const preview = String(Number(issued.value.toFixed(2)));
+    await expect(fader).toHaveAttribute("aria-valuenow", preview);
+    const at = await center(fader);
+    await page.mouse.move(at.x, at.y);
+    await page.mouse.down();
+    await page.mouse.move(at.x, at.y - 20, { steps: 3 });
+    if (settleDuringDrag) {
+      await page.evaluate(() => window.mixerFixture.settleCommit(false));
+      await expect(inspector(page).getByRole("status")).toBeVisible();
+    }
+    await page.keyboard.press("Escape");
+    await page.mouse.up();
+    await expect(fader).toHaveAttribute("aria-valuenow", settleDuringDrag ? "-4" : preview);
+    const cancelled = (await log(page)).filter((c): c is Extract<MixerCommand, { type: "param" }> => c.type === "param" && c.phase === "cancel");
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].value).toBe(settleDuringDrag ? -4 : issued.value);
+    if (!settleDuringDrag) await page.evaluate(() => window.mixerFixture.settleCommit(false));
+    await expect(fader).toHaveAttribute("aria-valuenow", "-4");
+    expect((await log(page)).filter(c => c.type === "param" && c.phase === "commit")).toHaveLength(1);
+  });
+}
+
+test("a host pending flag suppresses an outstanding commit preview", async ({ fixture }) => {
+  const page = await fixture();
+  await strip(page, "Kick").getByRole("button", { name: "Kick", exact: true }).click();
+  await clearLog(page);
+  await page.evaluate(() => window.mixerFixture.deferNextCommit());
+  const fader = page.getByRole("slider", { name: "Kick level" });
+  await fader.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(fader).not.toHaveAttribute("aria-valuenow", "-4");
+  await page.evaluate(() => window.mixerFixture.setPending("n-kick", true));
+  await expect(fader).toHaveAttribute("aria-disabled", "true");
+  await expect(fader).toHaveAttribute("aria-valuenow", "-4");
+  await page.evaluate(() => window.mixerFixture.settleCommit(false));
+  await page.evaluate(() => window.mixerFixture.setPending("n-kick", false));
+  await expect(fader).toHaveAttribute("aria-valuenow", "-4");
+  expect((await log(page)).filter(c => c.type === "param")).toHaveLength(1);
+});
+
+for (const cause of ["Escape", "blur"] as const) {
+  test(`${cause} cancels drag and wheel without a late commit, then new input works`, async ({ fixture }) => {
+    const page = await fixture();
+    const cancel = async () => {
+      if (cause === "Escape") await page.keyboard.press("Escape");
+      else await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    };
+    const fader = page.getByRole("slider", { name: "Kick level" });
+    const at = await center(fader);
+    await page.mouse.move(at.x, at.y);
+    await page.mouse.down();
+    await page.mouse.move(at.x, at.y - 20, { steps: 3 });
+    expect((await log(page)).some(c => c.type === "param" && c.phase === "live")).toBe(true);
+    await cancel();
+    await page.mouse.move(at.x, at.y - 40, { steps: 3 });
+    await page.mouse.up();
+    let params = (await log(page)).filter((c): c is Extract<MixerCommand, { type: "param" }> => c.type === "param");
+    expect(params.filter(c => c.phase === "cancel")).toEqual([{ type: "param", target: { kind: "level", nodeId: "n-kick" }, value: -4, phase: "cancel" }]);
+    expect(params.filter(c => c.phase === "commit")).toEqual([]);
+    await expect(fader).toHaveAttribute("aria-valuenow", "-4");
+
+    await clearLog(page);
+    const pan = page.getByRole("slider", { name: "Kick pan" });
+    const point = await center(pan);
+    await page.mouse.move(point.x, point.y);
+    await page.mouse.wheel(0, -80);
+    await expect.poll(async () => (await log(page)).filter(c => c.type === "param" && c.phase === "live").length).toBeGreaterThan(0);
+    await cancel();
+    // Past the shared 300 ms wheel-settlement timer: it must not resurrect a cancelled gesture.
+    await page.waitForTimeout(400);
+    params = (await log(page)).filter((c): c is Extract<MixerCommand, { type: "param" }> => c.type === "param");
+    expect(params.filter(c => c.phase === "cancel")).toEqual([{ type: "param", target: { kind: "pan", nodeId: "n-kick" }, value: 0, phase: "cancel" }]);
+    expect(params.filter(c => c.phase === "commit")).toEqual([]);
+    await expect(pan).toHaveAttribute("aria-valuenow", "0");
+
+    await clearLog(page);
+    await pan.focus();
+    await page.keyboard.press("ArrowRight");
+    expect(commits(await log(page))).toHaveLength(1);
+    await expect(pan).toHaveAttribute("aria-valuetext", "R2");
+  });
+}
+
 for (const width of [1000, 728, 390]) {
   test(`layout at ${width} px: no page overflow, master and selection legible; labelled capture`, async ({ fixture }, info) => {
     const page = await fixture("?long=1");

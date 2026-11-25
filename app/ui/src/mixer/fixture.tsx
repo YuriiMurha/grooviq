@@ -8,7 +8,7 @@ import "@fontsource-variable/manrope";
 import "../theme/riso.css";
 import "../app.css";
 import "../devices/devices.css";
-import { StrictMode, useLayoutEffect, useState } from "react";
+import { StrictMode, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Mixer } from "./Mixer";
 import type { MeterSource, MixerCommand, MixerError, MixerInsert, MixerMaster, MixerOption, MixerTrack } from "./mixerModel";
@@ -203,6 +203,8 @@ declare global {
     mixerFixture: {
       log: MixerCommand[];
       refuseNext(message: string): void;
+      deferNextCommit(): void;
+      settleCommit(accepted: boolean): void;
       setPending(id: string, pending: boolean): void;
       remove(id: string): void;
       replace(id: string, newId: string): void;
@@ -221,14 +223,31 @@ const METERS = snapshot(() => shownState);
 
 export function Fixture() {
   const [state, setState] = useState(initial);
+  const deferNext = useRef(false);
+  const deferred = useRef<{ command: Extract<MixerCommand, { type: "param" }>; resolve: () => void } | null>(null);
+  const afterRender = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
     shownState = state;
+    // Settle only after the controlled child received the host's authoritative props.
+    const resolve = afterRender.current;
+    afterRender.current = null;
+    resolve?.();
   });
 
   useLayoutEffect(() => {
     window.mixerFixture = {
       log: LOG,
       refuseNext: (message) => setState((s) => ({ ...s, refuse: message })),
+      deferNextCommit: () => { deferNext.current = true; },
+      settleCommit: (accepted) => {
+        const pending = deferred.current;
+        if (!pending) return;
+        deferred.current = null;
+        afterRender.current = pending.resolve;
+        setState((s) => accepted
+          ? { ...apply(s, pending.command), error: null }
+          : { ...s, error: { nodeId: pending.command.target.nodeId, message: "Refused delayed fixture commit." } });
+      },
       setPending: (id, pending) => setState((s) => update(s, id, (t) => ({ ...t, pending }))),
       remove: (id) => setState((s) => ({ ...s, tracks: s.tracks.filter((t) => t.id !== id) })),
       replace: (id, newId) => setState((s) => ({ ...s, tracks: s.tracks.map((t) => (t.id === id ? { ...t, id: newId, sends: t.sends.map((x) => ({ ...x, id: uid("send") })) } : t)) })),
@@ -239,6 +258,10 @@ export function Fixture() {
 
   const onCommand = (c: MixerCommand) => {
     window.mixerFixture.log.push(c);
+    if (c.type === "param" && c.phase === "commit" && deferNext.current) {
+      deferNext.current = false;
+      return new Promise<void>((resolve) => { deferred.current = { command: c, resolve }; });
+    }
     setState((s) => {
       const live = c.type === "param" && c.phase !== "commit";
       if (s.refuse && !live && c.type !== "select") {
