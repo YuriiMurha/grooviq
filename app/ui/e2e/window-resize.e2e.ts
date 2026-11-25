@@ -40,7 +40,7 @@ async function contained(dialog: Locator) {
 test.use({ seed: { audioLog: [], project: seed, files: soundsFor(["Kick"]) } });
 for (const device of ["Kick sampler", "Bass synth"]) {
   for (const [width, height] of [[1280, 800], [1440, 900], [1920, 1080]]) {
-    test(`${device} remains reachable after ${width} resize`, async ({ app, mock }, info) => {
+    test(`${device} remains reachable after ${width} resize`, async ({ app, mock }) => {
       await app.setViewportSize({ width, height });
       const opener = app.getByRole("button", { name: `Edit the ${device}` });
       await opener.click();
@@ -50,11 +50,8 @@ for (const device of ["Kick sampler", "Bass synth"]) {
       const knob = dialog.locator(`[data-param="${param}"]`);
       await knob.focus();
       await app.setViewportSize({ width: 900, height: 560 });
-      await stable(dialog);
-      await app.screenshot({ path: info.outputPath("before-assert.png") });
       await contained(dialog);
       await expect(knob).toBeFocused();
-      await app.screenshot({ path: info.outputPath("compact.png") });
       const before = Number(await knob.getAttribute("aria-valuenow"));
       const box = (await knob.boundingBox())!;
       await app.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
