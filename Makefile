@@ -40,7 +40,14 @@ check: test-instruction-profiles test-merge-train e2e-browser-results-test e2e-d
 	npm --prefix $(UI) run build
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
-	$(CARGO) test --workspace --all-features
+	@cargo_commands="$$($(CARGO) --list)" && \
+	if printf '%s\n' "$$cargo_commands" | grep -Eq '^[[:space:]]+nextest([[:space:]]|$$)'; then \
+		$(CARGO) nextest run --workspace --all-features --profile ci && \
+		$(CARGO) test --workspace --all-features --doc; \
+	else \
+		printf '%s\n' 'cargo-nextest unavailable. Install with: cargo install cargo-nextest --version 0.9.151 --locked'; \
+		$(CARGO) test --workspace --all-features; \
+	fi
 	$(MAKE) grid-budget
 	$(MAKE) notes-edit-budget
 	$(MAKE) export-budget
