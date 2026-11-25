@@ -328,6 +328,7 @@ impl EngineState {
             return Err(ControlError::Rejected);
         }
         self.mix.validate()?;
+        self.mix.covers(&self.channels, &song)?;
         Ok(Self {
             mix: self.mix,
             song,

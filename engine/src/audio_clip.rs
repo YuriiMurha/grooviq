@@ -102,6 +102,11 @@ impl AudioSchedule {
             .collect()
     }
 
+    /// Each entry's playlist track, in entry order.
+    pub(crate) fn entry_routes(&self) -> impl Iterator<Item = Option<u64>> + '_ {
+        (0..self.bank.entries.len()).map(|entry| self.route(entry))
+    }
+
     /// The playlist track of entry `entry`, if routed. Real-time safe.
     pub(crate) fn route(&self, entry: usize) -> Option<u64> {
         self.routes.get(entry).copied().flatten()

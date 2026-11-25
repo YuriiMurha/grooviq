@@ -393,6 +393,8 @@ struct Change {
     eq: bool,
     /// Clip -> playlist track from this block on.
     routes: Vec<(u32, u64)>,
+    /// From this block on the mix also routes playlist track 9 into T1.
+    track9: bool,
 }
 
 /// The hand-written chain: fresh devices that persist across `change` (as survivors must),
@@ -404,6 +406,7 @@ fn manual(iso: &Isolated, change: Option<Change>, start: usize) -> Vec<f32> {
     let mut eq: Option<Box<dyn Device>> = None;
     let mut master = 0.8;
     let mut routes = routes();
+    let mut track9 = false;
     let mut out = Vec::with_capacity(BLOCKS * N * 2);
     let side = |v: &[f32], b: usize, ch: usize| -> Vec<f32> {
         (0..N).map(|i| v[(b * N + i) * 2 + ch]).collect()
@@ -424,6 +427,7 @@ fn manual(iso: &Isolated, change: Option<Change>, start: usize) -> Vec<f32> {
                 eq = Some(fresh("eq", 0, &[]));
             }
             routes = ch.routes.clone();
+            track9 = ch.track9;
         }
         let audio_track = |track: u64, ch: usize| -> Vec<f32> {
             let mut w = vec![0.0f32; N];
@@ -443,6 +447,9 @@ fn manual(iso: &Isolated, change: Option<Change>, start: usize) -> Vec<f32> {
         for ch in 0..2 {
             acc(&mut t1[ch], &side(&iso.ch3, b, ch), 1.0);
             acc(&mut t1[ch], &audio_track(2, ch), 1.0);
+            if track9 {
+                acc(&mut t1[ch], &audio_track(9, ch), 1.0);
+            }
             acc(&mut t2[ch], &side(&iso.ch7, b, ch), 1.0);
             acc(&mut t2[ch], &audio_track(5, ch), 1.0);
             acc(&mut t2[ch], &side(&iso.synth, b, ch), 1.0);
@@ -560,6 +567,7 @@ fn a_live_install_keeps_survivor_state_and_held_voices() {
             threshold: Some(-30.0),
             eq: true,
             routes: routes(),
+            track9: false,
         }),
         0,
     );
@@ -626,6 +634,7 @@ fn a_track_only_move_reroutes_sounding_clips_without_restarting_them() {
             threshold: None,
             eq: false,
             routes: moved.clone(),
+            track9: false,
         }),
         0,
     );
@@ -959,4 +968,420 @@ fn survivor_transfers_check_identity_rate_and_order_before_moving_anything() {
     );
     assert_eq!(new.transfer_from(&mut old, &id), Ok(()));
     assert_eq!((plays(&mut new), plays(&mut old)), (1.0, 2.0));
+}
+
+// ---- R2/R3 repair: instance routes and one source-set transaction ----
+
+/// Channel 3 through unity track 1; track 2 is silent (zero gain).
+fn one_channel_mix(destination: u64) -> MixSetup {
+    MixSetup::Routed(RoutedMix {
+        mixer: Mixer {
+            tracks: vec![
+                Track {
+                    id: MASTER,
+                    output: None,
+                    inserts: vec![],
+                },
+                Track {
+                    id: MixerTrackId(1),
+                    output: Some(MASTER),
+                    inserts: vec![],
+                },
+                Track {
+                    id: MixerTrackId(2),
+                    output: Some(MASTER),
+                    inserts: vec![],
+                },
+            ],
+            sources: vec![Source {
+                id: SourceId::Channel(3),
+                destination: MixerTrackId(destination),
+            }],
+            ..Mixer::default()
+        },
+        gains: vec![TrackGain {
+            track: MixerTrackId(2),
+            left: 0.0,
+            right: 0.0,
+        }],
+        devices: vec![],
+    })
+}
+
+#[test]
+fn a_reused_channel_id_leaves_the_old_fade_on_its_old_route() {
+    let run = |reroute: bool| {
+        render(
+            Only::Channel(3),
+            one_channel_mix(1),
+            |_| N,
+            |b, c| {
+                if b == 30 {
+                    c.remove_channel(ChannelId(3)).unwrap();
+                    c.add_channel(ChannelSetup::sampler(
+                        ChannelId(3),
+                        None,
+                        vec![],
+                        ChannelMix::default(),
+                    ))
+                    .unwrap();
+                    if reroute {
+                        c.set_mix(one_channel_mix(2)).unwrap();
+                    }
+                }
+            },
+        )
+    };
+    let original = run(false);
+    let rerouted = run(true);
+    let fade = 30 * N * 2..34 * N * 2;
+    assert!(
+        audible(&original[fade.clone()]),
+        "the old instance fades out audibly"
+    );
+    assert_eq!(same_bits(&original, &rerouted), None);
+}
+
+#[test]
+fn a_song_naming_an_unrouted_track_is_refused_whole_in_routed_mode() {
+    let (mut c, _p) = engine_with(
+        EngineConfig { sample_rate: SR },
+        state(Only::All, routed(0.8, -18.0, false)),
+    );
+    let before = c.state().clone();
+    let mut song = before.song.clone();
+    song.audio = song.audio.with_tracks(&[(20, 9), (11, 2), (5, 5)]).unwrap();
+    assert_eq!(c.set_song(song.clone()), Err(ControlError::Rejected));
+    let update = TimelineUpdate {
+        pattern: Box::new(before.pattern.clone()),
+        song: Box::new(song),
+        bpm: before.bpm,
+        mode: before.playback_mode,
+        region: before.song_loop,
+        remove_channel: None,
+    };
+    assert_eq!(c.set_timeline(update), Err(ControlError::Rejected));
+    assert_eq!(c.state(), &before);
+}
+
+fn with_track9(mut mix: MixSetup) -> MixSetup {
+    if let MixSetup::Routed(m) = &mut mix {
+        m.mixer.sources.push(Source {
+            id: SourceId::AudioTrack(9),
+            destination: MixerTrackId(1),
+        });
+    }
+    mix
+}
+
+fn moved_song(c: &Controller, routes: &[(u32, u64)]) -> TimelineUpdate {
+    let s = c.state();
+    let mut song = s.song.clone();
+    let before = song.audio.clone();
+    song.audio = song.audio.with_tracks(routes).unwrap();
+    assert!(song.audio.shares_bank(&before));
+    TimelineUpdate {
+        pattern: Box::new(s.pattern.clone()),
+        song: Box::new(song),
+        bpm: s.bpm,
+        mode: s.playback_mode,
+        region: s.song_loop,
+        remove_channel: None,
+    }
+}
+
+#[test]
+fn one_queue_slot_admits_a_whole_source_and_mix_edit_and_a_full_queue_none() {
+    let moved = [(20, 9), (11, 2), (5, 5)];
+    let (mut c, _p) = engine_with(
+        EngineConfig { sample_rate: SR },
+        state(Only::All, routed(0.8, -18.0, false)),
+    );
+    let edit = |c: &Controller| SourceEdit {
+        remove: vec![ChannelId(3)],
+        add: vec![ChannelSetup::synth(
+            ChannelId(3),
+            vec![],
+            ChannelMix::default(),
+        )],
+        timeline: Some(moved_song(c, &moved)),
+        mix: with_track9(routed(0.8, -18.0, false)),
+    };
+    // The unsafe half on its own is refused: the song would name an unrouted track.
+    assert_eq!(
+        c.set_song(*moved_song(&c, &moved).song),
+        Err(ControlError::Rejected)
+    );
+    let mut fill = 0;
+    while c.send(Command::SetTempo { bpm: 120.0 }).is_ok() {
+        fill += 1;
+    }
+    assert!(fill > 0);
+    let before = (
+        c.state().clone(),
+        c.mix_revision(),
+        c.channel_instance(ChannelId(3)),
+    );
+    assert_eq!(c.set_sources_and_mix(edit(&c)), Err(ControlError::Full));
+    assert_eq!(
+        (
+            c.state().clone(),
+            c.mix_revision(),
+            c.channel_instance(ChannelId(3))
+        ),
+        before
+    );
+    // Exactly one slot.
+    let (mut c, mut p) = engine_with(
+        EngineConfig { sample_rate: SR },
+        state(Only::All, routed(0.8, -18.0, false)),
+    );
+    for _ in 0..fill - 1 {
+        c.send(Command::SetTempo { bpm: 120.0 }).unwrap();
+    }
+    let old_instance = c.channel_instance(ChannelId(3));
+    let revision = c.set_sources_and_mix(edit(&c)).unwrap();
+    assert_eq!(revision, c.mix_revision());
+    assert_eq!(c.state().song.audio.tracks(), moved.to_vec());
+    assert_eq!(c.state().mix, with_track9(routed(0.8, -18.0, false)));
+    assert_ne!(c.channel_instance(ChannelId(3)), old_instance);
+    assert!(c.send(Command::Stop).is_err(), "it took the single slot");
+    p.process(&mut [0.0; 2 * N], 2);
+    assert!(c.send(Command::Stop).is_ok());
+}
+
+#[test]
+fn a_compound_edit_moves_a_sounding_clip_to_a_new_track_without_restarting_anything() {
+    let moved = vec![(20, 9), (11, 2), (5, 5)];
+    // Isolated sources see the same song update, so only routing differs.
+    let iso = isolated(|b, c, only| {
+        if b == 25 {
+            let keep: Vec<_> = moved
+                .iter()
+                .copied()
+                .filter(|(id, _)| only == Only::Clip(*id))
+                .collect();
+            c.set_timeline(moved_song(c, &keep)).unwrap();
+        }
+    });
+    let expected = manual(
+        &iso,
+        Some(Change {
+            at: 25,
+            master: 0.6,
+            threshold: Some(-30.0),
+            eq: false,
+            routes: moved.clone(),
+            track9: true,
+        }),
+        0,
+    );
+    let got = render(
+        Only::All,
+        routed(0.8, -18.0, false),
+        |_| N,
+        |b, c| {
+            if b == 25 {
+                let edit = SourceEdit {
+                    remove: vec![],
+                    add: vec![],
+                    timeline: Some(moved_song(c, &moved)),
+                    mix: with_track9(routed(0.6, -30.0, false)),
+                };
+                c.set_sources_and_mix(edit).unwrap();
+            }
+        },
+    );
+    assert_eq!(same_bits(&expected, &got), None);
+}
+
+#[test]
+fn repeated_reuse_and_reroute_keep_every_fade_on_its_own_route() {
+    let silent = || ChannelSetup::sampler(ChannelId(3), None, vec![], ChannelMix::default());
+    let original = render(
+        Only::Channel(3),
+        one_channel_mix(1),
+        |_| N,
+        |b, c| {
+            if b == 30 {
+                c.remove_channel(ChannelId(3)).unwrap();
+                c.add_channel(silent()).unwrap();
+            }
+        },
+    );
+    let churned = render(
+        Only::Channel(3),
+        one_channel_mix(1),
+        |_| N,
+        |b, c| {
+            if (30..34).contains(&b) {
+                // Each block: replace the channel and flip its route, in one admission.
+                let edit = SourceEdit {
+                    remove: vec![ChannelId(3)],
+                    add: vec![silent()],
+                    timeline: None,
+                    mix: one_channel_mix(if b % 2 == 0 { 2 } else { 1 }),
+                };
+                c.set_sources_and_mix(edit).unwrap();
+            }
+        },
+    );
+    assert!(audible(&original[30 * N * 2..34 * N * 2]));
+    assert_eq!(same_bits(&original, &churned), None);
+}
+
+#[test]
+fn a_mix_that_drops_a_fading_route_waits_for_the_fade() {
+    let (mut c, mut p) = engine_with(
+        EngineConfig { sample_rate: SR },
+        state(Only::Channel(3), one_channel_mix(1)),
+    );
+    c.send(Command::Play).unwrap();
+    c.send(Command::ChannelNote {
+        channel: ChannelId(3),
+        key: 60,
+        velocity: 1.0,
+        on: true,
+        id: NoteId(1),
+    })
+    .unwrap();
+    p.process(&mut [0.0; 8 * N], 2);
+    c.remove_channel(ChannelId(3)).unwrap();
+    // Without track 1 the fading instance would have nowhere to go; so would LegacyDirect.
+    let mut no_track1 = one_channel_mix(2);
+    if let MixSetup::Routed(m) = &mut no_track1 {
+        m.mixer.tracks.retain(|t| t.id != MixerTrackId(1));
+        m.mixer.sources.clear();
+    }
+    let before = (c.state().clone(), c.mix_revision());
+    assert_eq!(c.set_mix(no_track1.clone()), Err(ControlError::Busy));
+    assert_eq!(c.set_mix(MixSetup::LegacyDirect), Err(ControlError::Busy));
+    assert_eq!((c.state().clone(), c.mix_revision()), before);
+    // Once the fade is collected and freed, the same edit goes through.
+    for _ in 0..16 {
+        p.process(&mut [0.0; 2 * N], 2);
+        let _ = c.check_health();
+    }
+    assert!(c.set_mix(no_track1).is_ok());
+    assert!(c.set_mix(MixSetup::LegacyDirect).is_ok());
+}
+
+#[test]
+fn compound_edits_refuse_whole_on_any_invalid_part() {
+    let (mut c, _p) = engine_with(
+        EngineConfig { sample_rate: SR },
+        state(Only::All, routed(0.8, -18.0, false)),
+    );
+    let before = (
+        c.state().clone(),
+        c.mix_revision(),
+        c.channel_instance(ChannelId(7)),
+    );
+    let base = || SourceEdit {
+        remove: vec![],
+        add: vec![],
+        timeline: None,
+        mix: routed(0.8, -18.0, false),
+    };
+    let cases = [
+        // A new channel the mix does not route.
+        (
+            SourceEdit {
+                add: vec![ChannelSetup::synth(
+                    ChannelId(8),
+                    vec![],
+                    ChannelMix::default(),
+                )],
+                ..base()
+            },
+            ControlError::Rejected,
+        ),
+        (
+            SourceEdit {
+                remove: vec![ChannelId(4)],
+                ..base()
+            },
+            ControlError::UnknownChannel,
+        ),
+        (
+            SourceEdit {
+                remove: vec![ChannelId(3), ChannelId(3)],
+                ..base()
+            },
+            ControlError::Rejected,
+        ),
+        (
+            SourceEdit {
+                add: vec![ChannelSetup::synth(
+                    ChannelId(7),
+                    vec![],
+                    ChannelMix::default(),
+                )],
+                ..base()
+            },
+            ControlError::ChannelExists,
+        ),
+        (
+            SourceEdit {
+                timeline: Some(TimelineUpdate {
+                    remove_channel: Some(ChannelId(7)),
+                    ..moved_song(&c, &routes())
+                }),
+                ..base()
+            },
+            ControlError::Rejected,
+        ),
+        // A song routing clip 20 to a track the mix does not name.
+        (
+            SourceEdit {
+                timeline: Some(moved_song(&c, &[(20, 9), (11, 2), (5, 5)])),
+                ..base()
+            },
+            ControlError::Rejected,
+        ),
+        // The mix itself invalid (a device missing), after everything else checks out.
+        (
+            SourceEdit {
+                add: vec![ChannelSetup::synth(
+                    ChannelId(99),
+                    vec![],
+                    ChannelMix::default(),
+                )],
+                mix: {
+                    let mut m = routed(0.8, -18.0, false);
+                    if let MixSetup::Routed(r) = &mut m {
+                        r.devices.pop();
+                    }
+                    m
+                },
+                ..base()
+            },
+            ControlError::Rejected,
+        ),
+    ];
+    for (edit, err) in cases {
+        assert_eq!(c.set_sources_and_mix(edit), Err(err));
+        assert_eq!(
+            (
+                c.state().clone(),
+                c.mix_revision(),
+                c.channel_instance(ChannelId(7))
+            ),
+            before
+        );
+    }
+    // A mix that stops naming a track the song uses is refused like the song itself.
+    let mut drops5 = routed(0.8, -18.0, false);
+    if let MixSetup::Routed(m) = &mut drops5 {
+        m.mixer.sources.retain(|s| s.id != SourceId::AudioTrack(5));
+    }
+    assert_eq!(c.set_mix(drops5), Err(ControlError::Rejected));
+    assert_eq!(
+        (
+            c.state().clone(),
+            c.mix_revision(),
+            c.channel_instance(ChannelId(7))
+        ),
+        before
+    );
 }

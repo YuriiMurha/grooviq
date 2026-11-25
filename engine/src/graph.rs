@@ -66,6 +66,8 @@ pub(crate) struct Graph {
     mix: Option<Box<crate::mixer::live::LiveMix>>,
     /// The controller's revision of the mix this graph runs.
     mix_revision: u64,
+    /// Which controller build made this graph; fade routes recorded before it retire with it.
+    epoch: u64,
 }
 
 /// Samples in a de-click ramp at `sample_rate`.
@@ -101,7 +103,16 @@ impl Graph {
             node_r: [0.0; BLOCK],
             mix: None,
             mix_revision: 0,
+            epoch: 0,
         }
+    }
+
+    pub(crate) fn set_epoch(&mut self, epoch: u64) {
+        self.epoch = epoch;
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// The mix a freshly built graph starts with (off the audio thread).
@@ -125,9 +136,16 @@ impl Graph {
     /// leaving mix ends up in `install` either way, to retire off-thread. Real-time safe:
     /// boxes and devices are swapped, nothing is allocated or freed.
     pub(crate) fn install_mix(&mut self, install: &mut crate::mixer::live::MixInstall) {
-        if install.generation != self.generation || install.base != self.mix_revision {
-            return;
+        if self.mix_installable(install) {
+            self.apply_mix(install);
         }
+    }
+
+    fn mix_installable(&self, install: &crate::mixer::live::MixInstall) -> bool {
+        install.generation == self.generation && install.base == self.mix_revision
+    }
+
+    fn apply_mix(&mut self, install: &mut crate::mixer::live::MixInstall) {
         if let (Some(new), Some(old)) = (install.live.as_mut(), self.mix.as_mut()) {
             new.adopt(old, &install.transfers, &install.params);
         }
@@ -167,6 +185,52 @@ impl Graph {
         if let Some(mix) = &mut self.mix {
             mix.kernel.reset();
         }
+    }
+
+    /// Whether every part of a source transaction can apply to this graph now: its mix was
+    /// prepared against this generation and revision, each removed channel is present, and
+    /// each added one finds its ID free (after the removals) and room. Checked before any
+    /// part changes, so a transaction applies whole or not at all. Real-time safe.
+    pub(crate) fn sources_admissible(&self, t: &crate::command::SourceTransaction) -> bool {
+        if !self.mix_installable(&t.mix) {
+            return false;
+        }
+        let present = self.present().count();
+        if t.removes
+            .iter()
+            .any(|id| !self.present().any(|c| c.id() == *id))
+        {
+            return false;
+        }
+        let adds = t.adds.iter().flatten();
+        if adds
+            .clone()
+            .any(|n| !t.removes.contains(&n.id()) && self.present().any(|c| c.id() == n.id()))
+        {
+            return false;
+        }
+        present + adds.count() <= MAX_CHANNELS + t.removes.len()
+    }
+
+    /// Applies a transaction [`Self::sources_admissible`] accepted: removals (each fades on
+    /// its prepared instance route; one with no fading room comes back at once), additions
+    /// in order, then the mix. Everything that leaves stays in `t` to retire off-thread.
+    pub(crate) fn apply_sources(&mut self, t: &mut crate::command::SourceTransaction) {
+        for &id in &t.removes {
+            if let Some(node) = self.remove_channel(id) {
+                // Capacity reserved for every removal: no allocation.
+                t.removed.push(node);
+            }
+        }
+        for slot in &mut t.adds {
+            if let Some(node) = slot.take() {
+                *slot = self.add_channel(node);
+            }
+        }
+    }
+
+    pub(crate) fn apply_transaction_mix(&mut self, t: &mut crate::command::SourceTransaction) {
+        self.apply_mix(&mut t.mix);
     }
 
     /// The channels that are not leaving.
@@ -607,8 +671,13 @@ impl Graph {
                 silenced += 1;
                 continue;
             }
-            // A leaving channel keeps its route until it is collected.
-            let id = SourceId::Channel(u64::from(channel.id().0));
+            // A leaving channel keeps the route its instance had when removed, until it is
+            // collected; its ID may already name a new channel on another route.
+            let id = if channel.leaving() {
+                SourceId::Instance(channel.instance)
+            } else {
+                SourceId::Channel(u64::from(channel.id().0))
+            };
             pull(mix, id, node_l, node_r);
         }
         for index in 0..mix.sources.ids().len() {

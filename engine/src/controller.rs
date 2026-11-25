@@ -55,6 +55,9 @@ pub enum ControlError {
     /// The channel's instrument has no such thing (a sample or a sampler parameter for a synth
     /// channel).
     WrongInstrument,
+    /// A removed channel is still fading out through a mixer track this change would delete
+    /// (or through the routed mix it would leave); retry once the fade is collected.
+    Busy,
 }
 
 impl std::fmt::Display for ControlError {
@@ -68,11 +71,36 @@ impl std::fmt::Display for ControlError {
             Self::ChannelExists => "a channel with that id exists already",
             Self::TooManyChannels => "the engine holds as many channels as it can",
             Self::WrongInstrument => "the channel's instrument has no such setting",
+            Self::Busy => "a removed channel is still fading out through the mix; try again",
         })
     }
 }
 
 impl std::error::Error for ControlError {}
+
+/// A removed channel instance's fade route (see `Controller::fades`).
+#[derive(Clone, Copy, Debug)]
+struct Fade {
+    instance: u64,
+    track: crate::mixer::MixerTrackId,
+    /// The graph build that was newest when it was removed: it fades in that graph or a
+    /// later one, so retiring any graph up to `epoch` cannot retire it early.
+    epoch: u64,
+}
+
+/// One atomic change of the engine's source set and mix (see
+/// [`Controller::set_sources_and_mix`]).
+#[derive(Clone, Debug)]
+pub struct SourceEdit {
+    /// Channels removed first; each fades out on the route it had.
+    pub remove: Vec<ChannelId>,
+    /// Channels added after the removals, in order (an ID just removed may be reused).
+    pub add: Vec<ChannelSetup>,
+    /// A new timeline; its `remove_channel` must be `None` (use `remove`).
+    pub timeline: Option<crate::TimelineUpdate>,
+    /// The mix for the resulting sources.
+    pub mix: crate::mixer::MixSetup,
+}
 
 /// The test tone as last set.
 #[derive(Clone, Copy, Debug)]
@@ -116,6 +144,11 @@ pub struct Controller {
     /// Which channel each id is now, see [`Self::channel_instance`].
     instances: BTreeMap<ChannelId, u64>,
     next_instance: u64,
+    /// Removed channel instances that may still be fading through a routed mix, on the
+    /// track each had: every prepared mix carries a route for them until they retire.
+    fades: Vec<Fade>,
+    /// Counts graph builds; each graph and each fade remembers the build it belongs to.
+    graph_epoch: u64,
     /// The revision of the mix the queued messages lead to; never reused (a loaded state
     /// takes a new one), so an install prepared against any other revision is stale.
     mix_revision: u64,
@@ -168,6 +201,8 @@ impl Controller {
             next_instance: 0,
             generation: 0,
             mix_revision: 0,
+            fades: Vec::new(),
+            graph_epoch: 0,
             record_mark: 0,
             recording_armed: false,
             seen_faults: 0,
@@ -318,6 +353,18 @@ impl Controller {
     /// are clamped, missing instrument parameters take their defaults and extra ones are
     /// dropped; a choke group past [`crate::MAX_CHOKE_GROUP`] is `Rejected`.
     pub fn add_channel(&mut self, setup: ChannelSetup) -> Result<(), ControlError> {
+        // A routed mix needs a route for the new instance in the same installation.
+        if matches!(self.state.mix, crate::mixer::MixSetup::Routed(_)) {
+            let mix = self.state.mix.clone();
+            return self
+                .set_sources_and_mix(SourceEdit {
+                    remove: Vec::new(),
+                    add: vec![setup],
+                    timeline: None,
+                    mix,
+                })
+                .map(|_| ());
+        }
         if self.state.channel(setup.id).is_some() {
             return Err(ControlError::ChannelExists);
         }
@@ -362,6 +409,7 @@ impl Controller {
         }
         self.push(Msg::RemoveChannel(id))?;
         self.state.channels.remove(index);
+        self.record_fade(id);
         self.instances.remove(&id);
         Ok(())
     }
@@ -396,6 +444,7 @@ impl Controller {
         let song = song.checked(&ids)?;
         song.automation.validate(&self.state.channels)?;
         song.audio.validate_loop(self.state.song_loop)?;
+        self.state.mix.covers(&self.state.channels, &song)?;
         if !song.valid_loop(self.state.song_loop) {
             return Err(ControlError::Rejected);
         }
@@ -426,6 +475,7 @@ impl Controller {
         {
             return Err(ControlError::Rejected);
         }
+        self.state.mix.covers(&channels, &song)?;
         self.push(Msg::Timeline(
             Box::new(crate::TimelineUpdate {
                 pattern: Box::new(pattern.clone()),
@@ -437,6 +487,7 @@ impl Controller {
         ))?;
         if let Some(id) = update.remove_channel {
             self.state.channels.retain(|c| c.id != id);
+            self.record_fade(id);
             self.instances.remove(&id);
         }
         self.state.pattern = pattern;
@@ -460,8 +511,10 @@ impl Controller {
     pub fn set_mix(&mut self, mix: crate::mixer::MixSetup) -> Result<u64, ControlError> {
         use crate::mixer::live;
         mix.validate()?;
+        mix.covers(&self.state.channels, &self.state.song)?;
+        let aliases = aliases(&mix, &self.instances, &self.fades)?;
         let rate = self.sample_rate;
-        let prepared = catch_unwind(AssertUnwindSafe(|| live::prepare(&mix, rate)))
+        let prepared = catch_unwind(AssertUnwindSafe(|| live::prepare(&mix, rate, &aliases)))
             .map_err(|_| ControlError::BuildFailed)??;
         let (transfers, params) = live::plan(&self.state.mix, &mix)?;
         let revision = self.mix_revision + 1;
@@ -477,6 +530,183 @@ impl Controller {
         self.mix_revision = revision;
         self.state.mix = mix;
         Ok(revision)
+    }
+
+    /// Changes the source set and the mix in one queue admission: channel removals, then
+    /// additions, an optional timeline (pattern, song, tempo, mode, loop) and the mix that
+    /// routes the result, all applied at one block boundary. Nothing is rebuilt: other
+    /// channels keep their notes, song audio on a kept bank keeps its voices, inserts that
+    /// survive keep their state, and removed channels fade on the route they had.
+    ///
+    /// Everything is validated and prepared here first; any refusal (`Rejected`,
+    /// `UnknownChannel`, `ChannelExists`, `TooManyChannels`, `Busy`, `BuildFailed`, `Full`)
+    /// changes nothing. A routed mix must name every resulting channel and every playlist
+    /// track the song's audio clips use. Returns the new mix revision.
+    pub fn set_sources_and_mix(&mut self, edit: SourceEdit) -> Result<u64, ControlError> {
+        use crate::mixer::{SourceId, live};
+        let SourceEdit {
+            remove,
+            add,
+            timeline,
+            mix,
+        } = edit;
+        if timeline
+            .as_ref()
+            .is_some_and(|u| u.remove_channel.is_some())
+        {
+            return Err(ControlError::Rejected);
+        }
+        let mut channels = self.state.channels.clone();
+        let mut instances = self.instances.clone();
+        let mut fades = self.fades.clone();
+        for (i, id) in remove.iter().enumerate() {
+            if remove[..i].contains(id) {
+                return Err(ControlError::Rejected);
+            }
+            let at = channels
+                .iter()
+                .position(|c| c.id == *id)
+                .ok_or(ControlError::UnknownChannel)?;
+            channels.remove(at);
+            let instance = instances.remove(id).unwrap_or(0);
+            if let Some(track) = self
+                .state
+                .mix
+                .destination(SourceId::Channel(u64::from(id.0)))
+            {
+                fades.push(Fade {
+                    instance,
+                    track,
+                    epoch: self.graph_epoch,
+                });
+            }
+        }
+        let mut next = self.next_instance;
+        let mut added = Vec::with_capacity(add.len());
+        for setup in add {
+            if channels.iter().any(|c| c.id == setup.id) {
+                return Err(ControlError::ChannelExists);
+            }
+            if channels.len() >= MAX_CHANNELS {
+                return Err(ControlError::TooManyChannels);
+            }
+            let setup = setup.checked()?;
+            next += 1;
+            instances.insert(setup.id, next);
+            channels.push(setup.clone());
+            added.push((setup, next));
+        }
+        let ids: Vec<_> = channels.iter().map(|c| c.id).collect();
+        let candidate = match &timeline {
+            Some(u) => {
+                if !u.bpm.is_finite() || !(20.0..=400.0).contains(&u.bpm) {
+                    return Err(ControlError::Rejected);
+                }
+                (
+                    (*u.pattern).clone().checked()?,
+                    (*u.song).clone().checked(&ids)?,
+                    u.bpm,
+                    u.mode,
+                    u.region,
+                )
+            }
+            None => (
+                self.state.pattern.clone(),
+                self.state.song.clone().checked(&ids)?,
+                self.state.bpm,
+                self.state.playback_mode,
+                self.state.song_loop,
+            ),
+        };
+        let (pattern, song, bpm, mode, region) = candidate;
+        song.automation.validate(&channels)?;
+        if !song.valid_loop(region) {
+            return Err(ControlError::Rejected);
+        }
+        mix.validate()?;
+        mix.covers(&channels, &song)?;
+        let aliases = aliases(&mix, &instances, &fades)?;
+        let rate = self.sample_rate;
+        let ramp = ramp_len(rate);
+        let any_solo = channels.iter().any(|c| c.mix.solo);
+        let built = catch_unwind(AssertUnwindSafe(|| {
+            let nodes: Vec<_> = added
+                .iter()
+                .map(|(setup, instance)| {
+                    let mut node = Box::new(ChannelNode::new(rate, ramp, setup, any_solo));
+                    node.instance = *instance;
+                    Some(node)
+                })
+                .collect();
+            live::prepare(&mix, rate, &aliases).map(|live| (nodes, live))
+        }))
+        .map_err(|_| ControlError::BuildFailed)??;
+        let (adds, prepared) = built;
+        let (transfers, params) = live::plan(&self.state.mix, &mix)?;
+        let revision = self.mix_revision + 1;
+        let removed = Vec::with_capacity(remove.len());
+        let transaction = crate::command::SourceTransaction {
+            removes: remove,
+            removed,
+            adds,
+            timeline: timeline.as_ref().map(|_| {
+                (
+                    Box::new(crate::TimelineUpdate {
+                        pattern: Box::new(pattern.clone()),
+                        song: Box::new(song.clone()),
+                        bpm,
+                        mode,
+                        region,
+                        remove_channel: None,
+                    }),
+                    self.state.playback_mode != mode,
+                    self.state.song_loop != region,
+                )
+            }),
+            mix: live::MixInstall {
+                generation: self.generation,
+                base: self.mix_revision,
+                revision,
+                live: prepared,
+                transfers,
+                params,
+                installed: false,
+            },
+            applied: false,
+        };
+        self.push(Msg::Sources(Box::new(transaction)))?;
+        // Admitted: only now does the mirror change, all of it.
+        self.state.channels = channels;
+        self.instances = instances;
+        self.next_instance = next;
+        self.fades = fades;
+        if timeline.is_some() {
+            self.state.pattern = pattern;
+            self.state.song = song;
+            self.state.bpm = bpm;
+            if self.state.playback_mode != mode {
+                self.recording_armed = false;
+            }
+            self.state.playback_mode = mode;
+            self.state.song_loop = region;
+        }
+        self.state.mix = mix;
+        self.mix_revision = revision;
+        Ok(revision)
+    }
+
+    /// Records the fade route of channel `id`'s current instance, which is being removed.
+    fn record_fade(&mut self, id: ChannelId) {
+        let source = crate::mixer::SourceId::Channel(u64::from(id.0));
+        if let (Some(track), Some(&instance)) =
+            (self.state.mix.destination(source), self.instances.get(&id))
+        {
+            self.fades.push(Fade {
+                instance,
+                track,
+                epoch: self.graph_epoch,
+            });
+        }
     }
 
     /// The revision of the latest accepted mix (see [`Self::set_mix`]).
@@ -813,16 +1043,21 @@ impl Controller {
             self.restart_owed = true;
         }
         processor.restart(self.sample_rate, graph);
+        // The old graph, and every channel fading in it, is gone; the queue no longer
+        // holds a removal (see `rebuilt_queue`).
+        self.fades.clear();
         self.free_trash();
         true
     }
 
     /// Construction is transactional: a panic never changes the mirrored project or identities.
-    fn try_build_graph(&self) -> Option<Box<Graph>> {
+    fn try_build_graph(&mut self) -> Option<Box<Graph>> {
+        self.graph_epoch += 1;
         catch_unwind(AssertUnwindSafe(|| self.replay())).ok()
     }
 
     pub(crate) fn build_graph(&mut self) -> Box<Graph> {
+        self.graph_epoch += 1;
         self.replay()
     }
 
@@ -856,10 +1091,13 @@ impl Controller {
         graph.set_song(Box::new(self.state.song.clone()));
         graph.playback_mode = self.state.playback_mode;
         graph.song_loop = self.state.song_loop;
-        // A fresh graph gets fresh insert devices; the state was validated on admission.
-        let mix = crate::mixer::live::prepare(&self.state.mix, self.sample_rate)
+        // A fresh graph gets fresh insert devices and no fading channels; the state was
+        // validated on admission.
+        let aliases = aliases(&self.state.mix, &self.instances, &[]).expect("no fades");
+        let mix = crate::mixer::live::prepare(&self.state.mix, self.sample_rate, &aliases)
             .expect("the mirrored mix prepares");
         graph.set_initial_mix(mix, self.mix_revision);
+        graph.set_epoch(self.graph_epoch);
         // Every channel starts at its mix: nothing ramps in a fresh graph.
         graph.settle();
         graph
@@ -928,8 +1166,24 @@ impl Controller {
 
     /// Frees what the processor handed back (graphs, channels, samples, patterns). The output layer also calls it while it runs
     /// the processor itself, so a restart waiting for room in the trash queue can go through.
+    /// Fade routes retire with their instance, or with every graph built up to theirs.
     pub(crate) fn free_trash(&mut self) {
-        while self.trash.pop().is_ok() {}
+        while let Ok(item) = self.trash.pop() {
+            let mut retire = |instance: u64| self.fades.retain(|f| f.instance != instance);
+            match &item {
+                Trash::Channel(node) | Trash::Timeline(_, Some(node)) => retire(node.instance),
+                Trash::Sources(t) => {
+                    for node in &t.removed {
+                        retire(node.instance);
+                    }
+                }
+                Trash::Graph(graph) => {
+                    let epoch = graph.epoch();
+                    self.fades.retain(|f| f.epoch > epoch);
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Every queued command has reached the processor.
@@ -945,6 +1199,38 @@ impl Controller {
             assert!(self.commands.push(Msg::ReplaceGraph(graph)).is_ok());
         }
     }
+}
+
+/// The engine-owned fade routes a mix prepared now must carry: one per present channel
+/// instance the mix routes (in case it is removed while this mix runs) and one per recorded
+/// fade, on its own track. A fade whose track the mix lacks, or any fade under LegacyDirect,
+/// is `Busy`: refusing the edit until it retires, never moving or dropping the fade.
+fn aliases(
+    mix: &crate::mixer::MixSetup,
+    instances: &BTreeMap<ChannelId, u64>,
+    fades: &[Fade],
+) -> Result<Vec<(u64, crate::mixer::MixerTrackId)>, ControlError> {
+    use crate::mixer::{MixSetup, SourceId};
+    if let MixSetup::LegacyDirect = mix {
+        return if fades.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(ControlError::Busy)
+        };
+    }
+    let mut out = Vec::with_capacity(instances.len() + fades.len());
+    for f in fades {
+        if !mix.has_track(f.track) {
+            return Err(ControlError::Busy);
+        }
+        out.push((f.instance, f.track));
+    }
+    for (id, &instance) in instances {
+        if let Some(track) = mix.destination(SourceId::Channel(u64::from(id.0))) {
+            out.push((instance, track));
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -59,7 +59,7 @@ pub use arrangement::{
     PatternClip, SongNote, compile_pattern_clips,
 };
 pub use command::{Command, NoteId};
-pub use controller::{ControlError, Controller, HealthEvent};
+pub use controller::{ControlError, Controller, HealthEvent, SourceEdit};
 pub use export::{ExportError, ExportOptions, ExportReport, WavFormat, export_wav};
 #[doc(hidden)]
 pub use export::{PartFiles, RealFiles, export_wav_with};

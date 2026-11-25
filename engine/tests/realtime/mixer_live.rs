@@ -201,6 +201,39 @@ fn live_mixer_installs_and_pulled_sources_never_allocate() {
             30 if block == 230 => c.set_mix(MixSetup::LegacyDirect).map(|_| ()).unwrap(),
             31 if block == 231 => c.set_mix(mix(9)).map(|_| ()).unwrap(),
             35 => c.send(Command::AllSoundOff).unwrap(),
+            // Replace a sounding channel, move clips and change the mix in one transaction.
+            40 | 41 => {
+                let s = c.state();
+                let mut song = s.song.clone();
+                let flip = block % 2 == 0;
+                song.audio = song
+                    .audio
+                    .with_tracks(&if flip {
+                        [(9, 2), (4, 1), (6, 2)]
+                    } else {
+                        [(9, 1), (4, 2), (6, 1)]
+                    })
+                    .unwrap();
+                let edit = SourceEdit {
+                    remove: vec![ChannelId(7)],
+                    add: vec![ChannelSetup::synth(
+                        ChannelId(7),
+                        vec![],
+                        ChannelMix::default(),
+                    )],
+                    timeline: Some(TimelineUpdate {
+                        pattern: Box::new(s.pattern.clone()),
+                        song: Box::new(song),
+                        bpm: s.bpm,
+                        mode: s.playback_mode,
+                        region: s.song_loop,
+                        remove_channel: None,
+                    }),
+                    mix: mix(block / 50 + 20),
+                };
+                c.set_sources_and_mix(edit).unwrap();
+                c.send(note(7, true)).unwrap();
+            }
             36 => {
                 c.send(Command::Play).unwrap();
                 c.send(note(7, true)).unwrap();

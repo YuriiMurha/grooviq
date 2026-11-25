@@ -9,8 +9,8 @@
 //! mute or solo beyond the fixed track coefficients.
 
 use super::{
-    Budget, InsertId, InsertIdentity, Mixer, PrepareConfig, PreparedInsert, PreparedMixer,
-    SourceBuffers, TrackGain, compile,
+    Budget, InsertId, InsertIdentity, Mixer, MixerTrackId, PrepareConfig, PreparedInsert,
+    PreparedMixer, Source, SourceBuffers, SourceId, TrackGain, compile,
 };
 use crate::BLOCK;
 use crate::controller::ControlError;
@@ -108,7 +108,13 @@ impl RoutedMix {
                     .map_err(|_| ControlError::Rejected)?;
             }
         }
-        if declared != devices.len() {
+        if declared != devices.len()
+            || self
+                .mixer
+                .sources
+                .iter()
+                .any(|s| matches!(s.id, SourceId::Instance(_)))
+        {
             return Err(ControlError::Rejected);
         }
         Ok((devices, kinds))
@@ -116,6 +122,48 @@ impl RoutedMix {
 }
 
 impl MixSetup {
+    /// Where the mix sends `source`, if it names it.
+    pub(crate) fn destination(&self, source: SourceId) -> Option<MixerTrackId> {
+        match self {
+            Self::LegacyDirect => None,
+            Self::Routed(mix) => mix
+                .mixer
+                .sources
+                .iter()
+                .find(|s| s.id == source)
+                .map(|s| s.destination),
+        }
+    }
+
+    /// A routed mix names every channel and every playlist track the song's audio uses;
+    /// LegacyDirect hears everything. Otherwise a source could be admitted and never heard.
+    pub(crate) fn covers(
+        &self,
+        channels: &[crate::ChannelSetup],
+        song: &crate::SongData,
+    ) -> Result<(), ControlError> {
+        if let Self::LegacyDirect = self {
+            return Ok(());
+        }
+        let named = |id| self.destination(id).is_some();
+        if channels
+            .iter()
+            .all(|c| named(SourceId::Channel(u64::from(c.id.0))))
+            && song
+                .audio
+                .entry_routes()
+                .all(|t| t.is_some_and(|t| named(SourceId::AudioTrack(t))))
+        {
+            Ok(())
+        } else {
+            Err(ControlError::Rejected)
+        }
+    }
+
+    pub(crate) fn has_track(&self, track: MixerTrackId) -> bool {
+        matches!(self, Self::Routed(mix) if mix.mixer.tracks.iter().any(|t| t.id == track))
+    }
+
     /// Topology and device descriptions only; constructs no device.
     pub(crate) fn validate(&self) -> Result<(), ControlError> {
         if let Self::Routed(mix) = self {
@@ -181,13 +229,27 @@ pub(crate) struct MixInstall {
     pub(crate) installed: bool,
 }
 
-/// Prepares `setup` for `rate`, off-thread. `LegacyDirect` prepares nothing.
-pub(crate) fn prepare(setup: &MixSetup, rate: f32) -> Result<Option<Box<LiveMix>>, ControlError> {
+/// Prepares `setup` for `rate`, off-thread, plus one engine-owned source per channel
+/// instance in `aliases` (`SourceId::Instance`) on the given track: a channel that is removed
+/// keeps that route while it fades, whatever later happens to its ID. `LegacyDirect`
+/// prepares nothing.
+pub(crate) fn prepare(
+    setup: &MixSetup,
+    rate: f32,
+    aliases: &[(u64, MixerTrackId)],
+) -> Result<Option<Box<LiveMix>>, ControlError> {
     let MixSetup::Routed(mix) = setup else {
         return Ok(None);
     };
     let (devices, kinds) = mix.checked()?;
-    let compiled = compile(&mix.mixer, budget()).map_err(|_| ControlError::Rejected)?;
+    let mut mixer = mix.mixer.clone();
+    mixer
+        .sources
+        .extend(aliases.iter().map(|&(instance, destination)| Source {
+            id: SourceId::Instance(instance),
+            destination,
+        }));
+    let compiled = compile(&mixer, budget()).map_err(|_| ControlError::Rejected)?;
     let declared: BTreeMap<_, _> = mix
         .mixer
         .tracks

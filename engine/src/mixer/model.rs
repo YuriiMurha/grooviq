@@ -15,6 +15,9 @@ pub enum SourceId {
     /// Engine-owned inputs with no user identity: they can never collide with a channel or
     /// a playlist track, whatever IDs those use.
     System(SystemSource),
+    /// A removed channel instance still fading out, on the route it had when removed. The
+    /// engine adds these itself; a caller's mix naming one is refused.
+    Instance(u64),
 }
 /// The test tone and the legacy built-in synth (the `Command::Note` instrument).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
