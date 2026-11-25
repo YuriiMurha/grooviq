@@ -55,8 +55,9 @@ Read the code; it is the documentation. `make help` lists the supported commands
 
 CI quirks:
 
-- `rust (macos-latest)` is sometimes cancelled at about 15 minutes with zero steps (no runner).
-  Re-run it with `gh run rerun <run-id> --failed`.
+- `rerun-no-runner.yml` automatically re-runs `rust (macos-latest)` once on the current head after a
+  zero-step runner acquisition cancellation. Use `gh run rerun <run-id> --failed` only if attempt 2
+  is cancelled the same way.
 - Branch protection is strict. After another merge, run `gh pr update-branch <n>`.
 - Auto-merge sometimes stalls at CLEAN. Then merge with `gh pr merge <n> --squash`.
 
