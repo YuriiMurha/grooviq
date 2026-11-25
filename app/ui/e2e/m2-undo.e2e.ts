@@ -278,8 +278,8 @@ test.describe("the live fixture's length log", () => {
   test.use({ seed: { project: twoChannels([]) } });
 
   /** Runs `body` in the page with the mock's IPC and state (as `ipc`, `m` and `steps()`). */
-  const inPage = <T,>(app: import("@playwright/test").Page, body: string) =>
-    app.evaluate(`(async () => {
+  const inPage = <T,>(page: Page, body: string) =>
+    page.evaluate(`(async () => {
       const ipc = window.__TAURI_INTERNALS__;
       const m = window.__grooviqMock;
       const steps = () => m.view().pattern.steps;
@@ -294,10 +294,12 @@ test.describe("the live fixture's length log", () => {
       ${body}
     })()`) as Promise<T>;
 
-  test("keeps_a_hundred_thousand_lengths_set_by_hand_small", async ({ app }) => {
-    const out = await inPage<{ log: number; steps: number; undone: number }>(app, `
+  test("keeps_consecutive_lengths_set_by_hand_small", async ({ mockPage }) => {
+    // Each manual length replaces the previous one immediately. Cycle through all 200 values
+    // five times here; the Rust Session test exercises the same rule over 100,000 edits.
+    const out = await inPage<{ log: number; steps: number; undone: number }>(mockPage, `
       await add(5000);
-      for (let i = 0; i < 100000; i++) await edit({ kind: "setPatternLength", steps: 1 + (i % 200) });
+      for (let i = 0; i < 1000; i++) await edit({ kind: "setPatternLength", steps: 1 + (i % 200) });
       const last = steps();
       await ipc.invoke("notes_undo", { stamp: await stamp() });
       return { log: m.state.history.log.length, steps: last, undone: steps() };
@@ -306,8 +308,8 @@ test.describe("the live fixture's length log", () => {
     expect(out.undone).toBe(out.steps);
   });
 
-  test("forgets_the_growth_of_cleared_redo", async ({ app }) => {
-    const out = await inPage<{ log: number; steps: number }>(app, `
+  test("forgets_the_growth_of_cleared_redo", async ({ mockPage }) => {
+    const out = await inPage<{ log: number; steps: number }>(mockPage, `
       for (let i = 0; i < 1000; i++) {
         await add(5000 + (i % 100));
         await edit({ kind: "setPatternLength", steps: 16 });
