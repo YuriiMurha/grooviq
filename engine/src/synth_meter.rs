@@ -112,6 +112,15 @@ mod tests {
     #[test]
     fn concurrent_reads_never_mix_capture_frame_and_fields() {
         let shared = SynthMeterShared::default();
+        let first_snapshot = std::sync::Barrier::new(2);
+        let consistent = |meter: &SynthMeter| {
+            meter
+                .levels
+                .iter()
+                .chain(meter.scope.iter())
+                .chain(meter.motion.iter())
+                .all(|value| *value == meter.frames as f32)
+        };
         std::thread::scope(|threads| {
             threads.spawn(|| {
                 for frames in 1..10_000 {
@@ -123,18 +132,19 @@ mod tests {
                         scope: [value; SYNTH_SCOPE_LEN],
                         motion: [value; 3],
                     }));
+                    if frames == 1 {
+                        first_snapshot.wait();
+                        first_snapshot.wait();
+                    }
                 }
             });
+            first_snapshot.wait();
+            let first = shared.read(7);
+            first_snapshot.wait();
+            assert!(first.as_ref().is_some_and(consistent));
             for _ in 0..10_000 {
                 if let Some(meter) = shared.read(7) {
-                    assert!(
-                        meter
-                            .levels
-                            .iter()
-                            .chain(meter.scope.iter())
-                            .chain(meter.motion.iter())
-                            .all(|v| *v == meter.frames as f32)
-                    );
+                    assert!(consistent(&meter));
                 }
             }
         });
