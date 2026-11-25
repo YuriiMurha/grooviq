@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, merge-train/batch]
   pull_request:
 
 permissions:
