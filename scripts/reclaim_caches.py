@@ -161,8 +161,8 @@ def reclaim_caches(
         cache = release_cache.resolve()
         registered_paths = {worktree.path.resolve() for worktree in worktrees}
 
-        if apply and (sys.version_info < (3, 11) or not shutil.rmtree.avoids_symlink_attacks):
-            raise OSError("Apply requires Python 3.11 or newer with symlink-safe cache removal")
+        if apply and not shutil.rmtree.avoids_symlink_attacks:
+            raise OSError("Apply requires symlink-safe cache removal")
 
         for worktree in worktrees[1:]:
             target = worktree.path / "target"
@@ -240,6 +240,13 @@ def disk_check(repo, minimum):
 
 
 def main():
+    if sys.version_info < (3, 11):
+        print(
+            "Grooviq cache maintenance requires Python 3.11 or newer. "
+            "Put a supported python3 on PATH.",
+            file=sys.stderr,
+        )
+        return 1
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     disk = commands.add_parser("disk-check")

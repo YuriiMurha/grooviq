@@ -1,16 +1,35 @@
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).with_name("reclaim_caches.py")
+
+
+class RuntimeTests(unittest.TestCase):
+    def test_old_python_refuses_both_commands_before_probing_disk(self):
+        import reclaim_caches
+
+        for command in ("reclaim-caches", "disk-check"):
+            with self.subTest(command=command):
+                error = io.StringIO()
+                with (
+                    patch.object(sys, "version_info", (3, 10)),
+                    patch.object(sys, "argv", [str(SCRIPT), command]),
+                    patch.object(shutil, "disk_usage", side_effect=AssertionError("disk probe ran")),
+                    redirect_stderr(error),
+                ):
+                    self.assertEqual(reclaim_caches.main(), 1)
+                self.assertIn("requires Python 3.11", error.getvalue())
 
 
 class DiskCheckTests(unittest.TestCase):
