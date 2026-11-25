@@ -712,3 +712,251 @@ fn system_sources_cannot_collide_with_user_ids() {
         }
     }
 }
+
+/// Two channel sources, each on its own unity track into a unity master, in insertion and
+/// identity order: here the routed sum is `(0 + a) + b`, the very additions LegacyDirect
+/// makes after a silent tone and synth. This equality is arithmetic for this shape only,
+/// not a claim about arbitrary routed sums. It lets chokes, automation, a song loop and a
+/// seek run through the routed graph against the legacy one.
+#[test]
+fn routed_chokes_automation_loop_and_seek_match_legacy_for_a_two_source_shape() {
+    let hits = |n: u32| -> Vec<SeqNote> {
+        (0..n)
+            .map(|i| SeqNote {
+                tick: i * 120,
+                channel: ChannelId(1 + i % 2),
+                key: 60 + (i % 5) as u8,
+                velocity: 0.9,
+                length: 200,
+                slide: false,
+            })
+            .collect()
+    };
+    let channel = |id, pan| {
+        let mut c = ChannelSetup::sampler(
+            ChannelId(id),
+            Some(sample()),
+            Vec::new(),
+            ChannelMix {
+                pan,
+                ..ChannelMix::default()
+            },
+        );
+        c.choke = 1;
+        c
+    };
+    let channels = vec![channel(1, -0.4), channel(2, 0.6)];
+    let arrangement = compile_pattern_clips(
+        &[(
+            1,
+            PatternData {
+                length: 3_840,
+                notes: hits(32),
+            },
+        )],
+        &[PatternClip {
+            id: 1,
+            pattern: 1,
+            start: 0,
+            length: 3_840,
+            offset: 0,
+            muted: false,
+        }],
+        10_000,
+    )
+    .unwrap();
+    let automation = AutomationSchedule::build(
+        vec![AutomationClip {
+            target: AutomationTarget::ChannelVolume(ChannelId(1)),
+            priority: 1,
+            start_tick: 0,
+            offset_tick: 0,
+            length_ticks: 1_920,
+            points: vec![
+                AutomationPoint {
+                    tick: 0,
+                    value: 0.2,
+                    segment: AutomationSegment::Linear,
+                },
+                AutomationPoint {
+                    tick: 1_920,
+                    value: 1.6,
+                    segment: AutomationSegment::Hold,
+                },
+            ],
+        }],
+        &channels,
+    )
+    .unwrap();
+    let to = |id| Track {
+        id: MixerTrackId(id),
+        output: Some(MASTER),
+        inserts: Vec::new(),
+    };
+    let mix = MixSetup::Routed(RoutedMix {
+        mixer: Mixer {
+            tracks: vec![
+                Track {
+                    id: MASTER,
+                    output: None,
+                    inserts: Vec::new(),
+                },
+                to(1),
+                to(2),
+            ],
+            sources: vec![
+                Source {
+                    id: SourceId::Channel(2),
+                    destination: MixerTrackId(2),
+                },
+                Source {
+                    id: SourceId::Channel(1),
+                    destination: MixerTrackId(1),
+                },
+            ],
+            ..Mixer::default()
+        },
+        gains: Vec::new(),
+        devices: Vec::new(),
+    });
+    let run = |mix: MixSetup| {
+        let state = EngineState {
+            bpm: 120.0,
+            playback_mode: PlaybackMode::Song,
+            song_loop: Some(SongLoop {
+                start_tick: 240,
+                end_tick: 1_200,
+            }),
+            channels: channels.clone(),
+            song: SongData {
+                arrangement: arrangement.clone(),
+                automation: automation.clone(),
+                end_tick: 3_840,
+                end_frame: 96_000,
+                frame_rate: SR,
+                frame_extent: None,
+                ..SongData::default()
+            },
+            mix,
+            ..EngineState::default()
+        };
+        let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
+        c.send(Command::Play).unwrap();
+        let mut out = Vec::new();
+        for b in 0..600 {
+            if b == 333 {
+                c.send(Command::Seek { tick: 500 }).unwrap();
+            }
+            let mut buf = [0.0; 2 * N];
+            p.process(&mut buf, 2);
+            out.extend_from_slice(&buf);
+            let _ = c.check_health();
+        }
+        out
+    };
+    let legacy = run(MixSetup::LegacyDirect);
+    assert!(audible(&legacy));
+    assert_eq!(same_bits(&legacy, &run(mix)), None);
+}
+
+/// A device that plays a constant, to see which kernel holds it.
+struct Marker(f32);
+impl Device for Marker {
+    fn set_param(&mut self, _: u32, _: f32) {}
+    fn process(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        _: Option<(&[f32], &[f32])>,
+        _: &[grooviq_dsp::NoteEvent],
+    ) {
+        l.fill(self.0);
+        r.fill(self.0);
+    }
+    fn reset(&mut self) {}
+}
+
+fn marker_kernel(rate: f32, value: f32, seed: u64) -> PreparedMixer {
+    let mixer = Mixer {
+        tracks: vec![Track {
+            id: MASTER,
+            output: None,
+            inserts: vec![Insert {
+                id: InsertId(1),
+                latency_frames: 0,
+                memory_bytes: 0,
+            }],
+        }],
+        ..Mixer::default()
+    };
+    PreparedMixer::prepare(
+        compile(&mixer, Budget::default()).unwrap(),
+        vec![PreparedInsert::with_identity(
+            InsertId(1),
+            Box::new(Marker(value)),
+            InsertIdentity { kind: 3, seed },
+        )],
+        &[],
+        PrepareConfig {
+            sample_rate: rate,
+            max_frames: N,
+            max_bytes: 1 << 20,
+        },
+    )
+    .unwrap()
+}
+
+fn plays(k: &mut PreparedMixer) -> f32 {
+    let host = grooviq_dsp::HostTransport {
+        domain: grooviq_dsp::HostDomain::Pattern,
+        frame: 0,
+        frames: N as u32,
+        sample_rate: k.sample_rate(),
+        bpm: 120.0,
+        playing: false,
+        anchor_frame: 0,
+        anchor_tick: 0.0,
+        shift: 0,
+        loop_start: 0,
+        loop_end: 0,
+        stream_generation: 0,
+        discontinuity: 0,
+        changed: false,
+    };
+    let sources = k.source_buffers().unwrap();
+    let (mut l, mut r) = ([0.0; N], [0.0; N]);
+    k.render_pulled(&host, &sources, &mut l, &mut r).unwrap();
+    l[0]
+}
+
+#[test]
+fn survivor_transfers_check_identity_rate_and_order_before_moving_anything() {
+    let id = [InsertId(1)];
+    let mut old = marker_kernel(SR, 1.0, 5);
+    let mut other_seed = marker_kernel(SR, 2.0, 6);
+    assert_eq!(
+        other_seed.transfer_from(&mut old, &id),
+        Err(TransferError::Identity(InsertId(1)))
+    );
+    let mut other_rate = marker_kernel(44_100.0, 2.0, 5);
+    assert_eq!(
+        other_rate.transfer_from(&mut old, &id),
+        Err(TransferError::SampleRate)
+    );
+    let mut new = marker_kernel(SR, 2.0, 5);
+    assert_eq!(
+        new.transfer_from(&mut old, &[InsertId(1), InsertId(1)]),
+        Err(TransferError::Unordered)
+    );
+    assert_eq!(
+        new.transfer_from(&mut old, &[InsertId(9)]),
+        Err(TransferError::Missing(InsertId(9)))
+    );
+    // Every refusal left each device where it was.
+    assert_eq!(
+        (plays(&mut old), plays(&mut other_seed), plays(&mut new)),
+        (1.0, 2.0, 2.0)
+    );
+    assert_eq!(new.transfer_from(&mut old, &id), Ok(()));
+    assert_eq!((plays(&mut new), plays(&mut old)), (1.0, 2.0));
+}
