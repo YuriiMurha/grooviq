@@ -16,8 +16,9 @@ hooks: ## Point git at .githooks (staged conflict/format checks before each comm
 	git config core.hooksPath .githooks
 
 .PHONY: merge-train test-merge-train
-merge-train: ## Quality only: advance the first enrolled PR (ORDER="12 34", HEAD_SHA=<approved SHA>)
-	python3 -B scripts/merge_train.py --order $(ORDER) $(if $(HEAD_SHA),--head $(HEAD_SHA))
+BATCH ?= 4
+merge-train: ## Quality only: advance a tested batch (ORDER="12=<approved SHA> 34=<approved SHA>", BATCH=4, optional ACK_MISMATCH=<batch SHA>)
+	python3 -B scripts/merge_train.py --order $(ORDER) --batch $(BATCH) $(if $(ACK_MISMATCH),--ack-mismatch $(ACK_MISMATCH)) || [ $$? -eq 75 ]
 
 test-merge-train: ## Test ordered protected merges without calling GitHub
 	python3 -B -m unittest discover -s scripts -p test_merge_train.py -v
@@ -32,14 +33,21 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: test-instruction-profiles ci-paths-test e2e-browser-results-test e2e-diagnostics-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles test-merge-train ci-paths-test e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
 	npm --prefix $(UI) run build
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
-	$(CARGO) test --workspace --all-features
+	@cargo_commands="$$($(CARGO) --list)" && \
+	if printf '%s\n' "$$cargo_commands" | grep -Eq '^[[:space:]]+nextest([[:space:]]|$$)'; then \
+		$(CARGO) nextest run --workspace --all-features --profile ci && \
+		$(CARGO) test --workspace --all-features --doc; \
+	else \
+		printf '%s\n' 'cargo-nextest unavailable. Install with: cargo install cargo-nextest --version 0.9.151 --locked'; \
+		$(CARGO) test --workspace --all-features; \
+	fi
 	$(MAKE) grid-budget
 	$(MAKE) notes-edit-budget
 	$(MAKE) export-budget
@@ -180,6 +188,10 @@ optional-rust-policy-test: ## Test optional Rust CI selection and conservative f
 .PHONY: ci-paths-test
 ci-paths-test: ## Test CI path selection and conservative failure fallback
 	node --test scripts/ci-paths.test.cjs
+
+.PHONY: rerun-no-runner-test
+rerun-no-runner-test: ## Test the macOS runner acquisition retry policy
+	node --test scripts/rerun-no-runner.test.cjs
 
 # T13: isolated Song reference selection; no global golden or benchmark workload changes.
 .PHONY: song-golden-test song-golden-update song-export-budget

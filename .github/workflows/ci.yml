@@ -2,15 +2,21 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, merge-train/batch]
   pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: "ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
-  cancel-in-progress: true
+  # A concurrency group has one pending slot by default. Give each main push its own group.
+  group: >-
+    ci-${{ github.workflow }}-${{ github.event.pull_request.number ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
+    github.ref }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/merge-train/batch') }}
 
 jobs:
   changes:
@@ -51,6 +57,11 @@ jobs:
     timeout-minutes: 30
     steps: &rust_steps
       - uses: actions/checkout@v5
+      # rust-cache keys on Cargo.toml dependency sections only, so a [profile] change would reuse
+      # dependencies built with the old profile and rebuild them on every PR. Key it on the root manifest.
+      - name: Key the Rust cache on the root manifest
+        shell: bash
+        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
       - name: Python for local refresh safety tests
         if: runner.os == 'macOS'
         uses: actions/setup-python@v5
@@ -62,8 +73,15 @@ jobs:
       - name: Staged conflict safety tests
         if: runner.os == 'macOS'
         run: make test-pre-commit
+      - name: Merge train safety tests
+        if: runner.os == 'macOS'
+        run: make test-merge-train
       - run: rustup toolchain install
+      # The Actions cache is over its 10 GB limit, and PR copies evict main's caches.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # `tauri-build` needs the built UI (`frontendDist`) to compile the app crate.
       - uses: actions/setup-node@v5
         with:
@@ -83,7 +101,22 @@ jobs:
         working-directory: app/ui
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-nextest@0.9.151
+      - name: Run workspace tests
+        id: nextest
+        run: cargo nextest run --workspace --all-features --profile ci
+      - name: Upload failed Rust test results
+        if: failure() && steps.nextest.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rust-junit-${{ runner.os }}-${{ github.run_attempt }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+      - name: Run workspace doctests
+        run: cargo test --workspace --all-features --doc
       - name: Checked real Session replay
         run: node scripts/semantic-replay.mjs
       - name: Note-edit budget runner tests
@@ -114,6 +147,8 @@ jobs:
       - run: rustup toolchain install
       - run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build -p grooviq-dsp --target wasm32-unknown-unknown
 
   ui:
@@ -142,6 +177,8 @@ jobs:
         run: node --test ../../scripts/e2e-browser-results.test.mjs
       - name: E2e diagnostic safety tests
         run: node --test ../../scripts/e2e-diagnostics.test.mjs
+      - name: Runner acquisition retry tests
+        run: node --test ../../scripts/rerun-no-runner.test.cjs
       - name: Real Session / mock semantic replay
         run: npm run e2e -- --config playwright.replay.config.ts --project chromium
       - name: Largest grid CPU budget

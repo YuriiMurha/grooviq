@@ -9,8 +9,13 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: dependency-policy-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: >-
+    dependency-policy-${{ github.event.pull_request.number ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
+    github.ref }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/merge-train/batch') }}
 jobs:
   rust-policy:
     runs-on: ubuntu-latest
@@ -19,6 +24,8 @@ jobs:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Versioned upstream CLI; no floating installer or advisory exclusions.
       - run: cargo install cargo-deny --version 0.22.1 --locked
       - name: Record Rust licence inventory

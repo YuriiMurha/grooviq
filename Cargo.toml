@@ -16,3 +16,28 @@ lto = "thin"
 # debug builds too. Debug assertions and overflow checks stay on.
 [profile.dev.package.grooviq-dsp]
 opt-level = 2
+
+# A few long, debug-built integration tests dominate CI time.
+# Opt-level 2 preserves the order and separate rounding of ordinary Rust float operations.
+# The golden tests verify byte-identical renders on macOS and Windows (song_m3's reference
+# is written by a --release build, so it already matches across opt levels).
+# Every dev build inherits this on purpose, `tauri dev` and debugger sessions included:
+# expect optimised-out variables when stepping through these crates.
+[profile.dev.package.grooviq-golden]
+opt-level = 2
+
+[profile.dev.package.grooviq-engine]
+opt-level = 2
+
+[profile.dev.package.grooviq-project]
+opt-level = 2
+
+# Render math, JSON parsing and archive compression are hot in those tests.
+[profile.dev.package.libm]
+opt-level = 2
+
+[profile.dev.package.serde_json]
+opt-level = 2
+
+[profile.dev.package.zlib-rs]
+opt-level = 2

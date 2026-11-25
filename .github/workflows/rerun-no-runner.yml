@@ -1,0 +1,38 @@
+name: rerun-no-runner
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+
+permissions:
+  actions: write
+  checks: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: rerun-no-runner-${{ github.event.workflow_run.id }}
+
+jobs:
+  rerun:
+    if: github.event.workflow_run.run_attempt == 1 && github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # workflow_run supplies the default-branch commit in github.sha.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { rerunNoRunner } = require('./scripts/rerun-no-runner.cjs');
+            await rerunNoRunner({
+              event: context.payload.workflow_run,
+              repo: context.repo,
+              rest: github.rest,
+              paginate: github.paginate,
+              log: core.info,
+            });

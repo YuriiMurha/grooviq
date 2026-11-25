@@ -29,8 +29,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: "perf-${{ inputs.capture_only && github.run_id || github.event.pull_request.number || github.ref }}"
-  cancel-in-progress: true
+  group: >-
+    perf-${{ (inputs.capture_only && github.run_id) || github.event.pull_request.number ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
+    github.ref }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/merge-train/batch') }}
 
 jobs:
   optional-inputs:
@@ -79,6 +84,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: bench
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Machine
         run: |
           case "$RUNNER_OS" in
@@ -170,6 +176,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: instructions
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Synth workload witnesses
         run: cargo test -p grooviq-golden --test synth_workload
       # The rust jobs never build this Linux-only code, so lint it here.
