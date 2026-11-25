@@ -76,9 +76,11 @@ CI quirks:
 
 ## Review
 
-- Every behaviour change gets an independent review on a different model family than the implementer.
-- Reviewer: GPT 6.1 Sol (`gpt-6.1-sol` on Codex, high effort), each round a fresh `delegate_task`
-  with `role: "review"`. Fallback: GPT 6 Astra, then the thread's own model; say so in the PR.
+- Lead (orchestrator) threads run Claude Opus 5.5 at extra-high effort. Implementers are subagents on
+  GPT 6.2 Sol (`gpt-6.2-sol` on Codex, high effort; fast mode for sequential work).
+- Every behaviour change gets an independent review on a different model family than the implementer:
+  Claude Opus 5.5 reviews GPT work, GPT 6.2 Sol (high) reviews Claude work. Each round is a fresh
+  `delegate_task` with `role: "review"`. Fallback: GPT 6 Astra, then the thread's own model; say so in the PR.
 - The reviewer is read-only. It replies:
 
   ```text

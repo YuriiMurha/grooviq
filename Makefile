@@ -15,6 +15,13 @@ help: ## Show this help
 hooks: ## Point git at .githooks (staged conflict/format checks before each commit)
 	git config core.hooksPath .githooks
 
+.PHONY: merge-train test-merge-train
+merge-train: ## Quality only: advance the first enrolled PR (ORDER="12 34", HEAD_SHA=<approved SHA>)
+	python3 -B scripts/merge_train.py --order $(ORDER) $(if $(HEAD_SHA),--head $(HEAD_SHA))
+
+test-merge-train: ## Test ordered protected merges without calling GitHub
+	python3 -B -m unittest discover -s scripts -p test_merge_train.py -v
+
 .PHONY: test-pre-commit
 test-pre-commit: ## Exercise staged conflict checks in disposable Git repositories
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_pre_commit.py -v
