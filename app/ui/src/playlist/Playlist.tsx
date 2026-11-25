@@ -11,6 +11,7 @@ import { createPlaylistRenderer, readPlaylistPalette, type PlaylistRenderer, typ
 import type { PlaylistModel } from "./usePlaylist";
 import { extent, hitClip, projectClips, viewport, type RenderClip } from "./viewport";
 import { PatternGroupGesture, crossedThreshold, marqueeRect, marqueeSelection, toggleSelection, togglesSelection, type GroupPreview } from "./groupGesture";
+import { buildClipAction, selectedPatternClips, selectionIsMuted, type ClipAction } from "./clipActions";
 import { keyboardLoop, LoopGesture, rulerTick } from "./ruler";
 import "./playlist.css";
 
@@ -26,11 +27,18 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
   const [pixelsPerBar, setPixelsPerBar] = useState(192);
   const [view, setView] = useState<PlaylistView>(DEFAULT_VIEW);
   const [tool, setTool] = useState<"draw" | "select" | "slice">("draw");
-  const [selectedState, setSelected] = useState<{ generation: number; ids: number[] } | null>(null);
+  const [selectedState, setSelected] = useState<{ generation: number; ids: number[]; originals?: number[] } | null>(null);
   const liveIds = useMemo(() => new Set(snapshot?.clips.map(clip => clip.id)), [snapshot]);
-  const selectedIds = useMemo(() => selectedState && selectedState.generation === snapshot?.generation
-    ? selectedState.ids.filter(id => liveIds.has(id)) : [], [selectedState, snapshot, liveIds]);
+  const selectedIds = useMemo(() => {
+    if (!selectedState || selectedState.generation !== snapshot?.generation) return [];
+    const current = selectedState.ids.filter(id => liveIds.has(id));
+    // Undo of a group duplicate removes every copy. Re-select its live originals.
+    return current.length ? current : selectedState.originals?.filter(id => liveIds.has(id)) ?? [];
+  }, [selectedState, snapshot, liveIds]);
   const selection = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const actionClips = useMemo(() => selectedPatternClips(snapshot?.clips ?? [], selection), [snapshot, selection]);
+  const unmuteSelection = selectionIsMuted(actionClips);
+  const clipLabel = selectedIds.length > 1 ? "clips" : "clip";
   const selected = selectedIds.length === 1 ? selectedIds[0] : null;
   const marquee = useRef<{ pointerId: number; start: Point; clientStart: Point; moved: boolean; stamp: ArrangementStamp; replacements: number } | null>(null);
   const [selectionRect, setSelectionRect] = useState<Rect | null>(null);
@@ -161,18 +169,25 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       if (id !== undefined) setSelected({ generation: result.reply.generation, ids: result.reply.createdIds.slice(-createdCount) });
     }
   };
-  const selectedAction = async (action: "mute" | "delete" | "makeUnique") => {
-    if (busy || !snapshot || !selectedClip || isProjectReplacing() || modalIsOpen()) return;
-    const id = selectedClip.id, generation = snapshot.generation;
-    const stamp = { generation, revision: snapshot.revision };
-    const operation = action === "mute"
-      ? { kind: "setClip" as const, clip: id, name: selectedClip.name, muted: !selectedClip.muted }
-      : { kind: action === "delete" ? "deleteClip" as const : "makeUnique" as const, clip: id };
+  const selectedAction = async (action: ClipAction | "makeUnique") => {
+    if (busy || !snapshot || isProjectReplacing() || modalIsOpen()) return;
+    const operations: Parameters<typeof mutate>[1] = action === "makeUnique"
+      ? selectedClip ? [{ kind: "makeUnique", clip: selectedClip.id }] : []
+      : buildClipAction(action, actionClips);
+    if (!operations.length) return;
     // A key action during a held preview owns that input: its later release sends nothing.
     cancel();
-    const result = await mutate(stamp, [operation]);
-    if (action === "delete" && result.status === "applied") {
-      setSelected(current => current?.generation === generation && current.ids.includes(id) ? null : current);
+    const result = await mutate({ generation: snapshot.generation, revision: snapshot.revision }, operations);
+    if (result.status !== "applied") return;
+    if (action === "duplicate" && result.reply.createdIds.length) {
+      setSelected(current => current === selectedState ? {
+        generation: result.reply.generation, ids: [...result.reply.createdIds],
+        originals: selectedIds.length > 1 ? selectedIds : undefined,
+      } : current);
+    }
+    // Keep a deleted group's IDs so one Undo can re-select the restored clips.
+    if (action === "delete" && selectedClip) {
+      setSelected(current => current === selectedState ? null : current);
     }
   };
   const down = (event: PointerEvent<HTMLCanvasElement>) => {
@@ -354,7 +369,7 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
         cancel(); void commit(snapshot, [{ kind: "setLoop", region: { ...snapshot.loopRegion, enabled: !snapshot.loopRegion.enabled } }], false);
       }}>Loop {snapshot?.loopRegion?.enabled ? "on" : "off"}</button>
       <span className="playlist-snap">Snap ¼ bar</span>
-      <button type="button" disabled={busy || !selectedClip} onClick={() => { if (snapshot && selectedClip) void commit(snapshot, [{ kind: "copy", clip: selectedClip.id, track: snapshot.tracks[selectedClip.trackIndex].id, startTick: Math.min(38_400_000 - selectedClip.content.lengthTicks, selectedClip.startTick + selectedClip.content.lengthTicks) }]); }}>Duplicate clip</button>
+      <button type="button" disabled={busy || !actionClips.length} onClick={() => { void selectedAction("duplicate"); }}>Duplicate {clipLabel}</button>
       <label>Zoom<input type="range" aria-label="Playlist zoom" min="96" max="768" step="24" value={pixelsPerBar} onChange={event => { cancel(); setPixelsPerBar(Number(event.target.value)); }} /></label>
       <button type="button" disabled={state.busy} onClick={() => { cancel(); void reload(); }}>Refresh playlist</button>
     </header>
@@ -377,9 +392,9 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     </div></div>
     <div className="playlist-status"><span id="playlist-help">In Select, modifier-click toggles clips and a drag from empty space selects a box. Drag a group to move it or Alt-drag to copy it. Escape cancels.</span><span aria-live="polite">{selectedIds.length} selected</span><span role="status">{state.busy ? "Updating playlist…" : `${snapshot?.total ?? 0} clips`}</span></div>
     <div className="playlist-selection"><label htmlFor="selected-playlist-clip">Selected clip</label><select id="selected-playlist-clip" aria-label="Selected playlist clip" value={selected ?? ""} disabled={state.busy} onChange={event => { cancel(); setSelected(event.target.value ? { generation: snapshot?.generation ?? 0, ids: [Number(event.target.value)] } : null); }}><option value="">None</option>{clips.filter(clip => clip.id === selected || visibleIds.has(clip.id)).map(clip => <option key={clip.id} value={clip.id ?? ""}>{clip.name} · Track {clip.trackIndex + 1} · {clip.startTick} ticks</option>)}</select>
-      <button type="button" aria-label={selectedClip?.muted ? "Unmute selected clip" : "Mute selected clip"} disabled={busy || !selectedClip} onClick={() => { void selectedAction("mute"); }}>{selectedClip?.muted ? "Unmute" : "Mute"}</button>
+      <button type="button" aria-label={`${unmuteSelection ? "Unmute" : "Mute"} selected ${clipLabel}`} disabled={busy || !actionClips.length} onClick={() => { void selectedAction("mute"); }}>{unmuteSelection ? "Unmute" : "Mute"}</button>
       <button type="button" aria-label="Make selected clip unique" disabled={busy || !selectedClip} onClick={() => { void selectedAction("makeUnique"); }}>Make unique</button>
-      <button type="button" aria-label="Delete selected clip" disabled={busy || !selectedClip} onClick={() => { void selectedAction("delete"); }}>Delete</button>
+      <button type="button" aria-label={`Delete selected ${clipLabel}`} disabled={busy || !actionClips.length} onClick={() => { void selectedAction("delete"); }}>Delete</button>
     </div>
     {(state.message || displayError || projection.error) && <p role="alert" className="playlist-error">{state.message ?? displayError ?? projection.error}</p>}
     {selected !== null && !selectedClip && <p className="playlist-readonly">This clip is visible here; its editing controls are not available yet.</p>}
