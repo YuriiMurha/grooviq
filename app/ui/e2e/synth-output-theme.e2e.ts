@@ -29,34 +29,41 @@ async function openScope(page: Page, name = "Bass") {
 
 test("the synth output scope keeps drawing without per-frame computed-style reads", async ({ app }) => {
   const scope = await openScope(app);
-  const { reads, strokes } = await scope.evaluate(async (canvas: HTMLCanvasElement) => {
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("No synth output context");
-    const getComputedStyle = window.getComputedStyle;
-    const stroke = ctx.stroke;
-    let reads = 0;
-    let strokes = 0;
-    window.getComputedStyle = (element, pseudo) => {
-      if (element === canvas) reads++;
-      return getComputedStyle.call(window, element, pseudo);
-    };
-    ctx.stroke = (...args: [] | [Path2D]) => {
-      strokes++;
-      Reflect.apply(stroke, ctx, args);
-    };
-    try {
-      // Allow for the probe starting partway through the first frame.
-      for (let frame = 0; frame < 32; frame++) {
-        await new Promise(requestAnimationFrame);
+  await app.keyboard.down("z");
+  try {
+    await expect(app.getByRole("dialog", { name: "Bass synth" }).locator(".synth-output-status")).toContainText("1 voice");
+    const { reads, strokes } = await scope.evaluate(async (canvas: HTMLCanvasElement) => {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("No synth output context");
+      const getComputedStyle = window.getComputedStyle;
+      const stroke = ctx.stroke;
+      let reads = 0;
+      let strokes = 0;
+      window.getComputedStyle = (element, pseudo) => {
+        if (element === canvas) reads++;
+        return getComputedStyle.call(window, element, pseudo);
+      };
+      ctx.stroke = (...args: [] | [Path2D]) => {
+        strokes++;
+        Reflect.apply(stroke, ctx, args);
+      };
+      try {
+        // Sampling is bounded to one request per 33 ms, so live draws can span several frames.
+        const deadline = performance.now() + 4000;
+        while (strokes < 30 && performance.now() < deadline) {
+          await new Promise(requestAnimationFrame);
+        }
+        return { reads, strokes };
+      } finally {
+        window.getComputedStyle = getComputedStyle;
+        ctx.stroke = stroke;
       }
-      return { reads, strokes };
-    } finally {
-      window.getComputedStyle = getComputedStyle;
-      ctx.stroke = stroke;
-    }
-  });
-  expect(strokes, "the scope drew across at least 30 animation frames").toBeGreaterThanOrEqual(30);
-  expect(reads, "scope style reads stay bounded while drawing").toBeLessThanOrEqual(1);
+    });
+    expect(strokes, "the held note produced at least 30 scope draws").toBeGreaterThanOrEqual(30);
+    expect(reads, "scope style reads stay bounded while drawing").toBeLessThanOrEqual(1);
+  } finally {
+    await app.keyboard.up("z");
+  }
 });
 
 const probeColour = [24, 241, 51];
@@ -108,7 +115,7 @@ test.describe("with a second synth editor selected", () => {
   test("an open but inactive synth output scope repaints on a live theme change", async ({ app }) => {
     const bass = await openScope(app, "Bass");
     // The Bass window covers the rack, so press Lead's opener directly. Opening Lead focuses and
-    // selects it, so the Bass scope stops its frame loop.
+    // selects it, so the Bass scope stops polling.
     await app.getByRole("button", { name: "Edit the Lead synth" }).evaluate((b: HTMLElement) => b.click());
     await expect(app.getByRole("dialog", { name: "Lead synth" }).getByLabel("Synth output waveform")).toBeVisible();
     await app.addStyleTag({ content: `
