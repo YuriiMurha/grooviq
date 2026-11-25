@@ -206,6 +206,7 @@ mod tests {
                     (64.25, false),
                     (127.25, false),
                     (17.25, true),
+                    (109.75, true),
                     (110.75, true),
                 ] {
                     let voice = Voice {
@@ -214,9 +215,11 @@ mod tests {
                         step: direction * step,
                         looping,
                         wrapped: true,
+                        // An odd loop length, so the period-2 sample tells mapped and
+                        // unmapped taps apart.
                         lo: 17.0,
-                        hi: 111.0,
-                        len: 94.0,
+                        hi: 110.0,
+                        len: 93.0,
                         ..Voice::OFF
                     };
                     let index = |k| if looping { voice.loop_index(k) } else { k };
@@ -251,6 +254,30 @@ mod tests {
         assert!(
             pure_sinc < actual && actual < pure_cubic,
             "{actual} must be inside the crossover"
+        );
+    }
+
+    #[test]
+    fn crossover_ends_in_pure_sinc_at_step_1_25() {
+        let sample = alternating_sample();
+        let at = |step: f64| {
+            let voice = Voice {
+                pos: 64.25,
+                end: sample.len() as f64,
+                step,
+                ..Voice::OFF
+            };
+            let (l, r) = read(&sample, &voice);
+            let (sl, sr) = sinc(&sample, &voice, step);
+            ((l.to_bits(), r.to_bits()), (sl.to_bits(), sr.to_bits()))
+        };
+        // Literal steps, not FADE_END, so moving the zone's top fails here.
+        let (actual, pure) = at(1.25);
+        assert_eq!(actual, pure, "step 1.25 must be the pure FIR");
+        let (actual, pure) = at(1.2499);
+        assert_ne!(
+            actual.0, pure.0,
+            "step 1.2499 must still blend in the cubic read"
         );
     }
 
