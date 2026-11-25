@@ -201,10 +201,13 @@ mod tests {
         let sample = alternating_sample();
         for step in [1.007, 48_000.0 / 44_100.0, 1.09] {
             for direction in [-1.0, 1.0] {
+                // A reverse one-shot starts at `end - 1` and plays down, so its tail case
+                // sits below that; a forward one-shot stays below `end`.
+                let tail = if direction > 0.0 { 127.25 } else { 126.25 };
                 for (pos, looping) in [
                     (0.25, false),
                     (64.25, false),
-                    (127.25, false),
+                    (tail, false),
                     (17.25, true),
                     (109.75, true),
                 ] {
@@ -221,7 +224,8 @@ mod tests {
                         end,
                         step: direction * step,
                         looping,
-                        wrapped: true,
+                        // Only a loop that has played through once is wrapped.
+                        wrapped: looping,
                         // An odd loop length, so the period-2 sample tells mapped and
                         // unmapped taps apart.
                         lo: 17.0,
@@ -229,6 +233,19 @@ mod tests {
                         len: 93.0,
                         ..Voice::OFF
                     };
+                    // Every case must be a state the renderer reaches.
+                    let reachable = if looping {
+                        voice.lo <= pos && pos < voice.hi
+                    } else if direction > 0.0 {
+                        voice.start <= pos && pos < voice.end
+                    } else {
+                        voice.start <= pos && pos <= voice.end - 1.0
+                    };
+                    assert!(
+                        reachable,
+                        "unreachable fixture: pos {pos}, step {}",
+                        voice.step
+                    );
                     let index = |k| if looping { voice.loop_index(k) } else { k };
                     let (l, r) = read(&sample, &voice);
                     let expected = (
