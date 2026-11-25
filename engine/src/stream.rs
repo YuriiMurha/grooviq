@@ -42,7 +42,7 @@ const MAX_INCOMING: usize = 256;
 const MAX_DRAIN: usize = 16;
 /// Frame rates outside this range are clamped.
 const HZ_RANGE: (u32, u32) = (1, 240);
-/// A client that cannot take a 40-byte frame within this long is dropped.
+/// The budget for blocked frame output or processing fragmented control input.
 const WRITE_TIMEOUT: Duration = Duration::from_millis(50);
 /// After a stall longer than this the schedule restarts instead of bursting to catch up.
 const MAX_LAG: Duration = Duration::from_millis(250);
@@ -247,6 +247,7 @@ fn serve(
         inner: stream,
         clock: WallClock,
         deadline,
+        read_budget: ReadBudget::Handshake,
         stop,
     };
     let mut attempt = tungstenite::accept_hdr_with_config(stream, callback, Some(config));
@@ -268,8 +269,8 @@ fn serve(
     }
 }
 
-// All underlying sockets remain nonblocking. Check every read/write/flush so
-// tungstenite's partial-frame loops cannot bypass the deadline or shutdown.
+// All underlying sockets remain nonblocking. Check shutdown on each syscall
+// so tungstenite's partial-frame loops cannot hide a stop request.
 trait WriteClock {
     fn now(&self) -> Instant;
     fn pause(&mut self, duration: Duration);
@@ -289,44 +290,98 @@ struct DeadlineIo<'a, S, C = WallClock> {
     inner: S,
     clock: C,
     deadline: Instant,
+    read_budget: ReadBudget,
     stop: &'a AtomicBool,
 }
 
+enum ReadBudget {
+    Handshake,
+    Streaming {
+        deadline: Option<Instant>,
+        partial: bool,
+    },
+}
+
 impl<S, C: WriteClock> DeadlineIo<'_, S, C> {
-    fn check(&self) -> io::Result<()> {
-        if self.stop.load(SeqCst) || self.clock.now() >= self.deadline {
-            Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "stream I/O deadline",
-            ))
+    fn begin_streaming_io(&mut self) {
+        self.deadline = self.clock.now() + WRITE_TIMEOUT;
+        self.read_budget = ReadBudget::Streaming {
+            deadline: None,
+            partial: false,
+        };
+    }
+
+    fn check_stop(&self) -> io::Result<()> {
+        if self.stop.load(SeqCst) {
+            Err(io::ErrorKind::TimedOut.into())
         } else {
             Ok(())
         }
+    }
+
+    fn check_deadline(&self, deadline: Instant) -> io::Result<()> {
+        if self.clock.now() >= deadline {
+            Err(io::ErrorKind::TimedOut.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn before_write(&self) -> io::Result<()> {
+        self.check_stop()?;
+        if matches!(self.read_budget, ReadBudget::Handshake) {
+            self.check_deadline(self.deadline)?;
+        }
+        Ok(())
+    }
+
+    fn after_write<T>(&self, result: io::Result<T>) -> io::Result<T> {
+        if matches!(&result, Err(e) if e.kind() == io::ErrorKind::WouldBlock) {
+            self.check_deadline(self.deadline)?;
+        }
+        result
     }
 }
 
 impl<S: Read, C: WriteClock> Read for DeadlineIo<'_, S, C> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        self.check()?;
-        self.inner.read(bytes)
+        self.check_stop()?;
+        match self.read_budget {
+            ReadBudget::Handshake => self.check_deadline(self.deadline)?,
+            ReadBudget::Streaming {
+                deadline: Some(deadline),
+                partial: true,
+            } => self.check_deadline(deadline)?,
+            ReadBudget::Streaming { .. } => {}
+        }
+        let result = self.inner.read(bytes);
+        // An idle poll can always return WouldBlock. After receiving bytes, bound
+        // the time tungstenite can spend reading more fragments in this poll.
+        if let ReadBudget::Streaming { deadline, partial } = &mut self.read_budget
+            && !*partial
+            && matches!(result, Ok(n) if n > 0)
+        {
+            deadline.get_or_insert_with(|| self.clock.now() + WRITE_TIMEOUT);
+            *partial = true;
+        }
+        result
     }
 }
 impl<S: Write, C: WriteClock> Write for DeadlineIo<'_, S, C> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.check()?;
-        self.inner.write(bytes)
+        self.before_write()?;
+        let result = self.inner.write(bytes);
+        self.after_write(result)
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.check()?;
-        self.inner.flush()
+        self.before_write()?;
+        let result = self.inner.flush();
+        self.after_write(result)
     }
 }
 
 fn flush_until<S: Read + Write, C: WriteClock>(ws: &mut WebSocket<DeadlineIo<'_, S, C>>) -> bool {
     loop {
-        if ws.get_ref().check().is_err() {
-            return false;
-        }
         match ws.flush() {
             // Output is complete. A late wake after successful I/O cannot make
             // the peer a stalled writer; shutdown still ends the connection.
@@ -349,7 +404,7 @@ fn send_frame<S: Read + Write, C: WriteClock>(
     ws: &mut WebSocket<DeadlineIo<'_, S, C>>,
     frame: Vec<u8>,
 ) -> bool {
-    ws.get_mut().deadline = ws.get_ref().clock.now() + WRITE_TIMEOUT;
+    ws.get_mut().begin_streaming_io();
     match ws.write(Message::Binary(frame.into())) {
         Ok(()) => {}
         Err(Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {}
@@ -403,8 +458,10 @@ impl Schedule {
 /// connection is over: the client sent Close (the reply is flushed first), the stream failed or
 /// closed, or a frame or message exceeded [`MAX_INCOMING`] (or was otherwise a protocol
 /// error). Text, Binary and Pong messages within that limit are read and ignored.
-fn drain_incoming(ws: &mut WebSocket<DeadlineIo<'_, TcpStream>>) -> bool {
-    ws.get_mut().deadline = Instant::now() + WRITE_TIMEOUT;
+fn drain_incoming<S: Read + Write, C: WriteClock>(
+    ws: &mut WebSocket<DeadlineIo<'_, S, C>>,
+) -> bool {
+    ws.get_mut().begin_streaming_io();
     for _ in 0..MAX_DRAIN {
         match ws.read() {
             Ok(Message::Close(_)) => {
@@ -412,7 +469,17 @@ fn drain_incoming(ws: &mut WebSocket<DeadlineIo<'_, TcpStream>>) -> bool {
                 let _ = flush_until(ws);
                 return false;
             }
-            Ok(_) => {}
+            Ok(_) => {
+                // A complete message can use up the poll budget. Leave remaining
+                // messages for the next poll instead of starting another read.
+                let io = ws.get_mut();
+                if let ReadBudget::Streaming { deadline, partial } = &mut io.read_budget {
+                    *partial = false;
+                    if deadline.is_some_and(|deadline| io.clock.now() >= deadline) {
+                        return !io.stop.load(SeqCst);
+                    }
+                }
+            }
             Err(Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => return true,
             Err(_) => return false,
         }
@@ -564,6 +631,7 @@ mod tests {
                 inner: socket,
                 clock: WallClock,
                 deadline: Instant::now() + HANDSHAKE_TIMEOUT,
+                read_budget: ReadBudget::Handshake,
                 stop: &stop,
             };
             let callback = |request: &Request, response: Response| {
@@ -647,7 +715,90 @@ mod tests {
             self.0.get()
         }
         fn pause(&mut self, duration: Duration) {
+            assert!(!duration.is_zero(), "blocked I/O retried at its deadline");
             self.0.set(self.0.get() + duration);
+        }
+    }
+
+    struct LateStartClock {
+        started_at: std::cell::Cell<Option<Instant>>,
+        resumed_at: Instant,
+    }
+
+    impl WriteClock for LateStartClock {
+        fn now(&self) -> Instant {
+            self.started_at.take().unwrap_or(self.resumed_at)
+        }
+
+        fn pause(&mut self, _: Duration) {
+            panic!("ready I/O must not wait");
+        }
+    }
+
+    struct ReadySocket {
+        incoming: &'static [u8],
+        outgoing: Vec<u8>,
+    }
+
+    impl Read for ReadySocket {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            if self.incoming.is_empty() {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            self.incoming.read(bytes)
+        }
+    }
+
+    impl Write for ReadySocket {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.outgoing.write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn late_start_socket<'a>(
+        stop: &'a AtomicBool,
+        incoming: &'static [u8],
+    ) -> WebSocket<DeadlineIo<'a, ReadySocket, LateStartClock>> {
+        let now = Instant::now();
+        let io = DeadlineIo {
+            inner: ReadySocket {
+                incoming,
+                outgoing: Vec::new(),
+            },
+            clock: LateStartClock {
+                started_at: std::cell::Cell::new(Some(now)),
+                resumed_at: now + Duration::from_millis(51),
+            },
+            deadline: now,
+            read_budget: ReadBudget::Handshake,
+            stop,
+        };
+        WebSocket::from_raw_socket(io, tungstenite::protocol::Role::Server, None)
+    }
+
+    #[test]
+    fn late_first_write_sends_the_frame() {
+        let stop = AtomicBool::new(false);
+        let mut ws = late_start_socket(&stop, &[]);
+        assert!(send_frame(&mut ws, vec![0x5a; 40]));
+        let wire = &ws.get_ref().inner.outgoing;
+        assert_eq!(&wire[..2], &[0x82, 40]);
+        assert_eq!(&wire[2..], &[0x5a; 40]);
+    }
+
+    #[test]
+    fn late_control_poll_keeps_idle_and_ready_clients_connected() {
+        let stop = AtomicBool::new(false);
+        // A masked Ping with one byte of payload must get an unmasked Pong.
+        let ping = &[0x89, 0x81, 1, 2, 3, 4, 0x5b];
+        for (incoming, outgoing) in [(&[][..], &[][..]), (&ping[..], &[0x8a, 1, 0x5a][..])] {
+            let mut ws = late_start_socket(&stop, incoming);
+            assert!(drain_incoming(&mut ws));
+            assert_eq!(ws.get_ref().inner.outgoing, outgoing);
         }
     }
 
@@ -667,8 +818,10 @@ mod tests {
                 // and complete-message limits cannot end this protocol work.
                 let frame = [if self.reads == 0 { 0x02 } else { 0x00 }, 0x80, 0, 0, 0, 0];
                 bytes[..frame.len()].copy_from_slice(&frame);
+                if self.reads != 0 {
+                    self.clock.set(self.clock.get() + Duration::from_millis(10));
+                }
                 self.reads += 1;
-                self.clock.set(self.clock.get() + Duration::from_millis(10));
                 if self.stop_after == Some(self.reads) {
                     self.stop.store(true, SeqCst);
                 }
@@ -694,7 +847,8 @@ mod tests {
                 reads: 0,
             },
             clock: TestClock(clock.clone()),
-            deadline: now + WRITE_TIMEOUT,
+            deadline: now,
+            read_budget: ReadBudget::Handshake,
             stop: &stop,
         };
         let config = WebSocketConfig::default()
@@ -702,17 +856,17 @@ mod tests {
             .max_frame_size(Some(MAX_INCOMING));
         let mut ws =
             WebSocket::from_raw_socket(io, tungstenite::protocol::Role::Server, Some(config));
-        assert!(matches!(ws.read(), Err(Error::Io(e)) if e.kind() == io::ErrorKind::TimedOut));
+        assert!(!drain_incoming(&mut ws));
         assert_eq!(ws.get_ref().inner.reads, expected_reads);
         assert_eq!(
             clock.get() - now,
-            Duration::from_millis(10 * expected_reads as u64)
+            Duration::from_millis(10 * (expected_reads as u64 - 1))
         );
     }
 
     #[test]
     fn fragmented_message_cannot_outlive_its_control_deadline() {
-        fragmented_message_obeys_budget(None, 5);
+        fragmented_message_obeys_budget(None, 6);
     }
 
     #[test]
@@ -723,7 +877,7 @@ mod tests {
     struct SlowWriter {
         clock: std::rc::Rc<std::cell::Cell<Instant>>,
         bytes: usize,
-        dribble: bool,
+        partial_until: Instant,
     }
     impl Read for SlowWriter {
         fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
@@ -732,7 +886,7 @@ mod tests {
     }
     impl Write for SlowWriter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if self.dribble {
+            if self.clock.get() < self.partial_until {
                 self.clock.set(self.clock.get() + Duration::from_millis(10));
                 self.bytes += 1;
                 Ok(bytes.len().min(1))
@@ -795,6 +949,7 @@ mod tests {
                 },
                 clock: TestClock(clock.clone()),
                 deadline: now,
+                read_budget: ReadBudget::Handshake,
                 stop: &stop,
             };
             let mut ws = WebSocket::from_raw_socket(io, tungstenite::protocol::Role::Server, None);
@@ -819,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_output_still_expires_at_the_original_deadline() {
+    fn persistent_backpressure_expires_with_or_without_partial_output() {
         for dribble in [false, true] {
             let now = Instant::now();
             let clock = std::rc::Rc::new(std::cell::Cell::new(now));
@@ -828,40 +983,21 @@ mod tests {
                 inner: SlowWriter {
                     clock: clock.clone(),
                     bytes: 0,
-                    dribble,
+                    partial_until: if dribble {
+                        now + Duration::from_millis(20)
+                    } else {
+                        now
+                    },
                 },
                 clock: TestClock(clock.clone()),
                 deadline: now,
+                read_budget: ReadBudget::Handshake,
                 stop: &stop,
             };
             let mut ws = WebSocket::from_raw_socket(io, tungstenite::protocol::Role::Server, None);
             assert!(!send_frame(&mut ws, vec![0x5a; 40]));
             assert_eq!(clock.get() - now, Duration::from_millis(50));
-            assert_eq!(ws.get_ref().inner.bytes, if dribble { 5 } else { 0 });
-            assert!(ws.get_ref().inner.bytes < 42, "wire output is incomplete");
-        }
-    }
-
-    #[test]
-    fn frame_deadline_bounds_never_reading_and_partial_progress() {
-        for dribble in [true, false] {
-            let now = Instant::now();
-            let clock = std::rc::Rc::new(std::cell::Cell::new(now));
-            let stop = AtomicBool::new(false);
-            let io = DeadlineIo {
-                inner: SlowWriter {
-                    clock: clock.clone(),
-                    bytes: 0,
-                    dribble,
-                },
-                clock: TestClock(clock.clone()),
-                deadline: now,
-                stop: &stop,
-            };
-            let mut ws = WebSocket::from_raw_socket(io, tungstenite::protocol::Role::Server, None);
-            assert!(!send_frame(&mut ws, vec![0; 40]));
-            assert_eq!(clock.get() - now, WRITE_TIMEOUT);
-            assert_eq!(ws.get_ref().inner.bytes, if dribble { 5 } else { 0 });
+            assert_eq!(ws.get_ref().inner.bytes, if dribble { 2 } else { 0 });
         }
     }
 
@@ -887,13 +1023,14 @@ mod tests {
             inner: SlowWriter {
                 clock: clock.clone(),
                 bytes: 0,
-                dribble: false,
+                partial_until: now,
             },
             clock: StopClock {
                 now: clock.clone(),
                 stop: &stop,
             },
             deadline: now,
+            read_budget: ReadBudget::Handshake,
             stop: &stop,
         };
         let mut ws = WebSocket::from_raw_socket(io, tungstenite::protocol::Role::Server, None);
