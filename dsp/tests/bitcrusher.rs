@@ -462,3 +462,21 @@ fn stream_derivation_cannot_zero_lock_any_purpose_or_channel() {
         }
     }
 }
+
+#[test]
+fn shortening_preserves_negative_fractional_carry() {
+    let input: Vec<_> = (0..12).map(|i| (i + 1) as f32 / 32.0).collect();
+    for block in [1, 7, 64, 127, 128] {
+        let mut d = setup(48000.0, &[(0, 24.0), (1, 2.5), (2, 0.0)]);
+        let mut output = run(&mut d, &input[..3], block).0;
+        d.set_param(1, 2.0);
+        output.extend(run(&mut d, &input[3..], block).0);
+        // At frame 3 the clock owes half a sample. The 10 ms smoother keeps
+        // subsequent periods close to 2.5 over this short observation window.
+        let captures = [0, 3, 5, 8, 10];
+        for (i, &sample) in output.iter().enumerate() {
+            let capture = *captures.iter().rev().find(|&&t| t <= i).unwrap();
+            assert_eq!(sample, input[capture], "frame {i}, block {block}");
+        }
+    }
+}

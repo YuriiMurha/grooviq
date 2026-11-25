@@ -87,6 +87,12 @@ input {
   font-weight: 600;
 }
 
+.chip-icon,
+.device-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
 .chip-latency {
   color: var(--muted);
   font-size: 12px;
