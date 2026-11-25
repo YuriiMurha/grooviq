@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { channelWaveform } from "../../api/notes";
 import { useSampleRevision } from "../../rack/sampleRevision";
 import type { ChannelView } from "../../api/project";
@@ -63,6 +63,17 @@ function usePeaks(channel: number, sample: string | null, missing: boolean): Flo
  * envelopes either side of the filter, the voice mode with glide and the choke group, and
  * velocity; gain and pan in the title bar. Every one of the 29 parameters has a control. */
 export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onError, onRelink }: Props) {
+  const fileDetails = useRef<HTMLElement>(null);
+  const recoveryFocus = useCallback((button: HTMLButtonElement | null) => {
+    if (!button) return;
+    return () => {
+      // The recovery control disappears when peaks arrive. Move only its own focus,
+      // never focus held elsewhere while the picker or waveform request was pending.
+      if (document.activeElement === button && fileDetails.current?.isConnected) {
+        fileDetails.current.focus({ preventScroll: true });
+      }
+    };
+  }, []);
   const params = useDeviceParams(channel.id, channel.sampler, (id) => samplerParam(id).default, onError);
   const v = params.value;
   const revision = useSampleRevision(channel.id);
@@ -175,6 +186,7 @@ export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onE
           <button
             type="button"
             className="dbutton"
+            ref={recoveryFocus}
             aria-label={channel.missing ? `Relink ${channel.name}` : `Choose a sample for ${channel.name}`}
             data-hint={`Choose the file ${channel.name} should play.`}
             onClick={() => onRelink(channel)}
@@ -222,7 +234,7 @@ export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onE
                 {repair.offer && <button type="button" className="dbutton" disabled={repair.busy} onClick={repair.undo}>Undo reset</button>}
               </div>}
               <details className="sample-file-details">
-                <summary tabIndex={0}>File details</summary>
+                <summary ref={fileDetails} tabIndex={0}>File details</summary>
                 <dl>
                   <dt>{channel.missing ? "Stored reference" : "File"}</dt><dd>{channel.sampleName ?? "No sample"}</dd>
                   <dt>Status</dt><dd>{channel.missing ? "Missing — locate the file to restore playback." : channel.sampleName ? "Loaded" : "No sample yet"}</dd>
