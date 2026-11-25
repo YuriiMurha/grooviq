@@ -363,13 +363,13 @@ fn future_version_wins_before_any_musical_schema_is_inspected() {
     let mut z = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
     z.start_file("project.json", zip::write::SimpleFileOptions::default())
         .unwrap();
-    z.write_all(br#"{"channels":[[true]],"patterns":[[false]],"arrangement":false,"format":"grooviq-project","version":4}"#).unwrap();
+    z.write_all(br#"{"channels":[[true]],"patterns":[[false]],"arrangement":false,"mixer":[1],"format":"grooviq-project","version":5}"#).unwrap();
     z.finish().unwrap();
     assert!(matches!(
         load(&path),
         Err(LoadError::NewerVersion {
-            found: 4,
-            supported: 3
+            found: 5,
+            supported: 4
         })
     ));
 }
