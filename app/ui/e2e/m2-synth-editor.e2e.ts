@@ -567,13 +567,20 @@ test.describe("replacing the project", () => {
     await mock.eval("(m) => m.queueDialog('/qa/projects/Same.grooviq')");
     await app.keyboard.press("ControlOrMeta+o");
     await expect.poll(() => mock.view().then((v) => v.path)).toBe("/qa/projects/Same.grooviq");
+    const { generation } = await mock.view();
     await open(app);
+    // Keep the wheel edit pending across browser calls so Open can proceed without a save prompt.
+    await app.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await app.clock.pauseAt(new Date("2026-01-01T00:01:00Z"));
     await control(app, "filter_cutoff").hover();
     await app.mouse.wheel(0, -100);
+    await app.clock.runFor(32);
+    await expect.poll(() => liveValue(mock, "filter_cutoff")).toBeGreaterThan(650);
     await mock.eval("(m) => m.queueDialog('/qa/projects/Same.grooviq')");
     await app.keyboard.press("ControlOrMeta+o");
+    await expect.poll(() => mock.view().then((v) => v.generation)).toBe(generation + 1);
     await expect(editor(app)).toHaveCount(0);
-    await app.waitForTimeout(600);
+    await app.clock.runFor(600);
     expect(await paramEdits(mock)).toEqual([]);
     expect((await stored(mock)).synth).toEqual(presetValues("808 Glide"));
   });
