@@ -447,7 +447,7 @@ fn stale_generation_and_writer_admission_refusal_preserve_every_inverse_and_capa
     assert!(matches!(r.step(true), HistoryEffect::SamplerTrim { .. }));
 }
 #[test]
-fn dedicated_and_global_trim_moves_preserve_order_optional_entries_and_new_capabilities() {
+fn dedicated_undo_and_global_redo_restore_trim_values_and_refresh_stamps() {
     let mut r = rig();
     let b = r.channels[1];
     let before = r.s.project().channels[1].sampler.clone();
@@ -478,7 +478,15 @@ fn dedicated_and_global_trim_moves_preserve_order_optional_entries_and_new_capab
         )
         .is_err()
     );
-    // Absent original start survives reset -> inverse as an absent map entry.
+}
+
+#[test]
+fn noop_trim_reset_and_empty_undo_preserve_replacement_project() {
+    let mut r = rig();
+    let b = r.channels[1];
+    r.reset(b);
+    assert!(r.s.view().project_can_undo);
+
     let mut project = r.s.project().clone();
     project.channels[1].sampler.remove("start");
     let loaded = Loaded {
@@ -497,9 +505,18 @@ fn dedicated_and_global_trim_moves_preserve_order_optional_entries_and_new_capab
     )
     .unwrap();
     r.drain();
-    r.reset(b);
-    r.step(true);
-    assert!(!r.s.project().channels[1].sampler.contains_key("start"));
+    let before = r.s.project().clone();
+    assert!(!before.channels[1].sampler.contains_key("start"));
+    let current = r.s.sampler_trim_view(b).unwrap();
+    let reset =
+        r.s.sampler_trim_reset(b, &current.stamp, Instant::now())
+            .unwrap();
+    r.drain();
+    assert!(!reset.changed);
+    assert_eq!(r.s.project(), &before);
+    assert!(matches!(r.step(true), HistoryEffect::Empty));
+    assert_eq!(r.s.history_usage().0, 0);
+    assert_eq!(r.s.project(), &before);
 }
 #[test]
 fn ordinary_trim_and_relink_retire_shared_stacks_but_observation_does_not() {
