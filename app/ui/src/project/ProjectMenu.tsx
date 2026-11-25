@@ -69,7 +69,9 @@ export function ProjectMenu({ name, platform, onAction }: Props) {
         onClick={() => setOpen(!open)}
       >
         <span className="project-name-text">{name}</span>
-        <span aria-hidden>▾</span>
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false" style={{ flexShrink: 0 }}>
+          <path d="m2 4 3 3 3-3" />
+        </svg>
       </button>
       {open && (
         <div className="menu" role="menu" aria-label="Project" onKeyDown={onKeyDown}>
