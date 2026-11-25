@@ -162,6 +162,30 @@ fn synth_trap_lead_uni7_block(bencher: Bencher, voices: usize) {
     bencher.bench_local(|| synth.process(black_box(&mut l), black_box(&mut r), None, &[]));
 }
 
+#[divan::bench(args = ["static", "fading"], consts = [64, 128])]
+fn legacy_delay<const N: usize>(bencher: Bencher, mode: &str) {
+    let mut device = grooviq_dsp::delay::Delay::new(SR);
+    device.set_param(0, 0.0);
+    device.set_param(2, 20.0);
+    let fading = mode == "fading";
+    let source: [f32; N] = std::array::from_fn(|i| libm::sinf(i as f32 * 0.31) * 0.2);
+    let mut alternate = false;
+    let mut render = || {
+        let mut l = source;
+        let mut r = source;
+        if fading {
+            alternate = !alternate;
+            device.set_param(2, if alternate { 20.05 } else { 20.0 });
+        }
+        device.process(black_box(&mut l), black_box(&mut r), None, &[]);
+        black_box((l, r));
+    };
+    for _ in 0..(SR as usize).div_ceil(N) {
+        render();
+    }
+    bencher.bench_local(render);
+}
+
 #[divan::bench(args = ["Glass Steps", "Soft Spools", "Dusk Circuit"], consts = [64, 128])]
 fn character_delay<const N: usize>(bencher: Bencher, name: &str) {
     use grooviq_dsp::character_delay::{CharacterDelay, preset};

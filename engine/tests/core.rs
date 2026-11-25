@@ -6,6 +6,19 @@ use grooviq_engine::{BPM_RANGE, Command, EngineConfig, NoteId, engine, render_of
 
 const SR: f32 = 48_000.0;
 
+#[test]
+fn tempo_synced_built_ins_cover_host_bpm_range() {
+    for (id, bpm_param) in [("delay", 8), ("character_delay", 8)] {
+        let (min, max, _) = grooviq_dsp::param_spec(id).unwrap()[bpm_param];
+        assert!(
+            min <= BPM_RANGE.0 && max >= BPM_RANGE.1,
+            "{id} accepts {min}..={max} BPM, host accepts {}..={}",
+            BPM_RANGE.0,
+            BPM_RANGE.1
+        );
+    }
+}
+
 fn cfg() -> EngineConfig {
     EngineConfig { sample_rate: SR }
 }
