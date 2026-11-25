@@ -3,7 +3,8 @@ import { SYSTEM_DEFAULT, type LogEntry, type Output } from "../audio";
 import { AudioLog } from "../log/AudioLog";
 import { MidiSettings } from "../midi/MidiSettings";
 import { focusInto, returnFocus } from "./focus";
-import { kindIcon, kindWarns } from "./kind";
+import { kindWarns } from "./kind";
+import { OutputIcon } from "./OutputIcon";
 
 interface Props {
   outputs: Output[];
@@ -68,7 +69,7 @@ export function OutputPopover({ outputs, chosen, guard, log, onSelect, onGuard, 
             onChange={() => onSelect(SYSTEM_DEFAULT)}
           />
           <span className="device-icon" aria-hidden>
-            ⚙️
+            <OutputIcon kind="default" />
           </span>
           <span className="device-name">
             System default
@@ -79,7 +80,7 @@ export function OutputPopover({ outputs, chosen, guard, log, onSelect, onGuard, 
           <label key={o.id} className={`device${kindWarns(o.kind) ? " warn" : ""}`}>
             <input type="radio" name="output" checked={chosen === o.id} onChange={() => onSelect(o.id)} />
             <span className="device-icon" aria-hidden>
-              {kindIcon(o.kind)}
+              <OutputIcon kind={o.kind} />
             </span>
             <span className="device-name">
               {o.name}
