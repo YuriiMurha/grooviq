@@ -1,29 +1,28 @@
 import type { Locator, Page } from "@playwright/test";
 import { colourDistance, expect, presetValues, project, test } from "./fixture";
 
-const synthProject = project([], {}, {
-  channels: [{
-    id: 1,
-    name: "Bass",
-    color: 3,
-    sample: null,
-    volume: 1,
-    pan: 0,
-    mute: false,
-    solo: false,
-    sampler: {},
-    kind: "synth",
-    synth: presetValues("808 Glide"),
-    preset: "808 Glide",
-  }],
-  nextId: 2,
+const synthChannel = (id: number, name: string) => ({
+  id,
+  name,
+  color: 3,
+  sample: null,
+  volume: 1,
+  pan: 0,
+  mute: false,
+  solo: false,
+  sampler: {},
+  kind: "synth" as const,
+  synth: presetValues("808 Glide"),
+  preset: "808 Glide",
 });
+
+const synthProject = project([], {}, { channels: [synthChannel(1, "Bass")], nextId: 2 });
 
 test.use({ seed: { project: synthProject } });
 
-async function openScope(page: Page) {
-  await page.getByRole("button", { name: "Edit the Bass synth" }).click();
-  const scope = page.getByRole("dialog", { name: "Bass synth" }).getByLabel("Synth output waveform");
+async function openScope(page: Page, name = "Bass") {
+  await page.getByRole("button", { name: `Edit the ${name} synth` }).click();
+  const scope = page.getByRole("dialog", { name: `${name} synth` }).getByLabel("Synth output waveform");
   await expect(scope).toBeVisible();
   return scope;
 }
@@ -101,4 +100,45 @@ test("the existing synth output canvas repaints and restores its stroke on live 
   await setTheme(app, originalTheme);
   await expect.poll(() => strokePixel(scope), { message: "the waveform stroke restores its original colour" }).toEqual(originalPixel);
   expect(await scope.evaluate((canvas, before) => canvas === before, originalNode)).toBe(true);
+});
+
+test.describe("with a second synth editor selected", () => {
+  test.use({ seed: { project: project([], {}, { channels: [synthChannel(1, "Bass"), synthChannel(2, "Lead")], nextId: 3 }) } });
+
+  test("an open but inactive synth output scope repaints on a live theme change", async ({ app }) => {
+    const bass = await openScope(app, "Bass");
+    // The Bass window covers the rack, so press Lead's opener directly. Opening Lead focuses and
+    // selects it, so the Bass scope stops its frame loop.
+    await app.getByRole("button", { name: "Edit the Lead synth" }).evaluate((b: HTMLElement) => b.click());
+    await expect(app.getByRole("dialog", { name: "Lead synth" }).getByLabel("Synth output waveform")).toBeVisible();
+    await app.addStyleTag({ content: `
+      :root[data-theme="scope-probe"] canvas[aria-label="Synth output waveform"] {
+        --kc: rgb(${probeColour.join(", ")});
+      }
+    ` });
+    await expect.poll(async () => (await strokePixel(bass))[3]).toBeGreaterThan(100);
+    const originalPixel = await strokePixel(bass);
+    expect(colourDistance(originalPixel, probeColour)).toBeGreaterThan(80);
+    const idleStrokes = await bass.evaluate(async (canvas: HTMLCanvasElement) => {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("No synth output context");
+      const stroke = ctx.stroke;
+      let strokes = 0;
+      ctx.stroke = (...args: [] | [Path2D]) => {
+        strokes++;
+        Reflect.apply(stroke, ctx, args);
+      };
+      try {
+        for (let frame = 0; frame < 10; frame++) await new Promise(requestAnimationFrame);
+        return strokes;
+      } finally {
+        ctx.stroke = stroke;
+      }
+    });
+    expect(idleStrokes, "the Bass scope is inactive and runs no frame loop").toBe(0);
+
+    await setTheme(app, "scope-probe");
+    await expect.poll(async () => colourDistance(await strokePixel(bass), probeColour),
+      { message: "the inactive waveform stroke uses the probe colour" }).toBeLessThan(8);
+  });
 });

@@ -27,9 +27,6 @@ export function OutputScope({ channel, active, generation }: { channel: number; 
     const scopeCanvas = canvas.current;
     if (!scopeCanvas) return;
     let strokeColour = getComputedStyle(scopeCanvas).color;
-    const unsubscribeTheme = subscribeThemeChange(() => {
-      strokeColour = getComputedStyle(scopeCanvas).color;
-    });
     const unsubscribe = onProjectReplacing(clear);
     const draw = (now: number) => {
       const visible = active && !document.hidden && !isProjectReplacing();
@@ -96,6 +93,11 @@ export function OutputScope({ channel, active, generation }: { channel: number; 
       if (active) frame = requestAnimationFrame(draw);
     };
     draw(performance.now());
+    const unsubscribeTheme = subscribeThemeChange(() => {
+      strokeColour = getComputedStyle(scopeCanvas).color;
+      // An inactive scope runs no frame loop, so repaint it here.
+      if (!active) draw(performance.now());
+    });
     return () => { disposed = true; cancelAnimationFrame(frame); unsubscribe(); unsubscribeTheme(); };
   }, [channel, active, generation]);
   return <section className="dwell synth-output" aria-label="Live synth output"><div className="dcard-head"><b className="dcard-title">Output</b><span ref={status} className="synth-output-status" /></div><canvas ref={canvas} width={660} height={48} style={{ width: "100%", height: 48, color: "var(--kc, var(--accent))" }} aria-label="Synth output waveform" /></section>;
