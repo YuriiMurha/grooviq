@@ -1,0 +1,106 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - run: python scripts/release-version.test.py
+      - name: Validate version tag against app and lockfiles
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/release-version.py
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bundle: dmg
+            extension: dmg
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+            extension: exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/ui/package-lock.json
+      - run: rustup toolchain install
+      - run: rustup target add ${{ matrix.target }}
+      - run: npm ci
+        working-directory: app/ui
+      # No signing secrets until #50. The CLI comes from the locked UI package.
+      # No release inputs: build jobs cannot create or modify GitHub releases.
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        with:
+          projectPath: app/src-tauri
+          tauriScript: npm --prefix ../ui run tauri --
+          args: --locked --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installer-${{ matrix.bundle }}
+          path: target/${{ matrix.target }}/release/bundle/${{ matrix.bundle }}/*.${{ matrix.extension }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: installer-*
+          path: installers
+          merge-multiple: true
+      - name: Attach both installers to a new draft only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmg=(installers/*.dmg)
+          exe=(installers/*.exe)
+          [[ ${#dmg[@]} == 1 && ${#exe[@]} == 1 ]]
+          # Never append assets to an existing (possibly public) release.
+          # A rerun requires the owner to remove its previous draft first.
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'A release already exists for this tag; refusing to modify it.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" "${dmg[0]}" "${exe[0]}" \
+            --verify-tag --draft --title "Grooviq $RELEASE_TAG" \
+            --notes 'Unsigned preview builds. macOS signing and notarization and Windows signing are tracked in #50. Review both installers before manually publishing this draft.'
