@@ -58,6 +58,10 @@ replay-update: ## Regenerate the real-Session transcript intentionally, then ver
 qa-ui: ui-install ## Playwright on the web build with the mock engine (WebKit and Chromium); shots in app/ui/e2e-results
 	cd $(UI) && npx playwright install chromium webkit && npm run e2e
 
+.PHONY: qa-mixer-ui
+qa-mixer-ui: ui-install ## Playwright on the mixer components' synthetic fixture only (WebKit and Chromium); ARGS=<extra playwright args>
+	cd $(UI) && npx playwright install chromium webkit && npm run e2e -- e2e/m4-mixer-components.e2e.ts $(ARGS)
+
 GALLERY_PORT ?= 4795
 .PHONY: ui-gallery ui-gallery-build ui-gallery-check ui-gallery-capture
 ui-gallery: ## Serve actual controls with generated state; installed UI dependencies required
@@ -134,7 +138,13 @@ qa-driver-build: ui-install ## Build the optional macOS QA driver app
 qa-driver: ## Control QA_HOME's silent automation app; SCRIPT=<trusted JS file>
 	python3 scripts/qa-driver.py --home "$(QA_HOME)" $(if $(SCRIPT),--script "$(SCRIPT)",)
 
-.PHONY: qa-driver-stop
+.PHONY: qa-driver-stop qa-driver-quit test-qa-driver
+test-qa-driver: ## Test private QA command separation without launching the app
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_qa_driver.py -v
+
+qa-driver-quit: ## Request normal Quit in QA_HOME, including the unsaved-close prompt
+	python3 scripts/qa-driver.py --home "$(QA_HOME)" --quit
+
 qa-driver-stop: ## Stop QA_HOME's automation app without a native dialog
 	python3 scripts/qa-driver.py --home "$(QA_HOME)" --shutdown
 

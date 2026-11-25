@@ -1,6 +1,6 @@
 //! Stereo-linked envelope contrast shaper. Modes blend continuously running detectors;
 //! curves interpolate bounded transient weights, without resetting envelope history.
-use crate::util::{Smooth, clamp_param, fast_tanh, flush, sane};
+use crate::util::{Smooth, clamp_param, fast_tanh, flush, flush64, sane};
 use crate::{Device, NoteEvent, db_to_gain};
 
 pub const SPEC: [(f32, f32, f32); 7] = [
@@ -34,7 +34,7 @@ pub struct DrumShaper {
     fast: [f32; 3],
     hold: [u32; 3],
     hold_samples: u32,
-    slow: [f32; 3],
+    slow: [f64; 3],
     attack: [f32; 3],
     release: [f32; 3],
     lag: [f32; 3],
@@ -110,9 +110,11 @@ impl Device for DrumShaper {
                 } else {
                     self.fast[m] = flush(level + (self.fast[m] - level) * self.release[m]);
                 }
-                self.slow[m] = flush(self.fast[m] + (self.slow[m] - self.fast[m]) * self.lag[m]);
-                *weight =
-                    ((self.fast[m] - self.slow[m]) / self.fast[m].max(1.0e-6)).clamp(0.0, 1.0);
+                // Keep the lag state in f64: f32 rounding leaves a steady residual
+                // that the Sharp curve's square root turns into an audible gain offset.
+                let fast = f64::from(self.fast[m]);
+                self.slow[m] = flush64(fast + (self.slow[m] - fast) * f64::from(self.lag[m]));
+                *weight = ((fast - self.slow[m]) / fast.max(1.0e-6)).clamp(0.0, 1.0) as f32;
             }
             let p = self.controls.each_mut().map(Smooth::next);
             let t = blend(weights, p[2]);
@@ -148,6 +150,36 @@ impl Device for DrumShaper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sharp_retains_sub_ulp_envelope_contrast() {
+        let mut d = DrumShaper::new(48000.0);
+        for (index, value) in [(1, 12.0), (2, 2.0), (3, 0.0)] {
+            d.set_param(index, value);
+        }
+        d.fast = [0.5; 3];
+        // One quarter of the f32 step below 0.5. Rounding the slow state
+        // before subtraction would erase this small but real contrast.
+        d.slow = [0.5 - 1.0 / 134_217_728.0; 3];
+        d.gain = 12.0;
+        d.process(&mut [0.5; 128], &mut [0.125; 128], None, &[]);
+        assert!(d.gain < 11.999 && d.gain > 11.99, "gain {}", d.gain);
+    }
+    #[test]
+    fn slow_follower_converges_and_flushes_subnormal_state() {
+        let mut d = DrumShaper::new(192000.0);
+        for _ in 0..3000 {
+            d.process(&mut [0.5; 128], &mut [0.125; 128], None, &[]);
+        }
+        for m in 0..3 {
+            // The real-valued recurrence converges to fast. This tolerance is
+            // loose for f64, but far below the f32 fixed-point rounding floor.
+            assert!((f64::from(d.fast[m]) - d.slow[m]).abs() < 1.0e-10);
+        }
+        d.reset();
+        d.slow = [f64::MIN_POSITIVE * 0.5; 3];
+        d.process(&mut [0.0], &mut [0.0], None, &[]);
+        assert_eq!(d.slow, [0.0; 3]);
+    }
     #[test]
     fn near_peak_hold_still_tracks_falling_envelopes() {
         for sr in [22050.0, 48000.0, 192000.0] {
