@@ -17,8 +17,8 @@ hooks: ## Point git at .githooks (staged conflict/format checks before each comm
 
 .PHONY: merge-train test-merge-train
 BATCH ?= 4
-merge-train: ## Quality only: advance a tested batch (ORDER="12=<approved SHA> 34=<approved SHA>", BATCH=4)
-	python3 -B scripts/merge_train.py --order $(ORDER) --batch $(BATCH)
+merge-train: ## Quality only: advance a tested batch (ORDER="12=<approved SHA> 34=<approved SHA>", BATCH=4, optional ACK_MISMATCH=<batch SHA>)
+	python3 -B scripts/merge_train.py --order $(ORDER) --batch $(BATCH) $(if $(ACK_MISMATCH),--ack-mismatch $(ACK_MISMATCH))
 
 test-merge-train: ## Test ordered protected merges without calling GitHub
 	python3 -B -m unittest discover -s scripts -p test_merge_train.py -v

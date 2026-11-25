@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from uuid import uuid4
 
 REPO = "YuriiMurha/grooviq"
@@ -95,10 +96,12 @@ def hold_reason(pr, head, approved):
     return None
 
 
-def check_status(repo, head):
+def check_status(repo, head, *, missing_pending=True):
     checks = repo.checks(head)
     failures, cancelled, pending = [], [], False
     for name in REQUIRED:
+        if name not in checks and not missing_pending:
+            continue
         state, url = checks.get(name, (None, ""))
         if state in FAILED:
             failures.append(f"{name} ({state})")
@@ -167,14 +170,14 @@ def build_batch(repo, git, base, active, order, limit, members=(), suspects=()):
                 continue
             accepted.append(candidate)
             # A squash leaves the PR head out of the ancestry used for the next merge.
-            previous = parent
+            accepted_tree, previous = tree, parent
             parent = git.commit(tree, parent, f"Train squash of #{number}")
             if len(accepted) == limit:
                 break
         if accepted:
             carried = deferred + suspects if bisecting else []
             batch = Batch(base, accepted, carried)
-            head = git.commit(tree, previous, batch.message())
+            head = git.commit(accepted_tree, previous, batch.message())
             git.publish(head, active)
             print(f"Pushed batch {head} ({numbers(accepted)}).")
             return
@@ -188,7 +191,115 @@ def numbers(candidates):
     return " ".join(f"#{number}" for number, _ in candidates)
 
 
-def merge_batch(repo, git, active, batch, order):
+def error_detail(error):
+    detail = getattr(error, "stderr", None)
+    if isinstance(detail, bytes):
+        detail = detail.decode(errors="replace")
+    return detail.strip() if detail else str(error)
+
+
+def landed_sha(pr):
+    head = pr.get("merge_commit_sha")
+    if pr["merged"] and isinstance(head, str) and SHA.fullmatch(head):
+        return head
+    return None
+
+
+def print_landed(members):
+    for number, head in members:
+        print(f"Merged #{number} at {head}")
+
+
+def report_landed(repo, members, *, show_merges=True):
+    landed, unknown = [], []
+    for number, _ in members:
+        try:
+            pr = repo.pull(number)
+            head = landed_sha(pr)
+            if head:
+                landed.append((number, head))
+            elif pr["merged"]:
+                unknown.append(number)
+        except Exception as error:
+            print(f"Could not verify #{number}: {error_detail(error)}.")
+            unknown.append(number)
+    if show_merges:
+        print_landed(landed)
+    prefix = ", ".join(f"#{number} at {head}" for number, head in landed)
+    unconfirmed = ", ".join(f"#{number}" for number in unknown)
+    return f"Merged so far: {prefix or 'none confirmed'}." + (
+        f" Unconfirmed: {unconfirmed}." if unknown else ""
+    )
+
+
+def squash(repo, git, active, number, head, expected_main):
+    for attempt in range(4):
+        main, current = git.refs()
+        if main != expected_main:
+            raise RuntimeError("main moved before squash")
+        if current != active:
+            raise RuntimeError("batch branch moved before squash")
+        try:
+            return repo.merge(number, head)
+        except Exception as error:
+            pr = repo.pull(number)
+            if pr["merged"]:
+                landed = landed_sha(pr)
+                main, current = git.refs()
+                if not landed or pr["head"]["sha"] != head or main != landed:
+                    raise RuntimeError("GitHub's reported squash does not match the approved head and main tip") from error
+                if current != active:
+                    raise RuntimeError("batch branch moved during squash; leaving it in place") from error
+                git.fetch(main)
+                if git.first_parent_chain(expected_main, main) != [landed]:
+                    raise RuntimeError("GitHub's reported squash has an unexpected parent") from error
+                return landed
+            detail = error_detail(error).lower()
+            if (attempt == 3 or not isinstance(error, subprocess.CalledProcessError)
+                    or "http 405" not in detail or "base branch was modified" not in detail):
+                raise
+            time.sleep(0.25 * (attempt + 1))
+
+
+def verify_landed_tree(git, active, main, tested_head, mismatch_file, ack_mismatch=None):
+    git.fetch(main)
+    landed, tested = git.tree(main), git.tree(tested_head)
+    if landed != tested:
+        if ack_mismatch == active:
+            print(f"Acknowledged tree mismatch for batch {active}.")
+            return
+        if mismatch_file is not None:
+            temp = mismatch_file.with_suffix(".tmp")
+            temp.write_text(f"{active}\n")
+            temp.replace(mismatch_file)
+        raise RuntimeError(f"main tree {landed} != tested tree {tested}; "
+                           f"investigate before passing --ack-mismatch {active}")
+
+
+def recover_prefix(git, active, batch, main, pulls, mismatch_file, ack_mismatch):
+    if main == batch.base:
+        return 0
+    landed = []
+    for (number, head), pr in zip(batch.members, pulls):
+        squash_head = landed_sha(pr)
+        if not squash_head or pr["head"]["sha"] != head:
+            break
+        landed.append((number, squash_head))
+    if not landed:
+        return 0
+    git.fetch(main)
+    if git.first_parent_chain(batch.base, main) != [head for _, head in landed]:
+        return 0
+    print_landed(landed)
+    tested = git.first_parent_chain(batch.base, active)
+    if len(tested) != len(batch.members):
+        raise RuntimeError("Tested commit does not match its trailers.")
+    verify_landed_tree(git, active, main, tested[len(landed) - 1], mismatch_file, ack_mismatch)
+    print(f"Recovered landed prefix of batch {active} ({numbers(landed)}).")
+    return len(landed)
+
+
+def merge_batch(repo, git, active, batch, order, mismatch_file):
     for number, head in batch.members:
         reason = hold_reason(repo.pull(number), head, order.get(number))
         if reason:
@@ -198,45 +309,58 @@ def merge_batch(repo, git, active, batch, order):
     expected_main = batch.base
     try:
         for number, head in batch.members:
-            main, current = git.refs()
-            if main != expected_main:
-                raise RuntimeError("main moved before squash")
-            if current != active:
-                raise RuntimeError("batch branch moved before squash")
-            expected_main = repo.merge(number, head)
+            expected_main = squash(repo, git, active, number, head, expected_main)
             merged.append((number, expected_main))
-    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError, KeyError) as error:
-        prefix = ", ".join(f"#{number} at {head}" for number, head in merged)
-        raise RuntimeError(f"Stopped at #{number}: {error}. Merged so far: {prefix or 'none'}.") from error
+        main, current = git.refs()
+    except (Exception, KeyboardInterrupt) as error:
+        report = report_landed(repo, batch.members)
+        raise RuntimeError(f"Stopped at #{number}: {error_detail(error)}. {report}") from error
 
-    main, current = git.refs()
-    git.fetch(main)
-    landed, tested = git.tree(main), git.tree(active)
-    if landed != tested:
-        raise RuntimeError(f"main tree {landed} != tested tree {tested}")
-    for number, head in merged:
-        print(f"Merged #{number} at {head}")
-    if current != active:
-        raise RuntimeError("batch branch moved during squash; leaving it in place.")
+    print_landed(merged)
+    try:
+        verify_landed_tree(git, active, main, active, mismatch_file)
+        if current != active:
+            raise RuntimeError("batch branch moved during squash; leaving it in place.")
+    except (Exception, KeyboardInterrupt) as error:
+        report = report_landed(repo, batch.members, show_merges=False)
+        raise RuntimeError(f"{error_detail(error)}. {report}") from error
     return main
 
 
-def tick(repo, git, order, limit=4):
+def tick(repo, git, order, limit=4, *, mismatch_file=None, ack_mismatch=None):
+    if not order:
+        raise RuntimeError("ORDER requires at least one approved PR head.")
     if limit < 1:
         raise RuntimeError("Batch size must be positive.")
     repo.verify_policy()
     base, active = git.refs()
+    blocked = mismatch_file.read_text().strip() if mismatch_file is not None and mismatch_file.exists() else ""
+    if blocked and ack_mismatch != blocked:
+        raise RuntimeError(f"Tree mismatch is blocked; investigate before passing --ack-mismatch {blocked}.")
+    if ack_mismatch and ack_mismatch != (blocked or active):
+        raise RuntimeError("The mismatch acknowledgement must name the blocked or active batch SHA.")
+    if blocked:
+        mismatch_file.unlink()
+        print(f"Acknowledged recorded mismatch for batch {blocked}.")
     for number in sorted(set(repo.enrolled()) - order.keys()):
         warning = f"; {AUTO_MERGE}" if repo.pull(number)["auto_merge"] is not None else ""
         print(f"Held #{number}: no approved head{warning}.")
     if active:
         git.fetch(active)
         batch = Batch.parse(git.message(active))
+        pulls = [repo.pull(number) for number, _ in batch.members]
+        recovered = recover_prefix(git, active, batch, base, pulls, mismatch_file, ack_mismatch)
+        if recovered:
+            landed = {number for number, _ in batch.members[:recovered]}
+            remaining = {number: head for number, head in order.items() if number not in landed}
+            build_batch(repo, git, base, active, remaining, limit,
+                        batch.members[recovered:recovered + limit],
+                        batch.members[recovered + limit:] + batch.suspects)
+            return
         changed = base != batch.base
         if changed:
             print(f"Abandoned batch {active}: main moved from {batch.base} to {base}.")
-        for number, head in batch.members:
-            pr = repo.pull(number)
+        for (number, head), pr in zip(batch.members, pulls):
             reason = hold_reason(pr, head, order.get(number))
             if pr["merged"]:
                 reason = "BYPASS: member already merged outside this tick"
@@ -246,6 +370,13 @@ def tick(repo, git, order, limit=4):
         if not changed and all(eligible(repo, candidate, order) for candidate in batch.members):
             failures, cancelled, pending = check_status(repo, active)
             if failures:
+                main_failures, _, main_pending = check_status(repo, base, missing_pending=False)
+                if main_failures:
+                    print(f"Held batch {active}: main is red ({main_failures}).")
+                    return
+                if main_pending:
+                    print(f"Waiting for required checks on main at {base}.")
+                    return
                 if len(batch.members) > 1:
                     split = min(limit, (len(batch.members) + 1) // 2)
                     print(f"Bisecting batch {active}: {failures}.")
@@ -262,7 +393,7 @@ def tick(repo, git, order, limit=4):
                 print(f"Waiting for batch {active} ({numbers(batch.members)}).")
                 return
             else:
-                base = merge_batch(repo, git, active, batch, order)
+                base = merge_batch(repo, git, active, batch, order, mismatch_file)
                 order = {n: sha for n, sha in order.items() if (n, sha) not in batch.members}
             build_batch(repo, git, base, active, order, limit, suspects=batch.suspects)
             return
@@ -276,10 +407,10 @@ class GitHub:
             argv += ["--paginate", "--slurp"]
         if body is not None:
             argv += ["--input", "-"]
-        # Retry on a later tick after checking remote state, especially after a write error.
+        # The caller reconciles remote state before retrying a failed write.
         result = subprocess.run(
             argv, input="" if body is None else json.dumps(body),
-            text=True, stdout=subprocess.PIPE, check=True, timeout=45,
+            text=True, capture_output=True, check=True, timeout=45,
         )
         return json.loads(result.stdout) if result.stdout else None
 
@@ -396,6 +527,13 @@ class Git:
     def tree(self, head):
         return self.run("rev-parse", f"{head}^{{tree}}").stdout.strip()
 
+    def first_parent_chain(self, base, head):
+        commits = self.run("rev-list", "--first-parent", "--parents", "--reverse",
+                           f"{base}..{head}").stdout.splitlines()
+        if not commits or commits[0].split()[1:2] != [base]:
+            return []
+        return [line.split()[0] for line in commits]
+
     def verify_chain(self, head, batch):
         commits = self.run("rev-list", "--first-parent", "--parents", "--reverse",
                            f"{batch.base}..{head}").stdout.splitlines()
@@ -419,12 +557,17 @@ def main():
     parser.add_argument("--order", nargs="*", default=[], metavar="PR=SHA",
                         help="priority PR numbers and exact approved heads")
     parser.add_argument("--batch", type=int, default=4, help="maximum members per batch")
+    parser.add_argument("--ack-mismatch", metavar="SHA", help="acknowledge an investigated tree mismatch")
     try:
         args = parser.parse_args()
     except SystemExit as error:
         return int(bool(error.code))
     try:
         order = parse_order(args.order)
+        if not order:
+            raise ValueError("ORDER requires at least one approved PR head.")
+        if args.ack_mismatch and not SHA.fullmatch(args.ack_mismatch):
+            raise ValueError("--ack-mismatch requires a full lowercase commit SHA.")
     except ValueError as error:
         print(f"Merge train stopped: {error}", file=sys.stderr)
         return 1
@@ -435,10 +578,11 @@ def main():
         ).strip()
         with (Path(common_dir) / "merge-train.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            tick(GitHub(), Git(), order, args.batch)
+            tick(GitHub(), Git(), order, args.batch,
+                 mismatch_file=Path(common_dir) / "merge-train-mismatch",
+                 ack_mismatch=args.ack_mismatch)
     except (OSError, subprocess.SubprocessError, RuntimeError, ValueError, KeyError) as error:
-        detail = getattr(error, "stderr", None)
-        print(f"Merge train stopped: {detail.strip() if detail else error}", file=sys.stderr)
+        print(f"Merge train stopped: {error_detail(error)}", file=sys.stderr)
         return 1
     return 0
 
