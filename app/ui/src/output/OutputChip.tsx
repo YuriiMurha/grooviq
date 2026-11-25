@@ -1,5 +1,6 @@
 import type { Output } from "../audio";
-import { kindIcon, kindWarns } from "./kind";
+import { kindWarns } from "./kind";
+import { OutputIcon } from "./OutputIcon";
 
 interface Props {
   output: Output | null;
@@ -21,7 +22,7 @@ export function OutputChip({ output, latencyMs, open, onToggle }: Props) {
       title={warn ? "Playing on speakers: the room can hear it" : undefined}
     >
       <span className="chip-icon" aria-hidden>
-        {output ? kindIcon(output.kind) : "🔇"}
+        <OutputIcon kind={output?.kind ?? "none"} />
       </span>
       <span className="chip-name">{output?.name ?? "No output"}</span>
       {output && latencyMs !== null && <span className="chip-latency">{latencyMs} ms</span>}
