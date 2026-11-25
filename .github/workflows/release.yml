@@ -22,11 +22,31 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
-      - run: python scripts/release-version.test.py
       - name: Validate version tag against app and lockfiles
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: python scripts/release-version.py
+        run: |
+          python - <<'PYTHON'
+          import json, os, pathlib, re, tomllib
+          tag = os.environ["RELEASE_TAG"]
+          if os.environ["GITHUB_REF_TYPE"] != "tag" or not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag, re.ASCII):
+              raise SystemExit("Expected stable vMAJOR.MINOR.PATCH tag")
+          version = tag[1:]
+          if any(int(part) > 65535 for part in version.split(".")):
+              raise SystemExit("Version exceeds Windows installer component limit")
+          def read_json(path):
+              return json.loads(pathlib.Path(path).read_text())
+          lock = read_json("app/ui/package-lock.json")
+          cargo = tomllib.loads(pathlib.Path("app/src-tauri/Cargo.toml").read_text())
+          cargo_lock = tomllib.loads(pathlib.Path("Cargo.lock").read_text())
+          versions = [read_json("app/src-tauri/tauri.conf.json")["version"],
+                      cargo["package"]["version"],
+                      next(p["version"] for p in cargo_lock["package"] if p["name"] == "grooviq-app"),
+                      read_json("app/ui/package.json")["version"],
+                      lock["version"], lock["packages"][""]["version"]]
+          if any(value != version for value in versions):
+              raise SystemExit("Tag must match all app versions and lockfiles")
+          PYTHON
 
   build:
     needs: validate
@@ -62,7 +82,7 @@ jobs:
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         with:
           projectPath: app/src-tauri
-          tauriScript: npm --prefix ../ui run tauri --
+          tauriScript: npm --prefix ../ui run tauri
           args: --locked --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
