@@ -1,8 +1,36 @@
-import { clickCell, expect, project, soundsFor, test, workspaceReady } from "./fixture";
-import { THEME_COLOR_TOKENS } from "../src/theme/contract";
+import { cellPoint, clickCell, colourDistance, expect, grid, pixelsAt, project, soundsFor, test, workspaceReady } from "./fixture";
+import { THEME_COLOR_TOKENS, themeTokenProblems } from "../src/theme/contract";
 import { parseColor } from "../src/rack/palette";
+import { token } from "./rollHelpers";
 
 test.use({ seed: { project: project(["Kick"]), files: soundsFor(["Kick"]) }, viewport: { width: 900, height: 560 } });
+
+test("the grid uses Riso ink when the startup stylesheet is slow", async ({ app, mock }) => {
+  let delayedStylesheet = false;
+  await app.route("**/assets/main-*.css", async (route) => {
+    delayedStylesheet = true;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await route.continue();
+  });
+
+  await app.reload();
+  await workspaceReady(app);
+  expect(delayedStylesheet, "the built stylesheet was delayed").toBe(true);
+  await expect(app.locator("html")).toHaveAttribute("data-theme", "riso");
+  const rootStyle = await app.evaluate((names) => {
+    const style = getComputedStyle(document.documentElement);
+    return Object.fromEntries(names.map((name) => [name, style.getPropertyValue(name)]));
+  }, [...THEME_COLOR_TOKENS, "--reg-x", "--reg-y", "--radius-s", "--radius-m", "--radius-l"]);
+  expect(themeTokenProblems((name) => rootStyle[name] ?? "")).toEqual([]);
+
+  await clickCell(app, 0, 1);
+  await expect.poll(async () => (await mock.view()).pattern.cells["1"][1]).toBeGreaterThan(0);
+  const ink = await token(app, "--ink-1");
+  await expect.poll(async () => {
+    const [pixel] = await pixelsAt(app, grid(app), [cellPoint(0, 1)]);
+    return colourDistance(pixel, ink);
+  }, { message: "the lit step uses the loaded ink" }).toBeLessThan(4);
+});
 
 for (const preference of ["absent", "invalid", "unavailable", "denied"] as const) {
   test(`Riso startup and editing survive ${preference} theme storage`, async ({ app, mock }, info) => {
