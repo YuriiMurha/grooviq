@@ -1385,3 +1385,124 @@ fn compound_edits_refuse_whole_on_any_invalid_part() {
         before
     );
 }
+
+#[test]
+fn a_plainly_added_routed_channel_gets_its_fade_route_and_must_be_routed() {
+    // Channel 3 added live (not in the initial state), played, then removed: its fade
+    // must stay audible on track 1 exactly as when it is removed without a reroute.
+    let run = |reroute: bool| {
+        let (mut c, mut p) = engine_with(
+            EngineConfig { sample_rate: SR },
+            EngineState {
+                mix: one_channel_mix(1),
+                ..EngineState::default()
+            },
+        );
+        c.add_channel(ChannelSetup::sampler(
+            ChannelId(3),
+            Some(sample()),
+            vec![],
+            ChannelMix::default(),
+        ))
+        .unwrap();
+        c.send(Command::ChannelNote {
+            channel: ChannelId(3),
+            key: 60,
+            velocity: 1.0,
+            on: true,
+            id: NoteId(1),
+        })
+        .unwrap();
+        let mut out = Vec::new();
+        for b in 0..20 {
+            if b == 10 {
+                c.remove_channel(ChannelId(3)).unwrap();
+                if reroute {
+                    c.add_channel(ChannelSetup::sampler(
+                        ChannelId(3),
+                        None,
+                        vec![],
+                        ChannelMix::default(),
+                    ))
+                    .unwrap();
+                    c.set_mix(one_channel_mix(2)).unwrap();
+                }
+            }
+            let mut buf = [0.0; 2 * N];
+            p.process(&mut buf, 2);
+            out.extend_from_slice(&buf);
+            let _ = c.check_health();
+        }
+        out
+    };
+    let kept = run(false);
+    assert!(audible(&kept[10 * N * 2..14 * N * 2]), "the fade is heard");
+    assert_eq!(same_bits(&kept, &run(true)), None);
+    // A channel the routed mix does not name would never be heard: refused.
+    let (mut c, _p) = engine_with(
+        EngineConfig { sample_rate: SR },
+        EngineState {
+            mix: one_channel_mix(1),
+            ..EngineState::default()
+        },
+    );
+    let unnamed = ChannelSetup::synth(ChannelId(8), vec![], ChannelMix::default());
+    assert_eq!(c.add_channel(unnamed), Err(ControlError::Rejected));
+    assert!(c.state().channels.is_empty());
+}
+
+#[test]
+fn retiring_an_older_graph_keeps_fades_of_the_newer_one() {
+    let (mut c, mut p) = engine_with(
+        EngineConfig { sample_rate: SR },
+        state(Only::Channel(3), one_channel_mix(1)),
+    );
+    p.process(&mut [0.0; 2 * N], 2);
+    // A panic: the next health check queues a graph rebuilt from the mirror.
+    c.send(Command::InjectPanic).unwrap();
+    p.process(&mut [0.0; 2 * N], 2);
+    let _ = c.check_health();
+    // Removed after that rebuild: it fades in the new graph.
+    c.remove_channel(ChannelId(3)).unwrap();
+    let mut no_track1 = one_channel_mix(2);
+    if let MixSetup::Routed(m) = &mut no_track1 {
+        m.mixer.tracks.retain(|t| t.id != MixerTrackId(1));
+        m.mixer.sources.clear();
+    }
+    // One block installs the new graph and starts the fade; the old graph retires.
+    p.process(&mut [0.0; 2 * N], 2);
+    let _ = c.check_health();
+    assert_eq!(c.set_mix(no_track1.clone()), Err(ControlError::Busy));
+    for _ in 0..16 {
+        p.process(&mut [0.0; 2 * N], 2);
+        let _ = c.check_health();
+    }
+    assert!(c.set_mix(no_track1).is_ok());
+}
+
+#[test]
+fn admission_counts_the_fade_routes_a_build_adds() {
+    // Exactly at the node budget without fade routes; one channel's route tips it over.
+    let mut mix = one_channel_mix(1);
+    if let MixSetup::Routed(m) = &mut mix {
+        m.mixer.tracks.truncate(2);
+        m.gains.clear();
+        let room = Budget::default().nodes as usize - m.mixer.tracks.len() - 1;
+        m.mixer.sources.extend((0..room as u64).map(|t| Source {
+            id: SourceId::AudioTrack(t),
+            destination: MASTER,
+        }));
+    }
+    let routed = EngineState {
+        channels: vec![ChannelSetup::synth(
+            ChannelId(3),
+            vec![],
+            ChannelMix::default(),
+        )],
+        mix: mix.clone(),
+        ..EngineState::default()
+    };
+    let (mut c, _p) = engine(EngineConfig { sample_rate: SR });
+    assert_eq!(c.load_state(routed), Err(ControlError::Rejected));
+    assert_eq!(c.state(), &EngineState::default());
+}

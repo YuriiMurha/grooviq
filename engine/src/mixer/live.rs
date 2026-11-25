@@ -135,6 +135,28 @@ impl MixSetup {
         }
     }
 
+    /// [`Self::validate`] plus the fade routes a graph built for `channels` adds (one per
+    /// routed channel), so a state admitted here also builds: compile budgets included.
+    pub(crate) fn validate_for(
+        &self,
+        channels: &[crate::ChannelSetup],
+    ) -> Result<(), ControlError> {
+        self.validate()?;
+        if let Self::Routed(mix) = self {
+            let mut mixer = mix.mixer.clone();
+            for (alias, c) in (0u64..).zip(channels) {
+                if let Some(destination) = self.destination(SourceId::Channel(u64::from(c.id.0))) {
+                    mixer.sources.push(Source {
+                        id: SourceId::Instance(alias),
+                        destination,
+                    });
+                }
+            }
+            compile(&mixer, budget()).map_err(|_| ControlError::Rejected)?;
+        }
+        Ok(())
+    }
+
     /// A routed mix names every channel and every playlist track the song's audio uses;
     /// LegacyDirect hears everything. Otherwise a source could be admitted and never heard.
     pub(crate) fn covers(

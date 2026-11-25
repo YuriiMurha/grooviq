@@ -1372,6 +1372,24 @@ mod tests {
     }
 
     #[test]
+    fn a_removal_with_no_fading_room_returns_in_the_envelope() {
+        let (mut p, mut commands, mut trash) = processor();
+        let mut buf = [0.0; BLOCK * 2];
+        for id in 0..crate::state::MAX_CHANNELS as u32 {
+            assert!(p.graph.add_channel(synth_node(id)).is_none());
+            assert!(p.graph.remove_channel(ChannelId(id)).is_none());
+        }
+        assert!(p.graph.add_channel(synth_node(1000)).is_none());
+        assert!(
+            commands
+                .push(Msg::Sources(sources(0, 0, vec![ChannelId(1000)], vec![])))
+                .is_ok()
+        );
+        p.process(&mut buf, 2);
+        assert_eq!(retired_sources(&mut trash), (true, 0, 1));
+    }
+
+    #[test]
     fn a_rebuild_keeps_only_a_source_transactions_transport_chronology() {
         let t = sources(0, 0, vec![ChannelId(5)], vec![6]);
         let note = |channel| Msg::Command {

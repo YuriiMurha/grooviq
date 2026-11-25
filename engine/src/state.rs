@@ -327,7 +327,7 @@ impl EngineState {
         if !song.valid_loop(self.song_loop) {
             return Err(ControlError::Rejected);
         }
-        self.mix.validate()?;
+        self.mix.validate_for(&self.channels)?;
         self.mix.covers(&self.channels, &song)?;
         Ok(Self {
             mix: self.mix,
