@@ -159,7 +159,7 @@ test.describe("keyboard path", () => {
       if (focused.label === "Step grid") break;
     }
     await info.attach("tab-order", { body: order.join("\n"), contentType: "text/plain" });
-    for (const stop of ["QA beat▾", "Play", "Stop", "Playback mode", "BPM", "Beats per bar", "Beat note value", "Test tone", "New", "Pattern 1", "Duplicate", "Rename", "Refresh patterns", "Pattern length", "Mute Kick", "Step grid"]) {
+    for (const stop of ["QA beat", "Play", "Stop", "Playback mode", "BPM", "Beats per bar", "Beat note value", "Test tone", "New", "Pattern 1", "Duplicate", "Rename", "Refresh patterns", "Pattern length", "Mute Kick", "Step grid"]) {
       expect(order.some((o) => o.replace(/\s/g, "") === stop.replace(/\s/g, "") || o === stop), `Tab reaches ${stop}`).toBe(true);
     }
     await expect(grid(app)).toBeFocused();
