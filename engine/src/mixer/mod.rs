@@ -6,11 +6,13 @@
 //! not claimed to reproduce the legacy addition order.
 mod compile;
 mod insert;
+mod latency;
 pub(crate) mod live;
 mod model;
 mod runtime;
 pub use compile::*;
 pub use insert::{InsertIdentity, ParamError, PreparedInsert};
+pub use latency::*;
 pub use live::{InsertDevice, MixSetup, RoutedMix, insert_kinds};
 pub use model::*;
 pub use runtime::*;
