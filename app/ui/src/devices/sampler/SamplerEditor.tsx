@@ -177,7 +177,12 @@ export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onE
             className="dbutton"
             aria-label={channel.missing ? `Relink ${channel.name}` : `Choose a sample for ${channel.name}`}
             data-hint={`Choose the file ${channel.name} should play.`}
-            onClick={() => onRelink(channel)}
+            onClick={(event) => {
+              // WebKit pointer activation does not focus buttons. Keep Escape in this window
+              // when the picker is cancelled, without taking focus on an async reply.
+              event.currentTarget.focus({ preventScroll: true });
+              onRelink(channel);
+            }}
           >
             {channel.missing ? "Relink…" : "Choose a sample…"}
           </button>
