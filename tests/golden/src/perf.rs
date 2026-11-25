@@ -240,19 +240,20 @@ impl Measurement {
         times.sort_unstable();
         let mut speed = self.speed.clone();
         speed.sort_by(f64::total_cmp);
-        let p999_ns = percentile(&times, 0.999);
-        // Count wall-time outliers strictly above 10x this run's p99.9 as likely preemptions.
+        let p50_ns = percentile(&times, 0.5);
+        // Count blocks strictly above 10× p50 so a cluster of slow blocks won't raise a tail cutoff.
+        let preemption_cutoff_ns = p50_ns.saturating_mul(10);
         let preemption_count =
-            times.len() - times.partition_point(|&ns| ns <= p999_ns.saturating_mul(10));
+            times.len() - times.partition_point(|&ns| ns <= preemption_cutoff_ns);
         Summary {
             scene: self.scene,
             block: self.block,
             deadline_ns: self.block as f64 / f64::from(SAMPLE_RATE) * 1e9,
             speed_median: median(&speed),
             speed_worst: speed.first().copied().unwrap_or(0.0),
-            p50_ns: percentile(&times, 0.5),
+            p50_ns,
             p99_ns: percentile(&times, 0.99),
-            p999_ns,
+            p999_ns: percentile(&times, 0.999),
             max_ns: times.last().copied().unwrap_or(0),
             preemption_count,
             hash: self.hash,

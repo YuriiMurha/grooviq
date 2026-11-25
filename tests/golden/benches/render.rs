@@ -13,7 +13,7 @@ use audio_thread_priority::{
     RtPriorityHandle, demote_current_thread_from_real_time, promote_current_thread_to_real_time,
 };
 use grooviq_golden::SAMPLE_RATE;
-use grooviq_golden::perf::report::{Row, b2_target, json, markdown, us};
+use grooviq_golden::perf::report::{Row, b2_target, json, markdown, promotion_label, us};
 use grooviq_golden::perf::{PerfScene, measure_with_timed_loop, perf_scenes};
 
 const BLOCKS: [usize; 3] = [64, 128, 256];
@@ -111,7 +111,7 @@ fn main() -> ExitCode {
                 s.deadline_pct(s.p99_ns),
                 s.deadline_pct(s.max_ns),
                 s.preemption_count,
-                b2_target(s),
+                b2_target(&row),
                 s.hash,
                 row.promotion
             );
@@ -144,7 +144,7 @@ fn main() -> ExitCode {
 }
 
 fn measure_row(scene: &PerfScene, block: usize, frames: usize, reps: usize) -> Result<Row, String> {
-    let mut refusal = None;
+    let mut rejections = Vec::with_capacity(reps);
     let measurement = measure_with_timed_loop(scene, block, frames, reps, |render| {
         // Mach may retain a time-constraint policy after demotion, so end the worker here.
         let rejection = std::thread::scope(|scope| {
@@ -157,16 +157,11 @@ fn measure_row(scene: &PerfScene, block: usize, frames: usize, reps: usize) -> R
                 .join()
                 .expect("render worker panicked")
         });
-        if let Some(reason) = rejection {
-            refusal.get_or_insert(reason);
-        }
+        rejections.push(rejection);
     })?;
     Ok(Row {
         summary: measurement.summary(),
-        promotion: match refusal {
-            Some(reason) => format!("not promoted: {reason}"),
-            None => "promoted".into(),
-        },
+        promotion: promotion_label(rejections.into_iter()),
     })
 }
 
