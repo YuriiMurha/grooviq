@@ -583,17 +583,16 @@ fn mode_roundtrip_new_open_and_failed_admission_do_not_play_or_rebind_held_resul
         step: 0,
     });
     let v = r.s.arrangement_view();
-    let held =
+    let captured =
         r.s.step_project_history(v.generation, v.revision, true, Instant::now())
             .unwrap();
-    let captured = serde_json::to_value(held).unwrap();
     r.drain();
     r.s.new_project().unwrap();
     r.drain();
     let fresh = r.s.generation();
-    assert_eq!(captured["state"]["generation"].as_u64(), Some(v.generation));
+    assert_eq!(captured.state.generation, v.generation);
     assert_ne!(v.generation, fresh);
-    assert_ne!(captured["state"]["generation"].as_u64(), Some(fresh));
+    assert_ne!(captured.state.generation, fresh);
     let stale =
         r.s.step_project_history(v.generation, v.revision, true, Instant::now())
             .unwrap_err();
