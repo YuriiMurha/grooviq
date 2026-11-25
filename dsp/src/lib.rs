@@ -12,7 +12,7 @@ pub use api::*;
 
 mod fft;
 mod insert_memory;
-pub use insert_memory::max_memory_bytes;
+pub use insert_memory::{max_memory_bytes, sample_rate_range};
 mod oversampling;
 pub mod saturation;
 mod util;
