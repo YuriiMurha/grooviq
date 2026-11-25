@@ -235,6 +235,10 @@ e2e-diagnostics-test: ## Test bounded timeout-surviving e2e diagnostics (Node on
 e2e-browser-results-test: ## Test complete browser CI accounting (Node only)
 	node --test scripts/e2e-browser-results.test.mjs
 
+.PHONY: test-perf-fetch
+test-perf-fetch: ## Exercise bounded benchmark dependency setup without Cargo or network
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_perf_fetch.py -v
+
 .PHONY: bench-mixer
 bench-mixer: ## Static mixer kernel render timings at 64/128 frames (smoke only, no deadline claim)
 	$(CARGO) bench -p grooviq-engine --bench mixer_kernels
