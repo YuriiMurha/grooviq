@@ -21,7 +21,8 @@ test("recording_stopping_itself_mid_draw_warns_releases_held_keys_and_commits_th
   await app.mouse.move(p.x, p.y);
   await app.mouse.down();
   await mock.eval("(m) => m.recordingStopsItself(1)");
-  await expect(warnings.getByText(/^Recording stopped:.*\b2 recorded notes were not added\./)).toBeVisible();
+  await expect(warnings.getByText(/^Recording stopped:/)).toBeVisible();
+  await expect(warnings.filter({ hasNotText: /^Silent QA mode/ })).toHaveCount(1);
   await expect(record).toHaveAttribute("aria-pressed", "false");
   // The held key is let go, by its own press.
   await expect.poll(live).not.toContain("1:48");

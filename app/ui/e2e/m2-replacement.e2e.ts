@@ -429,6 +429,7 @@ async function expectRefusedSaveWarnings(app: Page, reason: string) {
   const warnings = app.getByRole("status", { name: "Messages" }).locator(".toast.warn");
   await expect(warnings.getByText(reason, { exact: true })).toBeVisible();
   await expect(warnings.getByText(/^Your latest note edits could not be applied, so the project was not saved\./)).toBeVisible();
+  await expect(warnings.filter({ hasNotText: /^Silent QA mode/ })).toHaveCount(2);
 }
 
 test.describe("after a refused flush (pre-merge)", () => {
