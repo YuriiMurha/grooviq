@@ -66,10 +66,10 @@ jobs:
         if: runner.os == 'Windows'
         uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
         with:
-          drive-size: 12GB
+          drive-size: 32GB
           drive-path: ${{ runner.temp }}/grooviq-dev-drive.vhdx
           mount-path: target/dev-drive
-          # Windows trusts newly formatted Dev Drives. The action's trust option detaches antivirus filters.
+          # Hosted Windows runners disable Defender real-time monitoring. Speed gains come from ReFS and the VHDX.
           trusted-dev-drive: false
           env-mapping: |
             CARGO_TARGET_DIR,{{ DEV_DRIVE }}/cargo
@@ -126,6 +126,20 @@ jobs:
 
       - name: Optimized 8-second export budget
         run: node scripts/export-budget.mjs
+      - name: Report Windows Dev Drive usage
+        if: always() && runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          if (!$env:DEV_DRIVE_PATH) {
+            Write-Warning 'Dev Drive setup did not export a VHDX path.'
+            return
+          }
+          $volume = Get-DiskImage -ImagePath $env:DEV_DRIVE_PATH | Get-Disk | Get-Partition | Get-Volume
+          $used = ($volume.Size - $volume.SizeRemaining) / 1GB
+          Write-Host ('Dev Drive: {0:N2} GiB used, {1:N2} GiB free ({2})' -f $used, ($volume.SizeRemaining / 1GB), $volume.FileSystem)
+          $hostVolume = Get-Volume -FilePath $env:DEV_DRIVE_PATH
+          Write-Host ('VHDX host volume: {0:N2} GiB free of {1:N2} GiB' -f ($hostVolume.SizeRemaining / 1GB), ($hostVolume.Size / 1GB))
 
   rust-windows:
     name: rust (windows-latest)
@@ -168,9 +182,10 @@ jobs:
           cache: npm
           cache-dependency-path: app/ui/package-lock.json
       - name: Install Make for safety tests
+        timeout-minutes: 2
         run: |
-          apt-get update -qq
-          apt-get install -y --no-install-recommends make
+          apt-get -o Acquire::Retries=3 update -qq &&
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends make
       - name: Local refresh safety tests
         working-directory: .
         run: make test-refresh-app
