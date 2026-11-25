@@ -61,7 +61,7 @@ test("empty, capped, duplicated and partial file lists fail open", async () => {
   }
   assert.deepEqual(await selectJobs(request([file("docs/a.md"), file("docs/a.md")])), all);
   const partial = request([file("docs/a.md")]);
-  partial.pullRequest.changed_files = 2;
+  partial.pullRequest = { ...partial.pullRequest, changed_files: 2 };
   assert.deepEqual(await selectJobs(partial), all);
 });
 
