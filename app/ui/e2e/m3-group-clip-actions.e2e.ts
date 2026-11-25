@@ -49,6 +49,7 @@ const cases = [
     operations: [{ kind: "deleteClip", clip: 3 }, { kind: "deleteClip", clip: 4 }],
     after: [clips[2]],
     selectedCount: 0,
+    undoSelectedCount: 2,
   },
   {
     action: "mute",
@@ -58,6 +59,7 @@ const cases = [
     ],
     after: [{ ...clips[0], muted: true }, clips[1], clips[2]],
     selectedCount: 2,
+    undoSelectedCount: 2,
   },
   {
     action: "duplicate",
@@ -67,8 +69,10 @@ const cases = [
     ],
     after: [...clips, { ...clips[0], id: 6, startTick: 9600 }, { ...clips[1], id: 7, startTick: 14_400 }],
     selectedCount: 2,
+    // Undo removes the selected copies; nothing falls back to the originals.
+    undoSelectedCount: 0,
   },
-] satisfies { action: string; operations: ArrangementOperation[]; after: typeof clips; selectedCount: number }[];
+] satisfies { action: string; operations: ArrangementOperation[]; after: typeof clips; selectedCount: number; undoSelectedCount: number }[];
 
 async function invokeAction(group: Awaited<ReturnType<typeof selectGroup>>, action: string) {
   if (action === "delete") await group.canvas.press("Delete");
@@ -86,7 +90,7 @@ const savedArrangement = async (mock: Mock, path: string) => {
   return saved?.project.arrangement ?? null;
 };
 
-for (const { action, operations, after, selectedCount } of cases) {
+for (const { action, operations, after, selectedCount, undoSelectedCount } of cases) {
   test(`group ${action} sends one ordered batch and one Undo restores the group`, async ({ app, mock }) => {
     const group = await selectGroup(app);
     await invokeAction(group, action);
@@ -98,7 +102,7 @@ for (const { action, operations, after, selectedCount } of cases) {
     await app.keyboard.press("ControlOrMeta+z");
     await expect.poll(async () => (await state(app)).clips).toEqual(group.before.clips);
     await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
-    await expect(group.selected).toHaveText("2 selected");
+    await expect(group.selected).toHaveText(`${undoSelectedCount} selected`);
     expect((await state(app)).tracks).toEqual(tracks);
     expect(await view(app)).toMatchObject({ projectCanUndo: false, projectCanRedo: true });
     expect(await argsFor(mock, "arrangement_edit")).toEqual(editArgs(group.before, operations));
@@ -176,32 +180,7 @@ test("group duplicate selects the copies, and deleting them leaves nothing selec
   ]);
 });
 
-test("an edit after undoing a group duplicate keeps the restored originals selected", async ({ app, mock }) => {
-  const duplicate = cases.find(entry => entry.action === "duplicate");
-  const mute = cases.find(entry => entry.action === "mute");
-  if (!duplicate || !mute) throw new Error("Missing duplicate or mute case");
-  const group = await selectGroup(app);
-  await invokeAction(group, "duplicate");
-  await expect.poll(async () => (await state(app)).clips).toEqual(duplicate.after);
-  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
-
-  await app.keyboard.press("ControlOrMeta+z");
-  await expect.poll(async () => (await state(app)).clips).toEqual(group.before.clips);
-  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
-  await expect(group.selected).toHaveText("2 selected");
-  const undone = await state(app);
-
-  await invokeAction(group, "mute");
-  await expect.poll(async () => (await state(app)).clips).toEqual(mute.after);
-  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
-  await expect(group.selected).toHaveText("2 selected");
-  expect(await argsFor(mock, "arrangement_edit")).toEqual([
-    ...editArgs(group.before, duplicate.operations),
-    ...editArgs(undone, mute.operations),
-  ]);
-});
-
-test("undoing an edit on the copies and then the duplicate re-selects the originals", async ({ app, mock }) => {
+test("undoing a group duplicate after editing its copies leaves nothing for Delete to remove", async ({ app, mock }) => {
   const duplicate = cases.find(entry => entry.action === "duplicate");
   if (!duplicate) throw new Error("Missing duplicate case");
   const group = await selectGroup(app);
@@ -221,24 +200,16 @@ test("undoing an edit on the copies and then the duplicate re-selects the origin
   await app.keyboard.press("ControlOrMeta+z");
   await expect.poll(async () => (await state(app)).clips).toEqual(group.before.clips);
   await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
-  await expect(group.selected).toHaveText("2 selected");
-  const restored = await state(app);
+  await expect(group.selected).toHaveText("0 selected");
 
-  // Delete proves which clips are selected: the restored originals, not the removed copies.
-  await invokeAction(group, "delete");
-  await expect.poll(async () => (await state(app)).clips).toEqual([clips[2]]);
-  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
+  // With nothing selected, Delete returns before any native call: the originals survive.
+  await group.canvas.press("Delete");
+  expect((await state(app)).clips).toEqual(group.before.clips);
   expect(await argsFor(mock, "arrangement_edit")).toEqual([
     ...editArgs(group.before, duplicate.operations),
     ...editArgs(copied, [
       { kind: "setClip", clip: 6, name: "Kick in", muted: true },
       { kind: "setClip", clip: 7, name: "Kick out", muted: true },
     ]),
-    ...editArgs(restored, [{ kind: "deleteClip", clip: 3 }, { kind: "deleteClip", clip: 4 }]),
   ]);
-  // Like any group delete, one Undo restores the deleted originals and re-selects them.
-  await app.keyboard.press("ControlOrMeta+z");
-  await expect.poll(async () => (await state(app)).clips).toEqual(group.before.clips);
-  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
-  await expect(group.selected).toHaveText("2 selected");
 });

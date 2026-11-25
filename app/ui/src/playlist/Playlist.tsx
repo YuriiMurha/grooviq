@@ -27,14 +27,12 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
   const [pixelsPerBar, setPixelsPerBar] = useState(192);
   const [view, setView] = useState<PlaylistView>(DEFAULT_VIEW);
   const [tool, setTool] = useState<"draw" | "select" | "slice">("draw");
-  const [selectedState, setSelected] = useState<{ generation: number; ids: number[]; originals?: number[] } | null>(null);
+  const [selectedState, setSelected] = useState<{ generation: number; ids: number[] } | null>(null);
   const liveIds = useMemo(() => new Set(snapshot?.clips.map(clip => clip.id)), [snapshot]);
-  const selectedIds = useMemo(() => {
-    if (!selectedState || selectedState.generation !== snapshot?.generation) return [];
-    const current = selectedState.ids.filter(id => liveIds.has(id));
-    // Undo of a group duplicate removes every copy. Re-select its live originals.
-    return current.length ? current : selectedState.originals?.filter(id => liveIds.has(id)) ?? [];
-  }, [selectedState, snapshot, liveIds]);
+  // Only live IDs the user selected (or the copies a duplicate just made) are ever selected.
+  // Never fall back to other clips: Delete acts on this selection.
+  const selectedIds = useMemo(() => selectedState && selectedState.generation === snapshot?.generation
+    ? selectedState.ids.filter(id => liveIds.has(id)) : [], [selectedState, snapshot, liveIds]);
   const selection = useMemo(() => new Set(selectedIds), [selectedIds]);
   const actionClips = useMemo(() => selectedPatternClips(snapshot?.clips ?? [], selection), [snapshot, selection]);
   const unmuteSelection = selectionIsMuted(actionClips);
@@ -182,17 +180,11 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     if (action === "duplicate" && result.reply.createdIds.length) {
       setSelected(current => current === selectedState ? {
         generation: result.reply.generation, ids: [...result.reply.createdIds],
-        originals: selectedIds.length > 1 ? selectedIds : undefined,
       } : current);
     } else if (action === "delete" && selectedClip) {
       // A single-clip delete closes its inspector (#449). A group delete keeps its IDs so
       // one Undo re-selects the restored group.
       setSelected(current => current === selectedState ? null : current);
-    } else if (action === "delete" && selectedState?.originals) {
-      // The duplicate's Undo fallback survives other edits, so undoing them and then the
-      // duplicate still re-selects the originals. A delete ends it: a second Delete must
-      // not hit originals the user never re-selected.
-      setSelected(current => current && current === selectedState ? { generation: current.generation, ids: selectedIds } : current);
     }
   };
   const down = (event: PointerEvent<HTMLCanvasElement>) => {
