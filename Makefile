@@ -58,6 +58,10 @@ replay-update: ## Regenerate the real-Session transcript intentionally, then ver
 qa-ui: ui-install ## Playwright on the web build with the mock engine (WebKit and Chromium); shots in app/ui/e2e-results
 	cd $(UI) && npx playwright install chromium webkit && npm run e2e
 
+.PHONY: qa-mixer-ui
+qa-mixer-ui: ui-install ## Playwright on the mixer components' synthetic fixture only (WebKit and Chromium); ARGS=<extra playwright args>
+	cd $(UI) && npx playwright install chromium webkit && npm run e2e -- e2e/m4-mixer-components.e2e.ts $(ARGS)
+
 GALLERY_PORT ?= 4795
 .PHONY: ui-gallery ui-gallery-build ui-gallery-check ui-gallery-capture
 ui-gallery: ## Serve actual controls with generated state; installed UI dependencies required
