@@ -7,11 +7,14 @@
 //! `GITHUB_STEP_SUMMARY` (CI: append a Markdown table). Exits with an error if a scene's bits
 //! depend on the block size; the timings themselves never fail it.
 
-use std::fmt::Write as _;
 use std::process::ExitCode;
 
+use audio_thread_priority::{
+    RtPriorityHandle, demote_current_thread_from_real_time, promote_current_thread_to_real_time,
+};
 use grooviq_golden::SAMPLE_RATE;
-use grooviq_golden::perf::{Summary, measure, perf_scenes};
+use grooviq_golden::perf::report::{Row, b2_target, json, markdown, us};
+use grooviq_golden::perf::{PerfScene, measure_with_timed_loop, perf_scenes};
 
 const BLOCKS: [usize; 3] = [64, 128, 256];
 
@@ -20,6 +23,35 @@ fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+struct RealtimeScope(Option<RtPriorityHandle>);
+
+impl RealtimeScope {
+    fn enter(block: usize) -> Result<Self, String> {
+        // Hosted CI timings are advisory even when the guest accepts a priority request.
+        if std::env::var_os("CI").is_some() {
+            return Err("CI runner".into());
+        }
+        // The crate's fallback backend returns success without changing priority.
+        if !cfg!(any(target_os = "macos", target_os = "windows")) {
+            return Err("unsupported platform".into());
+        }
+        let block = u32::try_from(block).expect("the benchmark block size fits in u32");
+        promote_current_thread_to_real_time(block, SAMPLE_RATE)
+            .map(|handle| Self(Some(handle)))
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl Drop for RealtimeScope {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take()
+            && let Err(e) = demote_current_thread_from_real_time(handle)
+        {
+            eprintln!("warning: cannot restore render worker priority: {e}");
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -34,7 +66,7 @@ fn main() -> ExitCode {
         frames as f64 / f64::from(SAMPLE_RATE)
     );
     println!(
-        "{:<10} {:>5} {:>9} {:>9} {:>8} {:>8} {:>8} {:>8} {:>7} {:>7}  hash",
+        "{:<10} {:>5} {:>9} {:>9} {:>8} {:>8} {:>8} {:>8} {:>7} {:>7} {:>11} {:>16}  {:16}  thread priority",
         "scene",
         "block",
         "x RT med",
@@ -44,7 +76,10 @@ fn main() -> ExitCode {
         "p99.9 us",
         "max us",
         "p99 %",
-        "max %"
+        "max %",
+        "preemptions",
+        "128-frame target",
+        "hash"
     );
     let mut summaries = Vec::new();
     let mut failed = false;
@@ -54,17 +89,17 @@ fn main() -> ExitCode {
         }
         let mut hashes = Vec::new();
         for block in BLOCKS {
-            let m = match measure(&scene, block, frames, reps) {
-                Ok(m) => m,
+            let row = match measure_row(&scene, block, frames, reps) {
+                Ok(row) => row,
                 Err(e) => {
                     eprintln!("error: {e}");
                     failed = true;
                     continue;
                 }
             };
-            let s = m.summary();
+            let s = &row.summary;
             println!(
-                "{:<10} {:>5} {:>9.1} {:>9.1} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>7.2} {:>7.2}  {:016x}",
+                "{:<10} {:>5} {:>9.1} {:>9.1} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>7.2} {:>7.2} {:>11} {:>16}  {:016x}  {}",
                 s.scene,
                 s.block,
                 s.speed_median,
@@ -73,12 +108,15 @@ fn main() -> ExitCode {
                 us(s.p99_ns),
                 us(s.p999_ns),
                 us(s.max_ns),
-                pct(s.p99_ns, &s),
-                pct(s.max_ns, &s),
-                s.hash
+                s.deadline_pct(s.p99_ns),
+                s.deadline_pct(s.max_ns),
+                s.preemption_count,
+                b2_target(s),
+                s.hash,
+                row.promotion
             );
             hashes.push(s.hash);
-            summaries.push(s);
+            summaries.push(row);
         }
         if hashes.windows(2).any(|w| w[0] != w[1]) {
             eprintln!(
@@ -105,73 +143,31 @@ fn main() -> ExitCode {
     }
 }
 
-fn us(ns: u64) -> f64 {
-    ns as f64 / 1e3
-}
-
-/// A block time as a percentage of its deadline.
-fn pct(ns: u64, s: &Summary) -> f64 {
-    ns as f64 / s.deadline_ns * 100.0
-}
-
-fn markdown(summaries: &[Summary], frames: usize, reps: usize) -> String {
-    let mut out = format!(
-        "### Render speed and block times\n\n{:.1} s of audio at {SAMPLE_RATE} Hz, {reps} timed \
-         repetitions. Block times are single `process` calls, as a share of the block's \
-         real-time deadline.\n\n\
-         | scene | block | x real time (median) | x real time (slowest) | p50 µs | p99 µs | \
-         p99.9 µs | max µs | p99 % of deadline | max % of deadline | output hash |\n\
-         |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|\n",
-        frames as f64 / f64::from(SAMPLE_RATE)
-    );
-    for s in summaries {
-        let _ = writeln!(
-            out,
-            "| {} | {} | {:.1} | {:.1} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | `{:016x}` |",
-            s.scene,
-            s.block,
-            s.speed_median,
-            s.speed_worst,
-            us(s.p50_ns),
-            us(s.p99_ns),
-            us(s.p999_ns),
-            us(s.max_ns),
-            pct(s.p99_ns, s),
-            pct(s.max_ns, s),
-            s.hash
-        );
-    }
-    out.push('\n');
-    out
-}
-
-fn json(summaries: &[Summary], frames: usize, reps: usize) -> String {
-    let rows: Vec<String> = summaries
-        .iter()
-        .map(|s| {
-            format!(
-                "    {{\"scene\": \"{}\", \"block\": {}, \"deadline_ns\": {:.0}, \
-                 \"x_realtime_median\": {:.3}, \"x_realtime_slowest\": {:.3}, \
-                 \"p50_ns\": {}, \"p99_ns\": {}, \"p999_ns\": {}, \"max_ns\": {}, \
-                 \"hash\": \"{:016x}\"}}",
-                s.scene,
-                s.block,
-                s.deadline_ns,
-                s.speed_median,
-                s.speed_worst,
-                s.p50_ns,
-                s.p99_ns,
-                s.p999_ns,
-                s.max_ns,
-                s.hash
-            )
-        })
-        .collect();
-    format!(
-        "{{\n  \"sample_rate\": {SAMPLE_RATE},\n  \"frames\": {frames},\n  \"reps\": {reps},\n  \
-         \"results\": [\n{}\n  ]\n}}\n",
-        rows.join(",\n")
-    )
+fn measure_row(scene: &PerfScene, block: usize, frames: usize, reps: usize) -> Result<Row, String> {
+    let mut refusal = None;
+    let measurement = measure_with_timed_loop(scene, block, frames, reps, |render| {
+        // Mach may retain a time-constraint policy after demotion, so end the worker here.
+        let rejection = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let priority = RealtimeScope::enter(block);
+                    render();
+                    priority.err()
+                })
+                .join()
+                .expect("render worker panicked")
+        });
+        if let Some(reason) = rejection {
+            refusal.get_or_insert(reason);
+        }
+    })?;
+    Ok(Row {
+        summary: measurement.summary(),
+        promotion: match refusal {
+            Some(reason) => format!("not promoted: {reason}"),
+            None => "promoted".into(),
+        },
+    })
 }
 
 fn append(path: &str, text: &str) {
