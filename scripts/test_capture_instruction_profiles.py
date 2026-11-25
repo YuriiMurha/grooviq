@@ -165,8 +165,11 @@ else: print('annotation / symbols')
 
     def test_tool_probe_failure_records_failed_manifest_before_checkout(self):
         self.mode.write_text('tool-failure')
-        with self.assertRaisesRegex(c.CaptureError, r'valgrind exited 23: fixture tool diagnostic'):
-            self.capture()
+        with patch.object(c, 'run', wraps=c.run) as run:
+            with self.assertRaisesRegex(c.CaptureError, r'valgrind exited 23: fixture tool diagnostic'):
+                self.capture()
+        self.assertFalse(any(call.args[0][:2] == ['git', 'checkout'] for call in run.call_args_list),
+                         'a failed tool probe must not check out a revision')
         manifest = self.out / 'manifest.json'
         self.assertTrue(manifest.is_file(), 'validated output should record the failed tool probe')
         raw = manifest.read_text()
