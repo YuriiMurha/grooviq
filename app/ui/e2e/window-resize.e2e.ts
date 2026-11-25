@@ -1,4 +1,5 @@
 import type { Locator } from "@playwright/test";
+import { DESIGN_W, fitScale } from "../src/devices/windowPlacement";
 import { expect, presetValues, project, soundsFor, test } from "./fixture";
 
 const seed = project(["Kick"]);
@@ -22,6 +23,20 @@ async function stable(dialog: Locator) {
     throw new Error("Device geometry did not settle");
   });
 }
+
+// Before shrinking again, observe a rendered frame at the larger layout's scale.
+async function waitForExpandedLayout(dialog: Locator, width: number, height: number) {
+  await dialog.evaluate(async (el, { width, height, renderedWidth }) => {
+    for (let frame = 0; frame < 120; frame++) {
+      await new Promise(requestAnimationFrame);
+      const r = el.getBoundingClientRect();
+      if (innerWidth === width && innerHeight === height && r.width === renderedWidth &&
+          r.x >= 0 && r.y >= 0 && r.right <= innerWidth && r.bottom <= innerHeight) return;
+    }
+    throw new Error(`Device did not render within the ${width}×${height} viewport at width ${renderedWidth}`);
+  }, { width, height, renderedWidth: DESIGN_W * fitScale(width, height) });
+}
+
 async function contained(dialog: Locator) {
   const r = await stable(dialog);
   expect(r.x).toBeGreaterThanOrEqual(0);
@@ -45,7 +60,7 @@ for (const device of ["Kick sampler", "Bass synth"]) {
       const opener = app.getByRole("button", { name: `Edit the ${device}` });
       await opener.click();
       const dialog = app.getByRole("dialog", { name: device });
-      await stable(dialog);
+      await waitForExpandedLayout(dialog, width, height);
       const param = device.includes("synth") ? "osc1_semi" : "tune";
       const knob = dialog.locator(`[data-param="${param}"]`);
       await knob.focus();
@@ -76,7 +91,7 @@ for (const device of ["Kick sampler", "Bass synth"]) {
       }
       for (let i = 0; i < 2; i++) {
         await app.setViewportSize({ width, height });
-        await stable(dialog);
+        await waitForExpandedLayout(dialog, width, height);
         await app.setViewportSize({ width: 900, height: 560 });
         await contained(dialog);
       }
