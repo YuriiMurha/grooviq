@@ -2,6 +2,10 @@
 use super::*;
 use crate::{arrangement_history::MediaVersion, audio_assets::PreparedAudio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+const MAX_MEDIA_TICKET: u64 = (1 << 53) - 1;
+const CANCELLED_MEDIA_TICKET_LIMIT: usize = 64;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -143,6 +147,39 @@ impl Session {
         } else {
             false
         }
+    }
+    pub fn register_media_ticket(
+        &mut self,
+        ticket: u64,
+        intent: &MediaIntent,
+    ) -> Result<(), String> {
+        if !(1..=MAX_MEDIA_TICKET).contains(&ticket) {
+            return Err("Invalid media ticket".into());
+        }
+        if self.cancelled_media_tickets.contains(&ticket) {
+            return Err("Media ticket cancelled".into());
+        }
+        let std::collections::hash_map::Entry::Vacant(entry) = self.media_tickets.entry(ticket)
+        else {
+            return Err("Media ticket already in use".into());
+        };
+        entry.insert(intent.cancellation());
+        Ok(())
+    }
+    pub fn cancel_media_ticket(&mut self, ticket: u64) -> bool {
+        if let Some(cancelled) = self.media_tickets.get(&ticket) {
+            cancelled.store(true, Ordering::SeqCst);
+            return true;
+        }
+        // Cancel can arrive before the import command registers its ticket.
+        if self.cancelled_media_tickets.len() == CANCELLED_MEDIA_TICKET_LIMIT {
+            self.cancelled_media_tickets.pop_front();
+        }
+        self.cancelled_media_tickets.push_back(ticket);
+        false
+    }
+    pub fn release_media_ticket(&mut self, ticket: u64) {
+        self.media_tickets.remove(&ticket);
     }
     pub(super) fn media_version(&self, id: u32) -> MediaVersion {
         MediaVersion {

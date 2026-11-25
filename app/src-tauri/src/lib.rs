@@ -479,6 +479,7 @@ pub fn run() {
             arrangement_cmds::audio_import,
             arrangement_cmds::audio_relink,
             arrangement_cmds::audio_cancel,
+            arrangement_cmds::audio_cancel_ticket,
             arrangement_cmds::arrangement_waveform,
             arrangement_cmds::arrangement_mode,
             arrangement_cmds::arrangement_loop,
