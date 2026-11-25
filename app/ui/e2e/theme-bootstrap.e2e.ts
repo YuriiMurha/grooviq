@@ -7,7 +7,8 @@ test.use({ seed: { project: project(["Kick"]), files: soundsFor(["Kick"]) }, vie
 
 test("the grid uses Riso ink when the startup stylesheet is slow", async ({ app, mock }) => {
   let delayedStylesheet = false;
-  await app.route("**/assets/main-*.css", async (route) => {
+  // Every built sheet: the tokens sit in a chunk shared with the other entries, not in main-*.css.
+  await app.route("**/assets/*.css", async (route) => {
     delayedStylesheet = true;
     await new Promise((resolve) => setTimeout(resolve, 1500));
     await route.continue();
@@ -15,7 +16,7 @@ test("the grid uses Riso ink when the startup stylesheet is slow", async ({ app,
 
   await app.reload();
   await workspaceReady(app);
-  expect(delayedStylesheet, "the built stylesheet was delayed").toBe(true);
+  expect(delayedStylesheet, "the built stylesheets were delayed").toBe(true);
   await expect(app.locator("html")).toHaveAttribute("data-theme", "riso");
   const rootStyle = await app.evaluate((names) => {
     const style = getComputedStyle(document.documentElement);
