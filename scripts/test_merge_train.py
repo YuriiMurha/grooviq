@@ -1,7 +1,9 @@
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 import io
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -368,6 +370,13 @@ class MergeTrainTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ORDER"):
             self.run_tick(())
         self.assertFalse(self.repo.merged or self.git.writes)
+
+    def test_unrecognized_required_check_state_stops_without_writes(self):
+        self.git.batch([10])
+        self.repo.states[ACTIVE] = {**GREEN, "ui": ("future_state", "")}
+        with self.assertRaisesRegex(RuntimeError, "Unexpected required check state.*future_state"):
+            self.run_tick((10,))
+        self.assertFalse(self.repo.merged or self.repo.rejected or self.git.writes)
 
     def test_missing_batch_check_waits(self):
         self.git.batch([10, 20])
@@ -813,6 +822,33 @@ class MergeTrainTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_make_treats_a_busy_lock_as_success_and_keeps_real_stops_fatal(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            shutil.copyfile(train.__file__, scripts / "merge_train.py")
+            gh = root / "gh"
+            gh.write_text("#!/bin/sh\ntouch gh-called\nexit 99\n")
+            gh.chmod(0o755)
+            env = {**os.environ, "PATH": f"{root}{os.pathsep}{os.environ['PATH']}"}
+            makefile = Path(__file__).resolve().parents[1] / "Makefile"
+            make = ["make", "-f", str(makefile), "merge-train", "BATCH=4", "ACK_MISMATCH="]
+
+            with (root / ".git" / "merge-train.lock").open("a") as held:
+                train.fcntl.flock(held, train.fcntl.LOCK_EX | train.fcntl.LOCK_NB)
+                busy = subprocess.run([*make, f"ORDER=10={sha(10)}"], cwd=root, env=env,
+                                      capture_output=True, text=True)
+                stopped = subprocess.run([*make, "ORDER="], cwd=root, env=env,
+                                         capture_output=True, text=True)
+
+            self.assertIn("another tick holds the lock", busy.stdout)
+            self.assertEqual(busy.returncode, 0, busy.stderr)
+            self.assertEqual(stopped.returncode, 2)
+            self.assertIn("ORDER requires", stopped.stderr)
+            self.assertFalse((root / "gh-called").exists())
+
     def test_busy_flock_returns_tempfail_before_creating_clients(self):
         with TemporaryDirectory() as tmp:
             with (Path(tmp) / "merge-train.lock").open("a") as held:
