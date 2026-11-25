@@ -475,7 +475,8 @@ pub fn plan_latency(
                     w.feeds.push((pos, index(n)?));
                 }
             }
-            w.feeds.sort_by_key(|(pos, _)| *pos);
+            // The input index breaks ties canonically without stable-sort scratch.
+            w.feeds.sort_unstable();
 
             let mut chain = gather;
             let mut feed = 0;

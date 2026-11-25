@@ -1,7 +1,55 @@
 //! Compensation planner: every expectation is timed by hand from the topology, never
 //! taken from the planner.
 use grooviq_engine::mixer::*;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::mem::size_of;
+
+struct AllocationMeter;
+thread_local! {
+    // Requested payload only, on the thread measuring the planner. Other tests stay parallel.
+    static ALLOCATION: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
+}
+
+// SAFETY: forwards the allocator contract unchanged; the thread-local counters own no heap.
+unsafe impl GlobalAlloc for AllocationMeter {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller's valid layout is forwarded to the system allocator.
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            let _ = ALLOCATION.try_with(|c| {
+                if let Some((live, peak)) = c.get() {
+                    let live = live + layout.size();
+                    c.set(Some((live, peak.max(live))));
+                }
+            });
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let _ = ALLOCATION.try_with(|c| {
+            if let Some((live, peak)) = c.get() {
+                c.set(Some((live.saturating_sub(layout.size()), peak)));
+            }
+        });
+        // SAFETY: the original allocation and layout are forwarded unchanged.
+        unsafe { System.dealloc(ptr, layout) };
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: AllocationMeter = AllocationMeter;
+
+fn peak_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    ALLOCATION.with(|c| {
+        assert!(c.get().is_none());
+        c.set(Some((0, 0)));
+    });
+    let result = f();
+    let (_, peak) = ALLOCATION.with(|c| c.replace(None).unwrap());
+    (result, peak)
+}
 
 fn track(id: u64, output: Option<u64>, inserts: &[(u64, u32)]) -> Track {
     Track {
@@ -546,6 +594,68 @@ fn budgets_admit_the_exact_boundary_and_refuse_one_less() {
             ..
         })
     ));
+}
+
+#[test]
+fn scrambled_detector_sort_stays_within_admitted_peak_memory() {
+    let (_, calibration) = peak_during(|| {
+        let bytes = std::hint::black_box(vec![0u8; 4096]);
+        std::hint::black_box(&bytes);
+    });
+    assert_eq!(
+        calibration, 4096,
+        "allocation meter must observe real payload"
+    );
+
+    const N: u64 = 64;
+    const RECEIVER: u64 = 10_000;
+    let inserts: Vec<_> = (1..=N).rev().map(|id| (id, 0)).collect();
+    let mut m = Mixer {
+        tracks: vec![track(0, None, &[]), track(RECEIVER, Some(0), &inserts)],
+        ..Mixer::default()
+    };
+    for from in 1..=N {
+        m.tracks.push(track(from, Some(0), &[]));
+        for to in 1..=N {
+            m.sidechains.push(sidechain(from, to, Tap::PreFader));
+        }
+    }
+    let compiled = compile(&m, Budget::default()).unwrap();
+    let snapshot = actual(&inserts);
+    let initial = plan_latency(&compiled, &snapshot, ROOMY).unwrap();
+    // No future rings can mask temporary sorting payload in this graph.
+    assert_eq!(initial.resources.ring_samples, 0);
+    let memory = initial.resources.descriptor_bytes + initial.resources.work_bytes;
+    let budget = PdcBudget {
+        memory_bytes: memory,
+        ..ROOMY
+    };
+    let (result, peak) = peak_during(|| plan_latency(&compiled, &snapshot, budget));
+    let p = result.unwrap();
+    assert!(
+        peak as u64 <= memory,
+        "planner exceeded admitted requested payload: {peak} > {memory}"
+    );
+    assert_eq!(
+        peak as u64, memory,
+        "all reported storage was really allocated"
+    );
+
+    // Scrambling chain positions must not scramble equal-position detector gather order.
+    let mut feeds = p.delays.iter().filter_map(|d| match d.at {
+        PdcPoint::Detector {
+            insert,
+            input: InputId::Sidechain { from, .. },
+            ..
+        } => Some((insert, from)),
+        _ => None,
+    });
+    for insert in (1..=N).rev() {
+        for from in 1..=N {
+            assert_eq!(feeds.next(), Some((InsertId(insert), MixerTrackId(from))));
+        }
+    }
+    assert_eq!(feeds.next(), None);
 }
 
 #[test]
