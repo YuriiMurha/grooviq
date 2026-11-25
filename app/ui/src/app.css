@@ -46,6 +46,8 @@ input {
   padding: 0 16px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 90%, var(--raised)), var(--panel));
+  box-shadow: inset 0 1px 0 var(--hair);
 }
 
 .toolbar-audio {
@@ -561,7 +563,7 @@ input[type="checkbox"] {
   gap: 4px;
   height: 32px;
   padding: 3px 8px;
-  background: var(--raised);
+  background: transparent;
   border-radius: var(--radius-s);
   color: var(--muted);
 }
@@ -1001,7 +1003,7 @@ input[type="checkbox"] {
 .transport {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
 }
 
 .transport-buttons {
@@ -1035,6 +1037,7 @@ input[type="checkbox"] {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--well);
+  box-shadow: var(--reg-x) var(--reg-y) 0 var(--ink-1b);
 }
 
 .transport-btn.play[aria-pressed="true"] {
@@ -1042,7 +1045,8 @@ input[type="checkbox"] {
 }
 
 .transport-btn.record {
-  color: var(--muted);
+  color: var(--rec);
+  margin-right: 6px;
 }
 
 .transport-btn.record[aria-pressed="true"] {
@@ -1069,6 +1073,13 @@ input[type="checkbox"] {
   height: 16px;
 }
 
+.transport-btn,
+.toggle-btn,
+.tone {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--raised) 88%, var(--line)), color-mix(in srgb, var(--raised) 88%, var(--bg)));
+  box-shadow: inset 0 1px 0 var(--hair), 0 1px 0 rgba(3, 4, 16, 0.5);
+}
+
 .toggle-btn:hover {
   border-color: var(--muted);
 }
@@ -1092,8 +1103,8 @@ input[type="checkbox"] {
   border: 0;
   border-bottom: 1px solid transparent;
   color: var(--paper);
-  font-size: 20px;
-  font-weight: 700;
+  font-size: 18px;
+  font-weight: 650;
   line-height: 1.1;
   cursor: ns-resize;
 }
@@ -1110,8 +1121,8 @@ input[type="checkbox"] {
 }
 
 .position-value {
-  font-size: 20px;
-  font-weight: 700;
+  font-size: 18px;
+  font-weight: 650;
   line-height: 1.1;
   color: var(--paper);
 }
@@ -1122,6 +1133,11 @@ input[type="checkbox"] {
   gap: 4px;
   color: var(--faint);
   font-size: 12px;
+}
+
+.transport .field-caption {
+  font-size: 11px;
+  line-height: 1.25;
 }
 
 .tempo-caption select {
@@ -1157,6 +1173,7 @@ input[type="checkbox"] {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  box-shadow: inset 0 1px 0 var(--hair);
 }
 
 /* ---------------- dialogs ---------------- */
@@ -1293,7 +1310,7 @@ label.field {
 
 @media (max-width: 1000px) {
   .toolbar {
-    gap: 10px;
+    gap: 8px;
   }
 
   .transport {
@@ -1306,6 +1323,10 @@ label.field {
 
   .transport-btn {
     width: 34px;
+  }
+
+  .transport-btn.record {
+    margin-right: 4px;
   }
 
   .toggle-btn {
