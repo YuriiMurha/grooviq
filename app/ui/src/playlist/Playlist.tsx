@@ -190,8 +190,9 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       setSelected(current => current === selectedState ? null : current);
     } else if (selectedState?.originals) {
       // Any later edit ends the duplicate's Undo fallback: deleting the copies must not
-      // silently re-select their originals.
-      setSelected(current => current && current === selectedState ? { generation: current.generation, ids: current.ids } : current);
+      // silently re-select their originals. Keep what was visibly selected (the originals
+      // after an Undo of the duplicate), so the edit doesn't drop the user's selection.
+      setSelected(current => current && current === selectedState ? { generation: current.generation, ids: selectedIds } : current);
     }
   };
   const down = (event: PointerEvent<HTMLCanvasElement>) => {
