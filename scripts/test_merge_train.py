@@ -537,6 +537,27 @@ class MergeTrainTests(unittest.TestCase):
         self.assertNotIn("BYPASS", output)
         self.written([20], [30], expected=ACTIVE, base=landed)
 
+    def test_visible_prefix_is_verified_while_a_reported_squash_propagates(self):
+        self.git.batch([10, 20])
+        first = self.repo.merge(10, sha(10))
+        second = self.repo.merge(20, sha(20))
+        visible_main = first
+        self.git.refs = lambda: (visible_main, ACTIVE)
+        self.git.history[BASE, first] = [first]
+        self.git.history[BASE, second] = [first, second]
+        self.git.history[BASE, ACTIVE] = [sha(490), ACTIVE]
+        self.git.trees[sha(490)] = self.git.landed_tree
+
+        output = self.run_tick((10, 20))
+        self.assertIn(f"Merged #10 at {first}", output)
+        self.assertIn("prefix", output)
+        self.assertNotIn("BYPASS", output)
+        self.assertFalse(self.git.writes)
+
+        visible_main = second
+        self.assertIn(f"Merged #20 at {second}", self.run_tick((10, 20)))
+        self.assertEqual(self.git.writes, [("", ACTIVE)])
+
     def test_later_tick_latches_mismatched_squash_prefix(self):
         self.git.batch([10, 20])
         landed = self.repo.merge(10, sha(10))

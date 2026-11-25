@@ -288,8 +288,10 @@ def recover_prefix(git, active, batch, main, pulls, mismatch_file, ack_mismatch)
     if not landed:
         return 0
     git.fetch(main)
-    if git.first_parent_chain(batch.base, main) != [head for _, head in landed]:
+    visible = git.first_parent_chain(batch.base, main)
+    if not visible or visible != [head for _, head in landed[:len(visible)]]:
         return 0
+    landed = landed[:len(visible)]
     print_landed(landed)
     tested = git.first_parent_chain(batch.base, active)
     if len(tested) != len(batch.members):
@@ -351,6 +353,9 @@ def tick(repo, git, order, limit=4, *, mismatch_file=None, ack_mismatch=None):
         pulls = [repo.pull(number) for number, _ in batch.members]
         recovered = recover_prefix(git, active, batch, base, pulls, mismatch_file, ack_mismatch)
         if recovered:
+            if any(pr["merged"] for pr in pulls[recovered:]):
+                print(f"Held batch {active}: waiting for reported squashes to appear on main.")
+                return
             landed = {number for number, _ in batch.members[:recovered]}
             remaining = {number: head for number, head in order.items() if number not in landed}
             build_batch(repo, git, base, active, remaining, limit,
