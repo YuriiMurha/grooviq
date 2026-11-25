@@ -34,7 +34,10 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: make test-pre-commit
       - run: rustup toolchain install
+      # The Actions cache is over its 10 GB limit, and PR copies evict main's caches.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # `tauri-build` needs the built UI (`frontendDist`) to compile the app crate.
       - uses: actions/setup-node@v5
         with:
@@ -75,6 +78,8 @@ jobs:
       - run: rustup toolchain install
       - run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build -p grooviq-dsp --target wasm32-unknown-unknown
 
   ui:
@@ -101,6 +106,8 @@ jobs:
         run: node --test ../../scripts/e2e-browser-results.test.mjs
       - name: E2e diagnostic safety tests
         run: node --test ../../scripts/e2e-diagnostics.test.mjs
+      - name: Runner acquisition retry tests
+        run: node --test ../../scripts/rerun-no-runner.test.cjs
       - name: Real Session / mock semantic replay
         run: npm run e2e -- --config playwright.replay.config.ts --project chromium
       - name: Largest grid CPU budget

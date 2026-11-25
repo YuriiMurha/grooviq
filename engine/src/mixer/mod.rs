@@ -5,9 +5,11 @@
 //! and legacy source reduction/identity bypass remains a separate runtime contract.
 mod compile;
 mod insert;
+mod latency;
 mod model;
 mod runtime;
 pub use compile::*;
 pub use insert::{ParamError, PreparedInsert};
+pub use latency::*;
 pub use model::*;
 pub use runtime::*;

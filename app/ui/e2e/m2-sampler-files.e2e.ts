@@ -128,3 +128,37 @@ for (const repeats of [15, 20]) {
     });
   });
 }
+
+test.describe("file provenance", () => {
+  const provenance = project(["Reference", "Corrupt", "Numbered"]);
+  provenance.channels[0].sample = "samples/27-1-kick.wav";
+  provenance.channels[0].embedded = false;
+  provenance.channels[1].decodeFailed = true;
+  provenance.channels[2].sample = "/qa/sounds/12-kick.wav";
+  test.use({ seed: { project: provenance, files } });
+  test("distinguishes stored references from known files and refreshes after relink", async ({ app, mock }) => {
+    for (const name of ["Reference", "Corrupt", "Numbered"]) {
+      await app.getByRole("button", { name: `Edit the ${name} sampler`, exact: true }).click();
+      const editor = app.getByRole("dialog", { name: `${name} sampler`, exact: true });
+      await editor.locator("summary").click();
+      const details = editor.locator(".sample-file-details");
+      if (name === "Reference") {
+        await expect(details).toContainText("Filename unavailable");
+        await expect(details).toContainText("samples/27-1-kick.wav");
+        await mock.eval("m => m.queueDialog('/qa/sounds/Recovered.wav')");
+        await editor.getByRole("button", { name: "Relink Reference", exact: true }).click();
+        await expect(details.locator("dd").first()).toHaveText("Recovered.wav");
+        await expect(details).not.toContainText("samples/27-1-kick.wav");
+      } else if (name === "Corrupt") {
+        await expect(details.locator("dd").first()).toHaveText("Corrupt.wav");
+        await expect(details).toContainText("Missing");
+        await expect(details).not.toContainText("Filename unavailable");
+        await expect(details).not.toContainText("frames");
+      } else {
+        await expect(details.locator("dd").first()).toHaveText("12-kick.wav");
+        await expect(details).toContainText("Loaded");
+      }
+      await editor.getByRole("button", { name: `Close the ${name} sampler`, exact: true }).click();
+    }
+  });
+});
