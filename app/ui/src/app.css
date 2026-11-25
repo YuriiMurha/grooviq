@@ -101,12 +101,12 @@ input {
 }
 
 .chip.warn {
-  border-color: var(--ink-3);
-  box-shadow: inset 0 0 0 1px var(--ink-3);
+  border-color: var(--warn);
+  box-shadow: inset 0 0 0 1px var(--warn);
 }
 
 .chip.warn .chip-name {
-  color: var(--ink-3);
+  color: var(--warn);
 }
 
 .tone[aria-pressed="true"] {
@@ -197,7 +197,7 @@ input {
 }
 
 .device.warn .device-name {
-  color: var(--ink-3);
+  color: var(--warn);
 }
 
 .device-note {
@@ -250,7 +250,7 @@ input[type="checkbox"] {
 }
 
 .log-warn span {
-  color: var(--ink-3);
+  color: var(--warn);
 }
 
 .log-error span {
@@ -896,7 +896,7 @@ input[type="checkbox"] {
 }
 
 .toast.warn {
-  border-left-color: var(--ink-3);
+  border-left-color: var(--warn);
 }
 
 .toast span {
@@ -959,7 +959,7 @@ input[type="checkbox"] {
 }
 
 .save-state.dirty {
-  color: var(--ink-3);
+  color: var(--warn);
 }
 
 .menu {
@@ -1207,7 +1207,7 @@ input[type="checkbox"] {
 }
 
 .modal-message.warn {
-  color: var(--ink-3);
+  color: var(--warn);
 }
 
 .modal-actions {

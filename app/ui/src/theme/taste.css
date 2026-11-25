@@ -1,5 +1,5 @@
 /* Taste: graphite chrome, blue-black display glass and a butter-yellow signal.
-   Base roles from the theme-scope profile, paired inks and material colors from style-lab Taste. */
+   Base roles, primary inks and materials from the theme-scope profile and style-lab Taste. */
 :root[data-theme="taste"] {
   --bg: #0b1219;
   --panel: #2c2e30;
@@ -12,13 +12,15 @@
   --accent: #f7d772;
   --select: #faf7ee;
   --ok: #f7d772;
+  --warn: #f8a34e;
   --error: #ff8279;
-  --ink-1: #fe9199; --ink-1b: #491e22;
-  --ink-2: #64c0f9; --ink-2b: #02324a;
-  --ink-3: #a3c463; --ink-3b: #27330e;
-  --ink-4: #f89d53; --ink-4b: #452406;
-  --ink-5: #3ecec4; --ink-5b: #003834;
-  --ink-6: #d698fb; --ink-6b: #392345;
+  /* Keep the slide inks in the same hue families, bright enough to read on the roll. */
+  --ink-1: #fe9199; --ink-1b: #bc5264;
+  --ink-2: #64c0f9; --ink-2b: #377eaa;
+  --ink-3: #a3c463; --ink-3b: #6e8b38;
+  --ink-4: #f89d53; --ink-4b: #bb6430;
+  --ink-5: #3ecec4; --ink-5b: #2b8e88;
+  --ink-6: #d698fb; --ink-6b: #9864bb;
   --font: "Manrope Variable", system-ui, sans-serif;
   --radius-s: 4px;
   --radius-m: 6px;

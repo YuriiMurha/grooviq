@@ -4,7 +4,7 @@ import { parseColor } from "../rack/palette";
  * Keep these hex/rgb compatible: computed custom properties can still contain color-mix. */
 export const THEME_COLOR_TOKENS = [
   "--bg", "--panel", "--raised", "--line", "--line-soft", "--text", "--muted", "--faint",
-  "--accent", "--select", "--ok", "--error", "--paper", "--well", "--rec", "--hair",
+  "--accent", "--select", "--ok", "--warn", "--error", "--paper", "--well", "--rec", "--hair",
   "--ink-1", "--ink-1b", "--ink-2", "--ink-2b", "--ink-3", "--ink-3b",
   "--ink-4", "--ink-4b", "--ink-5", "--ink-5b", "--ink-6", "--ink-6b",
   "--step-a", "--step-b", "--step-lit", "--grid-focus", "--grid-playhead", "--knob-track", "--knob-gap",

@@ -9,7 +9,7 @@ const drums = project(["Kick", "Snare", "Hat"], { 1: [0, 4, 8, 12], 2: [4, 12], 
 const beat = twoChannels([
   { id: 1, channel: 1, tick: 480, length: 720, key: 60, velocity: 1 },
   { id: 2, channel: 1, tick: 1440, length: 480, key: 64, velocity: 0.5 },
-  { id: 3, channel: 1, tick: 2400, length: 960, key: 67, velocity: 1 },
+  { id: 3, channel: 1, tick: 2400, length: 960, key: 67, velocity: 1, slide: true },
   { id: 4, channel: 2, tick: 480, length: 960, key: 64, velocity: 1 },
 ]);
 beat.channels.push(...drums.channels.map((channel) => ({ ...channel, id: channel.id + 2 })));
@@ -68,15 +68,28 @@ for (const { id } of themes) {
         return [red, green, blue] as const;
       };
       const bytes = (name: string) => rgb(name).map((channel) => 255 * channel);
-      for (const text of ["--text", "--muted", "--faint", "--error"]) {
+      const inks = THEME_COLOR_TOKENS.filter((name) => name.startsWith("--ink-"));
+      for (const ink of inks.filter((name) => name.endsWith("b"))) {
+        for (const row of ["--roll-row", "--roll-row-black"]) {
+          expect(contrastRatio(rgb(ink), rgb(row)), `${ink} over ${row}`).toBeGreaterThanOrEqual(3);
+        }
+        if (id === "taste") {
+          const primary = ink.slice(0, -1);
+          expect(colourDistance(bytes(ink), bytes(primary)), `${ink} versus ${primary}`).toBeGreaterThanOrEqual(48);
+        }
+      }
+      for (const text of ["--text", "--muted", "--faint", "--error", "--warn"]) {
         for (const surface of ["--bg", "--panel", "--raised"]) {
-          // Riso retains its existing Bright Red. It reaches 4.40:1 on raised controls.
+          // Riso retains its existing Bright Red at 4.40:1 on raised controls. See #634.
           if (id === "riso" && text === "--error" && surface === "--raised") continue;
           expect(contrastRatio(rgb(text), rgb(surface)), `${text} over ${surface}`).toBeGreaterThanOrEqual(4.5);
         }
       }
       for (const surface of ["--well", "--line-soft"]) {
         expect(contrastRatio(rgb("--error"), rgb(surface)), `meter clip indicator over ${surface}`).toBeGreaterThanOrEqual(3);
+      }
+      for (const status of ["--ok", "--error"]) {
+        expect(colourDistance(bytes("--warn"), bytes(status)), `--warn versus ${status}`).toBeGreaterThanOrEqual(48);
       }
       if (id === "luminous") {
         for (const warning of ["--ink-3", "--ink-3b"]) {
@@ -93,7 +106,6 @@ for (const { id } of themes) {
           }
         }
       }
-      const inks = THEME_COLOR_TOKENS.filter((name) => name.startsWith("--ink-"));
       for (const state of ["--select", "--grid-focus", "--roll-select", "--grid-playhead", "--roll-playhead"]) {
         for (const ink of inks) {
           // Keep the existing Riso playhead palette covered while its pink collision awaits #546.
@@ -153,9 +165,10 @@ for (const { id } of themes) {
       expect((await stats(app)).renderer).toBe(renderer);
       const note = await local(app, 800, 60);
       const velocity = { x: (await local(app, 480, 60)).x + 1, y: 20 };
-      const [noteFill] = await pixelsAt(app, canvas(app), [note]);
+      const [noteFill, slideFill] = await pixelsAt(app, canvas(app), [note, await local(app, 2800, 67)]);
       const [bar] = await pixelsAt(app, lane(app), [velocity]);
       expect(colourDistance(noteFill, bytes("--ink-4")), "full-velocity Bass note").toBeLessThan(8);
+      expect(colourDistance(slideFill, bytes("--ink-4b")), "full-velocity Bass slide note").toBeLessThan(8);
       expect(colourDistance(bar, bytes("--ink-4")), "velocity bar").toBeLessThan(8);
 
       const [ghost, row] = await pixelsAt(app, canvas(app), [await local(app, 800, 64), await local(app, 3200, 64)]);
@@ -171,6 +184,8 @@ for (const { id } of themes) {
         await app.screenshot({ path: info.outputPath("roll.png"), scale: "css", animations: "disabled" });
         await app.getByRole("combobox", { name: "Key", exact: true }).selectOption({ label: "C" });
         await expect(app.getByRole("combobox", { name: "Scale", exact: true })).toHaveValue("major");
+        const warning = app.getByText("Unsaved changes", { exact: true });
+        await expect(warning).toHaveCSS("color", `rgb(${bytes("--warn").map(Math.round).join(", ")})`);
         await expect.poll(async () => (await stats(app)).scaleMask).toBe(0b101010110101);
         const keys = app.getByRole("group", { name: "Piano keys" });
         for (const [key, name] of [[60, "root C4"], [62, "in-scale D4"]] as const) {
