@@ -4,6 +4,7 @@ import io
 import shutil
 import os
 from pathlib import Path
+import select
 import subprocess
 import signal
 import sys
@@ -36,15 +37,32 @@ class ProcessSettlementTests(unittest.TestCase):
             c.reap_group(process)
         self.assertEqual(ps.call_count, 2)
 
+    def test_killpg_permission_error_rejects_exiting_group_at_deadline(self):
+        process = Mock(pid=123)
+        denied = PermissionError(1, 'Operation not permitted')
+        with patch.object(c.sys, 'platform', 'darwin'), \
+                patch.object(c.os, 'killpg', side_effect=[None, denied]), \
+                patch.object(c.os, 'waitpid', side_effect=ChildProcessError), \
+                patch.object(c.time, 'monotonic', side_effect=[0, .5, 2, 2]), \
+                patch.object(c.time, 'sleep'), \
+                patch.object(c.subprocess, 'check_output', return_value=' 123 ?E\n') as ps:
+            with self.assertRaises(PermissionError) as raised:
+                c.reap_group(process)
+        self.assertIs(raised.exception, denied)
+        ps.assert_called_once()
+
     def test_killpg_permission_error_rejects_live_group_member(self):
         process = Mock(pid=123)
         denied = PermissionError(1, 'Operation not permitted')
         with patch.object(c.sys, 'platform', 'darwin'), \
                 patch.object(c.os, 'killpg', side_effect=[None, denied]), \
-                patch.object(c.subprocess, 'check_output', return_value=' 123 Z\n 123 S\n'):
+                patch.object(c.time, 'monotonic', side_effect=[0, .5, 1, 2]), \
+                patch.object(c.time, 'sleep'), \
+                patch.object(c.subprocess, 'check_output', return_value=' 123 Z\n 123 S\n') as ps:
             with self.assertRaises(PermissionError) as raised:
                 c.reap_group(process)
         self.assertIs(raised.exception, denied)
+        ps.assert_called_once()
 
 
 class CaptureTests(unittest.TestCase):
@@ -251,33 +269,61 @@ else: print('annotation / symbols')
     def native_descendant_probe(self, mode):
         pidfile = self.root / 'descendant.pid'
         marker = self.root / 'late-marker'
+        cleanup_finished = self.root / 'cleanup-finished'
+        timed = mode in ('timeout', 'deadline')
         ready_signal = int(mode) if mode in (signal.SIGINT, signal.SIGTERM) else None
         child = f"""
 import os, pathlib, signal, time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))
-if {ready_signal!r} is not None:
+if {timed!r}:
+    os.write(1, b'R')
+else:
     os.kill({os.getpid()}, {ready_signal!r})
-time.sleep(.7)
+# Try the late write after cleanup has had its chance to stop us.
+finished = pathlib.Path({str(cleanup_finished)!r})
+watchdog = time.monotonic() + 10
+while not finished.exists() and time.monotonic() < watchdog:
+    time.sleep(.01)
 pathlib.Path({str(marker)!r}).write_text('late')
 """
-        parent = f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child!r}]); time.sleep(3)"
+        parent = f"import subprocess,sys; subprocess.Popen([sys.executable,'-c',{child!r}]).wait()"
+        command = [sys.executable, '-c', parent]
+        communicate = subprocess.Popen.communicate
+
+        def communicate_after_ready(process, *args, **kwargs):
+            if process.args == command:
+                # Only the readiness watchdog runs before the child's ready byte.
+                self.assertTrue(select.select([process.stdout], [], [], 10)[0],
+                                'native descendant must actually start')
+                self.assertEqual(os.read(process.stdout.fileno(), 1), b'R',
+                                 'native descendant must actually start')
+                if mode == 'deadline':
+                    with c.cancellation(.3):
+                        return communicate(process, *args, **kwargs)
+            return communicate(process, *args, **kwargs)
+
         settled = False
         try:
-            if mode == 'timeout':
-                with self.assertRaises(subprocess.TimeoutExpired):
-                    c.run([sys.executable, '-c', parent], self.root, timeout=.3)
+            if timed:
+                with patch.object(subprocess.Popen, 'communicate', communicate_after_ready):
+                    if mode == 'timeout':
+                        with self.assertRaises(subprocess.TimeoutExpired):
+                            c.run(command, self.root, timeout=.3)
+                    else:
+                        with self.assertRaisesRegex(c.CaptureError, f'^capture cancelled by signal {signal.SIGALRM}$'):
+                            c.run(command, self.root, timeout=2)
             else:
-                with c.cancellation(.3 if mode == 'deadline' else 3):
-                    expected_signal = signal.SIGALRM if mode == 'deadline' else mode
-                    with self.assertRaisesRegex(c.CaptureError, f'^capture cancelled by signal {expected_signal}$'):
+                with c.cancellation(3):
+                    with self.assertRaisesRegex(c.CaptureError, f'^capture cancelled by signal {mode}$'):
                         if mode == signal.SIGTERM:
                             with (self.root / 'child.log').open('xb') as log:
-                                c.save_command([sys.executable, '-c', parent], self.root, None, log, self.root, timeout=2)
+                                c.save_command(command, self.root, None, log, self.root, timeout=2)
                         else:
-                            c.run([sys.executable, '-c', parent], self.root, timeout=2)
+                            c.run(command, self.root, timeout=2)
             self.assertTrue(pidfile.exists(), 'native descendant must actually start')
             pid = int(pidfile.read_text())
+            cleanup_finished.touch()
             deadline = time.monotonic() + 2
             while True:
                 sample = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'stat='],
