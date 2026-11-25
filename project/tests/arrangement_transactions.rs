@@ -667,7 +667,7 @@ fn mute_resize_and_noop_keep_geometry_horizon_and_source_trim() {
         ],
     )
     .created_ids;
-    let horizon = s.export_state().song.end_tick;
+    let horizon = s.export_state().unwrap().song.end_tick;
     edit(
         &mut s,
         vec![Op::SetTrack {
@@ -677,7 +677,7 @@ fn mute_resize_and_noop_keep_geometry_horizon_and_source_trim() {
             mute: true,
         }],
     );
-    let state = s.export_state();
+    let state = s.export_state().unwrap();
     assert_eq!(state.song.end_tick, horizon);
     assert!(state.song.audio.is_empty());
     assert!(sound(&s).iter().all(|v| *v == 0.0));
@@ -722,7 +722,7 @@ fn mute_resize_and_noop_keep_geometry_horizon_and_source_trim() {
             },
         ],
     );
-    assert!(s.export_state().song.arrangement.notes.is_empty());
+    assert!(s.export_state().unwrap().song.arrangement.notes.is_empty());
     let a = &s.project().arrangement.clips[1];
     assert!(matches!(
         a.content,

@@ -36,7 +36,7 @@ pub fn perf_scenes() -> Vec<PerfScene> {
     let (project, files) = drums_4ch_project(&kit_dir());
     let drums = PerfScene {
         name: "drums_4ch",
-        state: engine_state(&project, &decode_samples(&files)),
+        state: engine_state(&project, &decode_samples(&files)).unwrap(),
         start: vec![Command::Play],
     };
 
@@ -78,7 +78,7 @@ pub fn perf_scenes() -> Vec<PerfScene> {
     start.push(Command::Play);
     let beat = PerfScene {
         name: "beat_16ch",
-        state: engine_state(&big, &decode_samples(&samples)),
+        state: engine_state(&big, &decode_samples(&samples)).unwrap(),
         start,
     };
     vec![drums, beat]
