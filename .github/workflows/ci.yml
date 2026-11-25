@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, merge-train/batch]
   pull_request:
 
 permissions:
@@ -33,6 +33,9 @@ jobs:
       - name: Staged conflict safety tests
         if: matrix.os == 'macos-latest'
         run: make test-pre-commit
+      - name: Merge train safety tests
+        if: matrix.os == 'macos-latest'
+        run: make test-merge-train
       - run: rustup toolchain install
       # The Actions cache is over its 10 GB limit, and PR copies evict main's caches.
       - uses: Swatinem/rust-cache@v2

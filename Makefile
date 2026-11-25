@@ -16,8 +16,9 @@ hooks: ## Point git at .githooks (staged conflict/format checks before each comm
 	git config core.hooksPath .githooks
 
 .PHONY: merge-train test-merge-train
-merge-train: ## Quality only: advance the first enrolled PR (ORDER="12 34", HEAD_SHA=<approved SHA>)
-	python3 -B scripts/merge_train.py --order $(ORDER) $(if $(HEAD_SHA),--head $(HEAD_SHA))
+BATCH ?= 4
+merge-train: ## Quality only: advance a tested batch (ORDER="12=<approved SHA> 34=<approved SHA>", BATCH=4, optional ACK_MISMATCH=<batch SHA>)
+	python3 -B scripts/merge_train.py --order $(ORDER) --batch $(BATCH) $(if $(ACK_MISMATCH),--ack-mismatch $(ACK_MISMATCH)) || [ $$? -eq 75 ]
 
 test-merge-train: ## Test ordered protected merges without calling GitHub
 	python3 -B -m unittest discover -s scripts -p test_merge_train.py -v
@@ -32,7 +33,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: test-instruction-profiles e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles test-merge-train e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
