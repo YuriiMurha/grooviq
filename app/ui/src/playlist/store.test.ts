@@ -65,6 +65,8 @@ describe("coherent native arrangement pages", () => {
 function rig() {
   const queue = new ProjectCommandQueue();
   const effects: string[] = [];
+  let readQueue: PlaylistAdapter["enqueueRead"] = command => queue.enqueue(command, false);
+  let seekNative: PlaylistAdapter["seek"] = async () => { effects.push("native-seek"); return { status: "applied", generation: 2, revision: 9, changed: false, request: null, createdIds: [], reload: false, message: null, warnings: [] }; };
   let current = true, blocked = false, snapshot = page();
   const views: PlaylistState[] = [];
   let invoke: (ops: readonly ArrangementOperation[]) => Promise<ArrangementReply> = async () => {
@@ -85,7 +87,8 @@ function rig() {
   const baseAdapter: Omit<PlaylistAdapter, "readPatterns"> = {
     origin: () => ({ ...origin }), current: at => current && at.generation === origin.generation && at.replacements === origin.replacements,
     blocked: () => blocked, beginTransition: beginProjectTransition,
-    enqueueRead: command => queue.enqueue(command, false), enqueueMutation: command => queue.enqueue(command, true),
+    enqueueRead: command => readQueue(command), enqueueMutation: command => queue.enqueue(command, true),
+    seek: (stamp, tick) => seekNative(stamp, tick),
     readPage: () => read(), edit: (_stamp, ops) => invoke(ops),
     selectPattern: (base, pattern) => select(base, pattern),
     readProject: async () => { effects.push("read-project"); return project(); },
@@ -95,7 +98,7 @@ function rig() {
   const adapter = { ...baseAdapter, readPatterns: bank };
   const controller = new PlaylistController(adapter);
   cleanups.push(registerSettlement(() => queue.flush()), registerSettlement(controller.settle));
-  return { controller, effects, views, current: (v: boolean) => { current = v; }, blocked: (v: boolean) => { blocked = v; },
+  return { controller, effects, views, readQueue: (fn: typeof readQueue) => { readQueue = fn; }, seekNative: (fn: typeof seekNative) => { seekNative = fn; }, current: (v: boolean) => { current = v; }, blocked: (v: boolean) => { blocked = v; },
     invoke: (fn: typeof invoke) => { invoke = fn; }, read: (fn: typeof read) => { read = fn; },
     sources: (fn: typeof sources) => { sources = fn; }, replaceSnapshot: (v: ArrangementPage) => { snapshot = v; },
     select: (fn: typeof select) => { select = fn; }, selectNormally: select };
@@ -331,4 +334,45 @@ describe("Make unique through the playlist publication ticket", () => {
     expect(r.controller.state.requiresRefresh).toBe(false);
     expect(r.effects).not.toContain("publish-project");
   });
+});
+
+it("seeks without mutation, history, project reads or unsaved settlement", async () => {
+  const r = rig(); await r.controller.reload(); r.effects.length = 0;
+  await r.controller.seek(page(), 960);
+  expect(r.effects).toEqual(["native-seek", "publish-controller"]);
+  expect(r.controller.unsettled()).toBe(false);
+  expect(await r.controller.settle()).toBe(true);
+  r.blocked(true); await r.controller.seek(page(), 960);
+  expect(r.effects).toEqual(["native-seek", "publish-controller"]);
+  r.blocked(false); r.current(false); await r.controller.seek(page(), 960);
+  expect(r.effects).toEqual(["native-seek", "publish-controller"]);
+});
+
+for (const stale of ["replacement", "retirement", "modal"] as const) it(`drops queued seek after ${stale}`, async () => {
+  const r = rig(); await r.controller.reload();
+  const gate = deferred<void>();
+  r.readQueue(async command => { await gate.promise; return command(); });
+  const pending = r.controller.seek(page(), 960);
+  if (stale === "replacement") r.current(false);
+  else if (stale === "modal") r.blocked(true);
+  else r.controller.retire();
+  gate.resolve(); await pending;
+  expect(r.effects).not.toContain("native-seek");
+});
+it("reports native refusal and failed IPC without unsaved work", async () => {
+  const r = rig(); await r.controller.reload();
+  r.seekNative(async () => ({ status: "refused", generation: 2, revision: 9, changed: false, request: null, createdIds: [], reload: true, message: "Pattern mode", warnings: [] }));
+  await r.controller.seek(page(), 960);
+  expect(r.controller.state.message).toBe("Pattern mode");
+  expect(r.controller.unsettled()).toBe(false);
+  r.seekNative(async () => { throw new Error("queue full"); });
+  await r.controller.seek(page(), 960);
+  expect(r.controller.state.message).toBe("queue full");
+  expect(r.controller.unsettled()).toBe(false);
+});
+
+it("refuses a stale revision before admitting a seek", async () => {
+  const r = rig(); await r.controller.reload();
+  await r.controller.seek({ generation: 2, revision: 8 }, 960);
+  expect(r.effects).not.toContain("native-seek");
 });

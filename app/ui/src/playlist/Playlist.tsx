@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from "react";
 import type { LoopRegion, ArrangementStamp } from "../api/arrangement";
 import type { PatternsView } from "../api/patterns";
+import type { LiveFrame } from "../live/decode";
 import { PATTERN_DRAG_TYPE } from "../patterns/PickerRail";
 import { isProjectReplacing, projectGeneration } from "../project/replacement";
 import { registerGestureCancellation } from "../project/pending";
@@ -11,15 +12,15 @@ import { createPlaylistRenderer, readPlaylistPalette, type PlaylistRenderer, typ
 import type { PlaylistModel } from "./usePlaylist";
 import { extent, hitClip, projectClips, viewport, type RenderClip } from "./viewport";
 import { PatternGroupGesture, crossedThreshold, marqueeRect, marqueeSelection, toggleSelection, togglesSelection, type GroupPreview } from "./groupGesture";
-import { keyboardLoop, LoopGesture, rulerTick } from "./ruler";
+import { keyboardLoop, keyboardSeek, seekTarget, LoopGesture, rulerTick } from "./ruler";
 import "./playlist.css";
 
-type Props = Readonly<{ model: PlaylistModel; patterns: PatternsView | null; bpm: number; beats: number; unit: number }>;
+type Props = Readonly<{ latest: { readonly current: LiveFrame | null }; model: PlaylistModel; patterns: PatternsView | null; bpm: number; beats: number; unit: number }>;
 type Active = { gesture: PatternGesture | PatternGroupGesture; start: Point; moved: boolean; clickId: number | null; pointerId: number; stamp: ArrangementStamp; kind: GestureInput["kind"] };
 const DEFAULT_VIEW: PlaylistView = { width: 1, height: 1, scrollTick: 0, scrollTrack: 0, tickWidth: 0.05, rowHeight: 64 };
 
-export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
-  const { state, mutate, reload } = model;
+export function Playlist({ model, patterns, bpm, beats, unit, latest }: Props) {
+  const { state, mutate, reload, seek } = model;
   const snapshot = state.snapshot;
   const barTicks = Math.max(1, Math.floor(3840 / Math.max(1, unit))) * Math.max(1, beats);
   const quantum = Math.max(1, Math.round(barTicks / 4));
@@ -40,7 +41,7 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
   const [preview, setPreview] = useState<PatternPreview | null>(null);
   const [loopPreview, setLoopPreview] = useState<LoopRegion | null>(null);
   const ruler = useRef<HTMLDivElement>(null);
-  const loopActive = useRef<{ gesture: LoopGesture; pointerId: number; stamp: ArrangementStamp } | null>(null);
+  const loopActive = useRef<{ gesture: LoopGesture; pointerId: number; stamp: ArrangementStamp; replacements: number; tick: number } | null>(null);
   const [previewIndex, setPreviewIndex] = useState(-1);
   const [sliceGuide, setSliceGuide] = useState<{ tick: number; trackIndex: number } | null>(null);
   const [rendererKind, setRendererKind] = useState<string>("Loading display");
@@ -291,7 +292,7 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     if (event.button !== 0 || busy || !snapshot || isProjectReplacing() || modalIsOpen() || event.ctrlKey || event.metaKey) return;
     cancel(); event.currentTarget.focus();
     const tick = rulerTick(event.clientX, event.currentTarget.getBoundingClientRect(), event.currentTarget.clientWidth, view);
-    loopActive.current = { gesture: new LoopGesture({ pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration() }, tick, quantum, event.clientX, snapshot.loopRegion?.enabled ?? true), pointerId: event.pointerId, stamp: snapshot };
+    loopActive.current = { gesture: new LoopGesture({ pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration() }, tick, quantum, event.clientX, snapshot.loopRegion?.enabled ?? true), pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration(), tick };
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch { cancel(); }
   };
   const loopMove = (event: PointerEvent<HTMLDivElement>, release = false) => {
@@ -301,11 +302,20 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     const tick = rulerTick(event.clientX, event.currentTarget.getBoundingClientRect(), event.currentTarget.clientWidth, view);
     setLoopPreview(owned.gesture.update(tick, event.clientX));
     if (!release) return;
+    const click = !owned.gesture.dragging && owned.replacements === projectGeneration() && owned.stamp.generation === snapshot.generation && owned.stamp.revision === snapshot.revision;
     const batch = owned.gesture.take({ pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration() });
     cancel(); if (batch) void commit(owned.stamp, batch, false);
+    else if (click) void seek(owned.stamp, seekTarget(owned.tick, quantum));
   };
   const loopKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") { event.preventDefault(); cancel(); return; }
+    if (!event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      const target = keyboardSeek(event.key, Number(latest.current?.positionTicks ?? 0n), quantum);
+      if (target === null) return;
+      event.preventDefault(); event.stopPropagation();
+      if (!busy && snapshot && !isProjectReplacing() && !modalIsOpen() && !event.repeat) { cancel(); void seek(snapshot, target); }
+      return;
+    }
     if (!event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
     if (!["Home", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
     event.preventDefault();
@@ -359,8 +369,8 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       <button type="button" disabled={state.busy} onClick={() => { cancel(); void reload(); }}>Refresh playlist</button>
     </header>
     <div ref={ruler} className="playlist-ruler" role="group" aria-label="Playlist loop ruler" tabIndex={0} aria-disabled={busy}
-      aria-description="Shift+Home sets a loop. Hold Shift and use up or down to adjust its start, or left or right to adjust its end."
-      data-hint="Drag to set a loop. Shift+Home sets a loop. With Shift held, up/down adjusts the start and left/right adjusts the end."
+      aria-description="Click to seek; drag to set a loop. Home seeks to zero; arrow keys seek one snap from the live position. Shift+Home sets a loop. Hold Shift and use up or down to adjust its start, or left or right to adjust its end."
+      data-hint="Click to seek; drag to set a loop. Home and arrows seek. Shift+Home sets a loop. With Shift held, up/down adjusts the start and left/right adjusts the end."
       onPointerDown={loopDown} onPointerMove={event => loopMove(event)} onPointerUp={event => loopMove(event, true)} onPointerCancel={cancel} onLostPointerCapture={cancel}
       onKeyDown={loopKey}>
       {shownLoop && <div className="playlist-loop" data-enabled={shownLoop.enabled} style={{ left: (shownLoop.startTick - view.scrollTick) * view.tickWidth, width: (shownLoop.endTick - shownLoop.startTick) * view.tickWidth }} /> }{Array.from({ length: Math.min(128, Math.ceil(view.width / pixelsPerBar) + 2) }, (_, index) => {
