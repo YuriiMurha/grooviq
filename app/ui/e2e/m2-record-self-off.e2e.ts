@@ -14,7 +14,6 @@ test("recording_stopping_itself_mid_draw_warns_releases_held_keys_and_commits_th
   await record.click();
   await expect(record).toHaveAttribute("aria-pressed", "true");
   await app.getByRole("button", { name: "Play" }).click();
-  const before = await warnings.count();
   // A typed key held while a note is drawn.
   await app.keyboard.down("z");
   await expect.poll(live).toContain("1:48");
@@ -22,7 +21,7 @@ test("recording_stopping_itself_mid_draw_warns_releases_held_keys_and_commits_th
   await app.mouse.move(p.x, p.y);
   await app.mouse.down();
   await mock.eval("(m) => m.recordingStopsItself(1)");
-  await expect(warnings).toHaveCount(before + 1);
+  await expect(warnings.getByText(/^Recording stopped:.*\b2 recorded notes were not added\./)).toBeVisible();
   await expect(record).toHaveAttribute("aria-pressed", "false");
   // The held key is let go, by its own press.
   await expect.poll(live).not.toContain("1:48");
