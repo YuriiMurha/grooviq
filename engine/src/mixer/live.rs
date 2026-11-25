@@ -134,12 +134,27 @@ fn budget() -> Budget {
 }
 
 fn construct(kind: &str, seed: u64, rate: f32) -> Option<Box<dyn Device>> {
-    if kind == "algorithmic_reverb" {
-        return Some(Box::new(
+    // The persisted seed is u64. Fold both halves for devices with a 32-bit RNG,
+    // preserving existing low-only seeds while making high bits affect their stream.
+    let narrow = seed as u32 ^ (seed >> 32) as u32;
+    match kind {
+        "bitcrusher" => Some(Box::new(grooviq_dsp::bitcrusher::Bitcrusher::with_seed(
+            rate, narrow,
+        ))),
+        "lofi_colour" => Some(Box::new(grooviq_dsp::lofi_colour::LofiColour::with_seed(
+            rate, narrow,
+        ))),
+        "character_delay" => Some(Box::new(
+            grooviq_dsp::character_delay::CharacterDelay::with_seed(rate, seed),
+        )),
+        "shimmer_reverb" => Some(Box::new(
+            grooviq_dsp::shimmer_reverb::ShimmerReverb::with_seed(rate, seed),
+        )),
+        "algorithmic_reverb" => Some(Box::new(
             grooviq_dsp::algorithmic_reverb::AlgorithmicReverb::with_seed(rate, seed),
-        ));
+        )),
+        _ => grooviq_dsp::create(kind, rate),
     }
-    grooviq_dsp::create(kind, rate)
 }
 
 /// A prepared routed mix: the kernel, its pulled source buffers, and the checked device
@@ -266,6 +281,101 @@ impl LiveMix {
         {
             for &(insert, index, value) in params {
                 let _ = self.kernel.set_param(insert, index, value);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn oracle(kind: &str, seed: u64) -> Box<dyn Device> {
+        // Independent expected mapping: XOR the two 32-bit halves for 32-bit RNGs.
+        let narrow = (seed % 4_294_967_296) as u32 ^ (seed / 4_294_967_296) as u32;
+        match kind {
+            "bitcrusher" => Box::new(grooviq_dsp::bitcrusher::Bitcrusher::with_seed(
+                48000.0, narrow,
+            )),
+            "lofi_colour" => Box::new(grooviq_dsp::lofi_colour::LofiColour::with_seed(
+                48000.0, narrow,
+            )),
+            "shimmer_reverb" => Box::new(grooviq_dsp::shimmer_reverb::ShimmerReverb::with_seed(
+                48000.0, seed,
+            )),
+            "character_delay" => Box::new(grooviq_dsp::character_delay::CharacterDelay::with_seed(
+                48000.0, seed,
+            )),
+            "algorithmic_reverb" => Box::new(
+                grooviq_dsp::algorithmic_reverb::AlgorithmicReverb::with_seed(48000.0, seed),
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    fn render(mut device: Box<dyn Device>, params: &[(u32, f32)]) -> Vec<u32> {
+        for &(index, value) in params {
+            device.set_param(index, value);
+        }
+        let mut out = Vec::with_capacity(32_000);
+        for block in 0..250 {
+            let mut l = std::array::from_fn::<_, 64, _>(|i| {
+                let frame = block * 64 + i;
+                ((frame * 7919 % 2003) as f32 / 2003.0 - 0.5) * 0.4
+            });
+            let mut r = std::array::from_fn::<_, 64, _>(|i| {
+                let frame = block * 64 + i;
+                ((frame * 104729 % 1999) as f32 / 1999.0 - 0.3) * 0.25
+            });
+            device.process(&mut l, &mut r, None, &[]);
+            for (a, b) in l.into_iter().zip(r) {
+                out.extend([a.to_bits(), b.to_bits()]);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn insert_factory_honors_every_seeded_device_and_both_seed_halves() {
+        let cases: [(&str, &[(u32, f32)]); 5] = [
+            (
+                "bitcrusher",
+                &[(0, 4.0), (1, 12.0), (2, 0.5), (3, 0.4), (4, 1.0), (5, 0.8)],
+            ),
+            (
+                "lofi_colour",
+                &[(0, 1.0), (1, 0.7), (2, 0.5), (3, 0.2), (5, 0.3), (7, 0.0)],
+            ),
+            ("shimmer_reverb", &[(0, 1.0), (4, 0.8), (5, 0.8)]),
+            (
+                "character_delay",
+                &[(0, 0.0), (2, 2.0), (3, 0.25), (7, 1.0), (9, 2.0), (10, 1.0)],
+            ),
+            ("algorithmic_reverb", &[]),
+        ];
+        for (kind, params) in cases {
+            let mut expected = Vec::new();
+            for seed in [123, 456, (1_u64 << 32) | 123] {
+                let reference = render(oracle(kind, seed), params);
+                let actual = render(construct(kind, seed, 48000.0).unwrap(), params);
+                assert_eq!(
+                    actual.iter().zip(&reference).position(|(a, b)| a != b),
+                    None,
+                    "{kind} must use the requested seed {seed}"
+                );
+                expected.push(reference);
+            }
+            assert!(
+                expected[0] != expected[1],
+                "{kind} fixture must expose seed changes"
+            );
+            // Native u64 devices may intentionally map several seeds to one phase.
+            // The host's explicit 32-bit fold must retain the high-half contribution.
+            if matches!(kind, "bitcrusher" | "lofi_colour") {
+                assert!(
+                    expected[0] != expected[2],
+                    "{kind} must use both seed halves"
+                );
             }
         }
     }
