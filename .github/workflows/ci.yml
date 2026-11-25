@@ -9,8 +9,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: "ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
-  cancel-in-progress: true
+  # A concurrency group has one pending slot by default. Give each main push its own group.
+  group: >-
+    ci-${{ github.workflow }}-${{ github.event.pull_request.number ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
+    github.ref }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/merge-train/batch') }}
 
 jobs:
   rust:
