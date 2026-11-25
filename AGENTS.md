@@ -50,15 +50,16 @@ Read the code; it is the documentation. `make help` lists the supported commands
 - Commit through the hook (`make hooks` enables it). Never `--no-verify`.
 - End every commit message with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - `Closes #N` only for the complete result; `Refs #N` otherwise.
-- Squash-merge after the three required checks pass:
-  `rust (macos-latest)`, `rust (windows-latest)`, `ui`.
+- Enrol a PR with the `merge-train` label once a cross-family review approves it and the three
+  required checks pass on its head: `rust (macos-latest)`, `rust (windows-latest)`, `ui`.
+  Send Quality the full approved head SHA. Only Quality's merge train updates branches and merges.
 
 CI quirks:
 
 - `rust (macos-latest)` is sometimes cancelled at about 15 minutes with zero steps (no runner).
   Re-run it with `gh run rerun <run-id> --failed`.
-- Branch protection is strict. After another merge, run `gh pr update-branch <n>`.
-- Auto-merge sometimes stalls at CLEAN. Then merge with `gh pr merge <n> --squash`.
+- Never run `gh pr merge`, `--admin` or `update-branch`, and never arm GitHub auto-merge.
+  A direct merge skips the train's tests.
 
 ## Verify
 
