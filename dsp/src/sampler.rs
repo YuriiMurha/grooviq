@@ -19,8 +19,8 @@
 //!
 //! Determinism: every exp/pow/tan goes through `libm`, pan uses `sqrt`, and there is no
 //! `mul_add`, so a render is bit-identical on every platform. Filter coefficients are
-//! recomputed every 16 frames counted from each note's start, so the output never depends on
-//! how the blocks are split. Real-time: `process` and `set_param` never allocate; `set_sample`
+//! refreshed from inputs sampled every 16 frames counted from each note's start, so the output
+//! never depends on how the blocks are split. Real-time: `process` and `set_param` never allocate; `set_sample`
 //! hands the previous buffer back so the caller frees it elsewhere.
 
 use crate::api::{Device, NoteEvent};
@@ -178,7 +178,7 @@ const SILENT: f32 = 1e-4;
 const FREE: f32 = 1e-5;
 /// Sustain level and cutoff changes ramp over this time in seconds.
 const RAMP_S: f32 = 0.005;
-/// Filter coefficients are recomputed every this many frames of a voice.
+/// Filter coefficient inputs are sampled every this many frames of a voice.
 const CONTROL_FRAMES: u8 = 16;
 /// The filter's lowest cutoff in Hz, and its highest as a fraction of the engine rate.
 const MIN_CUTOFF: f32 = 20.0;
@@ -247,8 +247,10 @@ struct Voice {
     fenv: f32,
     /// Cutoff offset in octaves from the note's velocity.
     vel_oct: f32,
-    /// Frames until the filter coefficients are recomputed (0: this frame).
+    /// Frames until the next filter control tick (0: this frame).
     ctl: u8,
+    /// Octaves and damping from the last control tick if it ran with the filter off.
+    pending_filter: Option<(f32, f32)>,
     /// Filter coefficients (TPT state-variable: `a1 a2 a3`, damping `k`) and per-channel state.
     a: [f32; 3],
     k: f32,
@@ -288,6 +290,7 @@ impl Voice {
         fenv: 0.0,
         vel_oct: 0.0,
         ctl: 0,
+        pending_filter: None,
         a: [0.0; 3],
         k: DAMP_MAX,
         ic: [[0.0; 2]; 2],
@@ -353,19 +356,20 @@ impl Voice {
         }
     }
 
-    /// Recomputes the filter coefficients for `log2_cutoff` (Hz), this voice's envelope and
-    /// velocity.
-    fn filter_coefs(&mut self, c: &Coefs, log2_cutoff: f32, env_amount: f32, sr: f32) {
-        let octaves = log2_cutoff + ENV_OCTAVES * env_amount * self.fenv + self.vel_oct;
+    fn filter_octaves(&self, log2_cutoff: f32, env_amount: f32) -> f32 {
+        log2_cutoff + ENV_OCTAVES * env_amount * self.fenv + self.vel_oct
+    }
+
+    fn filter_coefs(&mut self, octaves: f32, damp: f32, sr: f32) {
         // min then max, not clamp: never panics, whatever the rate.
         let fc = libm::exp2f(octaves)
             .min(MAX_CUTOFF_RATIO * sr)
             .max(MIN_CUTOFF);
         let g = libm::tanf(std::f32::consts::PI * fc / sr);
-        let a1 = 1.0 / (1.0 + g * (g + c.damp));
+        let a1 = 1.0 / (1.0 + g * (g + damp));
         let a2 = g * a1;
         self.a = [a1, a2, g * a2];
-        self.k = c.damp;
+        self.k = damp;
     }
 
     /// One frame of the state-variable filter on channel `ch`; `kind` 1 low-, 2 high-,
@@ -841,6 +845,7 @@ pub struct Sampler {
     p: [f32; PARAMS],
     c: Coefs,
     voices: Voices,
+    filter_bypassed: bool,
     /// Smoothed output gain per channel, moving toward `c.out`.
     out: [f32; 2],
     /// The sustain level, ramping to `p[SUSTAIN]`.
@@ -869,6 +874,7 @@ impl Sampler {
             p,
             c,
             voices: Voices::new(((STEAL_FADE_S * sr).round() as u32).max(1)),
+            filter_bypassed: false,
             out: c.out,
             sustain: Ramp::at(p[SUSTAIN]),
             cutoff: Ramp::at(libm::log2f(p[CUTOFF])),
@@ -994,6 +1000,22 @@ impl Device for Sampler {
         _sidechain: Option<(&[f32], &[f32])>,
         events: &[NoteEvent],
     ) {
+        self.render::<false>(l, r, events);
+    }
+
+    fn reset(&mut self) {
+        self.voices.silence();
+        self.rest();
+    }
+
+    fn choke(&mut self) {
+        self.voices.choke();
+    }
+}
+
+impl Sampler {
+    // Tests use the eager coefficient updates and unconditional declick division as an oracle.
+    fn render<const EAGER: bool>(&mut self, l: &mut [f32], r: &mut [f32], events: &[NoteEvent]) {
         l.fill(0.0);
         r.fill(0.0);
         let n = l.len().min(r.len());
@@ -1003,6 +1025,7 @@ impl Device for Sampler {
             p,
             c,
             voices,
+            filter_bypassed,
             out,
             sustain,
             cutoff,
@@ -1016,11 +1039,25 @@ impl Device for Sampler {
             return;
         };
         let declick = p[DECLICK] >= 0.5;
+        let far_fade = 2.0 * *fade_out;
         let kind = p[FILTER_TYPE] as u8;
+        let filter_on = kind != 0;
         let (env_amount, flt_sustain) = (p[FILTER_ENV], p[FLT_SUSTAIN]);
         let mut ev = events.iter().peekable();
         // Only events (and a choke, before the block) put voices in fade slots.
         let mut span = voices.span();
+        if !EAGER {
+            if filter_on && *filter_bypassed {
+                // A parameter change between ticks must use the previous tick's inputs until
+                // the next one. New notes and reset slots carry no pending inputs.
+                for v in &mut voices.v[..span] {
+                    if let Some((octaves, damp)) = v.pending_filter.take() {
+                        v.filter_coefs(octaves, damp, *sr);
+                    }
+                }
+            }
+            *filter_bypassed = !filter_on;
+        }
         for f in 0..n {
             let mut evented = false;
             while let Some(e) = ev.next_if(|e| e.offset as usize <= f) {
@@ -1108,7 +1145,12 @@ impl Device for Sampler {
                 }
                 // Control rate, counted from the note's start: block-split independent.
                 if v.ctl == 0 {
-                    v.filter_coefs(c, log2_cutoff, env_amount, *sr);
+                    let octaves = v.filter_octaves(log2_cutoff, env_amount);
+                    if EAGER || filter_on {
+                        v.filter_coefs(octaves, c.damp, *sr);
+                    } else {
+                        v.pending_filter = Some((octaves, c.damp));
+                    }
                     v.ctl = CONTROL_FRAMES;
                 }
                 v.ctl -= 1;
@@ -1131,9 +1173,15 @@ impl Device for Sampler {
                         } else {
                             v.pos - v.start
                         };
-                        let frames_left = to_edge / v.step.abs();
-                        if frames_left < *fade_out {
-                            amp *= (frames_left / *fade_out).max(0.0) as f32;
+                        let step = v.step.abs();
+                        // Use twice the fade distance to leave room for rounding. The step and
+                        // fade are bounded by f32 rates and pitch limits, so the product is
+                        // normal in f64. Keep the original division and gain near the edge.
+                        if EAGER || to_edge <= far_fade * step {
+                            let frames_left = to_edge / step;
+                            if frames_left < *fade_out {
+                                amp *= (frames_left / *fade_out).max(0.0) as f32;
+                            }
                         }
                     }
                 }
@@ -1143,7 +1191,7 @@ impl Device for Sampler {
                 } else {
                     (hermite(&buf.l, v.pos, |k| k), hermite(&buf.r, v.pos, |k| k))
                 };
-                if kind != 0 {
+                if filter_on {
                     xl = v.filter(0, kind, xl);
                     xr = v.filter(1, kind, xr);
                 }
@@ -1186,13 +1234,7 @@ impl Device for Sampler {
             voices.event(p, *sr, buf, e);
         }
     }
-
-    fn reset(&mut self) {
-        self.voices.silence();
-        self.rest();
-    }
-
-    fn choke(&mut self) {
-        self.voices.choke();
-    }
 }
+
+#[cfg(test)]
+mod tests;
