@@ -123,6 +123,7 @@ test('ignores events and branches outside PRs, main and the merge train', async 
   for (const event of [
     { ...run, event: 'push', head_branch: 'feature/x' },
     { ...run, event: 'merge_group', head_branch: 'main' },
+    { ...run, event: 'workflow_dispatch', head_branch: 'main' },
     { ...run, event: 'workflow_dispatch' },
   ]) {
     const { execute, calls } = scenario({ event });

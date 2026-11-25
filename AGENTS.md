@@ -57,7 +57,8 @@ CI quirks:
 
 - `rerun-no-runner.yml` automatically re-runs `rust (macos-latest)` once on the current head after a
   zero-step runner acquisition cancellation. If the job is still cancelled with zero steps after that
-  workflow ran (no attempt 2, or attempt 2 cancelled the same way), run `gh run rerun <run-id> --failed`.
+  workflow ran (no attempt 2, or attempt 2 cancelled the same way) and the run's commit is still the
+  PR head, run `gh run rerun <run-id> --failed`. A stale commit needs no rerun: the new head has its own run.
 - Branch protection is strict. After another merge, run `gh pr update-branch <n>`.
 - Auto-merge sometimes stalls at CLEAN. Then merge with `gh pr merge <n> --squash`.
 
