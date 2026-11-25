@@ -86,6 +86,12 @@ struct Network {
     lines: [DelayLine; 4],
     lengths: [usize; 4],
     damping: [f32; 4],
+    gain_key: Option<(u32, u32)>,
+    gains: [f32; 4],
+    #[cfg(test)]
+    uncached: bool,
+    #[cfg(test)]
+    gain_updates: usize,
 }
 impl Network {
     fn new(sr: f32, model: usize) -> Self {
@@ -94,6 +100,12 @@ impl Network {
             lines: std::array::from_fn(|i| DelayLine::new(lengths[i] + 2)),
             lengths,
             damping: [0.; 4],
+            gain_key: None,
+            gains: [0.; 4],
+            #[cfg(test)]
+            uncached: false,
+            #[cfg(test)]
+            gain_updates: 0,
         }
     }
     fn tick(
@@ -104,11 +116,30 @@ impl Network {
         damping: f32,
         sr: f32,
     ) -> [f32; 2] {
+        // Keep the original f32 expression: reassociation changes feedback render bits.
+        let key = (decay.to_bits(), sr.to_bits());
+        if self.gain_key != Some(key) {
+            self.gains = self
+                .lengths
+                .map(|length| libm::powf(10., -3. * length as f32 / (decay * sr)));
+            self.gain_key = Some(key);
+            #[cfg(test)]
+            {
+                self.gain_updates += 1;
+            }
+        }
         let mut x = [0.; 4];
         for (i, v) in x.iter_mut().enumerate() {
             let delayed = self.lines[i].read_int(self.lengths[i] - 1);
             self.damping[i] = tiny((1.0 - damping) * delayed + damping * self.damping[i]);
-            *v = self.damping[i] * libm::powf(10., -3. * self.lengths[i] as f32 / (decay * sr));
+            let gain = self.gains[i];
+            #[cfg(test)]
+            let gain = if self.uncached {
+                libm::powf(10., -3. * self.lengths[i] as f32 / (decay * sr))
+            } else {
+                gain
+            };
+            *v = self.damping[i] * gain;
         }
         let y = match model {
             0 => {
@@ -134,6 +165,7 @@ impl Network {
             d.clear();
         }
         self.damping = [0.; 4];
+        self.gain_key = None;
     }
 }
 pub struct AlgorithmicReverb {
@@ -284,6 +316,82 @@ impl Device for AlgorithmicReverb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn settled_gains_reuse_and_every_exact_key_change_recomputes() {
+        let mut n = Network::new(48000., 0);
+        for _ in 0..128 {
+            n.tick([0.; 2], 0, 2., 0.5, 48000.);
+        }
+        assert_eq!(n.gain_updates, 1);
+        let adjacent = f32::from_bits(2_f32.to_bits() + 1);
+        n.tick([0.; 2], 0, adjacent, 0.5, 48000.);
+        assert_eq!(n.gain_updates, 2);
+        n.tick([0.; 2], 0, adjacent, 0.5, 96000.);
+        assert_eq!(n.gain_updates, 3);
+        n.clear();
+        n.tick([0.; 2], 0, adjacent, 0.5, 96000.);
+        assert_eq!(n.gain_updates, 4);
+    }
+
+    #[test]
+    fn cache_matches_original_kernel_bits_across_blocks_automation_and_reset() {
+        for sr in [22050., 44100., 48000., 96000., 192000.] {
+            for block in [1, 7, 64, 127, 128] {
+                let mut cached = AlgorithmicReverb::with_seed(sr, 937);
+                let mut original = AlgorithmicReverb::with_seed(sr, 937);
+                for n in &mut original.networks {
+                    n.uncached = true;
+                }
+                for d in [&mut cached, &mut original] {
+                    d.set_param(2, 0.);
+                    d.set_param(10, 1.);
+                }
+                // Boundaries are independent of host block size, including a reset mid-ramp.
+                for (segment, frames) in [4096, 3072, 2048, 4096, 2048].into_iter().enumerate() {
+                    for d in [&mut cached, &mut original] {
+                        match segment {
+                            1 => d.set_param(3, 20.),
+                            2 => d.reset(),
+                            3 => {
+                                d.set_param(3, 0.1);
+                                d.set_param(0, 3.);
+                            }
+                            4 => {
+                                d.set_param(3, f32::NAN);
+                                d.set_param(3, f32::INFINITY);
+                            }
+                            _ => (),
+                        }
+                    }
+                    let mut offset = 0;
+                    while offset < frames {
+                        let count = block.min(frames - offset);
+                        let mut l: Vec<_> = (offset..offset + count)
+                            .map(|i| libm::sinf(i as f32 * 0.071) * 0.3)
+                            .collect();
+                        let mut r: Vec<_> = (offset..offset + count)
+                            .map(|i| libm::cosf(i as f32 * 0.037) * 0.2)
+                            .collect();
+                        let (mut x, mut y) = (l.clone(), r.clone());
+                        cached.process(&mut l, &mut r, None, &[]);
+                        original.process(&mut x, &mut y, None, &[]);
+                        assert_eq!(
+                            l.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            x.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            "left sr={sr} block={block} segment={segment} offset={offset}"
+                        );
+                        assert_eq!(
+                            r.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            y.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            "right sr={sr} block={block} segment={segment} offset={offset}"
+                        );
+                        offset += count;
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn charged_recursive_state_clears_without_subnormals() {
         for sr in [22050., 48000., 192000.] {
