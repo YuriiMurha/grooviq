@@ -59,7 +59,7 @@
     { "id": "low_cut", "min": 20, "max": 2000, "default": 200, "stepped": false },
     { "id": "high_cut", "min": 1000, "max": 20000, "default": 7000, "stepped": false },
     { "id": "mix", "min": 0, "max": 1, "default": 0.25, "stepped": false },
-    { "id": "bpm", "min": 40, "max": 300, "default": 140, "stepped": false }
+    { "id": "bpm", "min": 20, "max": 400, "default": 140, "stepped": false }
   ],
   "drive": [
     { "id": "mode", "min": 0, "max": 4, "default": 1, "stepped": true },
