@@ -227,7 +227,7 @@ jobs:
           # (3 on a regression), not tee's.
           set -o pipefail
           status=0
-          cargo bench -p grooviq-golden --bench instructions -- $BASELINE 2>&1 | tee instructions.txt || status=$?
+          cargo bench -p grooviq-golden --bench instructions -- ${BASELINE:+"$BASELINE"} 2>&1 | tee instructions.txt || status=$?
           {
             echo "## Instruction counts (Callgrind)"
             echo
