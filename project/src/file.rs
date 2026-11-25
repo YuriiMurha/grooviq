@@ -415,6 +415,8 @@ fn stage_save_with_limits(
     limits: Limits,
     disk: &mut impl Disk,
 ) -> io::Result<Staged> {
+    // Unsupported routing refuses before even the legacy stale-save cleanup runs.
+    crate::mixer::require_runtime_support(project).map_err(|e| too_big(e.to_string()))?;
     // Temp files of saves that died (and only those: see `leftover`); best effort.
     let _ = grooviq_engine::remove_stale_owned(path, ".tmp");
     // Everything that can be refused is refused before the first byte is written.
@@ -1754,6 +1756,37 @@ mod tests {
         assert!(!dead_path.exists(), "dead and old: removed");
         assert!(live.path.exists(), "a live writer's file was removed");
         assert!(young_path.exists(), "young: kept");
+    }
+
+    #[test]
+    fn an_unsupported_mixer_refusal_does_not_clean_a_dead_save_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let (mut project, samples) = with_sizes(&[6]);
+        project.mixer.mode = crate::mixer::Mode::Routed;
+        project.mixer.tracks[0].level = crate::mixer::Level::Silence;
+        project.validate_mixer().unwrap();
+
+        let dead = grooviq_engine::create_owned_temp(&path, ".tmp").unwrap();
+        age(&dead.path, 11 * 60);
+        let dead_path = dead.path.clone();
+        drop(dead.file);
+
+        save(&project, &samples, &path).unwrap_err();
+        assert!(
+            dead_path.exists(),
+            "unsupported routing must refuse before cleanup"
+        );
+        assert!(
+            !path.exists(),
+            "unsupported routing must not create a project file"
+        );
+
+        // Supported legacy saves still perform their existing stale-temp cleanup.
+        project.mixer = crate::mixer::Mixer::default();
+        save(&project, &samples, &path).unwrap();
+        assert!(!dead_path.exists());
+        assert!(path.exists());
     }
 
     #[test]
