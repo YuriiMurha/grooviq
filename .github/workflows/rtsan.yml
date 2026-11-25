@@ -57,6 +57,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: rtsan
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The build downloads LLVM's prebuilt RTSan runtime (rtsan-standalone-sys, with curl).
       # Cargo is on PATH here, not in ~/.cargo/bin where the Makefile looks by default.
       - run: make rtsan CARGO=cargo
