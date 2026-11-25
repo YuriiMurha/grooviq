@@ -50,9 +50,11 @@ it("keeps four-pixel drag intent after returning to the origin", () => {
 it("calculates snapped clicks and keyboard targets from the actual position", () => {
   expect(seekTarget(1500, 960)).toBe(1920);
   expect(keyboardSeek("Home", 1700, 960)).toBe(0);
+  expect(keyboardSeek("Home", null, 960)).toBe(0);
   expect(keyboardSeek("ArrowRight", 1700, 960)).toBe(2660);
   expect(keyboardSeek("ArrowLeft", 1700, 960)).toBe(740);
   expect(keyboardSeek("ArrowDown", 0, 960)).toBe(0);
   expect(keyboardSeek("a", 1700, 960)).toBeNull();
   expect(keyboardSeek("ArrowRight", NaN, 960)).toBeNull();
+  expect(keyboardSeek("ArrowRight", null, 960)).toBeNull();
 });

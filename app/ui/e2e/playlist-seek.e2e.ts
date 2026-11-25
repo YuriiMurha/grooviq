@@ -1,9 +1,69 @@
-import { test, expect, project } from "./fixture";
+import { readFileSync } from "node:fs";
+import { test, expect, project, workspaceReady, SYNTH_PARAMS, SYNTH_PRESETS } from "./fixture";
+import { installMockTauri, type MockSeed } from "./mockTauri";
 
-test.use({ seed: { project: project([], {}, { playMode: "song", arrangement: {
+const song = project([], {}, { playMode: "song", arrangement: {
   tracks: [{ id: 1, name: "Track", color: 0, mute: false }], audioAssets: [], loopRegion: null,
   clips: [{ id: 2, track: 1, name: "Pattern", startTick: 0, muted: false, content: { type: "pattern", pattern: 0, offsetTick: 0, lengthTicks: 15360 } }],
-}, nextId: 3 }) } });
+}, nextId: 3 });
+test.use({ seed: { project: song, files: { "/qa/projects/Replacement.grooviq": { kind: "project", project: song } } } });
+
+test("playlist loads after discarding recovery shown before the initial project view", async ({ page }) => {
+  const { sampler } = JSON.parse(readFileSync(new URL("../../../tests/fixtures/device-params.json", import.meta.url), "utf8")) as { sampler: MockSeed["samplerParams"] };
+  await page.addInitScript(installMockTauri, {
+    samplerParams: sampler, synthParams: SYNTH_PARAMS, synthPresets: SYNTH_PRESETS,
+    project: song, holdProjectView: true, recovery: { savedAt: 1_794_860_000, original: null, project: song },
+  });
+  await page.goto("/");
+  const recovery = page.getByRole("dialog", { name: "Restore your project?" });
+  await expect(recovery).toBeVisible();
+  await expect(page.getByRole("region", { name: "Channel rack" })).toHaveCount(0);
+  await page.evaluate("window.__grooviqMock.releaseCommand('project_view')");
+  await workspaceReady(page);
+  await expect(recovery).toBeVisible();
+  await recovery.getByRole("button", { name: "Discard" }).click();
+  await page.keyboard.press("F5");
+  await expect(page.getByRole("region", { name: "Playlist", exact: true }).getByRole("status")).toHaveText("1 clips");
+});
+
+for (const boundary of ["disconnect", "replacement"] as const) test(`relative seek waits for a live frame after ${boundary}`, async ({ app, mock }) => {
+  await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
+  await app.keyboard.press("Space");
+  await expect.poll(() => mock.eval("m => m.state.transport.playing")).toBe(true);
+  await app.keyboard.press("F5");
+  const ruler = app.getByRole("group", { name: "Playlist loop ruler" });
+  await expect(ruler).toHaveAttribute("aria-disabled", "false");
+  const seekTicks = async () => (await mock.calls("arrangement_seek")).map(call => call.args.tick);
+  await mock.eval("m => { m.pauseLive(true); m.hold(1700); m.injectLive(true); }");
+  await ruler.press("ArrowRight");
+  await expect.poll(seekTicks).toEqual([2660]);
+  await mock.eval("m => { m.hold(1700); m.injectLive(true); }");
+
+  if (boundary === "disconnect") {
+    expect(await mock.eval("m => m.disconnectLive()")).toBe(1);
+    const box = await ruler.boundingBox();
+    if (!box) throw new Error("No ruler");
+    await app.mouse.click(box.x + 480, box.y + 10);
+    await expect.poll(() => mock.eval("m => m.ticks()")).toBe(9600);
+  } else {
+    await mock.eval("m => m.queueDialog('/qa/projects/Replacement.grooviq')");
+    await app.keyboard.press("ControlOrMeta+o");
+    await expect(app).toHaveTitle("Replacement — Grooviq");
+    await expect(ruler).toHaveAttribute("aria-disabled", "false");
+  }
+
+  await ruler.press("ArrowRight");
+  await ruler.press("Home");
+  const absoluteSeeks = boundary === "disconnect" ? [2660, 9600, 0] : [2660, 0];
+  await expect.poll(seekTicks).toEqual(absoluteSeeks);
+  if (boundary === "replacement") {
+    await app.keyboard.press("Space");
+    await expect.poll(() => mock.eval("m => m.state.transport.playing")).toBe(true);
+  }
+  await expect.poll(() => mock.eval("m => { m.hold(3200); return m.injectLive(true); }")).toBe(1);
+  await ruler.press("ArrowRight");
+  await expect.poll(seekTicks).toEqual([...absoluteSeeks, 4160]);
+});
 
 test("click seeks without edits; four pixels commits a loop even after returning", async ({ app, mock }) => {
   await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");

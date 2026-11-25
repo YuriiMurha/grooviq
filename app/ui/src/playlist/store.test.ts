@@ -67,7 +67,7 @@ function rig() {
   const effects: string[] = [];
   let readQueue: PlaylistAdapter["enqueueRead"] = command => queue.enqueue(command, false);
   let seekNative: PlaylistAdapter["seek"] = async () => { effects.push("native-seek"); return { status: "applied", generation: 2, revision: 9, changed: false, request: null, createdIds: [], reload: false, message: null, warnings: [] }; };
-  let current = true, blocked = false, snapshot = page();
+  let current = true, blocked = false, seekBlocked = false, snapshot = page();
   const views: PlaylistState[] = [];
   let invoke: (ops: readonly ArrangementOperation[]) => Promise<ArrangementReply> = async () => {
     effects.push("native-edit"); snapshot = { ...snapshot, revision: 10 };
@@ -86,7 +86,7 @@ function rig() {
   const bank = async (): Promise<PatternsView> => ({ ...await sources(), revision: snapshot.revision, selected, view: project() });
   const baseAdapter: Omit<PlaylistAdapter, "readPatterns"> = {
     origin: () => ({ ...origin }), current: at => current && at.generation === origin.generation && at.replacements === origin.replacements,
-    blocked: () => blocked, beginTransition: beginProjectTransition,
+    blocked: () => blocked, seekBlocked: () => seekBlocked, beginTransition: beginProjectTransition,
     enqueueRead: command => readQueue(command), enqueueMutation: command => queue.enqueue(command, true),
     seek: (stamp, tick) => seekNative(stamp, tick),
     readPage: () => read(), edit: (_stamp, ops) => invoke(ops),
@@ -99,6 +99,7 @@ function rig() {
   const controller = new PlaylistController(adapter);
   cleanups.push(registerSettlement(() => queue.flush()), registerSettlement(controller.settle));
   return { controller, effects, views, readQueue: (fn: typeof readQueue) => { readQueue = fn; }, seekNative: (fn: typeof seekNative) => { seekNative = fn; }, current: (v: boolean) => { current = v; }, blocked: (v: boolean) => { blocked = v; },
+    seekBlocked: (v: boolean) => { seekBlocked = v; },
     invoke: (fn: typeof invoke) => { invoke = fn; }, read: (fn: typeof read) => { read = fn; },
     sources: (fn: typeof sources) => { sources = fn; }, replaceSnapshot: (v: ArrangementPage) => { snapshot = v; },
     select: (fn: typeof select) => { select = fn; }, selectNormally: select };
@@ -336,6 +337,15 @@ describe("Make unique through the playlist publication ticket", () => {
   });
 });
 
+it("continues arranging reads while a modal blocks seek", async () => {
+  const r = rig();
+  r.seekBlocked(true);
+  expect(await r.controller.reload()).toBe(true);
+  expect(r.effects).toContain("read-arrangement");
+  await r.controller.seek(page(), 960);
+  expect(r.effects).not.toContain("native-seek");
+});
+
 it("seeks without mutation, history, project reads or unsaved settlement", async () => {
   const r = rig(); await r.controller.reload(); r.effects.length = 0;
   await r.controller.seek(page(), 960);
@@ -354,7 +364,7 @@ for (const stale of ["replacement", "retirement", "modal"] as const) it(`drops q
   r.readQueue(async command => { await gate.promise; return command(); });
   const pending = r.controller.seek(page(), 960);
   if (stale === "replacement") r.current(false);
-  else if (stale === "modal") r.blocked(true);
+  else if (stale === "modal") r.seekBlocked(true);
   else r.controller.retire();
   gate.resolve(); await pending;
   expect(r.effects).not.toContain("native-seek");

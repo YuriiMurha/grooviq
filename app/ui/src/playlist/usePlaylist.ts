@@ -24,7 +24,7 @@ class SessionPlaylistBinding {
     const current = (at: ProjectStamp) => this.mounted && !isProjectReplacementPending() && projectGeneration() === at.replacements && this.session.latest.current.view?.generation === at.generation;
     this.controller = new PlaylistController({
       origin: () => ({ generation: this.session.latest.current.view?.generation ?? 0, replacements: projectGeneration() }),
-      current, blocked: () => isProjectReplacing() || modalIsOpen(), beginTransition: beginProjectTransition,
+      current, blocked: isProjectReplacing, seekBlocked: modalIsOpen, beginTransition: beginProjectTransition,
       enqueueRead: command => this.session.enqueue(command),
       enqueueMutation: command => this.session.enqueueMutation(command),
       seek: arrangementSeek, readPage: arrangementView, readPatterns: patternList, edit: arrangementEdit, readProject: projectView,

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from "react";
 import type { LoopRegion, ArrangementStamp } from "../api/arrangement";
 import type { PatternsView } from "../api/patterns";
-import type { LiveFrame } from "../live/decode";
 import { PATTERN_DRAG_TYPE } from "../patterns/PickerRail";
 import { isProjectReplacing, projectGeneration } from "../project/replacement";
 import { registerGestureCancellation } from "../project/pending";
@@ -15,11 +14,11 @@ import { PatternGroupGesture, crossedThreshold, marqueeRect, marqueeSelection, t
 import { keyboardLoop, keyboardSeek, seekTarget, LoopGesture, rulerTick } from "./ruler";
 import "./playlist.css";
 
-type Props = Readonly<{ latest: { readonly current: LiveFrame | null }; model: PlaylistModel; patterns: PatternsView | null; bpm: number; beats: number; unit: number }>;
+type Props = Readonly<{ rulerPosition: { readonly current: number | null }; model: PlaylistModel; patterns: PatternsView | null; bpm: number; beats: number; unit: number }>;
 type Active = { gesture: PatternGesture | PatternGroupGesture; start: Point; moved: boolean; clickId: number | null; pointerId: number; stamp: ArrangementStamp; kind: GestureInput["kind"] };
 const DEFAULT_VIEW: PlaylistView = { width: 1, height: 1, scrollTick: 0, scrollTrack: 0, tickWidth: 0.05, rowHeight: 64 };
 
-export function Playlist({ model, patterns, bpm, beats, unit, latest }: Props) {
+export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: Props) {
   const { state, mutate, reload, seek } = model;
   const snapshot = state.snapshot;
   const barTicks = Math.max(1, Math.floor(3840 / Math.max(1, unit))) * Math.max(1, beats);
@@ -310,7 +309,7 @@ export function Playlist({ model, patterns, bpm, beats, unit, latest }: Props) {
   const loopKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") { event.preventDefault(); cancel(); return; }
     if (!event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
-      const target = keyboardSeek(event.key, Number(latest.current?.positionTicks ?? 0n), quantum);
+      const target = keyboardSeek(event.key, rulerPosition.current, quantum);
       if (target === null) return;
       event.preventDefault(); event.stopPropagation();
       if (!busy && snapshot && !isProjectReplacing() && !modalIsOpen() && !event.repeat) { cancel(); void seek(snapshot, target); }
