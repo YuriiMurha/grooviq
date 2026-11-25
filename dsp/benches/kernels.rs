@@ -94,7 +94,7 @@ fn settle(device: &mut impl Device, events: &[NoteEvent]) -> ([f32; BLOCK], [f32
 }
 
 /// Ten seconds of stereo noise (a fixed sequence), longer than any voice plays here.
-fn noise_sample() -> Arc<SampleBuf> {
+fn noise_sample(rate: f32) -> Arc<SampleBuf> {
     let mut x = 0x2545_f491_u32;
     let mut next = move || {
         x ^= x << 13;
@@ -105,7 +105,7 @@ fn noise_sample() -> Arc<SampleBuf> {
     let len = 10 * SR as usize;
     let l: Vec<f32> = (0..len).map(|_| next()).collect();
     let r: Vec<f32> = (0..len).map(|_| next()).collect();
-    Arc::new(SampleBuf { rate: SR, l, r })
+    Arc::new(SampleBuf { rate, l, r })
 }
 
 /// A sampler playing a long sample: keys from 55 up, so most voices read between frames
@@ -113,11 +113,25 @@ fn noise_sample() -> Arc<SampleBuf> {
 /// voice ends with its sample.
 #[divan::bench(args = VOICES)]
 fn sampler_block(bencher: Bencher, voices: usize) {
-    let sample = noise_sample();
-    let notes = chord(55, voices);
+    sampler_blocks(bencher, noise_sample(SR), chord(55, voices), true);
+}
+
+#[divan::bench(args = [90, 150, 400], consts = [1, 16])]
+fn sampler_fixed_step_block<const N: usize>(bencher: Bencher, percent: u32) {
+    // Disable pitch tracking so every active voice reads at the same measured step.
+    sampler_blocks(
+        bencher,
+        noise_sample(SR * percent as f32 / 100.0),
+        chord(55, N),
+        false,
+    );
+}
+
+fn sampler_blocks(bencher: Bencher, sample: Arc<SampleBuf>, notes: Vec<NoteEvent>, track: bool) {
     bencher
         .with_inputs(|| {
             let mut s = Sampler::new(SR);
+            s.set_param(6, if track { 1.0 } else { 0.0 }); // pitch_track
             s.set_sample(Some(Arc::clone(&sample)));
             let (l, r) = settle(&mut s, &notes);
             (s, l, r)

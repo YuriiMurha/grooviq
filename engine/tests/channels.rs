@@ -875,7 +875,10 @@ fn notes_queued_before_a_new_project_and_a_rate_change_do_not_sound() {
     assert!(out.iter().all(|x| *x == 0.0), "nothing anyone asked for");
     c.send(note(1, true)).unwrap();
     p.process(&mut out, 2);
-    assert_eq!(left(&out)[100], 0.25, "a new note plays the new channel 1");
+    assert!(
+        (out[200] - 0.25).abs() < 1e-6,
+        "a new note plays the new channel 1 after resampling"
+    );
 }
 
 #[test]

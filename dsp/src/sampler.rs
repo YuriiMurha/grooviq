@@ -1,8 +1,9 @@
 //! Sampler: plays one sample per instance, pitched by key.
 //!
 //! Each note picks a region of the sample (`start`..`end`, optionally reversed), plays it at a
-//! rate set at note-on (`source_rate / engine_rate * 2^(semitones / 12)`) through a cubic
-//! Hermite read, and shapes it with an attack/decay/sustain/release envelope. In one-shot mode a
+//! rate set at note-on (`source_rate / engine_rate * 2^(semitones / 12)`) and shapes it with an
+//! attack/decay/sustain/release envelope. Cubic Hermite handles steps up to one source frame;
+//! faster reads use a low-pass FIR. In one-shot mode a
 //! note plays to the end of its region and ignores note-off; in gate mode note-off releases it.
 //! Loop mode repeats the region's tail (from `loop_start`, a fraction of the played region in
 //! play order) until note-off, then releases, also in one-shot mode. Each voice runs a 12 dB/oct
@@ -22,6 +23,8 @@
 //! recomputed every 16 frames counted from each note's start, so the output never depends on
 //! how the blocks are split. Real-time: `process` and `set_param` never allocate; `set_sample`
 //! hands the previous buffer back so the caller frees it elsewhere.
+
+mod resample;
 
 use crate::api::{Device, NoteEvent};
 use crate::util::clamp_param;
@@ -1137,12 +1140,7 @@ impl Device for Sampler {
                         }
                     }
                 }
-                let (mut xl, mut xr) = if v.looping {
-                    let at = |k| v.loop_index(k);
-                    (hermite(&buf.l, v.pos, at), hermite(&buf.r, v.pos, at))
-                } else {
-                    (hermite(&buf.l, v.pos, |k| k), hermite(&buf.r, v.pos, |k| k))
-                };
+                let (mut xl, mut xr) = resample::read(buf, v);
                 if kind != 0 {
                     xl = v.filter(0, kind, xl);
                     xr = v.filter(1, kind, xr);
