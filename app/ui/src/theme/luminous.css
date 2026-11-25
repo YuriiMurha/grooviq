@@ -1,0 +1,55 @@
+/* Luminous: layered graphite, cool highlights and paired edge-lit inks.
+   Base roles from the theme-scope profile, paired inks and material colors from style-lab high-end. */
+:root[data-theme="luminous"] {
+  --bg: #0d0e12;
+  --panel: #18191f;
+  --raised: #24252c;
+  --line: #2f3139;
+  --line-soft: #1f2027;
+  --text: #f3f4f8;
+  --muted: #b9bdc9;
+  --faint: #a1a6b4;
+  --accent: #f6f3ec;
+  --select: #47b9ff; /* a clearer blue edge next to the periwinkle channel */
+  --ok: #5fe3b8;
+  --ink-1: #ff8b78; --ink-1b: #f0476d;
+  --ink-2: #93a7ff; --ink-2b: #6a5cf5;
+  --ink-3: #ffd27c; --ink-3b: #f39a45;
+  --ink-4: #ef9cf2; --ink-4b: #a95cf0;
+  --ink-5: #72ecd5; --ink-5b: #1fb2c7;
+  --ink-6: #a9eb8f; --ink-6b: #3fbf7f;
+  --font: "Manrope Variable", system-ui, sans-serif;
+  --radius-s: 6px;
+  --radius-m: 9px;
+  --radius-l: 13px;
+
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --paper: #f3f4f8;
+  --well: #0a0b0d; /* 26% black over the graphite stage, baked for the canvases */
+  --rec: #ff8b78;
+  --hair: rgba(255, 255, 255, 0.07);
+  --step-a: #14151b;
+  --step-b: #0f1015;
+  --step-lit: #25262e; /* lit graphite above the velocity fill */
+  --knob-track: #393a41; /* 10% white on raised graphite */
+  --reg-x: 2px;
+  --reg-y: 2px;
+
+  --roll-row: #15161c;
+  --roll-row-black: #101116;
+  --roll-dim: rgba(10, 11, 14, 0.58);
+  --roll-line: rgba(255, 255, 255, 0.028);
+  --roll-beat: rgba(255, 255, 255, 0.075);
+  --roll-bar: rgba(255, 255, 255, 0.17);
+  --roll-box: rgba(71, 185, 255, 0.10);
+  --roll-key-white: #dcdee4;
+  --roll-key-black: #23252c;
+
+  --dev-card: #222329; /* lit glass over the graphite panel */
+  --dev-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10), 0 0 0 1px var(--line),
+    0 24px 60px -22px rgba(0, 0, 0, 0.75);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --z-overlay: 20;
+  --z-device: 5;
+  --toolbar-h: 56px;
+}
