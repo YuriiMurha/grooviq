@@ -187,6 +187,14 @@ pub enum ChannelKind {
     Synth,
 }
 
+/// Where the display name came from, independently of playback decoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SampleNameBasis {
+    AvailableFile,
+    StoredReference,
+}
+
 /// One channel of the rack.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -195,8 +203,10 @@ pub struct ChannelView {
     pub name: String,
     /// An index into the palette (0 = `--ink-1`).
     pub color: u8,
-    /// The sample's file name.
+    /// The available file name, falling back to the stored reference basename.
     pub sample_name: Option<String>,
+    pub sample_name_basis: Option<SampleNameBasis>,
+    pub sample_reference: Option<String>,
     /// The channel has a sample, but it is not loaded (not in the file, or it did not decode):
     /// it is silent until relinked.
     pub missing: bool,
@@ -1626,6 +1636,15 @@ impl Session {
             name: c.name.clone(),
             color: c.color,
             sample_name,
+            sample_name_basis: if self.files.contains_key(&c.id) {
+                Some(SampleNameBasis::AvailableFile)
+            } else {
+                c.sample.as_ref().map(|_| SampleNameBasis::StoredReference)
+            },
+            sample_reference: c
+                .sample
+                .as_ref()
+                .map(|s| s.path.to_string_lossy().into_owned()),
             missing: c.sample.is_some() && !self.decoded.contains_key(&c.id),
             sample_frames: self.decoded.get(&c.id).map(|s| s.len() as u64),
             volume: c.volume,
