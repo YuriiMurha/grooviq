@@ -275,19 +275,23 @@ def capture(repo, base, head, output):
     env = {k: v for k, v in os.environ.items() if k in ('PATH', 'HOME', 'RUSTUP_HOME', 'CARGO_HOME', 'LANG', 'TMPDIR', 'RUNNER_TRACKING_ID')}
     env.update(CARGO_BUILD_JOBS='2', CARGO_INCREMENTAL='0')
     tools = {}
-    for name, args in {'rustc': ['rustc', '+1.100.0', '-Vv'], 'cargo': ['cargo', '+1.100.0', '-V'],
-                       'runner': ['gungraun-runner', '--version'], 'valgrind': ['valgrind', '--version'],
-                       'valgrind_package': ['dpkg-query', '-W', 'valgrind'], 'uname': ['uname', '-a']}.items():
-        tools[name] = run(args, repo, env)
-    if '0ef1bc386059596dada8fb65b50425aab2ea637a' not in tools['rustc'] or '0.20.0' not in tools['runner']:
-        raise CaptureError('compiler/runner mismatch')
     output.mkdir(mode=0o700)
     report = {'status': 'failed', 'capture_result': 'failed', 'original_ref': original_ref, 'tools': tools, 'environment': {k: os.environ.get(k) for k in ('ImageOS', 'ImageVersion', 'RUNNER_ARCH')},
               'source_blobs': PINS, 'cpu': Path('/proc/cpuinfo').read_text() if Path('/proc/cpuinfo').exists() else 'unavailable',
               'flags': {'CARGO_BUILD_JOBS': '2', 'CARGO_INCREMENTAL': '0'}, 'runs': [],
               'limits': 'Historical runner image may be unavailable; totals must match before attribution. Selected commits execute build scripts; no sandbox.'}
     unsettled = False
+    in_tool_preflight = True
+    probe = None
     try:
+        for probe, args in {'rustc': ['rustc', '+1.100.0', '-Vv'], 'cargo': ['cargo', '+1.100.0', '-V'],
+                            'runner': ['gungraun-runner', '--version'], 'valgrind': ['valgrind', '--version'],
+                            'valgrind_package': ['dpkg-query', '-W', 'valgrind'], 'uname': ['uname', '-a']}.items():
+            tools[probe] = run(args, repo, env)
+        probe = None
+        if '0ef1bc386059596dada8fb65b50425aab2ea637a' not in tools['rustc'] or '0.20.0' not in tools['runner']:
+            raise CaptureError('compiler/runner mismatch')
+        in_tool_preflight = False
         # Private fresh target prevents stale profile reuse; never clean a caller cache.
         with private_target() as target:
             report['target'] = str(target)
@@ -348,10 +352,16 @@ def capture(repo, base, head, output):
         # No forced checkout: selected build-script writes and Git locks survive.
         with settling_signals():
             report['restoration'] = {'succeeded': False}
+            if in_tool_preflight:
+                # Keep tool stderr in the raised error rather than copying it into the artifact.
+                report['failure'] = {'phase': 'tool_preflight', 'tool': probe}
+                report['restoration']['required'] = False
             try:
                 if unsettled:
                     report['status'] = 'failed_process_cleanup'
                     report['restoration']['error'] = 'owned processes unsettled; target and checkout preserved'
+                    report['settled_ref'] = None
+                elif in_tool_preflight:
                     report['settled_ref'] = None
                 else:
                     try:
