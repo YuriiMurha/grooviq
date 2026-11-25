@@ -1475,6 +1475,7 @@ version = "0.1.0"
 dependencies = [
  "assert_no_alloc",
  "cpal",
+ "divan",
  "getrandom 0.4.3",
  "grooviq-dsp",
  "hound",

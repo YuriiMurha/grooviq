@@ -16,6 +16,9 @@ export interface ChannelView {
   /** 0..5: the ink is `--ink-(color + 1)`. */
   color: number;
   sampleName: string | null;
+  /** Optional for older view fixtures; absence does not establish a filename. */
+  sampleNameBasis?: "availableFile" | "storedReference" | null;
+  sampleReference?: string | null;
   /** The sample could not be found when the project opened. */
   missing: boolean;
   /** The loaded sample's length in frames; `null` without one (missing, none, or a synth). */

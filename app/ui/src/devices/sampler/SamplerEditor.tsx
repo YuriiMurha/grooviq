@@ -177,7 +177,12 @@ export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onE
             className="dbutton"
             aria-label={channel.missing ? `Relink ${channel.name}` : `Choose a sample for ${channel.name}`}
             data-hint={`Choose the file ${channel.name} should play.`}
-            onClick={() => onRelink(channel)}
+            onClick={(event) => {
+              // WebKit pointer activation does not focus buttons. Keep Escape in this window
+              // when the picker is cancelled, without taking focus on an async reply.
+              event.currentTarget.focus({ preventScroll: true });
+              onRelink(channel);
+            }}
           >
             {channel.missing ? "Relink…" : "Choose a sample…"}
           </button>
@@ -224,7 +229,8 @@ export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onE
               <details className="sample-file-details">
                 <summary tabIndex={0}>File details</summary>
                 <dl>
-                  <dt>{channel.missing ? "Stored reference" : "File"}</dt><dd>{channel.sampleName ?? "No sample"}</dd>
+                  <dt>File</dt><dd>{channel.sampleNameBasis === "availableFile" ? channel.sampleName : channel.sampleName ? "Filename unavailable" : "No sample"}</dd>
+                  {channel.sampleReference != null && channel.sampleNameBasis !== "availableFile" && <><dt>Stored reference</dt><dd>{channel.sampleReference}</dd></>}
                   <dt>Status</dt><dd>{channel.missing ? "Missing — locate the file to restore playback." : channel.sampleName ? "Loaded" : "No sample yet"}</dd>
                   {channel.sampleFrames !== null && <><dt>Length</dt><dd>{channel.sampleFrames.toLocaleString()} frames</dd></>}
                 </dl>

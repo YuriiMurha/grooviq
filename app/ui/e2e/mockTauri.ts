@@ -26,7 +26,7 @@ export interface MockProject {
   arrangement?: { tracks: { id: number; name: string; color: number; mute: boolean }[];
     clips: { id: number; track: number; name: string; startTick: number; muted: boolean;
       content: { type: "pattern"; pattern: number; offsetTick: number; lengthTicks: number } }[];
-    audioAssets: never[]; loopRegion: null };
+    audioAssets: never[]; loopRegion: { startTick: number; endTick: number; enabled: boolean } | null };
   nextId: number;
   key?: { root: number; scale: string } | null;
 }
@@ -40,6 +40,8 @@ export interface MockChannel {
   /** The project holds the sample's bytes (every saved sample is embedded). `false`: they are
    * missing from the project file, so the channel shows "Missing" until relinked. */
   embedded?: boolean;
+  /** Encoded bytes exist but cannot be decoded. */
+  decodeFailed?: boolean;
   volume: number;
   pan: number;
   mute: boolean;
@@ -324,7 +326,7 @@ export function installMockTauri(seed: MockSeed): void {
   const plain = (n: MockNote) => n.tick % STEP_TICKS === 0 && n.length === STEP_TICKS && n.key === 60 && !n.slide;
   const isRoll = (id: number) => s.project.pattern.notes.some((n) => n.channel === id && !plain(n));
   // session.rs: missing = a sample reference without decoded bytes. The path is never opened.
-  const missing = (c: MockChannel) => c.sample !== null && c.embedded === false;
+  const missing = (c: MockChannel) => c.sample !== null && (c.embedded === false || c.decodeFailed === true);
   /** A sample file's length (a second unless the file says otherwise). */
   const sampleSeconds = (path: string) => {
     const f = files.get(path);
@@ -351,6 +353,8 @@ export function installMockTauri(seed: MockSeed): void {
         name: c.name,
         color: c.color,
         sampleName: c.sample ? fileName(c.sample) : null,
+        sampleNameBasis: c.sample === null ? null : c.embedded === false ? "storedReference" : "availableFile",
+        sampleReference: c.sample,
         missing: missing(c),
         // session.rs: the decoded sample's length; none while it is missing.
         sampleFrames: c.sample === null || missing(c) ? null : (c.frames ?? Math.round(48_000 * sampleSeconds(c.sample))),
@@ -1371,7 +1375,7 @@ export function installMockTauri(seed: MockSeed): void {
       const operations: Record<string, unknown>[] = JSON.parse(raw);
       if (!Array.isArray(operations) || operations.length > 100_000) throw "Invalid arrangement batch";
       const before: Arrangement = clone(s.project.arrangement ?? { tracks: [], clips: [], audioAssets: [], loopRegion: null });
-      if (before.audioAssets.length || before.loopRegion) throw "Audio/automation editing is outside the finite pattern fixture";
+      if (before.audioAssets.length) throw "Audio/automation editing is outside the finite pattern fixture";
       const candidate = clone(s.project); const arrangement = clone(before); candidate.arrangement = arrangement;
       const addedPatterns = new Map<number, PatternEntry>();
       const sourcePattern = (id: number) => addedPatterns.get(id) ?? patternBank.get(id);
@@ -1390,7 +1394,15 @@ export function installMockTauri(seed: MockSeed): void {
       const clip = (value: unknown) => { const id = int(value, 0xffffffff); const result = arrangement.clips.find(c => c.id === id); if (!result) throw "Unknown clip"; return result; };
       operations.forEach((op, index) => {
         if (!op || typeof op !== "object") throw "Invalid arrangement operation";
-        if (op.kind === "createTrack") {
+        if (op.kind === "setLoop") {
+          if (op.region === null) arrangement.loopRegion = null;
+          else {
+            const region = op.region as Record<string, unknown>;
+            const startTick = int(region.startTick), endTick = int(region.endTick);
+            if (startTick >= endTick || typeof region.enabled !== "boolean") throw "Invalid loop region";
+            arrangement.loopRegion = { startTick, endTick, enabled: region.enabled };
+          }
+        } else if (op.kind === "createTrack") {
           const id = allocate(); arrangement.tracks.push({ id, name: name(op.name), color: int(op.color, 5), mute: false }); ids.push(id); tracksByOperation.set(index, id);
         } else if (op.kind === "createClip" || op.kind === "createClipOnCreatedTrack") {
           const target = op.kind === "createClip" ? track(op.track) : tracksByOperation.get(int(op.trackOperation, 100_000));
@@ -1529,6 +1541,7 @@ export function installMockTauri(seed: MockSeed): void {
       const c = s.project.channels[channelIndex(a.channel)];
       c.sample = path;
       c.embedded = true;
+      delete c.decodeFailed;
       // session.rs: the length is the new file's (a seeded length belonged to the old one).
       delete c.frames;
       invalidateTrim(c.id,true);
@@ -1604,7 +1617,7 @@ export function installMockTauri(seed: MockSeed): void {
     },
     channel_waveform: (a) => {
       const c = s.project.channels[channelIndex(a.channel)];
-      if (c.kind === "synth" || c.sample === null || c.embedded === false) throw `${c.name} has no sample to draw.`;
+      if (c.kind === "synth" || c.sample === null || missing(c)) throw `${c.name} has no sample to draw.`;
       // session.rs `waveform_peaks`: 1..=MAX_WAVEFORM_POINTS points.
       const points = clamp(a.points as number, 1, 16_384);
       const buf = new ArrayBuffer(points * 8);
