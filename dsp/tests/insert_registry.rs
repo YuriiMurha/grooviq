@@ -1,6 +1,6 @@
 use grooviq_dsp::{
     Device, EFFECTS, InsertError, create, create_insert, db_to_gain, is_stepped,
-    max_latency_frames, param_ids, param_spec, preset, presets,
+    max_latency_frames, max_memory_bytes, param_ids, param_spec, preset, presets,
 };
 
 #[global_allocator]
@@ -304,5 +304,89 @@ fn invalid_inserts_return_typed_errors() {
     for value in [0., 0.4, 1.] {
         params[4] = value;
         assert!(create_insert("utility", 48000., 0, &params).is_ok());
+    }
+}
+
+/// Eight 128-frame blocks of deterministic noise (longer than the 15 ms smoothers), as bits.
+fn first_blocks(device: &mut dyn Device) -> Vec<u32> {
+    let mut state = 0x1234_5678u32;
+    let mut out = Vec::new();
+    for _ in 0..8 {
+        let (mut left, mut right) = ([0f32; 128], [0f32; 128]);
+        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let v = (state >> 8) as f32 / 16_777_216.0 * 2.0 - 1.0;
+            (*l, *r) = (0.5 * v, -0.3 * v);
+        }
+        device.process(&mut left, &mut right, None, &[]);
+        out.extend(left.iter().chain(&right).map(|x| x.to_bits()));
+    }
+    out
+}
+
+/// `create_insert` must not glide from the defaults: its first blocks equal the same device
+/// after `reset()`, which snaps every smoother, at the minimum, maximum and middle vectors.
+#[test]
+fn every_effect_starts_at_the_requested_values() {
+    for id in EFFECTS {
+        let spec = param_spec(id).unwrap();
+        let vectors: [Vec<f32>; 3] = [
+            spec.iter().map(|s| s.0).collect(),
+            spec.iter().map(|s| s.1).collect(),
+            spec.iter().map(|s| 0.5 * (s.0 + s.1)).collect(),
+        ];
+        for params in &vectors {
+            let mut fresh = create_insert(id, 48000., 9, params).unwrap();
+            let mut snapped = create_insert(id, 48000., 9, params).unwrap();
+            snapped.reset();
+            assert!(
+                first_blocks(fresh.as_mut()) == first_blocks(snapped.as_mut()),
+                "{id} glides from its defaults at {params:?}"
+            );
+        }
+    }
+}
+
+/// Construction, latency and memory admission refuse exactly the same rates.
+#[test]
+fn rates_outside_the_native_range_are_refused_everywhere() {
+    for id in EFFECTS {
+        let params = defaults(id);
+        for sr in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.,
+            -48000.,
+            7999.,
+            384_001.,
+        ] {
+            assert_eq!(
+                create_insert(id, sr, 1, &params).err(),
+                Some(InsertError::InvalidSampleRate),
+                "{id} at {sr}"
+            );
+            assert_eq!(max_latency_frames(id, sr), None, "{id} at {sr}");
+            assert_eq!(
+                max_memory_bytes(id, sr),
+                Err(InsertError::InvalidSampleRate),
+                "{id} at {sr}"
+            );
+        }
+        for sr in [
+            8000., 16000., 22049., 22050., 44100., 192000., 192001., 384000.,
+        ] {
+            let admitted = max_memory_bytes(id, sr).is_ok();
+            assert_eq!(
+                create_insert(id, sr, 1, &params).is_ok(),
+                admitted,
+                "{id} at {sr}"
+            );
+            assert_eq!(
+                max_latency_frames(id, sr).is_some(),
+                admitted,
+                "{id} at {sr}"
+            );
+        }
     }
 }

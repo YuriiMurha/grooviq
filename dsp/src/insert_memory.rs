@@ -36,37 +36,21 @@ impl Payload {
     }
 }
 
-fn delay_payload(sample_rate: f32) -> Payload {
-    // Delay's MAX_MS is the longest division at the lowest legal BPM. Derive it
-    // from the public tables so the bound follows changes to the tempo range.
-    let max_ms =
-        delay::DIVISION_BEATS[delay::DIVISION_BEATS.len() - 1] * 60_000.0 / delay::SPEC[8].0;
-    let frames = (max_ms * 0.001 * sample_rate) as usize;
-    let Some(max) = frames.checked_add(8) else {
-        return Payload(None);
-    };
-    let mut payload = Payload::boxed::<delay::Delay>();
-    payload.delay_lines(max, 2);
-    payload
-}
-
 const STANDARD_RATE: RangeInclusive<f32> = 22050.0..=192000.0;
 const EXTENDED_RATE: RangeInclusive<f32> = 8000.0..=384000.0;
 type MemoryBound = fn(f32) -> Payload;
 
-/// Bounds a built-in effect's device-owned payload before construction for any legal parameters.
-/// Includes the boxed state, all owned buffer capacities, and any constructor scratch space.
-/// Excludes allocator metadata and shared inputs. Rates outside the effect's native range
-/// return an error, even when its standalone constructor would clamp the rate.
-pub fn max_memory_bytes(id: &str, sample_rate: f32) -> Result<u64, InsertError> {
-    let (rates, bound): (_, MemoryBound) = match id {
+/// Each effect's native sample-rate range and payload bound: the one table that admission
+/// (`max_memory_bytes`), construction (`create_insert`) and `max_latency_frames` share.
+fn table(id: &str) -> Result<(RangeInclusive<f32>, MemoryBound), InsertError> {
+    Ok(match id {
         "algorithmic_reverb" => (STANDARD_RATE, algorithmic_reverb::memory_payload),
         "bitcrusher" => (STANDARD_RATE, |_| {
             Payload::boxed::<bitcrusher::Bitcrusher>()
         }),
         "character_delay" => (STANDARD_RATE, character_delay::memory_payload),
         "comp" => (EXTENDED_RATE, |_| Payload::boxed::<comp::Comp>()),
-        "delay" => (EXTENDED_RATE, delay_payload),
+        "delay" => (EXTENDED_RATE, delay::memory_payload),
         "drive" => (EXTENDED_RATE, |_| drive::memory_payload()),
         "drum_shaper" => (STANDARD_RATE, |_| {
             Payload::boxed::<drum_shaper::DrumShaper>()
@@ -82,11 +66,27 @@ pub fn max_memory_bytes(id: &str, sample_rate: f32) -> Result<u64, InsertError> 
         "utility" => (EXTENDED_RATE, |_| Payload::boxed::<utility::Utility>()),
         _ if EFFECTS.contains(&id) => return Err(InsertError::MemoryBoundUnavailable),
         _ => return Err(InsertError::UnknownEffect),
-    };
-    // Validate the native rate before the constructor's bounded float-to-frame conversions.
-    if !rates.contains(&sample_rate) {
-        return Err(InsertError::InvalidSampleRate);
+    })
+}
+
+/// Refuses a rate outside the effect's native range (NaN and infinities included) instead of
+/// letting its constructor clamp it, so admission and construction always agree.
+pub(crate) fn check_rate(id: &str, sample_rate: f32) -> Result<(), InsertError> {
+    if table(id)?.0.contains(&sample_rate) {
+        Ok(())
+    } else {
+        Err(InsertError::InvalidSampleRate)
     }
+}
+
+/// Bounds a built-in effect's device-owned payload before construction for any legal parameters.
+/// Includes the boxed state, all owned buffer capacities, and any constructor scratch space.
+/// Excludes allocator metadata and shared inputs. Rates outside the effect's native range
+/// return an error, even when its standalone constructor would clamp the rate.
+pub fn max_memory_bytes(id: &str, sample_rate: f32) -> Result<u64, InsertError> {
+    let (_, bound) = table(id)?;
+    // Validate the native rate before the constructor's bounded float-to-frame conversions.
+    check_rate(id, sample_rate)?;
     bound(sample_rate).finish()
 }
 

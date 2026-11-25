@@ -82,10 +82,21 @@ pub struct Delay {
     out_m: PeakMeter,
 }
 
+/// Ring length at the (clamped) rate `sr`: the longest delay plus the read margin.
+fn buffer_delay(sr: f32) -> usize {
+    (MAX_MS * 0.001 * sr) as usize + 8
+}
+
+pub(crate) fn memory_payload(sr: f32) -> crate::insert_memory::Payload {
+    let mut payload = crate::insert_memory::Payload::boxed::<Delay>();
+    payload.delay_lines(buffer_delay(sr.clamp(8000.0, 384_000.0)), 2);
+    payload
+}
+
 impl Delay {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.clamp(8000.0, 384_000.0);
-        let max = (MAX_MS * 0.001 * sr) as usize + 8;
+        let max = buffer_delay(sr);
         let ctrl_rate = sr / CTRL as f32;
         let mut d = Self {
             sr,

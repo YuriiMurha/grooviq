@@ -205,7 +205,9 @@ pub fn preset(id: &str, name: &str) -> Option<Vec<(u32, f32)>> {
 }
 
 /// Upper bound on an effect's [`Device::latency_frames`] at this sample rate for any parameters.
+/// `None` for an unknown effect or a rate outside the effect's native range.
 pub fn max_latency_frames(id: &str, sample_rate: f32) -> Option<u32> {
+    insert_memory::check_rate(id, sample_rate).ok()?;
     Some((insert_spec(id)?.latency)(sample_rate))
 }
 
@@ -245,6 +247,7 @@ impl std::error::Error for InsertError {}
 /// [`param_spec`] order. Bitcrusher and Lo-fi Colour use a 32-bit seed formed by XORing the high
 /// and low halves of `seed`. Other seeded constructors receive `seed` unchanged.
 /// The first processed block starts at the supplied parameter values.
+/// A rate outside the effect's native range (the one [`max_memory_bytes`] checks) is refused.
 pub fn create_insert(
     id: &str,
     sample_rate: f32,
@@ -254,6 +257,8 @@ pub fn create_insert(
     if !EFFECTS.contains(&id) {
         return Err(InsertError::UnknownEffect);
     }
+    // Constructors clamp or panic on rates outside their range; refuse those before building.
+    insert_memory::check_rate(id, sample_rate)?;
     let spec = param_spec(id).ok_or(InsertError::UnknownEffect)?;
     if params.len() != spec.len() {
         return Err(InsertError::ParameterCount {
