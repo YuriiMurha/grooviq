@@ -26,7 +26,7 @@ export interface MockProject {
   arrangement?: { tracks: { id: number; name: string; color: number; mute: boolean }[];
     clips: { id: number; track: number; name: string; startTick: number; muted: boolean;
       content: { type: "pattern"; pattern: number; offsetTick: number; lengthTicks: number } }[];
-    audioAssets: never[]; loopRegion: null };
+    audioAssets: never[]; loopRegion: { startTick: number; endTick: number; enabled: boolean } | null };
   nextId: number;
   key?: { root: number; scale: string } | null;
 }
@@ -1371,7 +1371,7 @@ export function installMockTauri(seed: MockSeed): void {
       const operations: Record<string, unknown>[] = JSON.parse(raw);
       if (!Array.isArray(operations) || operations.length > 100_000) throw "Invalid arrangement batch";
       const before: Arrangement = clone(s.project.arrangement ?? { tracks: [], clips: [], audioAssets: [], loopRegion: null });
-      if (before.audioAssets.length || before.loopRegion) throw "Audio/automation editing is outside the finite pattern fixture";
+      if (before.audioAssets.length) throw "Audio/automation editing is outside the finite pattern fixture";
       const candidate = clone(s.project); const arrangement = clone(before); candidate.arrangement = arrangement;
       const addedPatterns = new Map<number, PatternEntry>();
       const sourcePattern = (id: number) => addedPatterns.get(id) ?? patternBank.get(id);
@@ -1390,7 +1390,15 @@ export function installMockTauri(seed: MockSeed): void {
       const clip = (value: unknown) => { const id = int(value, 0xffffffff); const result = arrangement.clips.find(c => c.id === id); if (!result) throw "Unknown clip"; return result; };
       operations.forEach((op, index) => {
         if (!op || typeof op !== "object") throw "Invalid arrangement operation";
-        if (op.kind === "createTrack") {
+        if (op.kind === "setLoop") {
+          if (op.region === null) arrangement.loopRegion = null;
+          else {
+            const region = op.region as Record<string, unknown>;
+            const startTick = int(region.startTick), endTick = int(region.endTick);
+            if (startTick >= endTick || typeof region.enabled !== "boolean") throw "Invalid loop region";
+            arrangement.loopRegion = { startTick, endTick, enabled: region.enabled };
+          }
+        } else if (op.kind === "createTrack") {
           const id = allocate(); arrangement.tracks.push({ id, name: name(op.name), color: int(op.color, 5), mute: false }); ids.push(id); tracksByOperation.set(index, id);
         } else if (op.kind === "createClip" || op.kind === "createClipOnCreatedTrack") {
           const target = op.kind === "createClip" ? track(op.track) : tracksByOperation.get(int(op.trackOperation, 100_000));
