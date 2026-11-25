@@ -146,6 +146,27 @@ class GitHubTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "policy changed"):
                     repo.checks("a" * 40)
 
+    def test_changed_required_app_binding_stops_before_inspecting_checks(self):
+        for changed_app in (ACTIONS_APP + 1, None):
+            with self.subTest(app_id=changed_app):
+                repo = GitHub()
+                calls = []
+                contexts = [
+                    {"context": name, "app_id": changed_app if name == "ui" else ACTIONS_APP}
+                    for name in REQUIRED
+                ]
+
+                def api(path, **kwargs):
+                    calls.append(path)
+                    if path == "branches/main/protection/required_status_checks":
+                        return {"strict": True, "checks": contexts}
+                    return []
+
+                repo.api = api
+                with self.assertRaisesRegex(RuntimeError, "policy changed"):
+                    repo.checks("a" * 40)
+                self.assertEqual(calls, ["branches/main/protection/required_status_checks"])
+
     def test_check_app_and_commit_are_both_verified(self):
         sha = "a" * 40
         check = {"name": "ui", "head_sha": sha, "status": "completed",
