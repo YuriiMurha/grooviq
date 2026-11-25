@@ -57,6 +57,8 @@ describe("playlist clip actions", () => {
       { kind: "copy", clip: 20, track: 1, startTick: MAX_SONG_TICKS - 3420 },
       { kind: "copy", clip: 10, track: 2, startTick: MAX_SONG_TICKS - 1920 },
     ]);
+    const atEnd = [first, { ...second, startTick: MAX_SONG_TICKS - 1920 }];
+    expect(buildClipAction("duplicate", selectedPatternClips(atEnd, selection))).toEqual([]);
   });
 
   it.each(["delete", "mute", "duplicate"] as const)("builds no %s batch for empty or read-only selections", action => {

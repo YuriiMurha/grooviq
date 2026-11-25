@@ -30,6 +30,8 @@ export function buildClipAction(action: ClipAction, clips: readonly PatternClip[
         endTick = Math.max(endTick, clip.startTick + clip.content.lengthTicks);
       }
       const offset = Math.min(endTick - firstTick, MAX_SONG_TICKS - endTick);
+      // At the song horizon a copy would land exactly on its original and be invisible.
+      if (offset <= 0) return [];
       return clips.map(clip => ({ kind: "copy", clip: clip.id, track: clip.track, startTick: clip.startTick + offset }));
     }
   }

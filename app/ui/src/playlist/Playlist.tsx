@@ -184,10 +184,14 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
         generation: result.reply.generation, ids: [...result.reply.createdIds],
         originals: selectedIds.length > 1 ? selectedIds : undefined,
       } : current);
-    }
-    // Keep a deleted group's IDs so one Undo can re-select the restored clips.
-    if (action === "delete" && selectedClip) {
+    } else if (action === "delete" && selectedClip) {
+      // A single-clip delete closes its inspector (#449). A group delete keeps its IDs so
+      // one Undo re-selects the restored group.
       setSelected(current => current === selectedState ? null : current);
+    } else if (selectedState?.originals) {
+      // Any later edit ends the duplicate's Undo fallback: deleting the copies must not
+      // silently re-select their originals.
+      setSelected(current => current && current === selectedState ? { generation: current.generation, ids: current.ids } : current);
     }
   };
   const down = (event: PointerEvent<HTMLCanvasElement>) => {

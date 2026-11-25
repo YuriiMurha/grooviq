@@ -156,3 +156,22 @@ for (const { action, operations, after, selectedCount } of cases) {
     expect(await argsFor(mock, "project_save")).toEqual([]);
   });
 }
+
+test("group duplicate selects the copies, and deleting them leaves nothing selected", async ({ app, mock }) => {
+  const duplicate = cases.find(entry => entry.action === "duplicate");
+  if (!duplicate) throw new Error("Missing duplicate case");
+  const group = await selectGroup(app);
+  await invokeAction(group, "duplicate");
+  await expect.poll(async () => (await state(app)).clips).toEqual(duplicate.after);
+  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
+  const copied = await state(app);
+
+  await invokeAction(group, "delete");
+  await expect.poll(async () => (await state(app)).clips).toEqual(group.before.clips);
+  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
+  await expect(group.selected).toHaveText("0 selected");
+  expect(await argsFor(mock, "arrangement_edit")).toEqual([
+    ...editArgs(group.before, duplicate.operations),
+    ...editArgs(copied, [{ kind: "deleteClip", clip: 6 }, { kind: "deleteClip", clip: 7 }]),
+  ]);
+});
