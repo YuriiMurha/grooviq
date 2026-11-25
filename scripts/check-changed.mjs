@@ -167,6 +167,8 @@ if (ui || workspace || changed.some((path) => path.startsWith("scripts/e2e-brows
   step("e2e browser accounting safety tests", "node", ["--test", "scripts/e2e-browser-results.test.mjs"]);
 if (ui || workspace || changed.some((path) => path.startsWith("scripts/e2e-diagnostics") || path === "Makefile"))
   step("e2e diagnostic safety tests", "node", ["--test", "scripts/e2e-diagnostics.test.mjs"]);
+if (ui || workspace || changed.some((path) => path.startsWith("scripts/rerun-no-runner") || path === "Makefile"))
+  step("runner acquisition retry tests", "node", ["--test", "scripts/rerun-no-runner.test.cjs"]);
 if (ui) {
   step("ui lint", "npm", ["run", "lint"], uiDir);
   step("ui typecheck", "npm", ["run", "typecheck"], uiDir);

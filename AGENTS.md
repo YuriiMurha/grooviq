@@ -56,8 +56,11 @@ Read the code; it is the documentation. `make help` lists the supported commands
 - Only Quality's merge train merges to main. Never merge, use `--admin`, arm GitHub auto-merge,
   or update an enrolled branch yourself.
 
-CI quirk: `rust (macos-latest)` is sometimes cancelled at about 15 minutes with zero steps (no runner).
-It is re-run: `gh run rerun <run-id> --failed` on your own unenrolled PR; the train handles enrolled ones.
+CI quirk: `rerun-no-runner.yml` automatically re-runs `rust (macos-latest)` once on the current head after a
+zero-step runner acquisition cancellation. If it is still cancelled with zero steps after that workflow ran
+(no attempt 2, or attempt 2 cancelled the same way) and the run's commit is still the head of your own
+unenrolled PR, run `gh run rerun <run-id> --failed`; the train handles enrolled PRs. A stale commit needs
+no rerun: the new head has its own run.
 
 ## Verify
 
