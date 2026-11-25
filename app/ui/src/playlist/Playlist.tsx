@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from "react";
-import type { ArrangementStamp } from "../api/arrangement";
+import type { LoopRegion, ArrangementStamp } from "../api/arrangement";
 import type { PatternsView } from "../api/patterns";
 import { PATTERN_DRAG_TYPE } from "../patterns/PickerRail";
 import { isProjectReplacing, projectGeneration } from "../project/replacement";
@@ -11,6 +11,7 @@ import { createPlaylistRenderer, readPlaylistPalette, type PlaylistRenderer, typ
 import type { PlaylistModel } from "./usePlaylist";
 import { extent, hitClip, projectClips, viewport, type RenderClip } from "./viewport";
 import { PatternGroupGesture, crossedThreshold, marqueeRect, marqueeSelection, toggleSelection, togglesSelection, type GroupPreview } from "./groupGesture";
+import { keyboardLoop, LoopGesture, rulerTick } from "./ruler";
 import "./playlist.css";
 
 type Props = Readonly<{ model: PlaylistModel; patterns: PatternsView | null; bpm: number; beats: number; unit: number }>;
@@ -37,6 +38,9 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
   const [capturedMembers, setCapturedMembers] = useState<ReadonlySet<number> | null>(null);
   const previewMembers = capturedMembers ?? selection;
   const [preview, setPreview] = useState<PatternPreview | null>(null);
+  const [loopPreview, setLoopPreview] = useState<LoopRegion | null>(null);
+  const ruler = useRef<HTMLDivElement>(null);
+  const loopActive = useRef<{ gesture: LoopGesture; pointerId: number; stamp: ArrangementStamp } | null>(null);
   const [previewIndex, setPreviewIndex] = useState(-1);
   const [sliceGuide, setSliceGuide] = useState<{ tick: number; trackIndex: number } | null>(null);
   const [rendererKind, setRendererKind] = useState<string>("Loading display");
@@ -65,6 +69,8 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
   const selectedClip = selected === null ? null : patternClips.get(selected) ?? null;
   const selectedIndex = useMemo(() => selected === null ? -1 : clips.findIndex(clip => clip.id === selected), [clips, selected]);
   const cancel = useCallback(() => {
+    const loop = loopActive.current; loopActive.current = null; loop?.gesture.cancel(); setLoopPreview(null);
+    if (loop && ruler.current?.hasPointerCapture(loop.pointerId)) ruler.current.releasePointerCapture(loop.pointerId);
     const owned = active.current;
     const pointerId = owned?.pointerId ?? marquee.current?.pointerId;
     marquee.current = null; setSelectionRect(null); setGroupPreview(null); setCapturedMembers(null);
@@ -80,7 +86,7 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     return () => observer.disconnect();
   }, [cancel]);
   useEffect(() => {
-    const captured = active.current ?? marquee.current;
+    const captured = active.current ?? marquee.current ?? loopActive.current;
     const stale = !snapshot || isProjectReplacing() || Boolean(captured &&
       (captured.stamp.generation !== snapshot.generation || captured.stamp.revision !== snapshot.revision));
     if (!stale) return;
@@ -281,6 +287,37 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       if (batch?.length) void commit(snapshot, batch, false);
     }
   };
+  const loopDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || busy || !snapshot || isProjectReplacing() || modalIsOpen() || event.ctrlKey || event.metaKey) return;
+    cancel(); event.currentTarget.focus();
+    const tick = rulerTick(event.clientX, event.currentTarget.getBoundingClientRect(), event.currentTarget.clientWidth, view);
+    loopActive.current = { gesture: new LoopGesture({ pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration() }, tick, quantum, event.clientX, snapshot.loopRegion?.enabled ?? true), pointerId: event.pointerId, stamp: snapshot };
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { cancel(); }
+  };
+  const loopMove = (event: PointerEvent<HTMLDivElement>, release = false) => {
+    const owned = loopActive.current;
+    if (!owned || owned.pointerId !== event.pointerId) return;
+    if (busy || !snapshot || isProjectReplacing() || modalIsOpen() || !event.currentTarget.hasPointerCapture(event.pointerId)) { cancel(); return; }
+    const tick = rulerTick(event.clientX, event.currentTarget.getBoundingClientRect(), event.currentTarget.clientWidth, view);
+    setLoopPreview(owned.gesture.update(tick, event.clientX));
+    if (!release) return;
+    const batch = owned.gesture.take({ pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration() });
+    cancel(); if (batch) void commit(owned.stamp, batch, false);
+  };
+  const loopKey = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") { event.preventDefault(); cancel(); return; }
+    if (!event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (!["Home", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (busy || !snapshot || isProjectReplacing() || modalIsOpen() || event.repeat) return;
+    const previous = snapshot.loopRegion;
+    const region = keyboardLoop(event.key, previous, view.scrollTick, quantum);
+    if (!region || (previous?.startTick === region.startTick && previous.endTick === region.endTick)) return;
+    cancel();
+    void commit(snapshot, [{ kind: "setLoop", region }], false);
+  };
+  const shownLoop = loopPreview ?? snapshot?.loopRegion;
   const visibleLabels = useMemo(() => {
     const labels: RenderClip[] = [];
     const single: RenderClip | null = preview ? { ...preview, kind: "pattern", lengthTicks: preview.content.lengthTicks, ink: 0 } : null;
@@ -312,12 +349,21 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
   return <section className="playlist" aria-label="Playlist" aria-busy={state.busy}>
     <header className="playlist-tools"><h2>Playlist</h2>
       <div role="group" aria-label="Playlist tool"><button type="button" aria-pressed={tool === "draw"} onClick={() => { cancel(); setTool("draw"); }}>Draw</button><button type="button" aria-pressed={tool === "select"} onClick={() => { cancel(); setTool("select"); }}>Select</button><button type="button" aria-pressed={tool === "slice"} onClick={() => { cancel(); setTool("slice"); }}>Slice</button></div>
+      <button type="button" aria-pressed={snapshot?.loopRegion?.enabled ?? false} disabled={busy || !snapshot?.loopRegion} onClick={() => {
+        if (!snapshot?.loopRegion || busy || isProjectReplacing() || modalIsOpen()) return;
+        cancel(); void commit(snapshot, [{ kind: "setLoop", region: { ...snapshot.loopRegion, enabled: !snapshot.loopRegion.enabled } }], false);
+      }}>Loop {snapshot?.loopRegion?.enabled ? "on" : "off"}</button>
       <span className="playlist-snap">Snap ¼ bar</span>
       <button type="button" disabled={busy || !selectedClip} onClick={() => { if (snapshot && selectedClip) void commit(snapshot, [{ kind: "copy", clip: selectedClip.id, track: snapshot.tracks[selectedClip.trackIndex].id, startTick: Math.min(38_400_000 - selectedClip.content.lengthTicks, selectedClip.startTick + selectedClip.content.lengthTicks) }]); }}>Duplicate clip</button>
       <label>Zoom<input type="range" aria-label="Playlist zoom" min="96" max="768" step="24" value={pixelsPerBar} onChange={event => { cancel(); setPixelsPerBar(Number(event.target.value)); }} /></label>
       <button type="button" disabled={state.busy} onClick={() => { cancel(); void reload(); }}>Refresh playlist</button>
     </header>
-    <div className="playlist-ruler" aria-hidden="true">{Array.from({ length: Math.min(128, Math.ceil(view.width / pixelsPerBar) + 2) }, (_, index) => {
+    <div ref={ruler} className="playlist-ruler" role="group" aria-label="Playlist loop ruler" tabIndex={0} aria-disabled={busy}
+      aria-description="Shift+Home sets a loop. Hold Shift and use up or down to adjust its start, or left or right to adjust its end."
+      data-hint="Drag to set a loop. Shift+Home sets a loop. With Shift held, up/down adjusts the start and left/right adjusts the end."
+      onPointerDown={loopDown} onPointerMove={event => loopMove(event)} onPointerUp={event => loopMove(event, true)} onPointerCancel={cancel} onLostPointerCapture={cancel}
+      onKeyDown={loopKey}>
+      {shownLoop && <div className="playlist-loop" data-enabled={shownLoop.enabled} style={{ left: (shownLoop.startTick - view.scrollTick) * view.tickWidth, width: (shownLoop.endTick - shownLoop.startTick) * view.tickWidth }} /> }{Array.from({ length: Math.min(128, Math.ceil(view.width / pixelsPerBar) + 2) }, (_, index) => {
       const bar = Math.floor(view.scrollTick / barTicks) + index; return <span key={bar} style={{ left: (bar * barTicks - view.scrollTick) * view.tickWidth }}>{bar + 1}</span>;
     })}</div>
     <div ref={scroll} className="playlist-scroll"><div className="playlist-space" style={{ width: dimensions.width, height: dimensions.height }}>

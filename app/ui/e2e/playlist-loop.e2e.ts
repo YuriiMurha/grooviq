@@ -1,0 +1,77 @@
+import { test, expect } from "./fixture";
+import type { ArrangementPage } from "../src/api/arrangement";
+import type { Page } from "@playwright/test";
+const read = (page: Page) => page.evaluate(() => (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: object) => Promise<ArrangementPage> } }).__TAURI_INTERNALS__.invoke("arrangement_view", { offset: 0, limit: 256 }));
+
+test("focused ruler creates and adjusts a loop without a pointer", async ({ app, mock }) => {
+  await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
+  await app.keyboard.press("F5");
+  const ruler = app.getByRole("group", { name: "Playlist loop ruler" });
+  await expect(ruler).toHaveAttribute("aria-disabled", "false");
+  await ruler.focus();
+  await app.keyboard.press("Shift+Home");
+  await expect.poll(async () => (await read(app)).loopRegion).toEqual({ startTick: 0, endTick: 960, enabled: true });
+  await expect(ruler).toHaveAttribute("aria-disabled", "false");
+  await app.keyboard.press("Shift+ArrowRight");
+  await expect.poll(async () => (await read(app)).loopRegion).toEqual({ startTick: 0, endTick: 1920, enabled: true });
+  await expect(ruler).toHaveAttribute("aria-disabled", "false");
+  await app.keyboard.press("Shift+ArrowUp");
+  await expect.poll(async () => (await read(app)).loopRegion).toEqual({ startTick: 960, endTick: 1920, enabled: true });
+  expect(await mock.calls("arrangement_edit")).toHaveLength(3);
+});
+
+test("ruler commits one canonical loop on release and uses Session undo/redo", async ({ app, mock }) => {
+  await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
+  await app.keyboard.press("F5");
+  const ruler = app.getByRole("group", { name: "Playlist loop ruler" });
+  await expect(ruler).toHaveAttribute("aria-disabled", "false");
+  const box = await ruler.boundingBox(); if (!box) throw new Error("No ruler");
+  const calls = (await mock.calls("arrangement_edit")).length;
+  await app.mouse.click(box.x + 48, box.y + 10);
+  expect(await mock.calls("arrangement_edit")).toHaveLength(calls);
+  await app.mouse.move(box.x + 48, box.y + 10); await app.mouse.down();
+  await app.mouse.move(box.x + 240, box.y + 10, { steps: 4 });
+  expect((await read(app)).loopRegion).toBeNull();
+  expect(await mock.calls("arrangement_edit")).toHaveLength(calls);
+  await app.mouse.up();
+  const region = { startTick: 960, endTick: 4800, enabled: true };
+  await expect.poll(async () => (await read(app)).loopRegion).toEqual(region);
+  expect(await mock.calls("arrangement_edit")).toHaveLength(calls + 1);
+  await app.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => (await read(app)).loopRegion).toBeNull();
+  await app.keyboard.press("ControlOrMeta+Shift+z");
+  await expect.poll(async () => (await read(app)).loopRegion).toEqual(region);
+  await app.getByRole("button", { name: "Loop on", exact: true }).click();
+  await expect.poll(async () => (await read(app)).loopRegion).toEqual({ ...region, enabled: false });
+  await app.getByRole("button", { name: "Loop off", exact: true }).click();
+  await expect.poll(async () => (await read(app)).loopRegion).toEqual(region);
+  await app.mouse.move(box.x + 300, box.y + 10); await app.mouse.down();
+  await app.mouse.move(box.x + 100, box.y + 10, { steps: 4 });
+  await app.keyboard.press("Escape"); await app.mouse.up();
+  expect((await read(app)).loopRegion).toEqual(region);
+  await mock.eval("m => m.refuseWorkspaceNext('loop admission refused')");
+  await app.mouse.move(box.x + 300, box.y + 10); await app.mouse.down();
+  await app.mouse.move(box.x + 100, box.y + 10, { steps: 4 }); await app.mouse.up();
+  await expect(app.getByRole("region", { name: "Playlist", exact: true }).getByRole("alert")).toContainText("loop admission refused");
+  expect((await read(app)).loopRegion).toEqual(region);
+});
+
+for (const cancellation of ["capture loss", "zoom", "F5"] as const) test(`held loop cancels on ${cancellation}`, async ({ app, mock }) => {
+  await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
+  await app.keyboard.press("F5");
+  const ruler = app.getByRole("group", { name: "Playlist loop ruler" });
+  await expect(ruler).toHaveAttribute("aria-disabled", "false");
+  await ruler.evaluate(element => element.addEventListener("gotpointercapture", event => element.setAttribute("data-pointer", String((event as PointerEvent).pointerId)), { once: true }));
+  const box = await ruler.boundingBox(); if (!box) throw new Error("No ruler");
+  const before = (await mock.calls("arrangement_edit")).length;
+  await app.mouse.move(box.x + 48, box.y + 10); await app.mouse.down();
+  await app.mouse.move(box.x + 240, box.y + 10, { steps: 4 });
+  if (cancellation === "capture loss") await ruler.evaluate(element => element.releasePointerCapture(Number(element.getAttribute("data-pointer"))));
+  else if (cancellation === "zoom") {
+    await app.getByRole("slider", { name: "Playlist zoom" }).focus();
+    await app.keyboard.press("ArrowRight");
+  } else await app.keyboard.press("F5");
+  await app.mouse.up();
+  expect((await read(app)).loopRegion).toBeNull();
+  expect(await mock.calls("arrangement_edit")).toHaveLength(before);
+});
