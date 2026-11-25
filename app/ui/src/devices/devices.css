@@ -530,7 +530,7 @@
 .osc-body {
   flex: 1;
   display: grid;
-  grid-template-columns: 1fr 150px;
+  grid-template-columns: minmax(0, 1fr) 192px;
   gap: 8px;
   min-height: 0;
 }
@@ -588,13 +588,13 @@
 .env-fields {
   flex: none;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(max-content, 1fr));
   gap: 3px;
 }
 
 .env-fields .dfield {
-  padding: 4px 5px 0;
-  gap: 3px;
+  padding: 4px 2px 0;
+  gap: 2px;
 }
 
 .lfo-body {
@@ -772,15 +772,16 @@
 
 .sample-missing > button { flex: none; }
 
-/* A marker's grip: start and end hang from the top like flags (start's to the right of its line,
-   end's to the left); the loop's sits at the bottom. The lines are drawn in the canvas. */
+/* Keep the whole grip inside the well. The canvas line stays at the actual trim position. */
 .wmark {
+  --grip-width: 18px;
+  --grip-offset: 4px;
   position: absolute;
   top: 0;
   left: var(--x);
-  width: 18px;
+  margin-left: clamp(calc(0px - var(--x)), calc(0px - var(--grip-offset)), calc(100% - var(--grip-width) - var(--x)));
+  width: var(--grip-width);
   height: 56%;
-  margin-left: -4px;
   border-radius: var(--radius-s);
   cursor: ew-resize;
   touch-action: none;
@@ -788,15 +789,20 @@
 }
 
 .wmark[data-param="end"] {
-  margin-left: -14px;
+  --grip-offset: 14px;
+}
+
+.wmark.inset {
+  top: 16px;
+  z-index: 2;
 }
 
 .wmark.loop {
+  --grip-width: 16px;
+  --grip-offset: 8px;
   top: auto;
   bottom: 0;
-  width: 16px;
   height: 40%;
-  margin-left: -8px;
 }
 
 .wmark-tab {

@@ -192,11 +192,14 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
     const range = markerRange(id, region);
     const [min, max] = range ?? [value, value];
     const off = id === "loop_start" && !loop;
+    const position = markerPosition(id, region);
+    // When the start or end tab must turn inward, offset it below the other tab.
+    const inset = id === "start" ? (1 - position) * w < 14 : id === "end" && position * w < 14;
     return (
       <div
         key={id}
-        className={`wmark ${id === "loop_start" ? "loop" : "edge"}${off ? " off" : ""}${dragging === id ? " dragging" : ""}`}
-        style={{ "--x": `${(markerPosition(id, region) * 100).toFixed(4)}%` } as CSSProperties}
+        className={`wmark ${id === "loop_start" ? "loop" : "edge"}${inset ? " inset" : ""}${off ? " off" : ""}${dragging === id ? " dragging" : ""}`}
+        style={{ "--x": `${(position * 100).toFixed(4)}%` } as CSSProperties}
         role="slider"
         tabIndex={0}
         aria-label={`${name} ${m.name.toLowerCase()}`}

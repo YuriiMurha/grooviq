@@ -237,7 +237,11 @@ export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onE
               </details>
             </>,
             <div className="sample-toggles">{slot("sample", "head")}</div>,
-            <span className="sample-name">{channel.sampleName ?? ""}</span>,
+            channel.sampleName && (
+              <span className="sample-name" role="note" aria-label={channel.sampleName} title={channel.sampleName}>
+                {channel.sampleName}
+              </span>
+            ),
           )}
           {card(
             "pitch",
