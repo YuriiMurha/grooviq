@@ -5,9 +5,9 @@ import { expect, project, soundsFor, test } from "./fixture";
 
 const editor = (page: Page) => page.getByRole("dialog", { name: "Kick sampler" });
 
-/** Per marker: whether it can be dragged, whether its grip and tab boxes are non-empty and inside
- * the waveform well, which marker a press at each centre reaches, and how much grip area it
- * shares with any other grip. */
+/** Per marker: whether it can be dragged and is drawn active, whether its grip and tab boxes are
+ * non-empty and inside the waveform well, which marker a press at each centre reaches, and how
+ * much of its grip and tab area it shares with another marker's grip or tab. */
 const grips = (page: Page, ids: string[]) =>
   editor(page).evaluate((dialog, ids) => {
     const well = dialog.querySelector(".sample-wave")!.getBoundingClientRect();
@@ -17,6 +17,8 @@ const grips = (page: Page, ids: string[]) =>
     const reached = (r: DOMRect) =>
       document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest<HTMLElement>("[data-param]")?.dataset.param ?? null;
     const boxes = ids.map((id) => dialog.querySelector<HTMLElement>(`.wmark[data-param="${id}"]`));
+    const rects = (grip: HTMLElement | null) =>
+      grip ? [grip, grip.querySelector(".wmark-tab")].filter((el) => el !== null).map((el) => el.getBoundingClientRect()) : [];
     const overlap = (a: DOMRect, b: DOMRect) =>
       Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
     return ids.map((id, i) => {
@@ -25,10 +27,15 @@ const grips = (page: Page, ids: string[]) =>
       if (!grip || !tab) return { id, missing: true };
       const g = grip.getBoundingClientRect();
       const t = tab.getBoundingClientRect();
-      const shared = boxes.reduce((sum, other, j) => (j === i || !other ? sum : sum + overlap(g, other.getBoundingClientRect())), 0);
+      const own = rects(grip);
+      const shared = boxes.reduce(
+        (sum, other, j) => (j === i ? sum : sum + own.reduce((s, a) => s + rects(other).reduce((s2, b) => s2 + overlap(a, b), 0), 0)),
+        0,
+      );
       return {
         id,
         enabled: grip.getAttribute("aria-disabled") === "false",
+        active: !grip.classList.contains("off"),
         inWell: inside(g) && inside(t),
         grip: reached(g),
         tab: reached(t),
@@ -49,12 +56,16 @@ const CASES = [
   { name: "start, end and loop at the left edge", sampler: { start: 0, end: 0.0001, loop: 1, loop_start: 0 } },
 ] as const;
 
-for (const { name, sampler } of CASES) {
-  test.describe(`marker grips ${name}`, () => {
+// 900×560 is the smallest app window; the device draws slightly scaled down there.
+const VIEWPORTS = [{ width: 1280, height: 800 }, { width: 900, height: 560 }];
+const RUNS = VIEWPORTS.flatMap((viewport) => CASES.map((c) => ({ viewport, ...c })));
+
+for (const { viewport, name, sampler } of RUNS) {
+  test.describe(`marker grips ${name} at ${viewport.width}×${viewport.height}`, () => {
     const p = project(["Kick"]);
     p.channels[0].frames = 48_000;
     p.channels[0].sampler = sampler;
-    test.use({ seed: { project: p, files: soundsFor(["Kick"]) } });
+    test.use({ viewport, seed: { project: p, files: soundsFor(["Kick"]) } });
 
     test("each grip and tab reaches its own marker", async ({ app }) => {
       await app.getByRole("button", { name: "Edit the Kick sampler" }).click();
@@ -62,7 +73,7 @@ for (const { name, sampler } of CASES) {
       const ids = "loop" in sampler ? ["start", "end", "loop_start"] : ["start", "end"];
       await expect
         .poll(() => grips(app, ids))
-        .toEqual(ids.map((id) => ({ id, enabled: true, inWell: true, grip: id, tab: id, shared: 0 })));
+        .toEqual(ids.map((id) => ({ id, enabled: true, active: true, inWell: true, grip: id, tab: id, shared: 0 })));
     });
   });
 }
