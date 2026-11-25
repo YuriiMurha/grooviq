@@ -8,11 +8,14 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(__doc__)
 parser.add_argument('--home', required=True)
-parser.add_argument('--script', type=Path)
-parser.add_argument("--shutdown", action="store_true")
+operation = parser.add_mutually_exclusive_group()
+operation.add_argument('--script', type=Path)
+operation.add_argument('--quit', action='store_true', help='Request normal Quit, including the unsaved-close guard')
+operation.add_argument("--shutdown", action="store_true", help='Force shutdown for cleanup without a dialog')
 args = parser.parse_args()
 script = args.script.read_text() if args.script else 'return {title:document.title,text:document.body.innerText};'
-request = b'{"shutdown":true}' if args.shutdown else json.dumps({'id': str(uuid.uuid4()), 'script': script}).encode()
+request = (b'{"shutdown":true}' if args.shutdown else b'{"quit":true}' if args.quit
+           else json.dumps({'id': str(uuid.uuid4()), 'script': script}).encode())
 if len(request) > 65536:
     parser.error('request exceeds 64 KiB')
 with socket.socket(socket.AF_UNIX) as client:

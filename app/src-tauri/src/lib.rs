@@ -334,7 +334,8 @@ fn end_session(audio: &Audio) {
 
 /// Whether closing must wait for the person; if so, asks the UI.
 fn hold_close(app: &AppHandle) -> bool {
-    if qa_automation() {
+    #[cfg(all(feature = "qa-driver", target_os = "macos"))]
+    if qa_driver::forced_shutdown_requested() {
         return false;
     }
     let Some(audio) = app.try_state::<Audio>() else {
@@ -543,6 +544,8 @@ pub fn run() {
             }
         }
         RunEvent::Exit => {
+            #[cfg(all(feature = "qa-driver", target_os = "macos"))]
+            qa_driver::cleanup(app);
             if let Some(audio) = app.try_state::<Audio>() {
                 end_session(&audio);
             }
