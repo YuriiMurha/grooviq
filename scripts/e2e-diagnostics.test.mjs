@@ -105,7 +105,8 @@ test('write failure stays incomplete and preserves failed suite status', async t
   assert.ok(!records().some(x => x.kind === 'framework-end'));
   assert.equal(r.activeTimer, false);
 });
-test('unref timer cannot keep an otherwise idle child alive', async t => {
+// A hang backstop only: the property is checked without a clock below.
+test('unref timer cannot keep an otherwise idle child alive', { timeout: 120_000 }, async t => {
   const { root } = fixture(t);
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     import R from ${JSON.stringify(source)};
@@ -114,6 +115,8 @@ test('unref timer cannot keep an otherwise idle child alive', async t => {
     process.send({ activeTimer: r.activeTimer, resources: process.getActiveResourcesInfo() });
     process.disconnect();
   `], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  // A timed-out test must not leave the child running, or the runner never exits.
+  t.signal.addEventListener('abort', () => child.kill('SIGKILL'), { once: true });
   let stderr = '';
   child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
   const closed = once(child, 'close');
