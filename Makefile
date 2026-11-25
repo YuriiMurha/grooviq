@@ -12,8 +12,12 @@ SAMPLY := samply record
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-19s\033[0m %s\n", $$1, $$2}'
 
-hooks: ## Point git at .githooks (staged-format check before each commit)
+hooks: ## Point git at .githooks (staged conflict/format checks before each commit)
 	git config core.hooksPath .githooks
+
+.PHONY: test-pre-commit
+test-pre-commit: ## Exercise staged conflict checks in disposable Git repositories
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_pre_commit.py -v
 
 ui-install: ## Install the UI's locked dependencies (npm ci)
 	npm --prefix $(UI) ci --no-audit --no-fund
@@ -130,7 +134,13 @@ qa-driver-build: ui-install ## Build the optional macOS QA driver app
 qa-driver: ## Control QA_HOME's silent automation app; SCRIPT=<trusted JS file>
 	python3 scripts/qa-driver.py --home "$(QA_HOME)" $(if $(SCRIPT),--script "$(SCRIPT)",)
 
-.PHONY: qa-driver-stop
+.PHONY: qa-driver-stop qa-driver-quit test-qa-driver
+test-qa-driver: ## Test private QA command separation without launching the app
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_qa_driver.py -v
+
+qa-driver-quit: ## Request normal Quit in QA_HOME, including the unsaved-close prompt
+	python3 scripts/qa-driver.py --home "$(QA_HOME)" --quit
+
 qa-driver-stop: ## Stop QA_HOME's automation app without a native dialog
 	python3 scripts/qa-driver.py --home "$(QA_HOME)" --shutdown
 
