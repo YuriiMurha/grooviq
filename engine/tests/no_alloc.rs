@@ -110,6 +110,26 @@ fn realtime<T>(f: impl FnOnce() -> T) -> T {
     })
 }
 
+#[cfg(feature = "profiling")]
+#[test]
+fn profiling_first_callback_is_realtime_safe() {
+    let _client = tracy_client::Client::start();
+    let (controller, mut processor) = engine(EngineConfig { sample_rate: SR });
+    processor.enable_profiling().unwrap();
+    thread::spawn(move || {
+        let mut output = [0.0; 4 * grooviq_engine::BLOCK * 2];
+        for _ in 0..128 {
+            realtime(|| processor.process(&mut output, 2));
+        }
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        controller.live().frames,
+        128 * 4 * grooviq_engine::BLOCK as u64
+    );
+}
+
 /// One fake output that keeps the slot it is opened with.
 struct OneDevice(Arc<Mutex<Option<Arc<AudioSlot>>>>);
 
