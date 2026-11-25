@@ -319,7 +319,10 @@ impl AudioProcessor {
         if self.clock.is_multiple_of(1024) {
             let instance = self.live.synth.selected(self.clock);
             let meter = if instance != 0 && !self.faulted {
-                self.graph.synth_meter(instance)
+                self.graph.synth_meter(instance).map(|mut meter| {
+                    meter.frames = self.clock;
+                    meter
+                })
             } else {
                 None
             };
