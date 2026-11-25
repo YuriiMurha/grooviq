@@ -15,6 +15,13 @@ help: ## Show this help
 hooks: ## Point git at .githooks (staged conflict/format checks before each commit)
 	git config core.hooksPath .githooks
 
+.PHONY: merge-train test-merge-train
+merge-train: ## Quality only: advance the first enrolled PR (ORDER="12 34", HEAD_SHA=<approved SHA>)
+	python3 -B scripts/merge_train.py --order $(ORDER) $(if $(HEAD_SHA),--head $(HEAD_SHA))
+
+test-merge-train: ## Test ordered protected merges without calling GitHub
+	python3 -B -m unittest discover -s scripts -p test_merge_train.py -v
+
 .PHONY: test-pre-commit
 test-pre-commit: ## Exercise staged conflict checks in disposable Git repositories
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_pre_commit.py -v
@@ -25,7 +32,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: test-instruction-profiles e2e-browser-results-test e2e-diagnostics-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
@@ -169,6 +176,10 @@ export-budget: ## Optimized 8-second PCM24 export with the original 4-second bud
 .PHONY: optional-rust-policy-test
 optional-rust-policy-test: ## Test optional Rust CI selection and conservative failure fallback
 	node --test scripts/optional-rust-checks.test.cjs
+
+.PHONY: rerun-no-runner-test
+rerun-no-runner-test: ## Test the macOS runner acquisition retry policy
+	node --test scripts/rerun-no-runner.test.cjs
 
 # T13: isolated Song reference selection; no global golden or benchmark workload changes.
 .PHONY: song-golden-test song-golden-update song-export-budget
