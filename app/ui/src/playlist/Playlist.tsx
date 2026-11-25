@@ -5,15 +5,16 @@ import { PATTERN_DRAG_TYPE } from "../patterns/PickerRail";
 import { isProjectReplacing, projectGeneration } from "../project/replacement";
 import { registerGestureCancellation } from "../project/pending";
 import { modalIsOpen } from "../project/shortcuts";
-import { localPoint, snapTick, tickAtX, type PatternPreview, type PlaylistView } from "./geometry";
+import { localPoint, snapTick, tickAtX, type PatternPreview, type PlaylistView, type Point, type Rect } from "./geometry";
 import { PatternGesture, type GestureInput } from "./gesture";
 import { createPlaylistRenderer, readPlaylistPalette, type PlaylistRenderer, type PlaylistScene } from "./renderer";
 import type { PlaylistModel } from "./usePlaylist";
 import { extent, hitClip, projectClips, viewport, type RenderClip } from "./viewport";
+import { PatternGroupGesture, crossedThreshold, marqueeRect, marqueeSelection, toggleSelection, togglesSelection, type GroupPreview } from "./groupGesture";
 import "./playlist.css";
 
 type Props = Readonly<{ model: PlaylistModel; patterns: PatternsView | null; bpm: number; beats: number; unit: number }>;
-type Active = { gesture: PatternGesture; pointerId: number; stamp: ArrangementStamp; index: number; kind: GestureInput["kind"] };
+type Active = { gesture: PatternGesture | PatternGroupGesture; start: Point; moved: boolean; clickId: number | null; pointerId: number; stamp: ArrangementStamp; kind: GestureInput["kind"] };
 const DEFAULT_VIEW: PlaylistView = { width: 1, height: 1, scrollTick: 0, scrollTrack: 0, tickWidth: 0.05, rowHeight: 64 };
 
 export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
@@ -24,8 +25,17 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
   const [pixelsPerBar, setPixelsPerBar] = useState(192);
   const [view, setView] = useState<PlaylistView>(DEFAULT_VIEW);
   const [tool, setTool] = useState<"draw" | "select" | "slice">("draw");
-  const [selectedState, setSelected] = useState<{ generation: number; id: number } | null>(null);
-  const selected = selectedState?.generation === snapshot?.generation ? selectedState?.id ?? null : null;
+  const [selectedState, setSelected] = useState<{ generation: number; ids: number[] } | null>(null);
+  const liveIds = useMemo(() => new Set(snapshot?.clips.map(clip => clip.id)), [snapshot]);
+  const selectedIds = useMemo(() => selectedState && selectedState.generation === snapshot?.generation
+    ? selectedState.ids.filter(id => liveIds.has(id)) : [], [selectedState, snapshot, liveIds]);
+  const selection = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const selected = selectedIds.length === 1 ? selectedIds[0] : null;
+  const marquee = useRef<{ pointerId: number; start: Point; clientStart: Point; moved: boolean; stamp: ArrangementStamp; replacements: number } | null>(null);
+  const [selectionRect, setSelectionRect] = useState<Rect | null>(null);
+  const [groupPreview, setGroupPreview] = useState<GroupPreview | null>(null);
+  const [capturedMembers, setCapturedMembers] = useState<ReadonlySet<number> | null>(null);
+  const previewMembers = capturedMembers ?? selection;
   const [preview, setPreview] = useState<PatternPreview | null>(null);
   const [previewIndex, setPreviewIndex] = useState(-1);
   const [sliceGuide, setSliceGuide] = useState<{ tick: number; trackIndex: number } | null>(null);
@@ -40,16 +50,27 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     catch (error) { return { clips: [] as RenderClip[], error: String(error) }; }
   }, [snapshot, bpm]);
   const clips = projection.clips;
-  const patternsOnly = useMemo(() => snapshot?.clips.flatMap(clip => {
-    if (clip.content.type !== "pattern") return [];
-    return [{ id: clip.id, name: clip.name, startTick: clip.startTick, muted: clip.muted, trackIndex: snapshot.tracks.findIndex(track => track.id === clip.track), content: { ...clip.content } }];
-  }) ?? [], [snapshot]);
-  const selectedClip = patternsOnly.find(clip => clip.id === selected) ?? null;
+  const patternClips = useMemo(() => {
+    const result = new Map<number, PatternPreview & { id: number }>();
+    if (!snapshot) return result;
+    const rows = new Map(snapshot.tracks.map((track, index) => [track.id, index]));
+    for (const clip of snapshot.clips) {
+      const trackIndex = rows.get(clip.track);
+      if (clip.content.type !== "pattern" || trackIndex === undefined) continue;
+      result.set(clip.id, { id: clip.id, name: clip.name, startTick: clip.startTick, muted: clip.muted, trackIndex, content: { ...clip.content } });
+    }
+    return result;
+  }, [snapshot]);
+  const patternsOnly = useMemo(() => [...patternClips.values()], [patternClips]);
+  const selectedClip = selected === null ? null : patternClips.get(selected) ?? null;
+  const selectedIndex = useMemo(() => selected === null ? -1 : clips.findIndex(clip => clip.id === selected), [clips, selected]);
   const cancel = useCallback(() => {
     const owned = active.current;
+    const pointerId = owned?.pointerId ?? marquee.current?.pointerId;
+    marquee.current = null; setSelectionRect(null); setGroupPreview(null); setCapturedMembers(null);
     active.current = null; owned?.gesture.cancel(); setPreview(null); setPreviewIndex(-1); setSliceGuide(null);
     const element = canvas.current;
-    if (owned && element?.hasPointerCapture(owned.pointerId)) element.releasePointerCapture(owned.pointerId);
+    if (pointerId !== undefined && element?.hasPointerCapture(pointerId)) element.releasePointerCapture(pointerId);
   }, []);
   useEffect(() => registerGestureCancellation(cancel), [cancel]);
   useEffect(() => {
@@ -59,8 +80,9 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     return () => observer.disconnect();
   }, [cancel]);
   useEffect(() => {
-    const stale = !snapshot || isProjectReplacing() || Boolean(active.current &&
-      (active.current.stamp.generation !== snapshot.generation || active.current.stamp.revision !== snapshot.revision));
+    const captured = active.current ?? marquee.current;
+    const stale = !snapshot || isProjectReplacing() || Boolean(captured &&
+      (captured.stamp.generation !== snapshot.generation || captured.stamp.revision !== snapshot.revision));
     if (!stale) return;
     const frame = requestAnimationFrame(cancel);
     return () => cancelAnimationFrame(frame);
@@ -79,6 +101,7 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     return () => { element.removeEventListener("webglcontextlost", lost); display.dispose(); renderer.current = null; };
   }, [cancel]);
   useEffect(() => { renderer.current?.setClips(clips); }, [clips]);
+  useEffect(() => { renderer.current?.setGroupSelection(previewMembers.size > 1 ? previewMembers : new Set()); }, [previewMembers]);
   useEffect(() => {
     const container = scroll.current; if (!container) return;
     const measure = () => {
@@ -96,38 +119,40 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       const dpr = Math.max(1, window.devicePixelRatio || 1);
       const width = Math.round(view.width * dpr), height = Math.round(view.height * dpr);
       if (element.width !== width) element.width = width; if (element.height !== height) element.height = height;
-      const scene: PlaylistScene = { view, dpr, barTicks, selected: clips.findIndex(clip => clip.id === selected), preview: transformed ? { index: previewIndex, clip: transformed } : null };
+      const scene: PlaylistScene = { view, dpr, barTicks, selected: selectedIndex, preview: transformed ? { index: previewIndex, clip: transformed } : null, group: groupPreview };
       display.draw(scene, readPlaylistPalette(element));
     };
     draw.current = render;
     const frame = requestAnimationFrame(render);
     return () => cancelAnimationFrame(frame);
-  }, [clips, selected, preview, previewIndex, snapshot, view, barTicks]);
+  }, [clips, selectedIndex, preview, previewIndex, snapshot, view, barTicks, groupPreview, previewMembers]);
   useEffect(() => {
     const observer = new MutationObserver(() => draw.current()); observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "data-theme", "style"] });
     const redraw = () => draw.current(); window.addEventListener("resize", redraw);
     return () => { observer.disconnect(); window.removeEventListener("resize", redraw); };
   }, []);
-  const dimensions = extent(clips, snapshot?.tracks.length ?? 0, view, barTicks);
+  const dimensions = useMemo(() => extent(clips, snapshot?.tracks.length ?? 0, view, barTicks), [clips, snapshot, view, barTicks]);
   const busy = state.busy || state.requiresRefresh || !snapshot || view.width <= 1 || view.height <= 1 || rendererKind === "Loading display" || Boolean(displayError || projection.error);
   const coordinates = (event: { clientX: number; clientY: number }) => {
     const rect = canvas.current?.getBoundingClientRect(); if (!rect) throw new Error("Playlist input area is unavailable");
     const point = localPoint({ x: event.clientX, y: event.clientY }, rect, view);
     return { point, tick: tickAtX(point.x, view), row: Math.max(0, Math.floor(point.y / view.rowHeight + view.scrollTrack)) };
   };
-  const begin = (input: GestureInput, index: number) => {
+  const begin = (input: GestureInput, index: number, start: Point, group: PatternPreview[] = []) => {
     const element = canvas.current; if (!element) return;
-    const gesture = new PatternGesture(input);
-    active.current = { gesture, pointerId: input.pointerId, stamp: { ...input.stamp }, index, kind: input.kind };
+    const gesture = group.length > 1 ? new PatternGroupGesture(input, group) : new PatternGesture(input);
+    active.current = { gesture, start, clickId: input.clip.id, moved: input.kind !== "move" && input.kind !== "copy", pointerId: input.pointerId, stamp: { ...input.stamp }, kind: input.kind };
     try { element.setPointerCapture(input.pointerId); } catch { cancel(); return; }
-    setPreview(gesture.preview); setPreviewIndex(index);
-    setSliceGuide(gesture.sliceTick === null ? null : { tick: gesture.sliceTick, trackIndex: input.clip.trackIndex });
+    if (gesture instanceof PatternGesture) {
+      setPreview(gesture.preview); setPreviewIndex(index);
+      setSliceGuide(gesture.sliceTick === null ? null : { tick: gesture.sliceTick, trackIndex: input.clip.trackIndex });
+    } else setCapturedMembers(gesture.memberIds);
   };
-  const commit = async (stamp: ArrangementStamp, operations: Parameters<typeof mutate>[1], selectCreated = true) => {
+  const commit = async (stamp: ArrangementStamp, operations: Parameters<typeof mutate>[1], selectCreated = true, createdCount = 1) => {
     const result = await mutate(stamp, operations);
     if (result.status === "applied" && selectCreated) {
       const id = result.reply.createdIds.at(-1);
-      if (id !== undefined) setSelected({ generation: result.reply.generation, id });
+      if (id !== undefined) setSelected({ generation: result.reply.generation, ids: result.reply.createdIds.slice(-createdCount) });
     }
   };
   const selectedAction = async (action: "mute" | "delete" | "makeUnique") => {
@@ -141,46 +166,88 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     cancel();
     const result = await mutate(stamp, [operation]);
     if (action === "delete" && result.status === "applied") {
-      setSelected(current => current?.generation === generation && current.id === id ? null : current);
+      setSelected(current => current?.generation === generation && current.ids.includes(id) ? null : current);
     }
   };
   const down = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (event.button !== 0 || busy || !snapshot || isProjectReplacing() || modalIsOpen() || event.ctrlKey || event.metaKey) return;
-    event.preventDefault(); event.currentTarget.focus();
+    if (event.button !== 0 || busy || !snapshot || isProjectReplacing() || modalIsOpen() ||
+        (tool !== "select" && (event.ctrlKey || event.metaKey))) return;
+    event.preventDefault(); cancel(); event.currentTarget.focus();
     const { point, tick, row } = coordinates(event);
     const hit = hitClip(clips, point.x, point.y, view);
     if (hit) {
       const id = hit.clip.id; if (id === null) return;
-      setSelected({ generation: snapshot.generation, id });
-      const clip = patternsOnly.find(clip => clip.id === id); if (!clip) return;
-      const kind = tool === "slice" ? "slice" : event.altKey ? "copy" : selected === id && hit.edge ? hit.edge === "start" ? "resizeStart" : "resizeEnd" : "move";
+      const clip = patternClips.get(id);
+      if (tool === "select" && togglesSelection(event)) {
+        if (clip) {
+          const previousPatterns = selectedIds.filter(member => patternClips.has(member));
+          setSelected({ generation: snapshot.generation, ids: toggleSelection(previousPatterns, id) });
+        }
+        return;
+      }
+      const keepGroup = tool !== "draw" && selection.has(id);
+      const ids = keepGroup ? selectedIds : [id];
+      if (!keepGroup) setSelected({ generation: snapshot.generation, ids });
+      if (!clip || (tool === "slice" && ids.length > 1)) return;
+      const kind = tool === "slice" ? "slice" : event.altKey ? "copy" : ids.length === 1 && selected === id && hit.edge ? hit.edge === "start" ? "resizeStart" : "resizeEnd" : "move";
+      // The renderer paints in playlist order and native copy appends in batch order.
+      const members = ids.length > 1 ? patternsOnly.filter(member => selection.has(member.id)) : [];
       begin({ kind, pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration(), originTick: tick, originTrack: row, quantum, tracks: snapshot.tracks,
-        sourceTicks: snapshot.sourcePeriods[clip.content.pattern], clip }, kind === "copy" ? -1 : clips.findIndex(c => c.id === id));
+        sourceTicks: snapshot.sourcePeriods[clip.content.pattern], clip }, kind === "copy" ? -1 : clips.findIndex(c => c.id === id), { x: event.clientX, y: event.clientY }, members);
       return;
     }
     setSelected(null);
+    if (tool === "select") {
+      marquee.current = { pointerId: event.pointerId, start: point, clientStart: { x: event.clientX, y: event.clientY }, moved: false,
+        stamp: { generation: snapshot.generation, revision: snapshot.revision }, replacements: projectGeneration() };
+      try { event.currentTarget.setPointerCapture(event.pointerId); } catch { cancel(); }
+      return;
+    }
     if (tool !== "draw" || patterns?.generation !== snapshot.generation) return;
     const source = patterns.patterns.find(pattern => pattern.id === patterns.selected); if (!source) return;
     const start = snapTick(tick, quantum, 0, 38_400_000 - barTicks);
     const clip: PatternPreview = { id: null, trackIndex: Math.min(row, Math.min(255, snapshot.tracks.length)), name: source.name, startTick: start, muted: false,
       content: { type: "pattern", pattern: source.id, offsetTick: 0, lengthTicks: barTicks } };
-    begin({ kind: "place", pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration(), originTick: tick, originTrack: row, quantum, tracks: snapshot.tracks, clip }, -1);
+    begin({ kind: "place", pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration(), originTick: tick, originTrack: row, quantum, tracks: snapshot.tracks, clip }, -1, { x: event.clientX, y: event.clientY });
   };
-  const move = (event: PointerEvent<HTMLCanvasElement>) => {
+  const move = (event: PointerEvent<HTMLCanvasElement>, released = false) => {
+    const box = marquee.current;
+    if (box && box.pointerId === event.pointerId) {
+      if (!snapshot || isProjectReplacing() || modalIsOpen() || !event.currentTarget.hasPointerCapture(event.pointerId) || box.replacements !== projectGeneration() || box.stamp.generation !== snapshot.generation || box.stamp.revision !== snapshot.revision) { cancel(); return; }
+      box.moved ||= crossedThreshold(box.clientStart, { x: event.clientX, y: event.clientY });
+      if (box.moved) {
+        const rect = marqueeRect(box.start, coordinates(event).point);
+        if (released) setSelected({ generation: snapshot.generation, ids: marqueeSelection(patternsOnly, rect, view) });
+        else setSelectionRect(rect);
+      }
+      return;
+    }
     const owned = active.current; if (!owned || owned.pointerId !== event.pointerId) return;
     if (isProjectReplacing() || modalIsOpen() || !event.currentTarget.hasPointerCapture(owned.pointerId)) { cancel(); return; }
-    const { tick, row } = coordinates(event); owned.gesture.update(tick, row); setPreview(owned.gesture.preview);
-    setSliceGuide(owned.gesture.sliceTick === null ? null : { tick: owned.gesture.sliceTick, trackIndex: owned.gesture.preview.trackIndex });
+    if (!owned.moved && !crossedThreshold(owned.start, { x: event.clientX, y: event.clientY })) return;
+    owned.moved = true;
+    const { tick, row } = coordinates(event); owned.gesture.update(tick, row);
+    if (owned.gesture instanceof PatternGroupGesture) setGroupPreview(owned.gesture.preview);
+    else {
+      const clip = owned.gesture.preview;
+      setPreview(clip);
+      setSliceGuide(owned.gesture.sliceTick === null ? null : { tick: owned.gesture.sliceTick, trackIndex: clip.trackIndex });
+    }
   };
   const up = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (marquee.current?.pointerId === event.pointerId) { move(event, true); cancel(); return; }
     const owned = active.current; if (!owned || owned.pointerId !== event.pointerId || !snapshot) return;
     // Pending capture can be released before got/lostpointercapture is dispatched.
     if (isProjectReplacing() || modalIsOpen() || !event.currentTarget.hasPointerCapture(owned.pointerId)) { cancel(); return; }
+    if (!owned.moved && !crossedThreshold(owned.start, { x: event.clientX, y: event.clientY })) {
+      if (owned.clickId !== null) setSelected({ generation: snapshot.generation, ids: [owned.clickId] });
+      cancel(); return;
+    }
     const { tick, row } = coordinates(event); owned.gesture.update(tick, row);
     const batch = owned.gesture.take({ pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration() });
     const stamp = owned.stamp; cancel();
     // Slice keeps the original left fragment selected; copy/place select their new ID.
-    if (batch?.length) void commit(stamp, batch, owned.kind !== "slice");
+    if (batch?.length) void commit(stamp, batch, owned.kind !== "slice", owned.gesture instanceof PatternGroupGesture ? batch.length : 1);
   };
   const drop = (event: DragEvent<HTMLCanvasElement>) => {
     if (busy || !snapshot || isProjectReplacing() || modalIsOpen()) return;
@@ -203,17 +270,45 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       if (!event.repeat) void selectedAction("delete");
       return;
     }
-    if (busy || !snapshot || !selectedClip || isProjectReplacing() || modalIsOpen() || event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
+    if (busy || !snapshot || !selectedIds.length || isProjectReplacing() || modalIsOpen() || event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-      event.preventDefault(); const direction = event.key === "ArrowLeft" ? -quantum : quantum;
-      const start = Math.max(0, Math.min(38_400_000 - selectedClip.content.lengthTicks, selectedClip.startTick + direction));
-      if (start !== selectedClip.startTick) void commit(snapshot, [{ kind: "move", clip: selectedClip.id, track: snapshot.tracks[selectedClip.trackIndex].id, startTick: start }]);
+      event.preventDefault(); cancel();
+      const members = patternsOnly.filter(member => selection.has(member.id));
+      if (!members.length) return;
+      const gesture = new PatternGroupGesture({ kind: "move", pointerId: 0, stamp: snapshot, replacements: projectGeneration(), originTick: 0, originTrack: 0, quantum, tracks: snapshot.tracks, clip: members[0] }, members);
+      gesture.update(event.key === "ArrowLeft" ? -quantum : quantum, 0);
+      const batch = gesture.take({ pointerId: 0, stamp: snapshot, replacements: projectGeneration() });
+      if (batch?.length) void commit(snapshot, batch, false);
     }
   };
-  const labelPreview: RenderClip | null = preview ? { id: preview.id, name: preview.name, kind: "pattern", trackIndex: preview.trackIndex, startTick: preview.startTick, lengthTicks: preview.content.lengthTicks, ink: 0, muted: preview.muted } : null;
-  const displayClips = clips.map((clip, index) => previewIndex === index && labelPreview ? labelPreview : clip);
-  if (labelPreview && previewIndex === -1) displayClips.push(labelPreview);
-  const visibleLabels = displayClips.filter(clip => (clip.startTick - view.scrollTick) * view.tickWidth < view.width && (clip.startTick + clip.lengthTicks - view.scrollTick) * view.tickWidth > 0 && (clip.trackIndex - view.scrollTrack) * 64 > -64 && (clip.trackIndex - view.scrollTrack) * 64 < view.height).slice(0, 1024);
+  const visibleLabels = useMemo(() => {
+    const labels: RenderClip[] = [];
+    const single: RenderClip | null = preview ? { ...preview, kind: "pattern", lengthTicks: preview.content.lengthTicks, ink: 0 } : null;
+    const include = (clip: RenderClip, offset?: GroupPreview) => {
+      if (labels.length >= 1024) return;
+      const startTick = clip.startTick + (offset?.deltaTicks ?? 0);
+      const trackIndex = clip.trackIndex + (offset?.deltaTracks ?? 0);
+      const x = (startTick - view.scrollTick) * view.tickWidth;
+      const y = (trackIndex - view.scrollTrack) * view.rowHeight + 18;
+      if (x < view.width && x + Math.max(1, clip.lengthTicks * view.tickWidth) > 0 && y < view.height && y + 42 > 0) {
+        labels.push(offset ? { ...clip, id: offset.kind === "copy" ? null : clip.id, startTick, trackIndex } : clip);
+      }
+    };
+    for (let index = 0; index < clips.length && labels.length < 1024; index++) {
+      const clip = clips[index];
+      const offset = groupPreview?.kind === "move" && clip.id !== null && previewMembers.has(clip.id) ? groupPreview : undefined;
+      include(index === previewIndex && single ? single : clip, offset);
+    }
+    if (single && previewIndex === -1) include(single);
+    if (groupPreview?.kind === "copy" && labels.length < 1024) {
+      for (const clip of clips) {
+        if (clip.id !== null && previewMembers.has(clip.id)) include(clip, groupPreview);
+        if (labels.length >= 1024) break;
+      }
+    }
+    return labels;
+  }, [clips, preview, previewIndex, view, groupPreview, previewMembers]);
+  const visibleIds = useMemo(() => new Set(visibleLabels.map(clip => clip.id)), [visibleLabels]);
   return <section className="playlist" aria-label="Playlist" aria-busy={state.busy}>
     <header className="playlist-tools"><h2>Playlist</h2>
       <div role="group" aria-label="Playlist tool"><button type="button" aria-pressed={tool === "draw"} onClick={() => { cancel(); setTool("draw"); }}>Draw</button><button type="button" aria-pressed={tool === "select"} onClick={() => { cancel(); setTool("select"); }}>Select</button><button type="button" aria-pressed={tool === "slice"} onClick={() => { cancel(); setTool("slice"); }}>Slice</button></div>
@@ -228,14 +323,14 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
     <div ref={scroll} className="playlist-scroll"><div className="playlist-space" style={{ width: dimensions.width, height: dimensions.height }}>
       <div className="playlist-camera" style={{ left: view.scrollTick * view.tickWidth, top: view.scrollTrack * view.rowHeight, width: view.width, height: view.height }}>
         <canvas ref={canvas} tabIndex={0} role="application" aria-label="Playlist clips" aria-disabled={busy} aria-describedby="playlist-help" data-renderer={rendererKind}
-          data-hint="Draw places the selected pattern. Drag moves a clip, Alt-drag copies it; select a clip to resize its edges. Slice cuts inside a pattern clip on release. Escape cancels." onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel}
+          data-hint="Draw places the selected pattern. Drag moves a clip, Alt-drag copies it; select a clip to resize its edges. Slice cuts inside a pattern clip on release. Escape cancels." onPointerDown={down} onPointerMove={event => move(event)} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel}
           onDragOver={event => { if (!busy && event.dataTransfer.types.includes(PATTERN_DRAG_TYPE)) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; } }} onDrop={drop} onKeyDown={key} />
-        <div className="playlist-labels" aria-hidden="true">{snapshot?.tracks.map((track, index) => <span className="playlist-track-name" key={track.id} style={{ left: 4, top: (index - view.scrollTrack) * view.rowHeight + 1 }}>{track.name}</span>)}{visibleLabels.map(clip => <span key={clip.id} style={{ left: Math.max(0, (clip.startTick - view.scrollTick) * view.tickWidth) + 6, top: (clip.trackIndex - view.scrollTrack) * view.rowHeight + 21,
+        <div className="playlist-labels" aria-hidden="true">{selectionRect && <span className="playlist-marquee" style={{ position: "absolute", left: selectionRect.x, top: selectionRect.y, width: selectionRect.width, height: selectionRect.height, border: "1px solid var(--select)", background: "color-mix(in srgb, var(--select) 15%, transparent)" }} />}{snapshot?.tracks.map((track, index) => <span className="playlist-track-name" key={track.id} style={{ left: 4, top: (index - view.scrollTrack) * view.rowHeight + 1 }}>{track.name}</span>)}{visibleLabels.map((clip, index) => <span key={clip.id ?? `preview-${index}`} style={{ left: Math.max(0, (clip.startTick - view.scrollTick) * view.tickWidth) + 6, top: (clip.trackIndex - view.scrollTrack) * view.rowHeight + 21,
           maxWidth: Math.max(0, Math.min(clip.lengthTicks * view.tickWidth - 12, view.width)) }}>{clip.name}{clip.kind !== "pattern" ? ` · ${clip.kind}` : ""}</span>)}{sliceGuide && <div className="playlist-slice-guide" style={{ left: (sliceGuide.tick - view.scrollTick) * view.tickWidth, top: (sliceGuide.trackIndex - view.scrollTrack) * view.rowHeight + 18, height: Math.min(42, Math.max(1, view.rowHeight - 22)) }} />}</div>
       </div>
     </div></div>
-    <div className="playlist-status"><span id="playlist-help">Drag patterns here. F5 closes the playlist; Escape cancels a drag.</span><span role="status">{state.busy ? "Updating playlist…" : `${snapshot?.total ?? 0} clips`}</span></div>
-    <div className="playlist-selection"><label htmlFor="selected-playlist-clip">Selected clip</label><select id="selected-playlist-clip" aria-label="Selected playlist clip" value={selected ?? ""} disabled={state.busy} onChange={event => { cancel(); setSelected(event.target.value ? { generation: snapshot?.generation ?? 0, id: Number(event.target.value) } : null); }}><option value="">None</option>{clips.filter(clip => clip.id === selected || visibleLabels.some(visible => visible.id === clip.id)).map(clip => <option key={clip.id} value={clip.id ?? ""}>{clip.name} · Track {clip.trackIndex + 1} · {clip.startTick} ticks</option>)}</select>
+    <div className="playlist-status"><span id="playlist-help">In Select, modifier-click toggles clips and a drag from empty space selects a box. Drag a group to move it or Alt-drag to copy it. Escape cancels.</span><span aria-live="polite">{selectedIds.length} selected</span><span role="status">{state.busy ? "Updating playlist…" : `${snapshot?.total ?? 0} clips`}</span></div>
+    <div className="playlist-selection"><label htmlFor="selected-playlist-clip">Selected clip</label><select id="selected-playlist-clip" aria-label="Selected playlist clip" value={selected ?? ""} disabled={state.busy} onChange={event => { cancel(); setSelected(event.target.value ? { generation: snapshot?.generation ?? 0, ids: [Number(event.target.value)] } : null); }}><option value="">None</option>{clips.filter(clip => clip.id === selected || visibleIds.has(clip.id)).map(clip => <option key={clip.id} value={clip.id ?? ""}>{clip.name} · Track {clip.trackIndex + 1} · {clip.startTick} ticks</option>)}</select>
       <button type="button" aria-label={selectedClip?.muted ? "Unmute selected clip" : "Mute selected clip"} disabled={busy || !selectedClip} onClick={() => { void selectedAction("mute"); }}>{selectedClip?.muted ? "Unmute" : "Mute"}</button>
       <button type="button" aria-label="Make selected clip unique" disabled={busy || !selectedClip} onClick={() => { void selectedAction("makeUnique"); }}>Make unique</button>
       <button type="button" aria-label="Delete selected clip" disabled={busy || !selectedClip} onClick={() => { void selectedAction("delete"); }}>Delete</button>
