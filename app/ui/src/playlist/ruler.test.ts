@@ -40,11 +40,9 @@ describe("loop ruler", () => {
 it("keeps four-pixel drag intent after returning to the origin", () => {
   const gesture = new LoopGesture(guard, 960, 960, 100);
   expect(gesture.update(960, 103.99)).toBeNull();
-  expect(gesture.dragging).toBe(false);
   expect(gesture.update(960, 104)).not.toBeNull();
-  gesture.update(960, 100);
-  expect(gesture.dragging).toBe(true);
-  expect(gesture.take(guard)).not.toBeNull();
+  expect(gesture.update(960, 100)).not.toBeNull();
+  expect(gesture.take(guard)).toEqual([{ kind: "setLoop", region: { startTick: 960, endTick: 1920, enabled: true } }]);
 });
 
 it("calculates snapped clicks and keyboard targets from the actual position", () => {

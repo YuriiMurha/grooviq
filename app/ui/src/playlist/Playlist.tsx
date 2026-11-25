@@ -6,7 +6,7 @@ import { isProjectReplacing, projectGeneration } from "../project/replacement";
 import { registerGestureCancellation } from "../project/pending";
 import { modalIsOpen } from "../project/shortcuts";
 import { localPoint, snapTick, tickAtX, type PatternPreview, type PlaylistView, type Point, type Rect } from "./geometry";
-import { PatternGesture, type GestureInput } from "./gesture";
+import { PatternGesture, type GestureGuard, type GestureInput } from "./gesture";
 import { createPlaylistRenderer, readPlaylistPalette, type PlaylistRenderer, type PlaylistScene } from "./renderer";
 import type { PlaylistModel } from "./usePlaylist";
 import { extent, hitClip, projectClips, viewport, type RenderClip } from "./viewport";
@@ -40,7 +40,11 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
   const [preview, setPreview] = useState<PatternPreview | null>(null);
   const [loopPreview, setLoopPreview] = useState<LoopRegion | null>(null);
   const ruler = useRef<HTMLDivElement>(null);
-  const loopActive = useRef<{ gesture: LoopGesture; pointerId: number; stamp: ArrangementStamp; replacements: number; tick: number } | null>(null);
+  const loopActive = useRef<{ gesture: LoopGesture; pointerId: number; stamp: ArrangementStamp } | null>(null);
+  const seekRuler = useRef<HTMLDivElement>(null);
+  const seekActive = useRef<GestureGuard | null>(null);
+  const seekPreview = useRef<number | null>(null);
+  const seekPlayhead = useRef<HTMLDivElement>(null);
   const [previewIndex, setPreviewIndex] = useState(-1);
   const [sliceGuide, setSliceGuide] = useState<{ tick: number; trackIndex: number } | null>(null);
   const [rendererKind, setRendererKind] = useState<string>("Loading display");
@@ -71,6 +75,8 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
   const cancel = useCallback(() => {
     const loop = loopActive.current; loopActive.current = null; loop?.gesture.cancel(); setLoopPreview(null);
     if (loop && ruler.current?.hasPointerCapture(loop.pointerId)) ruler.current.releasePointerCapture(loop.pointerId);
+    const seeking = seekActive.current; seekActive.current = null; seekPreview.current = null;
+    if (seeking && seekRuler.current?.hasPointerCapture(seeking.pointerId)) seekRuler.current.releasePointerCapture(seeking.pointerId);
     const owned = active.current;
     const pointerId = owned?.pointerId ?? marquee.current?.pointerId;
     marquee.current = null; setSelectionRect(null); setGroupPreview(null); setCapturedMembers(null);
@@ -86,7 +92,7 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
     return () => observer.disconnect();
   }, [cancel]);
   useEffect(() => {
-    const captured = active.current ?? marquee.current ?? loopActive.current;
+    const captured = active.current ?? marquee.current ?? loopActive.current ?? seekActive.current;
     const stale = !snapshot || isProjectReplacing() || Boolean(captured &&
       (captured.stamp.generation !== snapshot.generation || captured.stamp.revision !== snapshot.revision));
     if (!stale) return;
@@ -97,6 +103,23 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
     const end = () => cancel(); window.addEventListener("blur", end);
     return () => { window.removeEventListener("blur", end); cancel(); };
   }, [cancel]);
+  useEffect(() => {
+    const element = seekPlayhead.current;
+    if (!element) return;
+    let frame: number;
+    let previousX: number | undefined;
+    const drawPlayhead = () => {
+      const tick = seekPreview.current ?? rulerPosition.current;
+      const x = tick === null ? -4 : (tick - view.scrollTick) * view.tickWidth;
+      if (x !== previousX) {
+        element.style.transform = `translateX(${x}px)`;
+        previousX = x;
+      }
+      frame = requestAnimationFrame(drawPlayhead);
+    };
+    drawPlayhead();
+    return () => cancelAnimationFrame(frame);
+  }, [rulerPosition, view.scrollTick, view.tickWidth]);
   useEffect(() => {
     const element = canvas.current; if (!element) return;
     const display = createPlaylistRenderer(element); renderer.current = display;
@@ -287,34 +310,67 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
       if (batch?.length) void commit(snapshot, batch, false);
     }
   };
+  const tickAtRuler = (event: PointerEvent<HTMLDivElement>) =>
+    rulerTick(event.clientX, event.currentTarget.getBoundingClientRect(), event.currentTarget.clientWidth, view);
   const loopDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || busy || !snapshot || isProjectReplacing() || modalIsOpen() || event.ctrlKey || event.metaKey) return;
     cancel(); event.currentTarget.focus();
-    const tick = rulerTick(event.clientX, event.currentTarget.getBoundingClientRect(), event.currentTarget.clientWidth, view);
-    loopActive.current = { gesture: new LoopGesture({ pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration() }, tick, quantum, event.clientX, snapshot.loopRegion?.enabled ?? true), pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration(), tick };
+    loopActive.current = { gesture: new LoopGesture({ pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration() }, tickAtRuler(event), quantum, event.clientX, snapshot.loopRegion?.enabled ?? true), pointerId: event.pointerId, stamp: snapshot };
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch { cancel(); }
   };
   const loopMove = (event: PointerEvent<HTMLDivElement>, release = false) => {
     const owned = loopActive.current;
     if (!owned || owned.pointerId !== event.pointerId) return;
     if (busy || !snapshot || isProjectReplacing() || modalIsOpen() || !event.currentTarget.hasPointerCapture(event.pointerId)) { cancel(); return; }
-    const tick = rulerTick(event.clientX, event.currentTarget.getBoundingClientRect(), event.currentTarget.clientWidth, view);
-    setLoopPreview(owned.gesture.update(tick, event.clientX));
+    setLoopPreview(owned.gesture.update(tickAtRuler(event), event.clientX));
     if (!release) return;
-    const click = !owned.gesture.dragging && owned.replacements === projectGeneration() && owned.stamp.generation === snapshot.generation && owned.stamp.revision === snapshot.revision;
     const batch = owned.gesture.take({ pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration() });
     cancel(); if (batch) void commit(owned.stamp, batch, false);
-    else if (click) void seek(owned.stamp, seekTarget(owned.tick, quantum));
+  };
+  const seekDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || busy || !snapshot || isProjectReplacing() || modalIsOpen() || event.ctrlKey || event.metaKey) return;
+    cancel();
+    event.currentTarget.focus();
+    seekActive.current = { pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration() };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      cancel();
+      return;
+    }
+    seekPreview.current = seekTarget(tickAtRuler(event), quantum);
+  };
+  const seekMove = (event: PointerEvent<HTMLDivElement>, release = false) => {
+    const owned = seekActive.current;
+    if (!owned || owned.pointerId !== event.pointerId) return;
+    if (busy || !snapshot || isProjectReplacing() || modalIsOpen()
+      || !event.currentTarget.hasPointerCapture(event.pointerId)
+      || owned.replacements !== projectGeneration()
+      || owned.stamp.generation !== snapshot.generation || owned.stamp.revision !== snapshot.revision) {
+      cancel();
+      return;
+    }
+    const tick = seekTarget(tickAtRuler(event), quantum);
+    seekPreview.current = tick;
+    if (release) {
+      cancel();
+      void seek(owned.stamp, tick);
+    }
+  };
+  const seekKey = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") { event.preventDefault(); cancel(); return; }
+    if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+    const target = keyboardSeek(event.key, rulerPosition.current, quantum);
+    if (target === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!busy && snapshot && !isProjectReplacing() && !modalIsOpen() && !event.repeat) {
+      cancel();
+      void seek(snapshot, target);
+    }
   };
   const loopKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") { event.preventDefault(); cancel(); return; }
-    if (!event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
-      const target = keyboardSeek(event.key, rulerPosition.current, quantum);
-      if (target === null) return;
-      event.preventDefault(); event.stopPropagation();
-      if (!busy && snapshot && !isProjectReplacing() && !modalIsOpen() && !event.repeat) { cancel(); void seek(snapshot, target); }
-      return;
-    }
     if (!event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
     if (!["Home", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
     event.preventDefault();
@@ -367,9 +423,17 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
       <label>Zoom<input type="range" aria-label="Playlist zoom" min="96" max="768" step="24" value={pixelsPerBar} onChange={event => { cancel(); setPixelsPerBar(Number(event.target.value)); }} /></label>
       <button type="button" disabled={state.busy} onClick={() => { cancel(); void reload(); }}>Refresh playlist</button>
     </header>
+    <div ref={seekRuler} className="playlist-ruler playlist-seek-ruler" role="group" aria-label="Playlist seek ruler" tabIndex={0} aria-disabled={busy}
+      aria-description="Click or drag to seek. Home seeks to zero; arrow keys seek one snap from the live position."
+      data-hint="Click or drag to set the playhead. Home seeks to zero; arrow keys move one snap."
+      onPointerDown={seekDown} onPointerMove={event => seekMove(event)} onPointerUp={event => seekMove(event, true)}
+      onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={seekKey}>
+      <span className="playlist-seek-label" aria-hidden="true">Seek</span>
+      <div ref={seekPlayhead} className="playlist-seek-playhead" aria-hidden="true" />
+    </div>
     <div ref={ruler} className="playlist-ruler" role="group" aria-label="Playlist loop ruler" tabIndex={0} aria-disabled={busy}
-      aria-description="Click to seek; drag to set a loop. Home seeks to zero; arrow keys seek one snap from the live position. Shift+Home sets a loop. Hold Shift and use up or down to adjust its start, or left or right to adjust its end."
-      data-hint="Click to seek; drag to set a loop. Home and arrows seek. Shift+Home sets a loop. With Shift held, up/down adjusts the start and left/right adjusts the end."
+      aria-description="Drag to set a loop. Shift+Home sets a loop. Hold Shift and use up or down to adjust its start, or left or right to adjust its end."
+      data-hint="Drag to set a loop. Shift+Home sets a loop. With Shift held, up/down adjusts the start and left/right adjusts the end."
       onPointerDown={loopDown} onPointerMove={event => loopMove(event)} onPointerUp={event => loopMove(event, true)} onPointerCancel={cancel} onLostPointerCapture={cancel}
       onKeyDown={loopKey}>
       {shownLoop && <div className="playlist-loop" data-enabled={shownLoop.enabled} style={{ left: (shownLoop.startTick - view.scrollTick) * view.tickWidth, width: (shownLoop.endTick - shownLoop.startTick) * view.tickWidth }} /> }{Array.from({ length: Math.min(128, Math.ceil(view.width / pixelsPerBar) + 2) }, (_, index) => {

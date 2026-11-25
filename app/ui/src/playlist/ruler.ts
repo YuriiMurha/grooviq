@@ -42,7 +42,6 @@ export class LoopGesture {
     this.region = this.interval(tick);
     return this.moved ? this.region : null;
   }
-  get dragging(): boolean { return this.moved; }
   cancel(): void { this.closed = true; }
   take(guard: GestureGuard): readonly ArrangementOperation[] | null {
     if (this.closed) return null;
