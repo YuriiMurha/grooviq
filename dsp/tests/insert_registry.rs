@@ -307,11 +307,12 @@ fn invalid_inserts_return_typed_errors() {
     }
 }
 
-/// Eight 128-frame blocks of deterministic noise (longer than the 15 ms smoothers), as bits.
+/// 128 blocks of 128 frames of deterministic noise, as bits: long enough for 15 ms smoothers,
+/// 50 ms tap fades and Shimmer's slower pitch glide (which first diverges near frame 3,730).
 fn first_blocks(device: &mut dyn Device) -> Vec<u32> {
     let mut state = 0x1234_5678u32;
     let mut out = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..128 {
         let (mut left, mut right) = ([0f32; 128], [0f32; 128]);
         for (l, r) in left.iter_mut().zip(right.iter_mut()) {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -325,16 +326,24 @@ fn first_blocks(device: &mut dyn Device) -> Vec<u32> {
 }
 
 /// `create_insert` must not glide from the defaults: its first blocks equal the same device
-/// after `reset()`, which snaps every smoother, at the minimum, maximum and middle vectors.
+/// after `reset()`, which snaps every smoother, at the minimum, maximum and middle vectors
+/// (plus a short wet tap for the delays).
 #[test]
 fn every_effect_starts_at_the_requested_values() {
     for id in EFFECTS {
         let spec = param_spec(id).unwrap();
-        let vectors: [Vec<f32>; 3] = [
-            spec.iter().map(|s| s.0).collect(),
+        let mut vectors = vec![
+            spec.iter().map(|s| s.0).collect::<Vec<f32>>(),
             spec.iter().map(|s| s.1).collect(),
             spec.iter().map(|s| 0.5 * (s.0 + s.1)).collect(),
         ];
+        if matches!(id, "delay" | "character_delay") {
+            // A short free-time tap, fully wet: a tap that fades in from the default time
+            // shows within the first milliseconds. Indices: 0 sync, 2 time ms, 7 mix.
+            let mut tap = defaults(id);
+            (tap[0], tap[2], tap[7]) = (0., 1., 1.);
+            vectors.push(tap);
+        }
         for params in &vectors {
             let mut fresh = create_insert(id, 48000., 9, params).unwrap();
             let mut snapped = create_insert(id, 48000., 9, params).unwrap();
