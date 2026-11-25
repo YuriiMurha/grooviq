@@ -265,3 +265,115 @@ fn live_mixer_installs_and_pulled_sources_never_allocate() {
 fn realtime_process(p: &mut AudioProcessor, out: &mut [f32]) {
     super::realtime(|| p.process(out, 2));
 }
+
+const FADING_CAPACITY: u32 = MAX_CHANNELS as u32;
+
+fn synth(id: u32) -> ChannelSetup {
+    ChannelSetup::synth(ChannelId(id), vec![], ChannelMix::default())
+}
+
+fn edit(remove: Vec<u32>, add: Vec<u32>) -> SourceEdit {
+    SourceEdit {
+        remove: remove.into_iter().map(ChannelId).collect(),
+        add: add.into_iter().map(synth).collect(),
+        timeline: None,
+        mix: MixSetup::LegacyDirect,
+    }
+}
+
+fn start_note(channel: u32, id: u64) -> Command {
+    Command::ChannelNote {
+        channel: ChannelId(channel),
+        key: 60,
+        velocity: 0.8,
+        on: true,
+        id: NoteId(id),
+    }
+}
+
+/// MAX_LEAVING channels fading, then one more removal: the node with no fading room comes
+/// back through the transaction's reserved `removed` capacity inside the callback.
+#[test]
+fn full_fading_room_returns_removed_nodes_under_guard() {
+    let state = EngineState {
+        channels: (0..FADING_CAPACITY).map(synth).collect(),
+        ..EngineState::default()
+    };
+    let (mut c, mut p) = engine_with(
+        EngineConfig {
+            sample_rate: 48_000.0,
+        },
+        state,
+    );
+    let mut out = [0.0; 128];
+    super::realtime(|| p.process(&mut out, 2));
+    // Replace all 256 (256 leaving), then remove one more before any fade can finish.
+    c.set_sources_and_mix(edit(
+        (0..FADING_CAPACITY).collect(),
+        (1000..1000 + FADING_CAPACITY).collect(),
+    ))
+    .unwrap();
+    // This queued voice must disappear with the extra immediately removed node.
+    c.send(start_note(1000, 1)).unwrap();
+    c.set_sources_and_mix(edit(vec![1000], vec![])).unwrap();
+    c.send(start_note(1001, 2)).unwrap();
+    super::realtime(|| p.process(&mut out, 2));
+
+    // An isolated source proves the new nodes actually reached the graph and that the
+    // extra removed node contributes no sound, rather than only checking the mirror.
+    let (mut reference, mut renderer) = engine(EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let mut expected = [0.0; 128];
+    super::realtime(|| renderer.process(&mut expected, 2));
+    reference.add_channel(synth(1001)).unwrap();
+    reference.send(start_note(1001, 2)).unwrap();
+    super::realtime(|| renderer.process(&mut expected, 2));
+    assert!(expected.iter().any(|x| x.abs() > 1e-6));
+    assert_eq!(out, expected);
+    for _ in 0..50 {
+        super::realtime(|| p.process(&mut out, 2));
+        let _ = c.check_health();
+    }
+    assert_eq!(c.state().channels.len(), FADING_CAPACITY as usize - 1);
+    assert!(out.iter().all(|x| x.is_finite()));
+}
+
+/// A source transaction reaching a faulted graph is refused whole inside the callback and
+/// returns every owned node in its envelope.
+#[test]
+fn faulted_graph_returns_refused_sources_under_guard() {
+    let state = EngineState {
+        channels: vec![synth(1)],
+        ..EngineState::default()
+    };
+    let (mut c, mut p) = engine_with(
+        EngineConfig {
+            sample_rate: 48_000.0,
+        },
+        state,
+    );
+    let mut out = [0.0; 128];
+    super::realtime(|| p.process(&mut out, 2));
+    c.send(Command::InjectPanic).unwrap();
+    // The panic itself allocates its payload: outside the guard, as a fault is.
+    p.process(&mut out, 2);
+    // The controller has not collected the fault yet: it admits the edit.
+    c.set_sources_and_mix(edit(vec![1], vec![1, 2, 3])).unwrap();
+    c.set_mix(MixSetup::LegacyDirect).unwrap();
+    super::realtime(|| p.process(&mut out, 2));
+    super::realtime(|| p.process(&mut out, 2));
+    let events = c.check_health();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HealthEvent::Restarted { .. })),
+        "{events:?}"
+    );
+    for _ in 0..20 {
+        super::realtime(|| p.process(&mut out, 2));
+        let _ = c.check_health();
+    }
+    assert_eq!(c.state().channels.len(), 3);
+    assert!(out.iter().all(|x| x.is_finite()));
+}
