@@ -776,6 +776,7 @@
 .wmark {
   --grip-width: 18px;
   --grip-offset: 4px;
+  --tab-row: 16px;
   position: absolute;
   top: 0;
   left: var(--x);
@@ -792,9 +793,13 @@
   --grip-offset: 14px;
 }
 
+.wmark.stacked:not(.inset) {
+  height: var(--tab-row);
+}
+
 .wmark.inset {
-  top: 16px;
-  z-index: 2;
+  top: var(--tab-row);
+  height: calc(56% - var(--tab-row));
 }
 
 .wmark.loop {
@@ -844,7 +849,7 @@
 }
 
 .wmark:focus-visible {
-  outline-offset: 0;
+  outline-offset: -2px;
 }
 
 .pitch-body {

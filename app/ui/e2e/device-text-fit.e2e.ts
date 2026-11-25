@@ -29,18 +29,23 @@ async function openEditor(page: Page, name: string): Promise<Locator> {
   await page.getByRole("button", { name: `Edit the ${name}`, exact: true }).click();
   const dialog = page.getByRole("dialog", { name, exact: true });
   await expect(dialog).toBeVisible();
-  await page.evaluate(async () => {
+  const fontLoaded = await page.evaluate(async () => {
     await document.fonts.ready;
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    return document.fonts.check('11px "Manrope Variable"') &&
+      [...document.fonts].some((face) => face.family.replaceAll('"', "") === "Manrope Variable" && face.status === "loaded");
   });
+  expect(fontLoaded, "bundled Manrope is loaded").toBe(true);
+  if (page.viewportSize()?.width === 900) {
+    expect(await dialog.evaluate((el) => el.getBoundingClientRect().width / el.clientWidth), "minimum window scales the device").toBeLessThan(1);
+  }
   return dialog;
 }
 
 async function clipping(dialog: Locator): Promise<string[]> {
-  const candidates = await dialog.evaluate((root) => {
+  return dialog.evaluate((root) => {
     const tolerance = 1;
-    const issues: { index: number; text: string; detail: string; ellipsis?: boolean }[] = [];
-    const elements = [...root.querySelectorAll("*")];
+    const issues: string[] = [];
     const describe = (el: Element) => {
       const param = el.closest("[data-param]");
       const classes = [...el.classList].map((name) => `.${name}`).join("");
@@ -57,7 +62,7 @@ async function clipping(dialog: Locator): Promise<string[]> {
       return `${pixels(rect.width)} text vs ${pixels(box.width)} box${overhang ? `, ${overhang}` : ""}`;
     };
 
-    for (const [index, el] of elements.entries()) {
+    for (const el of root.querySelectorAll("*")) {
       const style = getComputedStyle(el);
       if (style.visibility !== "visible" || el.getClientRects().length === 0) continue;
       const text = (el instanceof SVGTextElement ? el.textContent : [...el.childNodes]
@@ -72,7 +77,7 @@ async function clipping(dialog: Locator): Promise<string[]> {
         const viewport = el.ownerSVGElement.getBoundingClientRect();
         if (textBox.left < viewport.left - tolerance || textBox.right > viewport.right + tolerance ||
             textBox.top < viewport.top - tolerance || textBox.bottom > viewport.bottom + tolerance) {
-          issues.push({ index, text, detail: `${selector}: outside SVG (${spans(textBox, viewport)})` });
+          issues.push(`${selector}: outside SVG (${spans(textBox, viewport)})`);
         }
         continue;
       }
@@ -93,20 +98,21 @@ async function clipping(dialog: Locator): Promise<string[]> {
       const scrolls = el.clientWidth > 0 && el.scrollWidth > el.clientWidth + tolerance;
       const ellipsis = style.textOverflow === "ellipsis" && style.overflowX !== "visible" &&
         (scrolls || rects.some((rect) => overflowsWidth(rect, box)));
-      if (scrolls || ellipsis) {
-        issues.push({ index, text, ellipsis, detail: `${selector}: scrollWidth ${el.scrollWidth}px vs clientWidth ${el.clientWidth}px` });
+      if ((scrolls || ellipsis) && !(ellipsis && el.title.replace(/\s+/g, " ").includes(text))) {
+        const missingTitle = ellipsis ? "; ellipsis has no full title" : "";
+        issues.push(`${selector}: scrollWidth ${el.scrollWidth}px vs clientWidth ${el.clientWidth}px${missingTitle}`);
       }
 
       // A nowrap span can grow to fit itself and still spill out of its control or grid cell.
-      // Check layout bounds in addition to CSS clipping. Ignore the zero-width waveform grip
-      // anchor; its absolutely positioned tab has a box of its own.
+      // Positioned or transformed text can cross its control without affecting layout widths.
       const visibleRects = ellipsis ? [box] : rects;
+      const control = el.closest(".dctl");
       for (let bound: Element | null = el; bound && root.contains(bound); bound = bound.parentElement) {
         const css = getComputedStyle(bound);
         const bounds = bound.getBoundingClientRect();
         const clips = (overflow: string) => overflow === "hidden" || overflow === "clip";
         const horizontal = bounds.width > 0 && css.display !== "inline";
-        const vertical = clips(css.overflowY);
+        const vertical = bound === control || clips(css.overflowY);
         const overflow = visibleRects.find((rect) => (horizontal && overflowsWidth(rect, bounds)) ||
           (vertical && (rect.top < bounds.top - tolerance || rect.bottom > bounds.bottom + tolerance)));
         if (overflow) {
@@ -116,31 +122,13 @@ async function clipping(dialog: Locator): Promise<string[]> {
             width: horizontal ? overflow.width : bounds.width,
             height: vertical ? overflow.height : bounds.height,
           });
-          issues.push({ index, text, detail: `${selector}: outside ${describe(bound)} (${spans(edges, bounds)})` });
+          issues.push(`${selector}: outside ${describe(bound)} (${spans(edges, bounds)})`);
           break;
         }
       }
     }
     return issues;
   });
-
-  const failures: string[] = [];
-  for (const issue of candidates) {
-    if (issue.ellipsis) {
-      const element = dialog.locator("*").nth(issue.index);
-      if ((await element.getAttribute("title"))?.includes(issue.text)) continue;
-      const fullText = new RegExp(issue.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-      try {
-        await expect(element).toHaveAccessibleName(fullText, { timeout: 1 });
-        continue;
-      } catch {
-        failures.push(`${issue.detail}; ellipsis has no full title or accessible name`);
-      }
-    } else {
-      failures.push(issue.detail);
-    }
-  }
-  return failures;
 }
 
 async function measure(dialog: Locator, state: string, findings: Set<string>) {

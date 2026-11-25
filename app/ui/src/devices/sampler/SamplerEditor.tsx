@@ -238,7 +238,7 @@ export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onE
             </>,
             <div className="sample-toggles">{slot("sample", "head")}</div>,
             channel.sampleName && (
-              <span className="sample-name" role="note" aria-label={channel.sampleName} title={channel.sampleName}>
+              <span className="sample-name" title={channel.sampleName}>
                 {channel.sampleName}
               </span>
             ),
