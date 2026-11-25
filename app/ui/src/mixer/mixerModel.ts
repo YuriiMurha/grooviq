@@ -36,13 +36,16 @@ export interface MixerSend {
 
 /** One mixer channel as the host holds it. */
 export interface MixerTrack {
+  /** View identity for this mounted mixer: qualify ids by project generation, or remount on
+   * project replacement. Reusing an id for another track would retarget a live gesture. */
   id: string;
   name: string;
   /** Supplied description ("Instrument", "Bus", "Return"). */
   kind: string;
   /** Riso ink 1..6. */
   ink: number;
-  /** Fader level, dB. */
+  /** Fader view value in LEVEL's range. LEVEL.min is the off sentinel, not a finite -60 dB
+   * engine gain; the host adapter maps it to/from silence. */
   level: number;
   /** -1 (left) .. 1 (right). */
   pan: number;
@@ -86,6 +89,8 @@ export type ParamTarget = { kind: "level" | "pan"; nodeId: string } | { kind: "s
 /** A continuous control: live while it moves, then one commit or a cancel (back to `value`). */
 export interface ParamCommand {
   target: ParamTarget;
+  /** View units: level uses LEVEL's off sentinel, pan is bipolar, send is linear gain.
+   * The host adapter converts these to engine units; this is not a persistence format. */
   value: number;
   phase: "live" | "commit" | "cancel";
 }
@@ -125,7 +130,7 @@ export interface MixerProps {
   onCommand: (command: MixerCommand) => CommandResult;
 }
 
-/** Fader: dB, from silence to +6, 0 by default. */
+/** Fader view: the finite bottom stop denotes off, matching the approved prototype. */
 export const LEVEL: ParamRange = { min: -60, max: 6, default: 0, curve: "lin", stepped: false };
 export const PAN: ParamRange = { min: -1, max: 1, default: 0, curve: "lin", stepped: false };
 export const SEND: ParamRange = { min: 0, max: 1, default: 0, curve: "lin", stepped: false };
