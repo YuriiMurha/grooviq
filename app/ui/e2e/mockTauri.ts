@@ -995,6 +995,8 @@ export function installMockTauri(seed: MockSeed): void {
   // --- The live stream: a fake WebSocket that sends v2 frames at 60 Hz. ---
   const LIVE_PORT = 47999;
   let synthObservation: number[] | null = null;
+  type SynthMotionSnapshot = { ampStage: number; filterStage: number; lfoPhase: number; ampLevel: number; filterLevel: number; lfoValue: number; voices: number; frames?: number };
+  let synthMotion: SynthMotionSnapshot | null = null;
   const encodeLive = () => {
     const buf = new ArrayBuffer(40);
     const v = new DataView(buf);
@@ -1579,6 +1581,11 @@ export function installMockTauri(seed: MockSeed): void {
       const sounding = [...s.live.keys()].some((key) => key.startsWith(`${channel.id}:`));
       const t = performance.now() / 1000;
       synthObservation = [instance, Math.floor(performance.now() * 48), sounding ? 0.5 : 0, sounding ? 0.5 : 0, sounding ? 1 : 0, sounding ? Math.sin(t) : 0, sounding ? 0.7 : 0, sounding ? 0.4 : 0, ...Array.from({ length: 256 }, (_, i) => sounding ? Math.sin(i / 10 + t * 9) * 0.4 : 0)];
+      if (synthMotion) {
+        synthObservation[1] = synthMotion.frames ?? synthObservation[1];
+        synthObservation.splice(4, 4, synthMotion.voices, synthMotion.lfoValue, synthMotion.ampLevel, synthMotion.filterLevel);
+      }
+      synthObservation.push(synthMotion?.ampStage ?? (sounding ? 3 : 0), synthMotion?.filterStage ?? (sounding ? 3 : 0), synthMotion?.lfoPhase ?? (t % 1));
       return synthObservation;
     },
     sampler_trim_view: (a) => trimView(Number(a.channel)),
@@ -1951,6 +1958,7 @@ export function installMockTauri(seed: MockSeed): void {
     unregisterListener: (_event: string, id: number) => callbacks.delete(id),
   };
   w.__grooviqMock = {
+    setSynthMotion: (snapshot: SynthMotionSnapshot | null) => { synthMotion = snapshot; },
     trimState: trimView,
     trimInverseCount: () => trimUndo.length,
     refuseTrim: (message: string) => { trimRefusal=message; },

@@ -119,6 +119,61 @@ test.describe("the synth editor", () => {
     expect((await mock.calls("synth_meter")).length).toBeLessThanOrEqual(before + 1);
   });
 
+  test("measured_stage_and_phase_drive_read_only_motion_and_frozen_capture_clears", async ({ app, mock }, info) => {
+    await open(app);
+    const before = await mock.eval("m => m.state.project");
+    const amp = editor(app).locator('[data-synth-meter="amp"]');
+    const flt = editor(app).locator('[data-synth-meter="flt"]');
+    const lfo = editor(app).locator('[data-synth-meter="lfo"]');
+    const snapshot = async (ampStage: number, phase: number, frames?: number) => {
+      await mock.eval(`m => m.setSynthMotion(${JSON.stringify({ ampStage, filterStage: 2, lfoPhase: phase, ampLevel: 0.25, filterLevel: 0.75, lfoValue: -0.3, voices: 1, frames })})`);
+    };
+    const x = (dot: Locator) => dot.evaluate(e => Number(e.getAttribute("cx")));
+    await snapshot(1, 0.1);
+    await expect(amp).toBeVisible();
+    const geometry = await amp.evaluate(e => ({
+      left: Number((e as SVGElement).dataset.meterLeft), attack: Number((e as SVGElement).dataset.meterAttack),
+      top: Number((e as SVGElement).dataset.meterTop), bottom: Number((e as SVGElement).dataset.meterBottom),
+    }));
+    const attackX = await x(amp);
+    expect(attackX).toBeCloseTo((geometry.left + geometry.attack) / 2, 4);
+    expect(Number(await amp.getAttribute("cy"))).toBeCloseTo(geometry.bottom - 0.25 * (geometry.bottom - geometry.top), 4);
+    const phaseX = await x(lfo);
+    const filterDecayX = await flt.evaluate(e => (Number((e as SVGElement).dataset.meterAttack) + Number((e as SVGElement).dataset.meterDecay)) / 2);
+    await expect.poll(() => x(flt)).toBeCloseTo(filterDecayX, 4);
+    await snapshot(3, 0.7);
+    await expect.poll(() => x(amp)).toBeGreaterThan(attackX);
+    await expect.poll(() => x(lfo)).toBeGreaterThan(phaseX);
+    const sustainX = await x(amp);
+    await snapshot(3, 0.7);
+    await expect.poll(() => x(amp)).toBe(sustainX);
+    await snapshot(4, 0.2);
+    await expect.poll(() => x(amp)).toBeGreaterThan(sustainX);
+    await shot(app, info, "measured-release");
+    await app.setViewportSize({ width: 900, height: 800 });
+    await shot(app, info, "measured-release-900");
+    await app.getByRole("button", { name: "Dismiss", exact: true }).click();
+    await app.setViewportSize({ width: 900, height: 560 });
+    await expect(amp).toBeVisible();
+    await expect(lfo).toBeVisible();
+    await expect(control(app, "amp_release")).toBeVisible();
+    await expect.poll(async () => {
+      const bounds = await amp.boundingBox();
+      return bounds !== null && bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 900 && bounds.y + bounds.height <= 560;
+    }).toBe(true);
+    await shot(app, info, "measured-release-900x560");
+    await app.setViewportSize({ width: 1280, height: 800 });
+    await snapshot(1, 0.4, 987654321);
+    await expect.poll(() => x(amp)).toBe(attackX);
+    await expect(amp).toBeHidden();
+    await expect(flt).toBeHidden();
+    await expect(lfo).toBeHidden();
+    await expect(editor(app).locator('[data-synth-stage="amp"]')).toBeHidden();
+    expect(await mock.eval("m => m.state.project")).toEqual(before);
+    expect((await mock.calls("channel_param_live")).length).toBe(0);
+    await mock.eval("m => m.setSynthMotion(null)");
+  });
+
   test("held_meter_request_stays_bounded_across_selection_and_reopening", async ({ app, mock }) => {
     const settleFrames = () => app.evaluate(() => new Promise<void>(resolve => {
       requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
