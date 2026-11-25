@@ -58,6 +58,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+      # rust-cache keys on Cargo.toml dependency sections only, so a [profile] change would reuse
+      # dependencies built with the old profile and rebuild them on every PR. Key it on the root manifest.
+      - name: Key the Rust cache on the root manifest
+        shell: bash
+        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
