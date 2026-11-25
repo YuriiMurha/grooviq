@@ -1506,3 +1506,96 @@ fn admission_counts_the_fade_routes_a_build_adds() {
     assert_eq!(c.load_state(routed), Err(ControlError::Rejected));
     assert_eq!(c.state(), &EngineState::default());
 }
+
+#[test]
+fn legacy_fades_refuse_routed_installs_until_retired_across_all_removal_apis() {
+    for path in 0..3 {
+        let run = |switch| {
+            render(
+                Only::Channel(3),
+                MixSetup::LegacyDirect,
+                |_| N,
+                |b, c| {
+                    let replacement =
+                        || ChannelSetup::sampler(ChannelId(3), None, vec![], ChannelMix::default());
+                    let snapshot = |c: &Controller| {
+                        (
+                            c.state().clone(),
+                            c.mix_revision(),
+                            c.channel_instance(ChannelId(3)),
+                        )
+                    };
+                    if b == 30 {
+                        if switch && path == 1 {
+                            let before = snapshot(c);
+                            assert_eq!(
+                                c.set_sources_and_mix(SourceEdit {
+                                    remove: vec![ChannelId(3)],
+                                    add: vec![replacement()],
+                                    timeline: None,
+                                    mix: one_channel_mix(1),
+                                }),
+                                Err(ControlError::Busy),
+                                "compound mode change must retain the legacy sink"
+                            );
+                            assert_eq!(snapshot(c), before, "refused compound edit is atomic");
+                        }
+                        match path {
+                            0 => {
+                                c.remove_channel(ChannelId(3)).unwrap();
+                                c.add_channel(replacement()).unwrap();
+                            }
+                            1 => {
+                                // A legacy-only compound edit is safe while a legacy fade rings.
+                                c.set_sources_and_mix(SourceEdit {
+                                    remove: vec![ChannelId(3)],
+                                    add: vec![replacement()],
+                                    timeline: None,
+                                    mix: MixSetup::LegacyDirect,
+                                })
+                                .unwrap();
+                            }
+                            _ => {
+                                let state = c.state();
+                                c.set_timeline(TimelineUpdate {
+                                    pattern: Box::new(state.pattern.clone()),
+                                    song: Box::new(state.song.clone()),
+                                    bpm: state.bpm,
+                                    mode: state.playback_mode,
+                                    region: state.song_loop,
+                                    remove_channel: Some(ChannelId(3)),
+                                })
+                                .unwrap();
+                                c.add_channel(replacement()).unwrap();
+                            }
+                        }
+                        if switch {
+                            let before = snapshot(c);
+                            assert_eq!(c.set_mix(one_channel_mix(1)), Err(ControlError::Busy));
+                            assert_eq!(snapshot(c), before, "refused mix leaves the mirror intact");
+                            // Do not block same-mode legacy edits merely because it has a fade.
+                            c.set_mix(MixSetup::LegacyDirect).unwrap();
+                        }
+                    }
+                    if b == 40 && switch {
+                        c.set_mix(one_channel_mix(1))
+                            .expect("the collected legacy fade releases Busy");
+                    }
+                },
+            )
+        };
+        let control = run(false);
+        let changed = run(true);
+        let fade = 30 * N * 2..34 * N * 2;
+        assert!(
+            audible(&control[fade.clone()]),
+            "path {path} has an audible old-instance fade"
+        );
+        assert_eq!(
+            same_bits(&control[fade.clone()], &changed[fade]),
+            None,
+            "path {path} preserved the fade"
+        );
+        assert!(changed[40 * N * 2..].iter().all(|v| v.abs() < 1e-10));
+    }
+}

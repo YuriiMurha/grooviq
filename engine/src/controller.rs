@@ -82,7 +82,8 @@ impl std::error::Error for ControlError {}
 #[derive(Clone, Copy, Debug)]
 struct Fade {
     instance: u64,
-    track: crate::mixer::MixerTrackId,
+    /// None retains the LegacyDirect sink; Some retains a routed track.
+    track: Option<crate::mixer::MixerTrackId>,
     /// The graph build that was newest when it was removed: it fades in that graph or a
     /// later one, so retiring any graph up to `epoch` cannot retire it early.
     epoch: u64,
@@ -569,17 +570,15 @@ impl Controller {
                 .ok_or(ControlError::UnknownChannel)?;
             channels.remove(at);
             let instance = instances.remove(id).unwrap_or(0);
-            if let Some(track) = self
+            let track = self
                 .state
                 .mix
-                .destination(SourceId::Channel(u64::from(id.0)))
-            {
-                fades.push(Fade {
-                    instance,
-                    track,
-                    epoch: self.graph_epoch,
-                });
-            }
+                .destination(SourceId::Channel(u64::from(id.0)));
+            fades.push(Fade {
+                instance,
+                track,
+                epoch: self.graph_epoch,
+            });
         }
         let mut next = self.next_instance;
         let mut added = Vec::with_capacity(add.len());
@@ -698,12 +697,10 @@ impl Controller {
     /// Records the fade route of channel `id`'s current instance, which is being removed.
     fn record_fade(&mut self, id: ChannelId) {
         let source = crate::mixer::SourceId::Channel(u64::from(id.0));
-        if let (Some(track), Some(&instance)) =
-            (self.state.mix.destination(source), self.instances.get(&id))
-        {
+        if let Some(&instance) = self.instances.get(&id) {
             self.fades.push(Fade {
                 instance,
-                track,
+                track: self.state.mix.destination(source),
                 epoch: self.graph_epoch,
             });
         }
@@ -1203,8 +1200,8 @@ impl Controller {
 
 /// The engine-owned fade routes a mix prepared now must carry: one per present channel
 /// instance the mix routes (in case it is removed while this mix runs) and one per recorded
-/// fade, on its own track. A fade whose track the mix lacks, or any fade under LegacyDirect,
-/// is `Busy`: refusing the edit until it retires, never moving or dropping the fade.
+/// fade, on its own track. A different output mode or a missing fading track is `Busy`:
+/// refuse the edit until retirement rather than move or drop the fade.
 fn aliases(
     mix: &crate::mixer::MixSetup,
     instances: &BTreeMap<ChannelId, u64>,
@@ -1212,7 +1209,7 @@ fn aliases(
 ) -> Result<Vec<(u64, crate::mixer::MixerTrackId)>, ControlError> {
     use crate::mixer::{MixSetup, SourceId};
     if let MixSetup::LegacyDirect = mix {
-        return if fades.is_empty() {
+        return if fades.iter().all(|f| f.track.is_none()) {
             Ok(Vec::new())
         } else {
             Err(ControlError::Busy)
@@ -1220,10 +1217,11 @@ fn aliases(
     }
     let mut out = Vec::with_capacity(instances.len() + fades.len());
     for f in fades {
-        if !mix.has_track(f.track) {
+        let track = f.track.ok_or(ControlError::Busy)?;
+        if !mix.has_track(track) {
             return Err(ControlError::Busy);
         }
-        out.push((f.instance, f.track));
+        out.push((f.instance, track));
     }
     for (id, &instance) in instances {
         if let Some(track) = mix.destination(SourceId::Channel(u64::from(id.0))) {
