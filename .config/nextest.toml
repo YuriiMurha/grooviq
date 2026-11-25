@@ -56,3 +56,11 @@ filter = '''
 test-group = "wall-clock"
 # The group serializes its own tests. Reserving all test threads keeps other groups out too.
 threads-required = "num-test-threads"
+# nextest starts tests in list order, so a member queued behind a long test would leave every
+# other slot idle until it can run alone. Run the group first, before the pool fills.
+priority = 100
+
+# Start the longest tests next so they do not finish last on 3-core runners.
+[[profile.ci.overrides]]
+filter = 'binary_id(=grooviq-golden::song_m3) | binary_id(=grooviq-golden::character_delay) | binary_id(=grooviq-dsp::character_delay)'
+priority = 50
