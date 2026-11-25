@@ -119,6 +119,28 @@ test.describe("the synth editor", () => {
     expect((await mock.calls("synth_meter")).length).toBeLessThanOrEqual(before + 1);
   });
 
+  test("deselecting_the_synth_mid_note_clears_its_scope", async ({ app }) => {
+    await open(app);
+    const scope = editor(app).getByLabel("Synth output waveform");
+    const status = editor(app).locator(".synth-output-status");
+    const amp = editor(app).locator('[data-synth-meter="amp"]');
+    const pixels = () => scope.evaluate((c: HTMLCanvasElement) => c.toDataURL());
+    await expect(status).toContainText("0 voices");
+    const silent = await pixels();
+    await app.keyboard.down("z");
+    try {
+      await expect(status).toContainText("1 voice");
+      await expect(amp).toBeVisible();
+      // Selecting another channel deactivates the editor while the note still sounds.
+      await app.getByRole("button", { name: "Mute Kick", exact: true }).focus();
+    } finally {
+      await app.keyboard.up("z");
+    }
+    await expect(status).toContainText("0 voices");
+    await expect(amp).toBeHidden();
+    await expect.poll(pixels).toBe(silent);
+  });
+
   test("measured_stage_and_phase_drive_read_only_motion_and_frozen_capture_clears", async ({ app, mock }, info) => {
     await open(app);
     const before = await mock.eval("m => m.state.project");
