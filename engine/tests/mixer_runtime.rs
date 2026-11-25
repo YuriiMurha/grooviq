@@ -728,6 +728,7 @@ fn malformed_render_calls_change_nothing() {
         )
     };
     let mut k = make();
+    let mut uninterrupted = make();
     let bank = bank(&k, 65);
     let good = blocks(&bank, 0, 64);
     let mut long = good.clone();
@@ -739,6 +740,15 @@ fn malformed_render_calls_change_nothing() {
     swapped.swap(0, 1);
     let mut uneven = good.clone();
     uneven[1].right = &bank[1].2[..63];
+
+    // A refusal must preserve an audible effect state, not just untouched fresh devices.
+    k.render(&t, &good, &mut ol, &mut or).unwrap();
+    let (mut expected_l, mut expected_r) = ([0.0f32; 64], [0.0f32; 64]);
+    uninterrupted
+        .render(&t, &good, &mut expected_l, &mut expected_r)
+        .unwrap();
+    assert_eq!((ol, or), (expected_l, expected_r));
+    let mut frame = 64;
 
     let cases: [(HostTransport, &[SourceBlock], usize, RenderError); 8] = [
         (
@@ -771,10 +781,36 @@ fn malformed_render_calls_change_nothing() {
         (t, &uneven, 64, RenderError::SourceLength { index: 1 }),
         (t, &long, 64, RenderError::SourceLength { index: 0 }),
     ];
-    for (t, sources, cap, want) in cases {
-        let got = k.render(&t, sources, &mut ol[..cap], &mut or[..cap]);
+    for (rejected_t, sources, cap, want) in cases {
+        ol.fill(7.0);
+        or.fill(7.0);
+        let got = k.render(&rejected_t, sources, &mut ol[..cap], &mut or[..cap]);
         assert_eq!(got, Err(want));
         assert_eq!(ol, [7.0; 64], "refused output untouched");
+        assert_eq!(or, [7.0; 64], "refused right output untouched");
+
+        let next = transport(sr, frame, 64, 120.0);
+        uninterrupted
+            .render(&next, &good, &mut expected_l, &mut expected_r)
+            .unwrap();
+        k.render(&next, &good, &mut ol, &mut or).unwrap();
+        assert_eq!(
+            (ol, or),
+            (expected_l, expected_r),
+            "{want:?} preserved warmed state"
+        );
+        if frame == 64 {
+            let (mut fresh_l, mut fresh_r) = ([0.0f32; 64], [0.0f32; 64]);
+            make()
+                .render(&next, &good, &mut fresh_l, &mut fresh_r)
+                .unwrap();
+            assert_ne!(
+                (expected_l, expected_r),
+                (fresh_l, fresh_r),
+                "the warmed fixture must distinguish a reset"
+            );
+        }
+        frame += 64;
     }
     let empty: [SourceBlock; 2] = [
         SourceBlock {
@@ -789,18 +825,24 @@ fn malformed_render_calls_change_nothing() {
         },
     ];
     assert_eq!(
-        k.render(&transport(sr, 0, 0, 120.0), &empty, &mut [], &mut []),
+        k.render(&transport(sr, frame, 0, 120.0), &empty, &mut [], &mut []),
         Ok(RenderReport::default())
     );
     assert_eq!(
-        k.render(&transport(sr, 0, 0, 120.0), &empty[..1], &mut [], &mut []),
+        k.render(
+            &transport(sr, frame, 0, 120.0),
+            &empty[..1],
+            &mut [],
+            &mut []
+        ),
         Err(RenderError::SourceCount {
             expected: 2,
             got: 1
         })
     );
 
-    let report = k.render(&t, &good, &mut ol, &mut or).unwrap();
+    let next = transport(sr, frame, 64, 120.0);
+    let report = k.render(&next, &good, &mut ol, &mut or).unwrap();
     assert_eq!(
         report,
         RenderReport {
@@ -808,12 +850,13 @@ fn malformed_render_calls_change_nothing() {
             silenced: 0
         }
     );
-    let (mut fl, mut fr) = ([0.0f32; 64], [0.0f32; 64]);
-    make().render(&t, &good, &mut fl, &mut fr).unwrap();
+    uninterrupted
+        .render(&next, &good, &mut expected_l, &mut expected_r)
+        .unwrap();
     assert_eq!(
         (ol, or),
-        (fl, fr),
-        "no refusal or empty call advanced any state"
+        (expected_l, expected_r),
+        "empty calls preserved warmed state"
     );
     assert_ne!(ol, [7.0; 64]);
 }
