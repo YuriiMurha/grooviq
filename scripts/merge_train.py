@@ -39,7 +39,8 @@ def tick(repo, order, approved_head):
                     if checks.get(name) not in PENDING | {"success"}]
         if failures:
             reason = ", ".join(failures)
-            repo.reject(number, reason)
+            if not repo.reject(number, sha, reason):
+                return f"Held #{number}: the failed head {sha} is no longer current."
             return f"Removed #{number} from the train: {reason}. Notify Root and the lane."
         if any(checks.get(name) != "success" for name in REQUIRED):
             return f"Waiting for required checks on #{number} at {sha}."
@@ -94,10 +95,21 @@ class GitHub:
     def behind_main(self, sha):
         return self.api(f"compare/main...{sha}?per_page=1")["behind_by"]
 
-    def reject(self, number, reason):
+    def reject(self, number, sha, reason):
+        def still_current():
+            pr = self.pull(number)
+            return pr["state"] == "open" and pr["head"]["sha"] == sha
+
+        if not still_current():
+            return False
         self.api(f"issues/{number}/comments", method="POST",
-                 body={"body": f"Removed from the merge train after a required check failed: {reason}."})
+                 body={"body": f"A required check failed on `{sha}`: {reason}. "
+                               "The train will remove that head from enrollment."})
+        if not still_current():
+            return False
+        # Label removal has no expected-head parameter, unlike update and merge.
         self.api(f"issues/{number}/labels/{LABEL}", method="DELETE")
+        return True
 
     def refresh(self, number, sha):
         self.api(f"pulls/{number}/update-branch", method="PUT", body={"expected_head_sha": sha})
