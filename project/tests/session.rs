@@ -1370,7 +1370,7 @@ fn the_export_state_is_the_engine_state_of_the_project() {
         )
         .unwrap();
     assert_eq!(
-        session.export_state(),
+        session.export_state().unwrap(),
         controller.lock().unwrap().state().clone()
     );
 }
@@ -1534,7 +1534,7 @@ fn a_velocity_on_an_empty_step_adds_a_hit_there() {
 /// mix, sampler value and the tempo are the very values the engine got.
 fn assert_mirror(session: &Session, controller: &Mutex<Controller>, after: &str) {
     let state = controller.lock().unwrap().state().clone();
-    assert_eq!(session.export_state(), state, "after {after}");
+    assert_eq!(session.export_state().unwrap(), state, "after {after}");
     let project = session.project();
     assert_eq!(
         project.clone().validate(),
@@ -2507,7 +2507,7 @@ fn the_time_signature_reaches_the_engine() {
         .apply(Edit::SetTimeSignature { beats: 7, unit: 8 }, Instant::now())
         .unwrap();
     assert_eq!(controller.lock().unwrap().state().time_signature, (7, 8));
-    assert_eq!(session.export_state().time_signature, (7, 8));
+    assert_eq!(session.export_state().unwrap().time_signature, (7, 8));
 }
 
 #[test]

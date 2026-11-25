@@ -1,16 +1,36 @@
 use super::InsertId;
 use grooviq_dsp::Device;
 
+/// What makes two prepared devices interchangeable for a survivor transfer: the same
+/// built-in kind (an index the caller assigns) and the same seed. Sample rate is the
+/// kernel's own and is compared separately.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InsertIdentity {
+    pub kind: u32,
+    pub seed: u64,
+}
+
 /// A built-in device the caller constructed, preset, seeded and prepared for the mixer's
 /// sample rate off-thread. The kernel neither inspects nor bounds its memory or latency.
 pub struct PreparedInsert {
     pub id: InsertId,
     pub device: Box<dyn Device>,
+    pub identity: InsertIdentity,
 }
 
 impl PreparedInsert {
+    /// A device with no transfer identity: it only survives into a kernel whose matching
+    /// insert also has the default identity.
     pub fn new(id: InsertId, device: Box<dyn Device>) -> Self {
-        Self { id, device }
+        Self::with_identity(id, device, InsertIdentity::default())
+    }
+
+    pub fn with_identity(id: InsertId, device: Box<dyn Device>, identity: InsertIdentity) -> Self {
+        Self {
+            id,
+            device,
+            identity,
+        }
     }
 }
 
@@ -19,6 +39,7 @@ impl PreparedInsert {
 pub(super) struct InsertSlot {
     pub(super) id: InsertId,
     pub(super) device: Box<dyn Device>,
+    pub(super) identity: InsertIdentity,
     pub(super) detector: (u32, u32),
 }
 

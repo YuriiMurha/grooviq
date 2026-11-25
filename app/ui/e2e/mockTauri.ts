@@ -93,6 +93,7 @@ type LengthEntry = { owner: number | null; growth: Growth } | { set: number };
 export interface MockSeed {
   audioLog?: { id: number; atMs: number; level: "info" | "warn" | "error"; message: string }[];
   holdAudioLog?: boolean;
+  holdProjectView?: boolean;
   /** Paths the mock's file system holds. */
   files?: Record<string, MockFile>;
   /** The project the engine holds at start; untitled and empty if absent. */
@@ -999,6 +1000,8 @@ export function installMockTauri(seed: MockSeed): void {
   // --- The live stream: a fake WebSocket that sends v2 frames at 60 Hz. ---
   const LIVE_PORT = 47999;
   let synthObservation: number[] | null = null;
+  type SynthMotionSnapshot = { ampStage: number; filterStage: number; lfoPhase: number; ampLevel: number; filterLevel: number; lfoValue: number; voices: number; frames?: number };
+  let synthMotion: SynthMotionSnapshot | null = null;
   const encodeLive = () => {
     const buf = new ArrayBuffer(40);
     const v = new DataView(buf);
@@ -1459,6 +1462,23 @@ export function installMockTauri(seed: MockSeed): void {
   };
   // Clip/media editing remains native-only. Reduced workspace history above applies
   // only real note/trim inverses; it cannot skip unsupported arrangement operations.
+  const seekArrangementTransport = (args: Record<string, unknown>) => {
+    try {
+      workspaceStamp(args);
+      if (workspaceRefusal !== null) { const error = workspaceRefusal; workspaceRefusal = null; throw error; }
+      if (s.project.playMode !== "song") throw "Seek requires Song mode";
+      let tick = Number(args.tick);
+      if (!Number.isSafeInteger(tick) || tick < 0) throw "Invalid seek tick";
+      const arrangement = s.project.arrangement;
+      const loop = arrangement?.loopRegion;
+      if (loop?.enabled) tick = Math.max(loop.startTick, Math.min(loop.endTick - 1, tick));
+      const end = Math.max(0, ...(arrangement?.clips ?? []).map(c => c.startTick + (c.content.type === "pattern" ? c.content.lengthTicks : 0)));
+      if (tick > end) throw "Seek outside Song extent";
+      s.transport.startTicks = tick; s.transport.startMs = performance.now();
+      if (s.transport.held !== null) s.transport.held = tick;
+      return { status: "applied", generation: s.generation, revision: arrangementRevision, changed: false, request: null, createdIds: [], reload: false, message: null, warnings: [] };
+    } catch (error) { return { status: "refused", generation: s.generation, revision: arrangementRevision, changed: false, request: null, createdIds: [], reload: true, message: String(error), warnings: [] }; }
+  };
   const nativeArrangementOnly = () => { throw "Arrangement/media commands are not simulated by this browser fixture; use native offline acceptance."; };
   const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
     arrangement_view: workspaceView,
@@ -1471,7 +1491,7 @@ export function installMockTauri(seed: MockSeed): void {
     arrangement_waveform: nativeArrangementOnly,
     arrangement_mode: workspaceMode,
     arrangement_loop: nativeArrangementOnly,
-    arrangement_seek: nativeArrangementOnly,
+    arrangement_seek: seekArrangementTransport,
     // Native menu state has no platform menu in this headless fixture.
     edit_history_enabled: () => null,
     // commands.rs
@@ -1592,6 +1612,11 @@ export function installMockTauri(seed: MockSeed): void {
       const sounding = [...s.live.keys()].some((key) => key.startsWith(`${channel.id}:`));
       const t = performance.now() / 1000;
       synthObservation = [instance, Math.floor(performance.now() * 48), sounding ? 0.5 : 0, sounding ? 0.5 : 0, sounding ? 1 : 0, sounding ? Math.sin(t) : 0, sounding ? 0.7 : 0, sounding ? 0.4 : 0, ...Array.from({ length: 256 }, (_, i) => sounding ? Math.sin(i / 10 + t * 9) * 0.4 : 0)];
+      if (synthMotion) {
+        synthObservation[1] = synthMotion.frames ?? synthObservation[1];
+        synthObservation.splice(4, 4, synthMotion.voices, synthMotion.lfoValue, synthMotion.ampLevel, synthMotion.filterLevel);
+      }
+      synthObservation.push(synthMotion?.ampStage ?? (sounding ? 3 : 0), synthMotion?.filterStage ?? (sounding ? 3 : 0), synthMotion?.lfoPhase ?? (t % 1));
       return synthObservation;
     },
     sampler_trim_view: (a) => trimView(Number(a.channel)),
@@ -1906,11 +1931,11 @@ export function installMockTauri(seed: MockSeed): void {
 
   /** Commands the test holds back (`holdCommand`), each until `releaseCommand`. */
   const holds = new Map<string, { promise: Promise<void>; release: () => void }>();
-  /** Commands whose next call the engine refuses (`refuseNext`), with the error it gives. */
-  if (seed.holdAudioLog) {
+  for (const [command, held] of Object.entries({ audio_log: seed.holdAudioLog, project_view: seed.holdProjectView })) {
+    if (!held) continue;
     let release!: () => void;
     const promise = new Promise<void>((resolve) => { release = resolve; });
-    holds.set("audio_log", { promise, release });
+    holds.set(command, { promise, release });
   }
   const replyHolds = new Map<string, { promise: Promise<void>; release: () => void }>();
   const replyHoldCommands = new Set(["pattern_list", "pattern_edit", "arrangement_view", "arrangement_mode", "arrangement_history", "arrangement_edit"]);
@@ -1964,6 +1989,7 @@ export function installMockTauri(seed: MockSeed): void {
     unregisterListener: (_event: string, id: number) => callbacks.delete(id),
   };
   w.__grooviqMock = {
+    setSynthMotion: (snapshot: SynthMotionSnapshot | null) => { synthMotion = snapshot; },
     trimState: trimView,
     trimInverseCount: () => trimUndo.length,
     refuseTrim: (message: string) => { trimRefusal=message; },
@@ -2018,6 +2044,7 @@ export function installMockTauri(seed: MockSeed): void {
       const v = new DataView(data);
       v.setUint8(1, (v.getUint8(1) & ~1) | (playing ? 1 : 0));
       for (const socket of sockets) socket.onmessage?.(new MessageEvent("message", { data }));
+      return sockets.size;
     },
     /** The next call of `cmd` fails with `error`, as when the engine's queue is full. */
     refuseNext: (cmd: string, error: string) => {
@@ -2051,6 +2078,14 @@ export function installMockTauri(seed: MockSeed): void {
     /** Holds back live frames (`true`) or lets them flow again. */
     pauseLive: (on: boolean) => {
       s.livePaused = on;
+    },
+    disconnectLive: () => {
+      const connected = [...sockets];
+      for (const socket of connected) {
+        socket.close();
+        socket.onclose?.(new CloseEvent("close"));
+      }
+      return connected.length;
     },
     /** A note that arrives from outside the UI's edits (the recorder, as `collect_recorded`
      * adds it): the engine bumps the notes revision and announces it. */

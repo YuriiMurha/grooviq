@@ -1,0 +1,11 @@
+.env-graph .synth-meter-stage {
+  fill: var(--kc, var(--accent));
+  opacity: 0.12;
+  pointer-events: none;
+}
+.env-graph [data-synth-meter], .lfo-display [data-synth-meter] {
+  fill: var(--kc, var(--accent));
+  stroke: var(--well);
+  stroke-width: 1.25;
+  pointer-events: none;
+}

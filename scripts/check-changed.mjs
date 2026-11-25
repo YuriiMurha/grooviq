@@ -83,7 +83,7 @@ function withDependents(name) {
 }
 
 const under = (path, dir) => path === dir || path.startsWith(`${dir}/`);
-const RUST_WIDE = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml"];
+const RUST_WIDE = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", ".config/nextest.toml"];
 const CI = [".github/workflows/"];
 // Read by people, never by a build, test or check.
 const INERT = [/\.md$/, /^LICENSE$/, /^docs\//, /^\.github\/(ISSUE_TEMPLATE\/|pull_request_template\.md$)/, /^\.(gitignore|gitattributes|editorconfig)$/];
@@ -152,6 +152,9 @@ if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs"
     "scripts/refresh_install.py", "scripts/test_refresh_install.py",
     "scripts/refresh_agent.py", "scripts/test_refresh_agent.py"].includes(path)))
   step("local refresh safety tests", "make", ["test-refresh-app"]);
+if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
+    "scripts/merge_train.py", "scripts/test_merge_train.py"].includes(path)))
+  step("merge train safety tests", "make", ["test-merge-train"]);
 const uiDir = join(root, "app", "ui");
 const needsUi = ui || workspace || rustCrates.has("grooviq-app");
 
@@ -167,6 +170,8 @@ if (ui || workspace || changed.some((path) => path.startsWith("scripts/e2e-brows
   step("e2e browser accounting safety tests", "node", ["--test", "scripts/e2e-browser-results.test.mjs"]);
 if (ui || workspace || changed.some((path) => path.startsWith("scripts/e2e-diagnostics") || path === "Makefile"))
   step("e2e diagnostic safety tests", "node", ["--test", "scripts/e2e-diagnostics.test.mjs"]);
+if (ui || workspace || changed.some((path) => path.startsWith("scripts/rerun-no-runner") || path === "Makefile"))
+  step("runner acquisition retry tests", "node", ["--test", "scripts/rerun-no-runner.test.cjs"]);
 if (ui) {
   step("ui lint", "npm", ["run", "lint"], uiDir);
   step("ui typecheck", "npm", ["run", "typecheck"], uiDir);
@@ -183,7 +188,16 @@ if (workspace || rustCrates.size > 0) {
   step("rust fmt", "cargo", ["fmt", "--all", "--check"]);
   const scope = workspace ? ["--workspace"] : [...rustCrates].sort().flatMap((c) => ["-p", c]);
   step("rust clippy", "cargo", ["clippy", ...scope, "--all-targets", "--all-features", "--", "-D", "warnings"]);
-  step("rust tests", "cargo", ["test", ...scope, "--all-features"]);
+  const cargoCommands = spawnSync("cargo", ["--list"], { cwd: root, env, encoding: "utf8" });
+  if (cargoCommands.status !== 0)
+    fail(`cargo --list failed: ${cargoCommands.error?.message ?? cargoCommands.stderr}`);
+  if (/^\s+nextest(?:\s|$)/m.test(cargoCommands.stdout)) {
+    step("rust tests", "cargo", ["nextest", "run", ...scope, "--all-features", "--profile", "ci"]);
+    step("rust doctests", "cargo", ["test", ...scope, "--all-features", "--doc"]);
+  } else {
+    console.log("cargo-nextest unavailable. Install with: cargo install cargo-nextest --version 0.9.151 --locked");
+    step("rust tests", "cargo", ["test", ...scope, "--all-features"]);
+  }
 }
 if (workspace || rustCrates.has("grooviq-project") || changed.some((path) => path.startsWith("scripts/notes-edit-budget."))) {
   step("notes budget runner tests", "node", ["--test", "scripts/notes-edit-budget.test.mjs"]);

@@ -1,6 +1,6 @@
 import { arrangementHistory, arrangementView } from "./api/arrangement";
 import { dispatchGlobalHistory } from "./project/globalHistory";
-import { projectGeneration } from "./project/replacement";
+import { onProjectReplacing, projectGeneration } from "./project/replacement";
 import { usePatterns } from "./patterns/usePatterns";
 import { Playlist } from "./playlist/Playlist";
 import { usePlaylist } from "./playlist/usePlaylist";
@@ -82,6 +82,7 @@ export function App() {
   const playGuard = useRef(new PlayGuard());
   const [latencyFrames, setLatencyFrames] = useState<number | null>(null);
   const latest = useRef<LiveFrame | null>(null);
+  const rulerPosition = useRef<number | null>(null);
   const [meterHistory] = useState(() => new MeterHistory());
   const meterContext = useRef<MeterContext>({});
   const outputRequest = useRef(0);
@@ -120,6 +121,7 @@ export function App() {
   const { view } = session;
   const patterns = usePatterns({ view, publishPatterns: session.publishPatterns, enqueue: session.enqueue, run: session.context.run });
   const playlist = usePlaylist(session);
+  useEffect(() => onProjectReplacing(() => { rulerPosition.current = null; }), []);
 
   // A project that is replaced must not go on playing, nor keep notes held on its channels.
   const stopIfPlaying = useCallback(async () => {
@@ -367,6 +369,7 @@ export function App() {
           meterHistory.push(frame, meterContext.current, performance.now());
           const before = latest.current;
           latest.current = frame;
+          if (!isProjectReplacementPending()) rulerPosition.current = Number(frame.positionTicks);
           if (before?.tone !== frame.tone) setTone(frame.tone);
           const believed = playGuard.current.believe(frame.playing);
           if (frame.playing) {
@@ -385,7 +388,10 @@ export function App() {
           if (before?.outputLatencyFrames !== frame.outputLatencyFrames) {
             setLatencyFrames(frame.outputLatencyFrames);
           }
-        }, { onConnectionChange: () => meterHistory.reset() });
+        }, { onConnectionChange: () => {
+          meterHistory.reset();
+          rulerPosition.current = null;
+        } });
       },
       (e: unknown) => toast(`Live meters are off: ${String(e)}`, true),
     );
@@ -492,7 +498,7 @@ export function App() {
           </div>
         </header>
         <main className="stage">
-          {view && <Workspace picker={<PickerRail key={view.generation} picker={patterns} />} playlist={<Playlist model={playlist} patterns={patterns.state.canonical} bpm={view.bpm} beats={view.timeSignature.beats} unit={view.timeSignature.unit} />} latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
+          {view && <Workspace picker={<PickerRail key={view.generation} picker={patterns} />} playlist={<Playlist rulerPosition={rulerPosition} model={playlist} patterns={patterns.state.canonical} bpm={view.bpm} beats={view.timeSignature.beats} unit={view.timeSignature.unit} />} latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
         </main>
         <HintBar />
         <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />

@@ -2,39 +2,86 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, merge-train/batch]
   pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: "ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
-  cancel-in-progress: true
+  # A concurrency group has one pending slot by default. Give each main push its own group.
+  group: >-
+    ci-${{ github.workflow }}-${{ github.event.pull_request.number ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
+    github.ref }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/merge-train/batch') }}
 
 jobs:
-  rust:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.select.outputs.rust }}
+      wasm: ${{ steps.select.outputs.wasm }}
+      e2e: ${{ steps.select.outputs.e2e }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        id: select
+        with:
+          script: |
+            const { selectJobs } = require('./scripts/ci-paths.cjs');
+            const jobs = await selectJobs({
+              eventName: context.eventName,
+              pullRequest: context.payload.pull_request,
+              repo: context.repo,
+              rest: github.rest,
+              paginate: github.paginate,
+            });
+            core.info(JSON.stringify(jobs));
+            for (const [job, run] of Object.entries(jobs)) core.setOutput(job, run);
+
+  # Explicit job names keep the required check contexts stable when skipped.
+  rust-macos:
+    name: rust (macos-latest)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps: &rust_steps
+      - uses: actions/checkout@v5
+      # rust-cache keys on Cargo.toml dependency sections only, so a [profile] change would reuse
+      # dependencies built with the old profile and rebuild them on every PR. Key it on the root manifest.
+      - name: Key the Rust cache on the root manifest
+        shell: bash
+        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
       - name: Python for local refresh safety tests
-        if: matrix.os == 'macos-latest'
+        if: runner.os == 'macOS'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Local refresh safety tests
-        if: matrix.os == 'macos-latest'
+        if: runner.os == 'macOS'
         run: make test-refresh-app
       - name: Staged conflict safety tests
-        if: matrix.os == 'macos-latest'
+        if: runner.os == 'macOS'
         run: make test-pre-commit
+      - name: Merge train safety tests
+        if: runner.os == 'macOS'
+        run: make test-merge-train
       - run: rustup toolchain install
+      # The Actions cache is over its 10 GB limit, and PR copies evict main's caches.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # `tauri-build` needs the built UI (`frontendDist`) to compile the app crate.
       - uses: actions/setup-node@v5
         with:
@@ -42,11 +89,11 @@ jobs:
           cache: npm
           cache-dependency-path: app/ui/package-lock.json
       - name: Instruction capture safety tests
-        if: matrix.os == 'macos-latest'
+        if: runner.os == 'macOS'
         timeout-minutes: 2
         run: make test-instruction-profiles
       - name: Private QA command tests
-        if: matrix.os == 'macos-latest'
+        if: runner.os == 'macOS'
         run: make test-qa-driver
       - run: npm ci
         working-directory: app/ui
@@ -54,7 +101,22 @@ jobs:
         working-directory: app/ui
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-nextest@0.9.151
+      - name: Run workspace tests
+        id: nextest
+        run: cargo nextest run --workspace --all-features --profile ci
+      - name: Upload failed Rust test results
+        if: failure() && steps.nextest.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rust-junit-${{ runner.os }}-${{ github.run_attempt }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+      - name: Run workspace doctests
+        run: cargo test --workspace --all-features --doc
       - name: Checked real Session replay
         run: node scripts/semantic-replay.mjs
       - name: Note-edit budget runner tests
@@ -65,9 +127,19 @@ jobs:
       - name: Optimized 8-second export budget
         run: node scripts/export-budget.mjs
 
+  rust-windows:
+    name: rust (windows-latest)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps: *rust_steps
+
   # The DSP crate is meant to also run in a browser; this keeps it compiling for the web.
   # Not a required check: it only has to stay green, and the `rust` jobs gate merging.
   dsp-wasm32:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.wasm != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -75,6 +147,8 @@ jobs:
       - run: rustup toolchain install
       - run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build -p grooviq-dsp --target wasm32-unknown-unknown
 
   ui:
@@ -97,10 +171,14 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test -- --run
+      - name: CI path selection tests
+        run: node --test ../../scripts/ci-paths.test.cjs
       - name: E2e browser accounting safety tests
         run: node --test ../../scripts/e2e-browser-results.test.mjs
       - name: E2e diagnostic safety tests
         run: node --test ../../scripts/e2e-diagnostics.test.mjs
+      - name: Runner acquisition retry tests
+        run: node --test ../../scripts/rerun-no-runner.test.cjs
       - name: Real Session / mock semantic replay
         run: npm run e2e -- --config playwright.replay.config.ts --project chromium
       - name: Largest grid CPU budget
@@ -110,6 +188,8 @@ jobs:
   # Not a required check: Playwright against the web build with the mock engine
   # (app/ui/e2e). WebKit stands in for the macOS app, Chromium for Windows' WebView2.
   e2e-browser:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.e2e != 'false' }}
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -177,8 +257,8 @@ jobs:
   # Four workers across two hosts, plus setup and aggregation cost (previously two).
   # A runner hard kill can prevent artifact delivery; absence must fail this gate.
   e2e:
-    if: ${{ always() }}
-    needs: [e2e-browser]
+    if: ${{ always() && !(needs.changes.outputs.e2e == 'false' && needs.e2e-browser.result == 'skipped') }}
+    needs: [changes, e2e-browser]
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:

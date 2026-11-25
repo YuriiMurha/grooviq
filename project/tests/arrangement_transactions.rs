@@ -667,7 +667,7 @@ fn mute_resize_and_noop_keep_geometry_horizon_and_source_trim() {
         ],
     )
     .created_ids;
-    let horizon = s.export_state().song.end_tick;
+    let horizon = s.export_state().unwrap().song.end_tick;
     edit(
         &mut s,
         vec![Op::SetTrack {
@@ -677,7 +677,7 @@ fn mute_resize_and_noop_keep_geometry_horizon_and_source_trim() {
             mute: true,
         }],
     );
-    let state = s.export_state();
+    let state = s.export_state().unwrap();
     assert_eq!(state.song.end_tick, horizon);
     assert!(state.song.audio.is_empty());
     assert!(sound(&s).iter().all(|v| *v == 0.0));
@@ -722,7 +722,7 @@ fn mute_resize_and_noop_keep_geometry_horizon_and_source_trim() {
             },
         ],
     );
-    assert!(s.export_state().song.arrangement.notes.is_empty());
+    assert!(s.export_state().unwrap().song.arrangement.notes.is_empty());
     let a = &s.project().arrangement.clips[1];
     assert!(matches!(
         a.content,
@@ -1207,6 +1207,35 @@ fn audio_metadata_does_not_replace_runtime_bank() {
         before.shares_bank(&s.checked_export_state().unwrap().song.audio),
         "name-only edit rebuilt active audio bank"
     );
+}
+#[test]
+fn track_only_audio_move_keeps_the_bank_and_refreshes_its_route() {
+    let (mut s, _, _, _) = rig();
+    let clip = edit(&mut s, vec![draw(audio(false), 0)]).created_ids[0];
+    let track = edit(
+        &mut s,
+        vec![Op::CreateTrack {
+            name: "B".into(),
+            color: 0,
+        }],
+    )
+    .created_ids[0];
+    let before = s.checked_export_state().unwrap().song.audio;
+    assert_eq!(before.tracks(), vec![(clip, 2)]);
+    edit(
+        &mut s,
+        vec![Op::Move {
+            clip,
+            track,
+            start_tick: 0,
+        }],
+    );
+    let after = s.checked_export_state().unwrap().song.audio;
+    assert!(
+        before.shares_bank(&after),
+        "a track-only move must keep sounding clips"
+    );
+    assert_eq!(after.tracks(), vec![(clip, u64::from(track))]);
 }
 #[test]
 fn batch_streams_point_caps_before_trailing_syntax_with_kind_in_any_position() {

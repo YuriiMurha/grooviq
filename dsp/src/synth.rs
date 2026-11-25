@@ -494,6 +494,18 @@ enum Stage {
     Release,
 }
 
+impl Stage {
+    fn meter_code(self) -> f32 {
+        match self {
+            Self::Idle => 0.0,
+            Self::Attack => 1.0,
+            Self::Decay => 2.0,
+            Self::Sustain => 3.0,
+            Self::Release => 4.0,
+        }
+    }
+}
+
 /// Exponential ADSR coefficients (targets overshoot so each stage ends in its stated time:
 /// attack is gently convex, decay/release fall ~60 dB over their time, like an analog RC).
 #[derive(Clone, Copy, Debug, Default)]
@@ -2070,6 +2082,9 @@ impl Device for Synth {
             3 => self.lfo_meter,
             4 if v.active => v.amp.v as f32,
             5 if v.active => v.flt.v as f32,
+            7 if v.active => v.amp.stage.meter_code(),
+            8 if v.active => v.flt.stage.meter_code(),
+            9 => self.lfo.phase as f32,
             _ => 0.0,
         }
     }
@@ -2090,6 +2105,77 @@ impl Device for Synth {
 mod tests {
     mod idle;
     use super::*;
+
+    #[test]
+    fn motion_meter_follows_rendered_envelopes_and_retrigger() {
+        let mut synth = Synth::new(48_000.0);
+        for index in [AMP_A, AMP_D, AMP_R, FLT_A, FLT_D, FLT_R] {
+            synth.set_param(index as u32, 10.0);
+        }
+        let mut note = NoteEvent {
+            offset: 0,
+            key: 60,
+            velocity: 1.0,
+            on: true,
+            slide: false,
+            id: 1,
+        };
+        synth.process(&mut [0.0; 1], &mut [0.0; 1], None, &[note]);
+        assert_eq!((synth.meter(7), synth.meter(8)), (1.0, 1.0));
+        // Editing a live attack must report the actual stage, rather than restart a display timer.
+        synth.set_param(AMP_A as u32, 20.0);
+        let mut seen = [false; 5];
+        for _ in 0..4000 {
+            synth.process(&mut [0.0; 1], &mut [0.0; 1], None, &[]);
+            seen[synth.meter(7) as usize] = true;
+        }
+        assert!(seen[1] && seen[2] && seen[3]);
+        note.on = false;
+        synth.process(&mut [0.0; 1], &mut [0.0; 1], None, &[note]);
+        assert_eq!(synth.meter(7), 4.0);
+        note.on = true;
+        synth.process(&mut [0.0; 1], &mut [0.0; 1], None, &[note]);
+        assert_eq!(synth.meter(7), 1.0);
+        note.on = false;
+        synth.process(&mut [0.0; 1], &mut [0.0; 1], None, &[note]);
+        for _ in 0..100 {
+            synth.process(&mut [0.0; 64], &mut [0.0; 64], None, &[]);
+        }
+        assert_eq!((synth.meter(7), synth.meter(8)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn motion_meter_observes_stages_last_voice_and_actual_phase() {
+        let mut synth = Synth::new(48_000.0);
+        for (stage, code) in [
+            (Stage::Idle, 0.0),
+            (Stage::Attack, 1.0),
+            (Stage::Decay, 2.0),
+            (Stage::Sustain, 3.0),
+            (Stage::Release, 4.0),
+        ] {
+            synth.last_voice = 3;
+            synth.voices[3].active = true;
+            synth.voices[3].amp.stage = stage;
+            synth.voices[3].flt.stage = Stage::Release;
+            assert_eq!(synth.meter(7), code);
+            assert_eq!(synth.meter(8), 4.0);
+        }
+        synth.voices[3].active = false;
+        assert_eq!(synth.meter(7), 0.0);
+        assert_eq!(synth.meter(8), 0.0);
+        for phase in [0.0, 0.125, 0.73, 0.999999999] {
+            synth.lfo.phase = phase;
+            assert_eq!(synth.meter(9), phase as f32);
+        }
+        synth.lfo.phase = 0.99999;
+        synth.lfo.inc = 0.01;
+        synth.lfo.next();
+        assert!(synth.meter(9) < 0.02);
+        let before = synth.meter(9);
+        synth.process(&mut [0.0; 64], &mut [0.0; 64], None, &[]);
+        assert_ne!(synth.meter(9), before);
+    }
 
     #[derive(Clone, Copy)]
     enum Ev {

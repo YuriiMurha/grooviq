@@ -104,6 +104,7 @@ pub fn drums_4ch_project(samples_dir: &Path) -> (Project, SampleFiles) {
     let project = Project {
         play_mode: Default::default(),
         arrangement: Default::default(),
+        mixer: Default::default(),
         name: "Drums 4ch".into(),
         bpm: 140.0,
         channels: vec![

@@ -568,6 +568,10 @@ impl SaveJob {
     }
 }
 
+fn mixer_error(error: crate::mixer::MixerError) -> SessionError {
+    SessionError::InvalidValue(error.to_string())
+}
+
 /// The open project. See the module docs.
 pub struct Session {
     controller: Arc<Mutex<Controller>>,
@@ -2953,7 +2957,7 @@ impl Session {
 
     /// Replaces the engine's state with the project's (stopping the transport first).
     fn sync_engine(&self) -> Result<(), SessionError> {
-        let state = self.export_state();
+        let state = self.export_state()?;
         lock(&self.controller).load_state(state)?;
         Ok(())
     }
@@ -2965,9 +2969,12 @@ impl Session {
         files: SampleFiles,
         decoded: HashMap<u32, Arc<SampleBuf>>,
     ) -> Result<(), SessionError> {
+        // Before anything changes: the generic song fallback below must never take a mixer
+        // the engine cannot play and open it dry.
+        crate::mixer::require_runtime_support(&project).map_err(mixer_error)?;
         self.settle_recording()?;
         self.admit_media(&files, &decoded)?;
-        let mut state = engine_state(&project, &decoded);
+        let mut state = engine_state(&project, &decoded).map_err(mixer_error)?;
         let (song, error) =
             match crate::compile_song::compile_song(&project, &decoded, None, self.song_note_limit)
             {
@@ -3215,8 +3222,8 @@ impl Session {
     }
 
     /// The engine's state for an export: the project as it plays now.
-    pub fn export_state(&self) -> EngineState {
-        let mut state = engine_state(&self.project, &self.decoded);
+    pub fn export_state(&self) -> Result<EngineState, SessionError> {
+        let mut state = engine_state(&self.project, &self.decoded).map_err(mixer_error)?;
         state.song = self.compiled_song.clone();
         state.playback_mode = Self::timeline(&self.project, state.song.clone()).mode;
         state.song_loop = if self.song_error.is_none() {
@@ -3224,7 +3231,7 @@ impl Session {
         } else {
             None
         };
-        state
+        Ok(state)
     }
 
     pub fn checked_export_state(&self) -> Result<EngineState, SessionError> {
@@ -3233,7 +3240,7 @@ impl Session {
         {
             return Err(SessionError::InvalidValue(error.clone()));
         }
-        Ok(self.export_state())
+        self.export_state()
     }
 
     /// Explicit backend export selection. Whole Song ignores transport looping; a region

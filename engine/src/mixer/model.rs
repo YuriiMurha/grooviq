@@ -12,6 +12,18 @@ id!(SendId);
 pub enum SourceId {
     Channel(u64),
     AudioTrack(u64),
+    /// Engine-owned inputs with no user identity: they can never collide with a channel or
+    /// a playlist track, whatever IDs those use.
+    System(SystemSource),
+    /// A removed channel instance still fading out, on the route it had when removed. The
+    /// engine adds these itself; a caller's mix naming one is refused.
+    Instance(u64),
+}
+/// The test tone and the legacy built-in synth (the `Command::Note` instrument).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SystemSource {
+    Tone,
+    Synth,
 }
 pub const MASTER: MixerTrackId = MixerTrackId(0);
 

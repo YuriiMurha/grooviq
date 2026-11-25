@@ -31,8 +31,12 @@ mod algorithmic_reverb;
 mod bitcrusher;
 #[path = "realtime/character_delay.rs"]
 mod character_delay;
+#[path = "realtime/delay.rs"]
+mod delay;
 #[path = "realtime/fattener.rs"]
 mod fattener;
+#[path = "realtime/mixer_live.rs"]
+mod mixer_live;
 #[path = "realtime/mixer_runtime.rs"]
 mod mixer_runtime;
 #[path = "realtime/saturation.rs"]

@@ -365,3 +365,103 @@ fn steady_sustain_reaches_requested_gain_at_every_rate_mode_and_curve() {
         }
     }
 }
+
+// Removing the input bound must fail on actual direct-Device numeric output.
+#[test]
+fn hostile_input_is_finite_and_matches_safe_headroom_through_recovery() {
+    let hostile = [
+        f32::MAX,
+        -f32::MAX,
+        1e30,
+        -1e30,
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        1e-40,
+    ];
+    for sr in [22050.0, 48000.0, 192000.0] {
+        for stereo in [false, true] {
+            for controls in [
+                [12.0, 12.0, 0.0, 0.0, 0.0, 1.0, 12.0],
+                [-12.0, -12.0, 2.0, 2.0, 1.0, 0.0, -24.0],
+                [12.0, -12.0, 1.0, 1.0, 0.5, 0.5, 12.0],
+                [-12.0, 12.0, 2.0, 0.0, 1.0, 1.0, 12.0],
+                [0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+            ] {
+                let render = |block, bounded| {
+                    let mut d = DrumShaper::new(sr);
+                    for (i, v) in controls.into_iter().enumerate() {
+                        d.set_param(i as u32, v);
+                    }
+                    let mut l = drum_input(4096);
+                    let mut r = l.iter().map(|v| -v * 0.5).collect::<Vec<_>>();
+                    for i in 0..256 {
+                        r[i] = hostile[i % hostile.len()];
+                        l[i] = if stereo {
+                            hostile[(i + 3) % hostile.len()]
+                        } else {
+                            0.0
+                        };
+                    }
+                    if bounded {
+                        for v in l.iter_mut().chain(&mut r) {
+                            *v = if v.is_finite() {
+                                v.clamp(-16.0, 16.0)
+                            } else {
+                                0.0
+                            };
+                        }
+                    }
+                    // Automation occurs at the same sample regardless of block partition.
+                    assert_no_alloc::assert_no_alloc(|| {
+                        process_chunks(&mut d, &mut l[..333], &mut r[..333], block);
+                    });
+                    d.set_param(0, -controls[0]);
+                    d.set_param(5, 0.7);
+                    assert_no_alloc::assert_no_alloc(|| {
+                        process_chunks(&mut d, &mut l[333..], &mut r[333..], block);
+                    });
+                    for (i, (&a, &b)) in l.iter().zip(&r).enumerate() {
+                        assert!(
+                            a.is_finite() && b.is_finite(),
+                            "sr={sr} stereo={stereo} controls={controls:?} sample={i}: {a}, {b}"
+                        );
+                    }
+                    d.reset();
+                    let mut a = drum_input(1024);
+                    let mut b = a.clone();
+                    assert_no_alloc::assert_no_alloc(|| {
+                        process_chunks(&mut d, &mut a, &mut b, block)
+                    });
+                    let mut fresh = DrumShaper::new(sr);
+                    for (i, v) in controls.into_iter().enumerate() {
+                        fresh.set_param(i as u32, v);
+                    }
+                    fresh.set_param(0, -controls[0]);
+                    fresh.set_param(5, 0.7);
+                    let mut c = drum_input(1024);
+                    let mut e = c.clone();
+                    process_chunks(&mut fresh, &mut c, &mut e, 31);
+                    assert_eq!(a, c);
+                    assert_eq!(b, e);
+                    (l, r, a, b)
+                };
+                let expected = render(128, true);
+                for block in [1, 7, 31, 128] {
+                    assert_eq!(render(block, false), expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn neutral_preserves_normal_audio_and_full_input_headroom() {
+    let mut l = drum_input(4096);
+    l.extend([-16.0, -3.0, -1.0, 0.0, 1.0, 3.0, 16.0]);
+    let mut r: Vec<f32> = l.iter().map(|v| -v).collect();
+    let expected = (l.clone(), r.clone());
+    let mut d = DrumShaper::new(48000.0);
+    assert_no_alloc::assert_no_alloc(|| process_chunks(&mut d, &mut l, &mut r, 31));
+    assert_eq!((l, r), expected);
+}

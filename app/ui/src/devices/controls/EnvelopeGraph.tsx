@@ -133,7 +133,8 @@ export function EnvelopeGraph({ meter, name, attack, decay, sustain, release, gr
           ))}
           <path className="dw-fill" d={fill} />
           <path className="dw-line" d={line} />
-          {meter && <ellipse className="dw-node" data-synth-meter={meter} data-meter-top={box.top} data-meter-bottom={p.yBottom} cx={w - 8} cy={p.yBottom} rx={3} ry={3} style={{ visibility: "hidden" }} />}
+          {meter && <rect className="synth-meter-stage" data-synth-stage={meter} x={0} y={box.top} width={0} height={box.height} style={{ visibility: "hidden" }} />}
+          {meter && <ellipse className="dw-node" data-synth-meter={meter} data-meter-left={box.left} data-meter-attack={p.xA} data-meter-decay={p.xD} data-meter-sustain={p.xS} data-meter-right={p.xR} data-meter-top={box.top} data-meter-bottom={p.yBottom} cx={w - 8} cy={p.yBottom} rx={3} ry={3} style={{ visibility: "hidden" }} />}
           {point("attack", p.xA, p.yTop)}
           {point("decay", p.xD, p.yS)}
           {point("release", p.xR, p.yBottom)}

@@ -4,6 +4,22 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 describe("synth observation identity", () => {
+  it("decodes motion without extending scope and accepts legacy/pending observations", () => {
+    const legacy = [7, 1024, ...Array(262).fill(0.25)];
+    expect(decodeSynthMeter(legacy, 7)?.motion).toBeNull();
+    expect(decodeSynthMeter([7, 2048], 7)?.motion).toBeNull();
+    for (const [code, stage] of ["idle", "attack", "decay", "sustain", "release"].entries()) {
+      const result = decodeSynthMeter([...legacy, code, 4 - code, 1], 7);
+      expect(result?.motion).toEqual({ ampStage: stage, filterStage: ["release", "sustain", "decay", "attack", "idle"][code], lfoPhase: 1 });
+      expect(result?.scope).toEqual(Array(256).fill(0.25));
+    }
+    for (const motion of [[-1, 0, 0], [5, 0, 0], [1.5, 0, 0], [0, 5, 0], [0, 1.2, 0], [0, 0, -0.1], [0, 0, 1.01], [0, 0, NaN]]) {
+      expect(decodeSynthMeter([...legacy, ...motion], 7)).toBeNull();
+    }
+    for (const frame of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Infinity]) {
+      expect(decodeSynthMeter([7, frame], 7)).toBeNull();
+    }
+  });
   it("rejects another incarnation and malformed/nonfinite frames", () => {
     const raw = [7, 1024, ...Array(262).fill(0.25)];
     expect(decodeSynthMeter(raw, 7)?.scope).toEqual(Array(256).fill(0.25));
