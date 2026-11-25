@@ -119,6 +119,18 @@ test('ignores jobs that ran steps and jobs outside the required macOS check', as
   }
 });
 
+test('ignores events and branches outside PRs, main and the merge train', async () => {
+  for (const event of [
+    { ...run, event: 'push', head_branch: 'feature/x' },
+    { ...run, event: 'merge_group', head_branch: 'main' },
+    { ...run, event: 'workflow_dispatch' },
+  ]) {
+    const { execute, calls } = scenario({ event });
+    await execute();
+    assert.deepEqual(calls, [], `${event.event} ${event.head_branch}`);
+  }
+});
+
 test('ignores attempt 2 and a delayed event after a rerun was already requested', async () => {
   const second = scenario({ event: { ...run, run_attempt: 2 } });
   await second.execute();
