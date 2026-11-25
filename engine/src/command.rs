@@ -301,6 +301,13 @@ pub(crate) enum Msg {
         mode_changed: bool,
         loop_changed: bool,
     },
+    /// A prepared mix (or LegacyDirect) and its survivor plan; whatever leaves the graph
+    /// goes back through the trash queue inside the same envelope.
+    SetMix(Box<crate::mixer::live::MixInstall>),
+    /// Channel removals and additions, an optional timeline and the matching mix, applied
+    /// together at one block boundary or not at all; everything displaced or refused
+    /// returns in the same envelope.
+    Sources(Box<SourceTransaction>),
     /// Queues [`crate::RecordEvent::Mark`] with this id in the recording queue.
     RecordMark(u32),
     /// Completion identity for an exhausted recovery transaction.
@@ -360,7 +367,24 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
                 cut.push(id);
                 continue;
             }
-            Msg::AddChannel(_) | Msg::SetPattern(_) | Msg::SetSong(_) => continue,
+            Msg::AddChannel(_) | Msg::SetPattern(_) | Msg::SetSong(_) | Msg::SetMix(_) => {
+                continue;
+            }
+            // The rebuilt graph already has its sources and mix; only its transport
+            // chronology stays, and its removals cut earlier notes.
+            Msg::Sources(t) => {
+                cut.extend(t.removes.iter().copied());
+                if let Some((update, mode_changed, loop_changed)) = &t.timeline {
+                    kept.push(Msg::TimelineRebuilt {
+                        bpm: update.bpm,
+                        mode: update.mode,
+                        region: update.region,
+                        mode_changed: *mode_changed,
+                        loop_changed: *loop_changed,
+                    });
+                }
+                continue;
+            }
             Msg::Timeline(update, mode_changed, loop_changed) => {
                 if let Some(id) = update.remove_channel {
                     cut.push(id);
@@ -446,6 +470,22 @@ pub(crate) enum Trash {
     Pattern(Box<PatternData>),
     Song(Box<crate::SongData>),
     Timeline(Box<TimelineUpdate>, Option<Box<ChannelNode>>),
+    Mix(Box<crate::mixer::live::MixInstall>),
+    Sources(Box<SourceTransaction>),
+}
+
+/// One owning source-set transaction (see [`Msg::Sources`]). Built and fully validated on
+/// the control thread with room reserved for everything the callback may hand back.
+pub(crate) struct SourceTransaction {
+    pub(crate) removes: Vec<ChannelId>,
+    /// Removed nodes with no fading room; capacity `removes.len()`.
+    pub(crate) removed: Vec<Box<ChannelNode>>,
+    /// New nodes in order; a slot is empty once the graph took its node.
+    pub(crate) adds: Vec<Option<Box<ChannelNode>>>,
+    /// The timeline and its admission-time mode/loop transition flags.
+    pub(crate) timeline: Option<(Box<TimelineUpdate>, bool, bool)>,
+    pub(crate) mix: crate::mixer::live::MixInstall,
+    pub(crate) applied: bool,
 }
 
 #[cfg(test)]

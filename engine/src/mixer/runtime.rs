@@ -227,7 +227,7 @@ impl PreparedMixer {
                 return Err(PrepareError::UnknownInsert(b.id));
             }
             let id = b.id;
-            if devices.insert(id, b.device).is_some() {
+            if devices.insert(id, (b.device, b.identity)).is_some() {
                 return Err(PrepareError::DuplicateBinding(id));
             }
         }
@@ -355,11 +355,13 @@ impl PreparedMixer {
                     }
                 }
                 keys.push((insert.id, to_u32(inserts.len())?));
+                let (device, identity) = devices
+                    .remove(&insert.id)
+                    .ok_or(PrepareError::MissingInsert(insert.id))?;
                 inserts.push(InsertSlot {
                     id: insert.id,
-                    device: devices
-                        .remove(&insert.id)
-                        .ok_or(PrepareError::MissingInsert(insert.id))?,
+                    device,
+                    identity,
                     detector: (d0, to_u32(detector.len())?),
                 });
             }
@@ -483,7 +485,82 @@ impl PreparedMixer {
         if n == 0 {
             return Ok(RenderReport::default());
         }
+        Ok(self.run(transport, &Blocks(sources), out_l, out_r))
+    }
 
+    /// Allocates source buffers matching [`Self::source_order`] for [`Self::render_pulled`].
+    /// Off-thread only.
+    pub fn source_buffers(&self) -> Result<SourceBuffers, PrepareError> {
+        let len = self
+            .sources
+            .len()
+            .checked_mul(2 * self.max_frames)
+            .ok_or(PrepareError::Overflow)?;
+        let mut ids = reserved(self.sources.len())?;
+        ids.extend_from_slice(&self.sources);
+        let mut data = reserved(len)?;
+        data.resize(len, 0.0);
+        Ok(SourceBuffers {
+            ids,
+            max_frames: self.max_frames,
+            data,
+        })
+    }
+
+    /// [`Self::render`] reading each source from `sources`, which the caller filled in place:
+    /// no per-render source list is built. Refuses buffers made for another source order.
+    pub fn render_pulled(
+        &mut self,
+        transport: &HostTransport,
+        sources: &SourceBuffers,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+    ) -> Result<RenderReport, RenderError> {
+        let n = transport.frames as usize;
+        if n > self.max_frames {
+            return Err(RenderError::TooManyFrames {
+                frames: transport.frames,
+                max: self.max_frames as u32,
+            });
+        }
+        if transport.sample_rate.to_bits() != self.sample_rate.to_bits() {
+            return Err(RenderError::SampleRate);
+        }
+        if out_l.len() < n || out_r.len() < n {
+            return Err(RenderError::OutputCapacity);
+        }
+        if sources.ids.len() != self.sources.len() {
+            return Err(RenderError::SourceCount {
+                expected: self.sources.len() as u32,
+                got: sources.ids.len().min(u32::MAX as usize) as u32,
+            });
+        }
+        if let Some(i) = sources
+            .ids
+            .iter()
+            .zip(&self.sources)
+            .position(|(a, b)| a != b)
+        {
+            return Err(RenderError::SourceOrder { index: i as u32 });
+        }
+        if sources.max_frames < n {
+            return Err(RenderError::SourceLength { index: 0 });
+        }
+        if n == 0 {
+            return Ok(RenderReport::default());
+        }
+        Ok(self.run(transport, &Pulled(sources, n), out_l, out_r))
+    }
+
+    /// The validated render core shared by both source forms.
+    fn run(
+        &mut self,
+        transport: &HostTransport,
+        sources: &dyn SourceView,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+    ) -> RenderReport {
+        let n = transport.frames as usize;
         let mf = self.max_frames;
         let stride = 4 * mf;
         let (taps, scratch) = self.buffers.split_at_mut(self.nodes.len() * stride);
@@ -504,8 +581,8 @@ impl PreparedMixer {
                         (&taps[at..at + n], &taps[at + mf..at + mf + n], gain)
                     }
                     Feed::Source { index, gain } => {
-                        let s = &sources[index as usize];
-                        (s.left, s.right, gain)
+                        let (l, r) = sources.block(index as usize);
+                        (l, r, gain)
                     }
                 };
                 accumulate(wl, wr, l, r, gain);
@@ -571,10 +648,46 @@ impl PreparedMixer {
         let master = (self.nodes.len() - 1) * stride + 2 * mf;
         out_l[..n].copy_from_slice(&taps[master..master + n]);
         out_r[..n].copy_from_slice(&taps[master + mf..master + mf + n]);
-        Ok(RenderReport {
+        RenderReport {
             frames: n as u32,
             silenced,
-        })
+        }
+    }
+
+    /// Moves each surviving insert's live device out of `old` into this kernel, and this
+    /// kernel's unused fresh device into `old` (which then retires off-thread): a swap, so
+    /// nothing is allocated or freed here. `inserts` is strictly increasing. The whole plan
+    /// is checked first (same sample rate; each insert present in both kernels with the same
+    /// [`InsertIdentity`]); on any mismatch nothing moves. Real-time safe.
+    pub fn transfer_from(
+        &mut self,
+        old: &mut PreparedMixer,
+        inserts: &[InsertId],
+    ) -> Result<(), TransferError> {
+        if old.sample_rate.to_bits() != self.sample_rate.to_bits() {
+            return Err(TransferError::SampleRate);
+        }
+        for (i, &id) in inserts.iter().enumerate() {
+            if i > 0 && inserts[i - 1] >= id {
+                return Err(TransferError::Unordered);
+            }
+            let (Ok(a), Ok(b)) = (find(&self.keys, id), find(&old.keys, id)) else {
+                return Err(TransferError::Missing(id));
+            };
+            if self.inserts[a].identity != old.inserts[b].identity {
+                return Err(TransferError::Identity(id));
+            }
+        }
+        for &id in inserts {
+            if let (Ok(a), Ok(b)) = (find(&self.keys, id), find(&old.keys, id)) {
+                std::mem::swap(&mut self.inserts[a].device, &mut old.inserts[b].device);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn sample_rate(&self) -> f32 {
+        self.sample_rate
     }
 
     /// Clears every device and tap without resizing or freeing anything.
@@ -596,6 +709,72 @@ impl PreparedMixer {
         debug_assert_eq!(self.inserts[slot].id, insert);
         self.inserts[slot].device.set_param(index, value);
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferError {
+    SampleRate,
+    Unordered,
+    Missing(InsertId),
+    Identity(InsertId),
+}
+
+/// Caller-owned stereo blocks in [`PreparedMixer::source_order`], reserved off-thread by
+/// [`PreparedMixer::source_buffers`]. Filling, clearing and reading never allocate.
+pub struct SourceBuffers {
+    ids: Vec<SourceId>,
+    max_frames: usize,
+    /// Per source: left `max_frames`, then right `max_frames`.
+    data: Vec<f32>,
+}
+
+impl SourceBuffers {
+    pub fn ids(&self) -> &[SourceId] {
+        &self.ids
+    }
+
+    /// The buffer of `id`, by binary search over the canonical order.
+    pub fn index(&self, id: SourceId) -> Option<usize> {
+        self.ids.binary_search(&id).ok()
+    }
+
+    /// Zeroes the first `frames` of every source.
+    pub fn clear(&mut self, frames: usize) {
+        let frames = frames.min(self.max_frames);
+        for block in self.data.chunks_exact_mut(self.max_frames) {
+            block[..frames].fill(0.0);
+        }
+    }
+
+    pub fn block(&self, index: usize) -> (&[f32], &[f32]) {
+        let at = index * 2 * self.max_frames;
+        let (l, r) = self.data[at..at + 2 * self.max_frames].split_at(self.max_frames);
+        (l, r)
+    }
+
+    pub fn block_mut(&mut self, index: usize) -> (&mut [f32], &mut [f32]) {
+        let at = index * 2 * self.max_frames;
+        self.data[at..at + 2 * self.max_frames].split_at_mut(self.max_frames)
+    }
+}
+
+trait SourceView {
+    fn block(&self, index: usize) -> (&[f32], &[f32]);
+}
+
+struct Blocks<'a, 'b>(&'a [SourceBlock<'b>]);
+impl SourceView for Blocks<'_, '_> {
+    fn block(&self, index: usize) -> (&[f32], &[f32]) {
+        (self.0[index].left, self.0[index].right)
+    }
+}
+
+struct Pulled<'a>(&'a SourceBuffers, usize);
+impl SourceView for Pulled<'_> {
+    fn block(&self, index: usize) -> (&[f32], &[f32]) {
+        let (l, r) = self.0.block(index);
+        (&l[..self.1], &r[..self.1])
     }
 }
 
