@@ -108,6 +108,27 @@ fn reenabled_filter_matches_eager_at_every_control_offset() {
 }
 
 #[test]
+fn second_switch_on_without_a_bypassed_tick_matches_eager() {
+    let mut pair = RenderPair::new(4096);
+    pair.set(&[
+        (FILTER_TYPE, 1.0),
+        (CUTOFF, 900.0),
+        (RES, 0.6),
+        (FILTER_ENV, 0.8),
+        (FLT_ATTACK, 30.0),
+    ]);
+    pair.block(17, &[note(60, 0.9)], "initial filtered note");
+    pair.set(&[(FILTER_TYPE, 0.0)]);
+    pair.block(16, &[], "bypass across a tick");
+    pair.set(&[(FILTER_TYPE, 1.0)]);
+    pair.block(16, &[], "apply pending inputs, then tick with filtering on");
+    pair.set(&[(FILTER_TYPE, 0.0)]);
+    pair.block(1, &[], "bypass between ticks");
+    pair.set(&[(FILTER_TYPE, 1.0)]);
+    assert!(pair.block(64, &[], "second switch-on"));
+}
+
+#[test]
 fn bypass_matches_eager_across_loop_glide_choke_and_reset() {
     for mode in [1.0, 2.0] {
         let mut pair = RenderPair::new(192);
@@ -151,29 +172,5 @@ fn bypass_matches_eager_across_loop_glide_choke_and_reset() {
         pair.set(&[(FILTER_TYPE, 1.0)]);
         assert!(!pair.block(1, &[], "reset clears parked voices"));
         assert!(pair.block(127, &[note(61, 0.77)], "new voice after reset"));
-    }
-}
-
-#[test]
-fn declick_matches_eager_near_both_edges_while_gliding() {
-    for reverse in [0.0, 1.0] {
-        let mut pair = RenderPair::new(290);
-        pair.set(&[
-            (REVERSE, reverse),
-            (START, 0.013),
-            (END, 0.989),
-            (GLIDE, 3.0),
-        ]);
-        let context = format!("declick at reverse={reverse}");
-        pair.block(63, &[note(60, 0.8)], &context);
-        let slide = NoteEvent {
-            offset: 6,
-            slide: true,
-            ..note(69, 0.8)
-        };
-        assert!(pair.block(64, &[slide], &context));
-        pair.block(127, &[], &context);
-        assert_eq!(pair.actual.active_voices(), 0);
-        assert!(!pair.block(1, &[], &context));
     }
 }

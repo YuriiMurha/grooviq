@@ -1014,7 +1014,7 @@ impl Device for Sampler {
 }
 
 impl Sampler {
-    // Tests use the eager coefficient updates and unconditional declick division as an oracle.
+    // Tests use eager filter coefficient updates as an oracle.
     fn render<const EAGER: bool>(&mut self, l: &mut [f32], r: &mut [f32], events: &[NoteEvent]) {
         l.fill(0.0);
         r.fill(0.0);
@@ -1039,7 +1039,6 @@ impl Sampler {
             return;
         };
         let declick = p[DECLICK] >= 0.5;
-        let far_fade = 2.0 * *fade_out;
         let kind = p[FILTER_TYPE] as u8;
         let filter_on = kind != 0;
         let (env_amount, flt_sustain) = (p[FILTER_ENV], p[FLT_SUSTAIN]);
@@ -1173,15 +1172,9 @@ impl Sampler {
                         } else {
                             v.pos - v.start
                         };
-                        let step = v.step.abs();
-                        // Use twice the fade distance to leave room for rounding. The step and
-                        // fade are bounded by f32 rates and pitch limits, so the product is
-                        // normal in f64. Keep the original division and gain near the edge.
-                        if EAGER || to_edge <= far_fade * step {
-                            let frames_left = to_edge / step;
-                            if frames_left < *fade_out {
-                                amp *= (frames_left / *fade_out).max(0.0) as f32;
-                            }
+                        let frames_left = to_edge / v.step.abs();
+                        if frames_left < *fade_out {
+                            amp *= (frames_left / *fade_out).max(0.0) as f32;
                         }
                     }
                 }
