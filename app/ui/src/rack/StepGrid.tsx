@@ -33,6 +33,7 @@ import {
   type GridLayout,
 } from "./gridModel";
 import { readPalette, type GridRenderer, type Palette } from "./palette";
+import { subscribeThemeChange } from "../theme/changes";
 import { createCanvasRenderer } from "./canvasRenderer";
 import { createGlRenderer } from "./glRenderer";
 import { rollInstances } from "./rollPreview";
@@ -203,12 +204,15 @@ export function StepGrid({
       setHasFocus(false);
       setUse2d(true);
     };
+    const refreshPalette = () => {
+      palette.current = paletteOf(document.documentElement);
+      dirty.current = true;
+    };
     const build = () => {
       clearTimeout(wait);
-      palette.current = paletteOf(document.documentElement);
+      refreshPalette();
       const made = use2d ? factories.current.fallback(el) : factories.current.gl(el);
       renderer.current = made;
-      dirty.current = true;
       if (use2d && refocus.current) {
         refocus.current = false;
         el.focus();
@@ -223,15 +227,13 @@ export function StepGrid({
       wait = setTimeout(giveUp, RESTORE_WAIT_MS);
     };
     build();
-    if (use2d) {
-      return () => {
-        renderer.current?.dispose();
-        renderer.current = null;
-      };
+    const unsubscribeTheme = subscribeThemeChange(refreshPalette);
+    if (!use2d) {
+      el.addEventListener("webglcontextlost", onLost);
+      el.addEventListener("webglcontextrestored", build);
     }
-    el.addEventListener("webglcontextlost", onLost);
-    el.addEventListener("webglcontextrestored", build);
     return () => {
+      unsubscribeTheme();
       clearTimeout(wait);
       el.removeEventListener("webglcontextlost", onLost);
       el.removeEventListener("webglcontextrestored", build);
@@ -241,7 +243,7 @@ export function StepGrid({
   }, [use2d]);
 
   // The draw loop: the playhead is read every frame; the grid is drawn only when the playhead's
-  // step, the cells, the focus or the size changed.
+  // step, the cells, the focus, the size or the palette changed.
   useEffect(() => {
     let raf = 0;
     let shown: number | null | undefined;
