@@ -121,7 +121,16 @@ def reject(repo, number, head, reason):
         print(f"Held #{number}: the failed head {head} is no longer current.")
 
 
-def eligible(repo, candidate, order):
+def main_check_hold(repo, base):
+    failures, _, pending = check_status(repo, base, missing_pending=False)
+    if failures:
+        return f"main is red ({failures})"
+    if pending:
+        return f"main is pending at {base}"
+    return None
+
+
+def eligible(repo, candidate, order, base):
     number, head = candidate
     reason = hold_reason(repo.pull(number), head, order.get(number))
     if reason:
@@ -129,7 +138,11 @@ def eligible(repo, candidate, order):
         return False
     failures, cancelled, pending = check_status(repo, head)
     if failures:
-        reject(repo, number, head, failures)
+        main_hold = main_check_hold(repo, base)
+        if main_hold:
+            print(f"Held #{number}: {main_hold}.")
+        else:
+            reject(repo, number, head, failures)
         return False
     if cancelled:
         print(f"Held #{number}: re-run {cancelled}.")
@@ -140,7 +153,7 @@ def eligible(repo, candidate, order):
 
 def build_batch(repo, git, base, active, order, limit, members=(), suspects=()):
     git.fetch(base)
-    suspects = [candidate for candidate in suspects if eligible(repo, candidate, order)]
+    suspects = [candidate for candidate in suspects if eligible(repo, candidate, order, base)]
     queue = dict(order)
     while members or suspects or queue:
         bisecting = bool(members or suspects)
@@ -155,7 +168,7 @@ def build_batch(repo, git, base, active, order, limit, members=(), suspects=()):
         for candidate in members:
             number, head = candidate
             queue.pop(number, None)
-            if not eligible(repo, candidate, order):
+            if not eligible(repo, candidate, order, base):
                 continue
             if not git.fetch_pull(number, head):
                 print(f"Held #{number}: fetched head moved; supply the new approved head.")
@@ -276,9 +289,9 @@ def verify_landed_tree(git, active, main, tested_head, mismatch_file, ack_mismat
                            f"investigate before passing --ack-mismatch {active}")
 
 
-def recover_prefix(git, active, batch, main, pulls, mismatch_file, ack_mismatch):
+def recover_prefix(repo, git, active, batch, main, pulls, mismatch_file, ack_mismatch):
     if main == batch.base:
-        return 0
+        return 0, []
     landed = []
     for (number, head), pr in zip(batch.members, pulls):
         squash_head = landed_sha(pr)
@@ -286,19 +299,24 @@ def recover_prefix(git, active, batch, main, pulls, mismatch_file, ack_mismatch)
             break
         landed.append((number, squash_head))
     if not landed:
-        return 0
+        return 0, []
     git.fetch(main)
     visible = git.first_parent_chain(batch.base, main)
-    if not visible or visible != [head for _, head in landed[:len(visible)]]:
-        return 0
-    landed = landed[:len(visible)]
-    print_landed(landed)
+    matched = 0
+    for actual, (_, expected) in zip(visible, landed):
+        if actual != expected:
+            break
+        matched += 1
+    if not matched or any(check_status(repo, active)):
+        return 0, []
+    prefix = landed[:matched]
+    print_landed(prefix)
     tested = git.first_parent_chain(batch.base, active)
     if len(tested) != len(batch.members):
         raise RuntimeError("Tested commit does not match its trailers.")
-    verify_landed_tree(git, active, main, tested[len(landed) - 1], mismatch_file, ack_mismatch)
-    print(f"Recovered landed prefix of batch {active} ({numbers(landed)}).")
-    return len(landed)
+    verify_landed_tree(git, active, prefix[-1][1], tested[matched - 1], mismatch_file, ack_mismatch)
+    print(f"Recovered landed prefix of batch {active} ({numbers(prefix)}).")
+    return matched, visible[matched:]
 
 
 def merge_batch(repo, git, active, batch, order, mismatch_file):
@@ -351,9 +369,18 @@ def tick(repo, git, order, limit=4, *, mismatch_file=None, ack_mismatch=None):
         git.fetch(active)
         batch = Batch.parse(git.message(active))
         pulls = [repo.pull(number) for number, _ in batch.members]
-        recovered = recover_prefix(git, active, batch, base, pulls, mismatch_file, ack_mismatch)
+        recovered, outside = recover_prefix(
+            repo, git, active, batch, base, pulls, mismatch_file, ack_mismatch,
+        )
         if recovered:
-            if any(pr["merged"] for pr in pulls[recovered:]):
+            if outside:
+                print(f"Batch {active}: main moved beyond the recovered prefix to {base}.")
+                outside = set(outside)
+                for (number, _), pr in zip(batch.members[recovered:], pulls[recovered:]):
+                    head = landed_sha(pr)
+                    if head in outside:
+                        print(f"#{number} BYPASS: member landed outside the recovered prefix at {head}.")
+            elif any(pr["merged"] for pr in pulls[recovered:]):
                 print(f"Held batch {active}: waiting for reported squashes to appear on main.")
                 return
             landed = {number for number, _ in batch.members[:recovered]}
@@ -372,15 +399,12 @@ def tick(repo, git, order, limit=4, *, mismatch_file=None, ack_mismatch=None):
             if reason:
                 print(f"Abandoned batch {active}: #{number} {reason}.")
                 changed = True
-        if not changed and all(eligible(repo, candidate, order) for candidate in batch.members):
+        if not changed and all(eligible(repo, candidate, order, base) for candidate in batch.members):
             failures, cancelled, pending = check_status(repo, active)
             if failures:
-                main_failures, _, main_pending = check_status(repo, base, missing_pending=False)
-                if main_failures:
-                    print(f"Held batch {active}: main is red ({main_failures}).")
-                    return
-                if main_pending:
-                    print(f"Waiting for required checks on main at {base}.")
+                main_hold = main_check_hold(repo, base)
+                if main_hold:
+                    print(f"Waiting on batch {active}: {main_hold}.")
                     return
                 if len(batch.members) > 1:
                     split = min(limit, (len(batch.members) + 1) // 2)
