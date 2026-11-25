@@ -17,6 +17,7 @@ LABEL = "merge-train"
 AUTO_MERGE = "BYPASS risk: GitHub auto-merge is enabled"
 ACTIONS_APP = 15368
 REQUIRED = ("rust (macos-latest)", "rust (windows-latest)", "ui")
+SELECTOR = "changes"
 PENDING = {None, "queued", "in_progress", "pending", "requested", "waiting"}
 FAILED = {"failure", "timed_out", "startup_failure", "action_required", "stale", "neutral", "skipped"}
 SHA = re.compile(r"[a-f0-9]{40}")
@@ -97,13 +98,19 @@ def hold_reason(pr, head, approved):
     return None
 
 
-def check_status(repo, head, *, missing_pending=True):
+def check_status(repo, head, *, scope):
     checks = repo.checks(head)
+    selected = checks.get(SELECTOR, (None, ""))[0] == "success"
     failures, cancelled, pending = [], [], False
     for name in REQUIRED:
-        if name not in checks and not missing_pending:
+        if name not in checks and scope == "main":
             continue
         state, url = checks.get(name, (None, ""))
+        if state == "skipped":
+            if scope == "batch":
+                state = "cancelled"
+            elif scope == "pr" and name != "ui":
+                state = "success" if selected else "cancelled"
         if state in FAILED:
             failures.append(f"{name} ({state})")
         elif state == "cancelled":
@@ -123,7 +130,7 @@ def reject(repo, number, head, reason):
 
 
 def main_check_hold(repo, base):
-    failures, _, pending = check_status(repo, base, missing_pending=False)
+    failures, _, pending = check_status(repo, base, scope="main")
     if failures:
         return f"main is red ({failures})"
     if pending:
@@ -137,7 +144,7 @@ def eligible(repo, candidate, order, base):
     if reason:
         print(f"Held #{number}: {reason}.")
         return False
-    failures, cancelled, pending = check_status(repo, head)
+    failures, cancelled, pending = check_status(repo, head, scope="pr")
     if failures:
         main_hold = main_check_hold(repo, base)
         if main_hold:
@@ -308,7 +315,7 @@ def recover_prefix(repo, git, active, batch, main, pulls, mismatch_file, ack_mis
         if actual != expected:
             break
         matched += 1
-    if not matched or any(check_status(repo, active)):
+    if not matched or any(check_status(repo, active, scope="batch")):
         return 0, []
     prefix = landed[:matched]
     print_landed(prefix)
@@ -401,7 +408,7 @@ def tick(repo, git, order, limit=4, *, mismatch_file=None, ack_mismatch=None):
                 print(f"Abandoned batch {active}: #{number} {reason}.")
                 changed = True
         if not changed and all(eligible(repo, candidate, order, base) for candidate in batch.members):
-            failures, cancelled, pending = check_status(repo, active)
+            failures, cancelled, pending = check_status(repo, active, scope="batch")
             if failures:
                 main_hold = main_check_hold(repo, base)
                 if main_hold:
@@ -465,12 +472,15 @@ class GitHub:
         for page in pages:
             for check in page["check_runs"]:
                 name = check["name"]
-                if (name in REQUIRED and check["head_sha"] == sha
+                if ((name in REQUIRED or name == SELECTOR) and check["head_sha"] == sha
                         and (check.get("app") or {}).get("id") == ACTIONS_APP):
                     if name in checks:
-                        raise RuntimeError(f"Ambiguous required check {name} on {sha}.")
+                        if name != SELECTOR:
+                            raise RuntimeError(f"Ambiguous required check {name} on {sha}.")
+                        checks[name] = None, ""
+                        continue
                     state = check["conclusion"] if check["status"] == "completed" else check["status"]
-                    if state is None:
+                    if state is None and name != SELECTOR:
                         raise RuntimeError(f"Missing conclusion for completed check {name} on {sha}.")
                     url = check.get("details_url") or check.get("html_url") or ""
                     checks[name] = state, url.split("/job/", 1)[0]

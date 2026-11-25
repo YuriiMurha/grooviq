@@ -214,6 +214,33 @@ class MergeTrainTests(unittest.TestCase):
                 self.assertEqual((number, head), (10, sha(10)))
                 self.assertIn(f"ui ({conclusion})", reason)
 
+    def test_ui_only_pr_with_successful_selector_can_skip_both_rust_checks(self):
+        self.repo.states[sha(10)] = {**GREEN, **{n: ("skipped", "") for n in REQUIRED[:2]},
+                                    "changes": ("success", "")}
+        self.run_tick((10,))
+        self.written([10])
+        self.assertFalse(self.repo.rejected)
+
+    def test_skipped_pr_rust_requires_a_successful_selector(self):
+        for selector in (None, "cancelled", "in_progress", "failure"):
+            with self.subTest(selector=selector):
+                self.setUp()
+                states = {**GREEN, **{n: ("skipped", "https://run/10") for n in REQUIRED[:2]}}
+                if selector is not None:
+                    states["changes"] = (selector, "")
+                self.repo.states[sha(10)] = states
+                self.assertIn("re-run", self.run_tick((10, 20)))
+                self.written([20])
+                self.assertFalse(self.repo.rejected)
+                self.assertTrue(self.repo.prs[10]["labels"])
+
+    def test_successful_selector_does_not_excuse_skipped_pr_ui(self):
+        self.repo.states[sha(10)] = {**GREEN, "ui": ("skipped", ""),
+                                    "changes": ("success", "")}
+        self.run_tick((10, 20))
+        self.written([20])
+        self.assertEqual(self.repo.rejected, [(10, sha(10), "ui (skipped)")])
+
     def test_own_head_failure_keeps_enrollment_while_main_is_red_or_pending(self):
         for status, message in (("failure", "main is red"), ("queued", "main is pending")):
             with self.subTest(status=status):
@@ -347,6 +374,16 @@ class MergeTrainTests(unittest.TestCase):
         self.repo.states[ACTIVE] = {}
         self.assertIn(f"Waiting for batch {ACTIVE} (#10 #20)", self.run_tick())
         self.assertFalse(self.repo.merged or self.git.writes)
+
+    def test_any_skipped_required_batch_check_holds_even_with_successful_selector(self):
+        for name in REQUIRED:
+            with self.subTest(name=name):
+                self.setUp()
+                self.git.batch([10, 20])
+                self.repo.states[ACTIVE] = {**GREEN, name: ("skipped", "https://run/batch"),
+                                            "changes": ("success", "")}
+                self.assertIn("re-run https://run/batch", self.run_tick((10, 20)))
+                self.assertFalse(self.repo.merged or self.repo.rejected or self.git.writes)
 
     def test_cancelled_batch_gives_run_url_without_bisection(self):
         self.git.batch([10, 20])
@@ -866,6 +903,30 @@ class GitHubTests(unittest.TestCase):
         self.assertEqual(repo.checks(head), {
             "ui": ("cancelled", "https://github.com/owner/repo/actions/runs/10"),
         })
+
+    def test_selector_uses_the_same_latest_check_response_and_verified_app_and_head(self):
+        repo = GitHub()
+        head = sha(10)
+        rust = {"name": REQUIRED[0], "head_sha": head, "status": "completed",
+                "conclusion": "skipped", "app": {"id": ACTIONS_APP}}
+        selector = {**rust, "name": "changes", "conclusion": "success"}
+        pages = [{"check_runs": [rust, {**selector, "head_sha": sha(20)},
+                                  {**selector, "app": {"id": 9}}, selector]}]
+        with patch.object(repo, "api", return_value=pages) as api:
+            self.assertEqual(repo.checks(head), {REQUIRED[0]: ("skipped", ""),
+                                                "changes": ("success", "")})
+        api.assert_called_once_with(f"commits/{head}/check-runs?filter=latest&per_page=100",
+                                    paginate=True)
+
+    def test_ambiguous_optional_selector_never_authorizes_skips(self):
+        repo = GitHub()
+        head = sha(10)
+        selector = {"name": "changes", "head_sha": head, "status": "completed",
+                    "conclusion": "success", "app": {"id": ACTIONS_APP}}
+        repo.api = lambda *args, **kwargs: [{"check_runs": [
+            {**selector, "conclusion": "cancelled"}, selector,
+        ]}]
+        self.assertEqual(repo.checks(head), {"changes": (None, "")})
 
     def test_duplicate_or_incomplete_required_check_is_ambiguous(self):
         repo = GitHub()
