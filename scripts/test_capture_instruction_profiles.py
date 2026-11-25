@@ -63,7 +63,11 @@ name = pathlib.Path(sys.argv[0]).name
 target = pathlib.Path(os.environ.get('CARGO_TARGET_DIR', root / 'unused'))
 if name == 'rustc': print('rustc 1.100.0 0ef1bc386059596dada8fb65b50425aab2ea637a')
 elif name == 'gungraun-runner': print('gungraun-runner 0.20.0')
-elif name == 'valgrind': print('valgrind-3.22.0')
+elif name == 'valgrind':
+ if mode == 'tool-failure':
+  print('fixture tool diagnostic', file=sys.stderr)
+  sys.exit(23)
+ print('valgrind-3.22.0')
 elif name == 'cargo':
  if '-V' in sys.argv: print('cargo 1.100.0')
  else:
@@ -139,14 +143,43 @@ else: print('annotation / symbols')
         self.assertEqual(self.git('status', '--porcelain'), '')
 
     def test_failures_restore_ref_and_remain_failed(self):
-        for mode in ('compile', 'crash', 'missing', 'zero', 'stale', 'wrongbinary', 'no-measurements'):
+        errors = {
+            'compile': r'^cargo exited 101:',
+            'crash': r'^.*/harness exited 101$',
+            'missing': r'^expected five fresh profiles, got \[.+\]$',
+            'zero': r'^zero Ir$',
+            'stale': r'^stale profile$',
+            'wrongbinary': r'^unsafe evidence path: .*\/outside$',
+            'no-measurements': r'^expected five fresh profiles, got \[\]$',
+        }
+        for mode, error in errors.items():
             with self.subTest(mode=mode):
                 self.mode.write_text(mode)
-                with self.assertRaises(c.CaptureError): self.capture()
-                self.assertEqual(json.loads((self.out / 'manifest.json').read_text())['status'], 'failed')
+                with self.assertRaisesRegex(c.CaptureError, error) as rejected:
+                    self.capture()
+                manifest = self.out / 'manifest.json'
+                self.assertTrue(manifest.is_file(), f'no manifest after {rejected.exception}')
+                self.assertEqual(json.loads(manifest.read_text())['status'], 'failed')
                 self.assertEqual(self.git('branch', '--show-current'), self.branch)
-                import shutil
                 shutil.rmtree(self.out)
+
+    def test_tool_probe_failure_records_failed_manifest_before_checkout(self):
+        self.mode.write_text('tool-failure')
+        with self.assertRaisesRegex(c.CaptureError, r'valgrind exited 23: fixture tool diagnostic'):
+            self.capture()
+        manifest = self.out / 'manifest.json'
+        self.assertTrue(manifest.is_file(), 'validated output should record the failed tool probe')
+        raw = manifest.read_text()
+        report = json.loads(raw)
+        self.assertEqual(report['status'], 'failed')
+        self.assertEqual(report['failure'], {'phase': 'tool_preflight', 'tool': 'valgrind'})
+        self.assertFalse(report['restoration']['required'])
+        self.assertEqual(report['runs'], [])
+        self.assertNotIn('target', report)
+        self.assertNotIn('fixture tool diagnostic', raw)
+        self.assertEqual(self.git('branch', '--show-current'), self.branch)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
+        self.assertEqual(self.git('status', '--porcelain'), '')
 
     def test_disk_failure_restores_ref(self):
         with patch.object(c, 'copy_evidence', side_effect=OSError('disk full')):
