@@ -44,6 +44,12 @@ assert_no_alloc = { version = "1.1", default-features = false }
 # while building, which links LLVM's prebuilt runtime (macOS and Linux only).
 rtsan-standalone = "0.3.0"
 tempfile = "3"
+# Micro-benchmarks (MIT OR Apache-2.0): `make bench-mixer`.
+divan = "0.1.21"
+
+[[bench]]
+name = "mixer_kernels"
+harness = false
 
 [[test]]
 name = "panic"
