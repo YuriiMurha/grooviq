@@ -10,7 +10,6 @@ dependency on each CI run; the following identifies current attribution:
 
 BlueOak-1.0.0 (https://spdx.org/licenses/BlueOak-1.0.0.html):
 - @isaacs/nonrecursive-glob-match 1.1.0
-- minimatch 10.2.6 (nested under @typescript-eslint/typescript-estree)
 - minimatch 11.0.8
 - lru-cache 11.5.3 (nested under jsdom)
   Upstream maintainer: Isaac Z. Schlueter and contributors.
