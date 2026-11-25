@@ -117,13 +117,10 @@ jobs:
           [[ ${#dmg[@]} == 1 && ${#exe[@]} == 1 ]]
           # Never append assets to an existing (possibly public) release.
           # A rerun requires the owner to remove its previous draft first.
-          if response=$(gh api --include "repos/$GH_REPO/releases/tags/$RELEASE_TAG" 2>&1); then
+          ids=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.tag_name == env.RELEASE_TAG) | .id')
+          if [[ -n "$ids" ]]; then
             echo 'A release already exists for this tag; refusing to modify it.' >&2
-            exit 1
-          fi
-          status=$(printf '%s\n' "$response" | awk '/^HTTP\// { print $2; exit }')
-          if [[ "$status" != 404 ]]; then
-            echo 'Cannot verify release absence; refusing to continue.' >&2
             exit 1
           fi
           gh release create "$RELEASE_TAG" "${dmg[0]}" "${exe[0]}" \
