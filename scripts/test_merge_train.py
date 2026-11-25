@@ -776,6 +776,36 @@ class MergeTrainTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_busy_flock_returns_tempfail_before_creating_clients(self):
+        with TemporaryDirectory() as tmp:
+            with (Path(tmp) / "merge-train.lock").open("a") as held:
+                train.fcntl.flock(held, train.fcntl.LOCK_EX | train.fcntl.LOCK_NB)
+                with (patch.object(sys, "argv", ["merge_train.py", "--order", f"10={sha(10)}"]),
+                      patch.object(train.subprocess, "check_output", return_value=tmp) as discover,
+                      patch.object(train.subprocess, "run") as command,
+                      patch.object(train, "GitHub") as github,
+                      patch.object(train, "Git") as git,
+                      redirect_stdout(io.StringIO()) as stdout,
+                      redirect_stderr(io.StringIO()) as stderr):
+                    self.assertEqual(train.main(), 75)
+                discover.assert_called_once_with(
+                    ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True,
+                )
+                command.assert_not_called()
+                github.assert_not_called()
+                git.assert_not_called()
+                self.assertEqual(stdout.getvalue(), "Merge train busy: another tick holds the lock.\n")
+                self.assertEqual(stderr.getvalue(), "")
+
+    def test_blocking_io_error_after_acquiring_lock_is_a_failure(self):
+        with (TemporaryDirectory() as tmp,
+              patch.object(sys, "argv", ["merge_train.py", "--order", f"10={sha(10)}"]),
+              patch.object(train.subprocess, "check_output", return_value=tmp),
+              patch.object(train, "tick", side_effect=BlockingIOError("tick failed")),
+              redirect_stderr(io.StringIO()) as stderr):
+            self.assertEqual(train.main(), 1)
+        self.assertIn("Merge train stopped: tick failed", stderr.getvalue())
+
     def test_invalid_cli_arguments_exit_one(self):
         script = Path(__file__).with_name("merge_train.py")
         result = subprocess.run([sys.executable, "-B", str(script), "--batch", "many"],

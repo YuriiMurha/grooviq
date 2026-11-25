@@ -4,6 +4,7 @@ import argparse
 from dataclasses import dataclass
 import fcntl
 import json
+from os import EX_TEMPFAIL
 from pathlib import Path
 import re
 import subprocess
@@ -606,7 +607,11 @@ def main():
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True,
         ).strip()
         with (Path(common_dir) / "merge-train.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("Merge train busy: another tick holds the lock.")
+                return EX_TEMPFAIL
             tick(GitHub(), Git(), order, args.batch,
                  mismatch_file=Path(common_dir) / "merge-train-mismatch",
                  ack_mismatch=args.ack_mismatch)
