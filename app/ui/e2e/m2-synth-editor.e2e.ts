@@ -119,26 +119,33 @@ test.describe("the synth editor", () => {
     expect((await mock.calls("synth_meter")).length).toBeLessThanOrEqual(before + 1);
   });
 
-  test("deselecting_the_synth_mid_note_clears_its_scope", async ({ app }) => {
+  test("deselecting_the_synth_mid_note_clears_its_scope_and_stops_its_reads", async ({ app, mock }) => {
     await open(app);
     const scope = editor(app).getByLabel("Synth output waveform");
     const status = editor(app).locator(".synth-output-status");
     const amp = editor(app).locator('[data-synth-meter="amp"]');
     const pixels = () => scope.evaluate((c: HTMLCanvasElement) => c.toDataURL());
+    const bassReads = async () => (await mock.calls("synth_meter")).filter((c) => c.args.channel === SYNTH_ID).length;
     await expect(status).toContainText("0 voices");
     const silent = await pixels();
     await app.keyboard.down("z");
     try {
       await expect(status).toContainText("1 voice");
       await expect(amp).toBeVisible();
-      // Selecting another channel deactivates the editor while the note still sounds.
+      // Selecting another channel deactivates the editor while the key is still held.
       await app.getByRole("button", { name: "Mute Kick", exact: true }).focus();
+      await expect(app.locator("button.channel-name", { hasText: "Kick" })).toHaveAttribute("aria-current", "true");
+      await expect(status).toContainText("0 voices");
+      await expect(amp).toBeHidden();
+      await expect.poll(pixels).toBe(silent);
+      // The inactive scope stops sampling: no Bass reads across several polling intervals.
+      const reads = await bassReads();
+      expect(reads, "the scope read Bass's meter while it was active").toBeGreaterThan(0);
+      await app.evaluate(() => new Promise((resolve) => setTimeout(resolve, 200)));
+      expect(await bassReads(), "an inactive scope sends no meter reads").toBe(reads);
     } finally {
       await app.keyboard.up("z");
     }
-    await expect(status).toContainText("0 voices");
-    await expect(amp).toBeHidden();
-    await expect.poll(pixels).toBe(silent);
   });
 
   test("measured_stage_and_phase_drive_read_only_motion_and_frozen_capture_clears", async ({ app, mock }, info) => {
