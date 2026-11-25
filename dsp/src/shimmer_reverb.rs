@@ -192,6 +192,65 @@ impl Device for ShimmerReverb {
 mod tests {
     use super::*;
     #[test]
+    fn both_pitch_heads_match_independent_sample_reference() {
+        for sr in [22050., 48000., 192000.] {
+            for phase in [0., 0.125, 0.4999, 0.5, 0.75, 0.9999] {
+                for mode in [0., 0.35, 1., 1.6, 2., 2.75, 3.] {
+                    let mut reverb = ShimmerReverb::new(sr);
+                    let line = &mut reverb.lines[0];
+                    // Nonconstant history distinguishes the two addresses and
+                    // interpolation fractions, including negative-index ring wrap.
+                    for (i, sample) in line.data.iter_mut().enumerate() {
+                        *sample = (libm::sin(i as f64 * 0.017) + 0.3 * libm::cos(i as f64 * 0.043))
+                            as f32;
+                    }
+                    line.phase = [
+                        phase,
+                        (phase + 0.13) % 1.,
+                        (phase + 0.37) % 1.,
+                        (phase + 0.71) % 1.,
+                    ];
+                    line.pos = 1;
+                    for step in 0..8 {
+                        let mut expected = 0_f64;
+                        for (k, &p) in line.phase.iter().enumerate() {
+                            let p = f64::from(p);
+                            let q = (p + 0.5) % 1.;
+                            let first_weight = 1. - (2. * p - 1.).abs();
+                            let mode_weight = (1. - (f64::from(mode) - k as f64).abs()).max(0.);
+                            // Compute coordinates and linear interpolation directly;
+                            // neither Line::read nor Line::shifted supplies the oracle.
+                            let sample_at = |phase: f64| {
+                                let delay = f64::from(line.base)
+                                    + phase * f64::from(line.window)
+                                    + 0.7 * 0.002 * f64::from(line.base) * -0.4;
+                                let x =
+                                    (line.pos as f64 - delay).rem_euclid(line.data.len() as f64);
+                                let index = libm::floor(x) as usize;
+                                let fraction = x - index as f64;
+                                f64::from(line.data[index])
+                                    + fraction
+                                        * (f64::from(line.data[(index + 1) % line.data.len()])
+                                            - f64::from(line.data[index]))
+                            };
+                            expected += mode_weight
+                                * (first_weight * sample_at(p)
+                                    + (1. - first_weight) * sample_at(q));
+                        }
+                        let actual = f64::from(line.shifted(mode, 0.7, -0.4));
+                        // Margin for f32 address rounding; observed reference error
+                        // stays below 5.2e-5 for these rates and coordinates.
+                        assert!(
+                            (actual - expected).abs() < 0.0002,
+                            "dual-head sample: rate {sr}, phase {phase}, mode {mode}, step {step}: {actual} vs {expected}"
+                        );
+                        line.pos = (line.pos + 1) % line.data.len();
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn pitch_readers_shift_all_four_intervals() {
         // Independent musical oracle: octaves and pure 3:2 / 2:3 fifths.
         // Reading RATIOS here would make wrong production tuning self-validating.
