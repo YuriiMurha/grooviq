@@ -1249,6 +1249,7 @@ impl Session {
 
                 // Shared allocators never rewind. A restored pattern's note allocator is
                 // bounded by retained note identities; new pattern IDs never alias old ones.
+                histories.protected.insert(change.order);
                 if undo {
                     histories.arrangement.redo.push(change)
                 } else {
@@ -1338,16 +1339,36 @@ impl Session {
             clips
         }
         // Metadata and equivalent track organization do not affect the runtime bank.
-        // Decoded owners cannot change within this exclusive borrow; media publication
-        // uses a separate path which always rebuilds the bank.
+        // prepare_song_with also checks decoded allocation identity before it reuses the bank.
         runtime(&self.project) == runtime(project)
     }
 
     fn prepare_song(&self, project: &Project) -> Result<grooviq_engine::SongData, SessionError> {
+        self.prepare_song_with(project, &self.decoded)
+    }
+
+    fn prepare_song_with(
+        &self,
+        project: &Project,
+        decoded: &HashMap<u32, Arc<SampleBuf>>,
+    ) -> Result<grooviq_engine::SongData, SessionError> {
+        let before = &self.project.arrangement.audio_assets;
+        let after = &project.arrangement.audio_assets;
+        let same_assets = before.len() == after.len()
+            && before.iter().zip(after).all(|(a, b)| {
+                a.id == b.id
+                    && a.source_rate == b.source_rate
+                    && a.source_frames == b.source_frames
+                    && match (self.decoded.get(&a.id), decoded.get(&b.id)) {
+                        (Some(before), Some(after)) => Arc::ptr_eq(before, after),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            });
         crate::compile_song::compile_song(
             project,
-            &self.decoded,
-            (self.song_error.is_none() && self.same_audio(project))
+            decoded,
+            (self.song_error.is_none() && same_assets && self.same_audio(project))
                 .then_some(&self.compiled_song.audio),
             self.song_note_limit,
         )
@@ -2273,15 +2294,16 @@ impl Session {
         let mut decoded = self.decoded.clone();
         files.remove(&channel);
         decoded.remove(&channel);
+        // Structural deletion has no inverse. Remove its references from other steps
+        // before dropping the channel, so unrelated gestures still work.
+        let mut histories = self.staged_histories();
+        histories.forget_channel(&self.project, channel);
+        self.admit_histories(&mut histories)?;
         self.publish_media_candidate(&candidate, &files, &decoded)?;
         self.project = candidate;
         self.files = files;
         self.decoded = decoded;
-        // Undo cannot bring a channel back (structural undo is M6), nor its notes.
-        self.history.clear();
-        self.pattern_histories.clear();
-        self.arrangement_history.clear();
-        self.trim_history = Default::default();
+        self.install_histories(histories);
         Ok(())
     }
 

@@ -1,6 +1,7 @@
 use super::*;
 use crate::compile::channel_setups;
 use crate::mixer_compile::compile_mix;
+use crate::mixer_edit::{MixerAck, MixerEdit, MixerView};
 use grooviq_engine::{SongData, SourceEdit};
 
 impl Session {
@@ -39,8 +40,6 @@ impl Session {
         Ok(())
     }
 }
-
-use crate::mixer_edit::{MixerAck, MixerEdit, MixerView};
 
 impl Session {
     pub fn mixer_view(&self) -> MixerView {

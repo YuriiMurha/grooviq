@@ -216,8 +216,7 @@ impl Session {
         if let Some(validate) = &self.precommit {
             validate(project).map_err(SessionError::InvalidValue)?;
         }
-        let song = crate::compile_song::compile_song(project, decoded, None, self.song_note_limit)
-            .map_err(SessionError::InvalidValue)?;
+        let song = self.prepare_song_with(project, decoded)?;
         self.publish_prepared_candidate(project, song, Some(decoded))
     }
     pub fn publish_media(

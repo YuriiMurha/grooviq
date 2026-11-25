@@ -883,7 +883,7 @@ impl Controller {
 
     /// The rate the engine runs at (after clamping): the output layer compares it with a
     /// device's before deciding to reconfigure.
-    pub(crate) fn sample_rate(&self) -> f32 {
+    pub fn sample_rate(&self) -> f32 {
         self.sample_rate
     }
 

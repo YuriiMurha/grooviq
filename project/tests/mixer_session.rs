@@ -406,6 +406,10 @@ fn an_audio_track_move_keeps_its_bank_and_follows_the_new_route() {
     let dry = sound(&session);
     mixer(&mut session, take_bus);
     assert_eq!(sound(&session), dry, "track 2 still belongs to master");
+    session.play().unwrap();
+    let mut prefix = [0.0_f32; 256];
+    processor.process(&mut prefix, 2);
+    assert_eq!(prefix.as_slice(), &dry[..prefix.len()]);
     let bank = session.checked_export_state().unwrap().song.audio;
     arrangement(
         &mut session,
@@ -425,6 +429,13 @@ fn an_audio_track_move_keeps_its_bank_and_follows_the_new_route() {
         assert_eq!(samples[1], 0.0, "frame {frame}");
     }
 
+    let mut suffix = [0.0_f32; 256];
+    processor.process(&mut suffix, 2);
+    assert_eq!(
+        suffix.as_slice(),
+        &routed[prefix.len()..prefix.len() + suffix.len()]
+    );
+
     history(&mut session, true);
     assert_eq!(sound(&session), dry);
     arrangement(
@@ -442,4 +453,301 @@ fn an_audio_track_move_keeps_its_bank_and_follows_the_new_route() {
     );
     history(&mut session, false);
     assert!(session.project().mixer.sources.is_empty());
+}
+
+#[test]
+fn removing_a_channel_preserves_other_notes_redo_and_the_bus_inverse() {
+    use grooviq_project::{
+        notes::{NewNote, NotesEdit},
+        session::Edit,
+    };
+    let (c, mut processor) = engine::engine(engine::EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let c = Arc::new(Mutex::new(c));
+    let mut session = Session::new(c.clone());
+    let now = Instant::now();
+    session.add_synth_channel("Init", now).unwrap();
+    session.add_synth_channel("Init", now).unwrap();
+    let [removed, kept] = [
+        session.project().channels[0].id,
+        session.project().channels[1].id,
+    ];
+    mixer(
+        &mut session,
+        vec![
+            Op::CreateTrack {
+                name: "Voice bus".into(),
+                output: IdRef::Id(0),
+            },
+            Op::Assign {
+                source: SourceKey::Channel(removed),
+                destination: IdRef::Created(0),
+            },
+        ],
+    );
+    for tick in [0, 240] {
+        session
+            .edit_notes(
+                NotesEdit {
+                    generation: session.generation(),
+                    pattern_id: session.project().current_pattern,
+                    base_revision: session.notes_revision(),
+                    add: [removed, kept]
+                        .map(|channel| NewNote {
+                            channel,
+                            tick,
+                            length: 120,
+                            key: 60,
+                            velocity: 0.5,
+                            slide: false,
+                        })
+                        .to_vec(),
+                    update: Vec::new(),
+                    delete: Vec::new(),
+                },
+                now,
+            )
+            .unwrap();
+    }
+    history(&mut session, true);
+    processor.process(&mut [0.0; 128], 2);
+    while c.lock().unwrap().send(engine::Command::Stop).is_ok() {}
+    let before = (
+        session.project().clone(),
+        session.mixer_view(),
+        session.history_usage(),
+    );
+    let remove = Edit::RemoveChannel { channel: removed };
+    assert!(session.apply(remove.clone(), now).is_err());
+    assert_eq!(session.project(), &before.0);
+    assert_eq!(session.mixer_view(), before.1);
+    assert_eq!(session.history_usage(), before.2);
+    processor.process(&mut [0.0; 128], 2);
+    session.apply(remove, now).unwrap();
+    assert!(session.project().mixer.sources.is_empty());
+
+    let notes = |s: &Session| {
+        s.project().patterns[0]
+            .notes
+            .iter()
+            .map(|n| (n.channel, n.tick))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(notes(&session), [(kept, 0)]);
+    history(&mut session, false);
+    assert_eq!(notes(&session), [(kept, 0), (kept, 240)]);
+    history(&mut session, true);
+    history(&mut session, true);
+    assert!(notes(&session).is_empty());
+
+    let v = session.mixer_view();
+    let error = session
+        .step_project_history(v.generation, v.revision, true, now)
+        .unwrap_err();
+    assert!(error.message.contains("fading"), "{}", error.message);
+    assert_eq!(session.mixer_view(), v);
+    processor.process(&mut [0.0; 2048], 2);
+    c.lock().unwrap().check_health();
+    history(&mut session, true);
+    assert_eq!(session.project().mixer.mode, Mode::LegacyDirect);
+    assert_eq!(session.project().channels.len(), 1);
+    assert_eq!(session.project().channels[0].id, kept);
+}
+
+#[test]
+fn a_held_instrument_survives_routing_and_another_source_addition() {
+    let (c, mut processor) = engine::engine(engine::EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let c = Arc::new(Mutex::new(c));
+    let mut session = Session::new(c.clone());
+    let now = Instant::now();
+    session.add_synth_channel("Init", now).unwrap();
+    let channel = session.project().channels[0].id;
+    let instance = c
+        .lock()
+        .unwrap()
+        .channel_instance(engine::ChannelId(channel));
+    session.live_note_on(channel, 60, 0.5).unwrap();
+    let mut before = [0.0_f32; 1024];
+    processor.process(&mut before, 2);
+    assert!(before.iter().any(|v| v.abs() > 0.001));
+    mixer(
+        &mut session,
+        vec![
+            Op::CreateTrack {
+                name: "Voice bus".into(),
+                output: IdRef::Id(0),
+            },
+            Op::Assign {
+                source: SourceKey::Channel(channel),
+                destination: IdRef::Created(0),
+            },
+            Op::SetFader {
+                track: IdRef::Created(0),
+                level: Level::Db(0.0),
+                pan: 1.0,
+            },
+        ],
+    );
+    session.add_synth_channel("Init", now).unwrap();
+    let new = session.project().channels[1].id;
+    {
+        let ctl = c.lock().unwrap();
+        assert_eq!(ctl.channel_instance(engine::ChannelId(channel)), instance);
+        let live::MixSetup::Routed(mix) = &ctl.state().mix else {
+            panic!("dry mix")
+        };
+        assert!(mix.mixer.sources.contains(&live::Source {
+            id: live::SourceId::Channel(new.into()),
+            destination: live::MASTER,
+        }));
+    }
+    let mut after = [0.0_f32; 1024];
+    processor.process(&mut after, 2);
+    assert!(after.chunks_exact(2).any(|frame| frame[1].abs() > 0.001));
+    assert!(after.chunks_exact(2).all(|frame| frame[0] == 0.0));
+    assert!(
+        session.project().patterns[0].notes.is_empty(),
+        "a live voice supplied the sound"
+    );
+}
+
+#[test]
+fn promotion_after_legacy_removal_waits_for_fade_collection() {
+    let (c, mut processor) = engine::engine(engine::EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let ctl = Arc::new(Mutex::new(c));
+    let mut session = Session::new(ctl.clone());
+    let now = Instant::now();
+    session.add_synth_channel("Init", now).unwrap();
+    let channel = session.project().channels[0].id;
+    processor.process(&mut [0.0_f32; 128], 2);
+    session
+        .apply(
+            grooviq_project::session::Edit::RemoveChannel { channel },
+            now,
+        )
+        .unwrap();
+    let create = || {
+        vec![Op::CreateTrack {
+            name: "Bus".into(),
+            output: IdRef::Id(0),
+        }]
+    };
+    let before = (
+        session.mixer_view(),
+        session.history_usage(),
+        ctl.lock().unwrap().state().clone(),
+    );
+    let err = session
+        .edit_mixer(before.0.generation, before.0.revision, create(), now)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        grooviq_project::session::SessionError::Engine(engine::ControlError::Busy)
+    ));
+    assert_eq!(
+        (
+            session.mixer_view(),
+            session.history_usage(),
+            ctl.lock().unwrap().state().clone()
+        ),
+        before
+    );
+    processor.process(&mut [0.0_f32; 2048], 2);
+    ctl.lock().unwrap().check_health();
+    let ack = session
+        .edit_mixer(before.0.generation, before.0.revision, create(), now)
+        .unwrap();
+    assert_eq!(ack.created_ids, [(0, CreatedId::Track(1))]);
+}
+
+#[test]
+fn structural_pattern_edit_clears_mixer_undo_and_redo_without_changing_the_mix() {
+    use grooviq_project::{arrangement_edit::HistoryEffect, pattern_edit::PatternEdit};
+    for make_unique in [false, true] {
+        let (c, _p) = engine::engine(engine::EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        let mut session = Session::new(Arc::new(Mutex::new(c)));
+        let loaded = audio_fixture(false);
+        let decoded = grooviq_project::decode_samples(&loaded);
+        session
+            .open("initial.grooviq".as_ref(), loaded, decoded)
+            .unwrap();
+        let edit = |s: &mut Session, edit| {
+            let v = s.patterns();
+            s.edit_patterns(v.generation, v.revision, edit, Instant::now())
+                .unwrap()
+        };
+        let structural = if make_unique {
+            let ack = arrangement(
+                &mut session,
+                vec![ArrangementEdit::CreateClip {
+                    track: 2,
+                    name: "Pattern".into(),
+                    start_tick: 0,
+                    muted: false,
+                    content: ClipContent::Pattern {
+                        pattern: 0,
+                        offset_tick: 0,
+                        length_ticks: 960,
+                    },
+                }],
+            );
+            PatternEdit::MakeUnique {
+                clip: ack.created_ids[0],
+            }
+        } else {
+            let v = edit(
+                &mut session,
+                PatternEdit::Create {
+                    name: "Spare".into(),
+                },
+            );
+            PatternEdit::Delete {
+                pattern: v.patterns[1].id,
+            }
+        };
+        mixer(
+            &mut session,
+            vec![Op::CreateTrack {
+                name: "Bus".into(),
+                output: IdRef::Id(0),
+            }],
+        );
+        mixer(
+            &mut session,
+            vec![Op::SetFader {
+                track: IdRef::Id(1),
+                level: Level::Silence,
+                pan: 1.0,
+            }],
+        );
+        history(&mut session, true);
+        let before = session.project().mixer.clone();
+        edit(&mut session, structural);
+        assert!(matches!(history(&mut session, true), HistoryEffect::Empty));
+        assert!(matches!(history(&mut session, false), HistoryEffect::Empty));
+        assert_eq!(session.project().mixer, before);
+    }
+}
+
+#[test]
+fn mixer_mute_and_solo_each_refuse_compile_and_save() {
+    for (mute, solo) in [(true, false), (false, true)] {
+        let mut project = Project::new();
+        project.mixer.mode = Mode::Routed;
+        project.mixer.tracks[0].mute = mute;
+        project.mixer.tracks[0].solo = solo;
+        let samples = HashMap::new();
+        assert!(matches!(
+            engine_state(&project, &samples),
+            Err(grooviq_project::mixer::MixerError::UnsupportedTrackControls(0))
+        ));
+        assert!(grooviq_project::validate_save(&project, &HashMap::new()).is_err());
+    }
 }
