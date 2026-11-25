@@ -33,7 +33,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: test-instruction-profiles test-merge-train e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles test-merge-train ci-paths-test e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
@@ -184,6 +184,10 @@ export-budget: ## Optimized 8-second PCM24 export with the original 4-second bud
 .PHONY: optional-rust-policy-test
 optional-rust-policy-test: ## Test optional Rust CI selection and conservative failure fallback
 	node --test scripts/optional-rust-checks.test.cjs
+
+.PHONY: ci-paths-test
+ci-paths-test: ## Test CI path selection and conservative failure fallback
+	node --test scripts/ci-paths.test.cjs
 
 .PHONY: rerun-no-runner-test
 rerun-no-runner-test: ## Test the macOS runner acquisition retry policy
