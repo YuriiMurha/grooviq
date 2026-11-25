@@ -141,11 +141,20 @@ impl MixSetup {
         &self,
         channels: &[crate::ChannelSetup],
     ) -> Result<(), ControlError> {
+        self.validate_for_channels(channels.iter().map(|c| c.id))
+    }
+
+    /// Checks a logical mix and reserves one route per channel for its eventual fade.
+    /// Construction and verification of actual devices still happen on live preparation.
+    pub fn validate_for_channels(
+        &self,
+        channels: impl IntoIterator<Item = crate::ChannelId>,
+    ) -> Result<(), ControlError> {
         self.validate()?;
         if let Self::Routed(mix) = self {
             let mut mixer = mix.mixer.clone();
             for (alias, c) in (0u64..).zip(channels) {
-                if let Some(destination) = self.destination(SourceId::Channel(u64::from(c.id.0))) {
+                if let Some(destination) = self.destination(SourceId::Channel(u64::from(c.0))) {
                     mixer.sources.push(Source {
                         id: SourceId::Instance(alias),
                         destination,

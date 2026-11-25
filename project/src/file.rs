@@ -448,11 +448,8 @@ fn plan_with_missing(
     limits: Limits,
     allow_missing: bool,
 ) -> io::Result<(Project, Vec<Entry>)> {
-    // Nothing writes a mixer the runtime does not play yet (#477, #506), nor an invalid one.
+    // The resulting file must be valid and render with every stored mixer setting.
     crate::mixer::require_runtime_support(project).map_err(|e| too_big(e.to_string()))?;
-    project
-        .validate_mixer()
-        .map_err(|e| too_big(e.to_string()))?;
     if let Some(p) = project
         .patterns
         .iter()

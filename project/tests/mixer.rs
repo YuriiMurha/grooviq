@@ -904,7 +904,7 @@ fn a_mixer_built_in_memory_is_held_to_the_same_bounds() {
     assert_eq!(check(&m), Err(MixerError::TooBig("tracks")));
 }
 
-// ---- A routed mixer is refused wherever it would play or be written ----
+// ---- Unsupported controls are refused wherever the project would play or be written ----
 
 /// The v3 fixture with [`routed`], as a version 4 file: readable, valid, unsupported.
 fn routed_file(dir: &Path) -> (std::path::PathBuf, Loaded) {
@@ -938,18 +938,18 @@ fn routed_file(dir: &Path) -> (std::path::PathBuf, Loaded) {
 }
 
 #[test]
-fn compiling_a_routed_mixer_is_refused_not_rendered_dry() {
+fn compiling_a_bypassed_insert_is_refused() {
     let d = tempfile::tempdir().unwrap();
     let (_, loaded) = routed_file(d.path());
     let decoded = decode_samples(&loaded).samples;
     let p = &loaded.project;
     assert_eq!(
         engine_state(p, &decoded),
-        Err(MixerError::RoutedUnsupported)
+        Err(MixerError::UnsupportedBypass(2))
     );
     assert_eq!(
         compile_channels(p, &decoded),
-        Err(MixerError::RoutedUnsupported)
+        Err(MixerError::UnsupportedBypass(2))
     );
     assert!(compile_song(p, &decoded, None, 1_000_000).is_err());
     // The same project with the legacy mixer compiles: the guard is the only refusal.
@@ -970,7 +970,7 @@ fn listing(dir: &Path) -> Vec<String> {
 }
 
 #[test]
-fn writing_a_routed_mixer_is_refused_before_any_file_changes() {
+fn writing_a_bypassed_insert_is_refused_before_any_file_changes() {
     let d = tempfile::tempdir().unwrap();
     let (_, loaded) = routed_file(d.path());
     let out = d.path().join("out");
@@ -999,7 +999,7 @@ fn writing_a_routed_mixer_is_refused_before_any_file_changes() {
 }
 
 #[test]
-fn opening_a_routed_mixer_changes_nothing_in_the_session() {
+fn opening_a_bypassed_insert_changes_nothing_in_the_session() {
     let d = tempfile::tempdir().unwrap();
     let (path, routed) = routed_file(d.path());
     let (controller, mut processor) = e::engine(e::EngineConfig {

@@ -1,4 +1,5 @@
 //! Retained changed entities only; immutable curves share allocation ownership with live data.
+use crate::mixer::{Assignment, Mixer, Mode, Send, Sidechain, Track};
 use crate::*;
 use std::collections::HashMap;
 
@@ -29,9 +30,14 @@ pub(crate) struct Change {
     pub assets: Vec<Delta<AudioAsset>>,
     pub media: Vec<(MediaVersion, MediaVersion)>,
     pub region: Option<(Option<LoopRegion>, Option<LoopRegion>)>,
+    pub mixer: Option<Box<MixerChange>>,
     pub order: u64,
 }
-fn diff<T: Clone + PartialEq>(a: &[T], b: &[T], id: impl Fn(&T) -> u32) -> Vec<Delta<T>> {
+fn diff<T: Clone + PartialEq, K: Copy + Ord + std::hash::Hash>(
+    a: &[T],
+    b: &[T],
+    id: impl Fn(&T) -> K,
+) -> Vec<Delta<T>> {
     let old: HashMap<_, _> = a.iter().enumerate().map(|(i, x)| (id(x), (i, x))).collect();
     let new: HashMap<_, _> = b.iter().enumerate().map(|(i, x)| (id(x), (i, x))).collect();
     let mut keys: Vec<_> = old.keys().chain(new.keys()).copied().collect();
@@ -52,7 +58,12 @@ fn diff<T: Clone + PartialEq>(a: &[T], b: &[T], id: impl Fn(&T) -> u32) -> Vec<D
         })
         .collect()
 }
-fn apply<T: Clone>(list: &mut Vec<T>, deltas: &[Delta<T>], undo: bool, id: impl Fn(&T) -> u32) {
+fn apply<T: Clone, K: PartialEq>(
+    list: &mut Vec<T>,
+    deltas: &[Delta<T>],
+    undo: bool,
+    id: impl Fn(&T) -> K,
+) {
     let mut insert = Vec::new();
     for d in deltas {
         let (take, put) = if undo {
@@ -72,6 +83,77 @@ fn apply<T: Clone>(list: &mut Vec<T>, deltas: &[Delta<T>], undo: bool, id: impl 
         list.insert(i.min(list.len()), x);
     }
 }
+#[derive(Clone, Debug)]
+pub(crate) struct MixerChange {
+    tracks: Vec<Delta<Track>>,
+    sends: Vec<Delta<Send>>,
+    sidechains: Vec<Delta<Sidechain>>,
+    sources: Vec<Delta<Assignment>>,
+    mode: Option<(Mode, Mode)>,
+}
+
+fn sidechain_id(s: &Sidechain) -> (u32, u32, bool) {
+    (s.from, s.to, s.tap == crate::mixer::Tap::Post)
+}
+
+impl MixerChange {
+    fn between(before: &Mixer, after: &Mixer) -> Option<Box<Self>> {
+        if before == after {
+            return None;
+        }
+        let change = Self {
+            tracks: diff(&before.tracks, &after.tracks, |t| t.id),
+            sends: diff(&before.sends, &after.sends, |s| s.id),
+            sidechains: diff(&before.sidechains, &after.sidechains, sidechain_id),
+            sources: diff(&before.sources, &after.sources, |a| a.source),
+            mode: (before.mode != after.mode).then_some((before.mode, after.mode)),
+        };
+        (!change.is_empty()).then(|| Box::new(change))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.tracks.is_empty()
+            && self.sends.is_empty()
+            && self.sidechains.is_empty()
+            && self.sources.is_empty()
+            && self.mode.is_none()
+    }
+
+    fn apply(&self, mixer: &mut Mixer, undo: bool) {
+        apply(&mut mixer.tracks, &self.tracks, undo, |t| t.id);
+        apply(&mut mixer.sends, &self.sends, undo, |s| s.id);
+        apply(&mut mixer.sidechains, &self.sidechains, undo, sidechain_id);
+        apply(&mut mixer.sources, &self.sources, undo, |a| a.source);
+        if let Some((before, after)) = self.mode {
+            mixer.mode = if undo { before } else { after };
+        }
+        // Allocation counters are taken from the current project and never part of an inverse.
+    }
+
+    fn bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<Self>()
+            + self.tracks.capacity() * std::mem::size_of::<Delta<Track>>()
+            + self.sends.capacity() * std::mem::size_of::<Delta<Send>>()
+            + self.sidechains.capacity() * std::mem::size_of::<Delta<Sidechain>>()
+            + self.sources.capacity() * std::mem::size_of::<Delta<Assignment>>();
+        for (_, track) in self
+            .tracks
+            .iter()
+            .flat_map(|d| [&d.before, &d.after])
+            .flatten()
+        {
+            bytes += track.name.capacity()
+                + track.inserts.capacity() * std::mem::size_of::<crate::mixer::Insert>();
+            for insert in &track.inserts {
+                bytes += insert.device.capacity()
+                    + insert.params.capacity() * std::mem::size_of::<f32>()
+                    + insert.preset.as_ref().map_or(0, String::capacity);
+            }
+        }
+        bytes
+    }
+}
+
 impl Change {
     pub fn between(a: &Project, b: &Project) -> Self {
         Self {
@@ -90,6 +172,7 @@ impl Change {
                     b.arrangement.loop_region.clone(),
                 )
             }),
+            mixer: MixerChange::between(&a.mixer, &b.mixer),
             order: crate::undo::next_order(),
         }
     }
@@ -100,6 +183,9 @@ impl Change {
         apply(&mut p.arrangement.clips, &self.clips, undo, |c| c.id);
         apply(&mut p.arrangement.tracks, &self.tracks, undo, |c| c.id);
         apply(&mut p.patterns, &self.patterns, undo, |p| p.id);
+        if let Some(mixer) = &self.mixer {
+            mixer.apply(&mut p.mixer, undo);
+        }
         if let Some((a, b)) = &self.region {
             p.arrangement.loop_region = if undo { a.clone() } else { b.clone() };
         }
@@ -114,6 +200,7 @@ impl Change {
     }
     pub fn bytes(&self, curves: &mut HashMap<usize, usize>) -> usize {
         let mut n = std::mem::size_of::<Self>()
+            + self.mixer.as_deref().map_or(0, MixerChange::bytes)
             + self.assets.capacity() * std::mem::size_of::<Delta<AudioAsset>>()
             + self.media.capacity() * std::mem::size_of::<(MediaVersion, MediaVersion)>();
         for (_, a) in self
