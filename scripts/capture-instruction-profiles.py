@@ -73,6 +73,23 @@ def settling_signals():
             signal.signal(sig, handler)
 
 
+def darwin_group_settled(pgid):
+    deadline = time.monotonic() + 2
+    while (remaining := deadline - time.monotonic()) > 0:
+        # A vanished group is an empty match in a successful process listing.
+        members = subprocess.check_output(
+            ['/bin/ps', '-A', '-o', 'pgid=', '-o', 'stat='], text=True, timeout=remaining)
+        active = [state for group, state in map(str.split, members.splitlines())
+                  if group == str(pgid) and not state.startswith('Z')]
+        if not active:
+            return True
+        # The E flag means exit is in progress. Wait for disappearance or Z.
+        if any('E' not in state[1:] for state in active):
+            return False
+        time.sleep(.01)
+    return False
+
+
 def reap_group(process):
     with settling_signals():
         for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -80,6 +97,11 @@ def reap_group(process):
                 os.killpg(process.pid, sig)
             except ProcessLookupError:
                 pass
+            except PermissionError:
+                # macOS can deny signals to a group containing only zombies.
+                if sys.platform != 'darwin' or not darwin_group_settled(process.pid):
+                    raise
+                break
             if sig == signal.SIGTERM:
                 try:
                     process.wait(timeout=.15)

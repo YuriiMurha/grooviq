@@ -8,14 +8,43 @@ import subprocess
 import signal
 import sys
 import time
-import threading
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location('capture', Path(__file__).with_name('capture-instruction-profiles.py'))
 c = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(c)
+
+
+class ProcessSettlementTests(unittest.TestCase):
+    def test_killpg_permission_error_allows_zombie_only_group(self):
+        process = Mock(pid=123)
+        with patch.object(c.sys, 'platform', 'darwin'), \
+                patch.object(c.os, 'killpg', side_effect=[None, PermissionError(1, 'Operation not permitted')]), \
+                patch.object(c.os, 'waitpid', side_effect=ChildProcessError), \
+                patch.object(c.subprocess, 'check_output', return_value=' 123 Z+\n 456 S\n'):
+            c.reap_group(process)
+        process.wait.assert_called_with(timeout=2)
+
+    def test_killpg_permission_error_waits_for_exiting_group(self):
+        process = Mock(pid=123)
+        with patch.object(c.sys, 'platform', 'darwin'), \
+                patch.object(c.os, 'killpg', side_effect=[None, PermissionError(1, 'Operation not permitted')]), \
+                patch.object(c.os, 'waitpid', side_effect=ChildProcessError), \
+                patch.object(c.subprocess, 'check_output', side_effect=[' 123 ?E\n', ' 123 Z\n']) as ps:
+            c.reap_group(process)
+        self.assertEqual(ps.call_count, 2)
+
+    def test_killpg_permission_error_rejects_live_group_member(self):
+        process = Mock(pid=123)
+        denied = PermissionError(1, 'Operation not permitted')
+        with patch.object(c.sys, 'platform', 'darwin'), \
+                patch.object(c.os, 'killpg', side_effect=[None, denied]), \
+                patch.object(c.subprocess, 'check_output', return_value=' 123 Z\n 123 S\n'):
+            with self.assertRaises(PermissionError) as raised:
+                c.reap_group(process)
+        self.assertIs(raised.exception, denied)
 
 
 class CaptureTests(unittest.TestCase):
@@ -222,19 +251,26 @@ else: print('annotation / symbols')
     def native_descendant_probe(self, mode):
         pidfile = self.root / 'descendant.pid'
         marker = self.root / 'late-marker'
-        child = f"import os,time,pathlib,signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(.7); pathlib.Path({str(marker)!r}).write_text('late')"
+        ready_signal = int(mode) if mode in (signal.SIGINT, signal.SIGTERM) else None
+        child = f"""
+import os, pathlib, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))
+if {ready_signal!r} is not None:
+    os.kill({os.getpid()}, {ready_signal!r})
+time.sleep(.7)
+pathlib.Path({str(marker)!r}).write_text('late')
+"""
         parent = f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child!r}]); time.sleep(3)"
-        timer = None
+        settled = False
         try:
             if mode == 'timeout':
                 with self.assertRaises(subprocess.TimeoutExpired):
                     c.run([sys.executable, '-c', parent], self.root, timeout=.3)
             else:
                 with c.cancellation(.3 if mode == 'deadline' else 3):
-                    if mode != 'deadline':
-                        timer = threading.Timer(.3, lambda: os.kill(os.getpid(), mode))
-                        timer.start()
-                    with self.assertRaises(c.CaptureError):
+                    expected_signal = signal.SIGALRM if mode == 'deadline' else mode
+                    with self.assertRaisesRegex(c.CaptureError, f'^capture cancelled by signal {expected_signal}$'):
                         if mode == signal.SIGTERM:
                             with (self.root / 'child.log').open('xb') as log:
                                 c.save_command([sys.executable, '-c', parent], self.root, None, log, self.root, timeout=2)
@@ -242,14 +278,23 @@ else: print('annotation / symbols')
                             c.run([sys.executable, '-c', parent], self.root, timeout=2)
             self.assertTrue(pidfile.exists(), 'native descendant must actually start')
             pid = int(pidfile.read_text())
-            state = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True).stdout.strip()
-            self.assertTrue(not state or state.startswith('Z'), f'descendant remains live: {state}')
+            deadline = time.monotonic() + 2
+            while True:
+                sample = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'stat='],
+                                        capture_output=True, text=True, timeout=2)
+                state = sample.stdout.strip()
+                if not state:
+                    self.assertEqual((sample.returncode, sample.stderr), (1, ''), 'ps failed to inspect descendant')
+                    break
+                self.assertEqual(sample.returncode, 0, sample.stderr)
+                if state.startswith('Z'):
+                    break
+                self.assertLess(time.monotonic(), deadline, f'descendant remains live: {state}')
+                time.sleep(.01)
+            settled = True
             self.assertFalse(marker.exists())
         finally:
-            if timer:
-                timer.cancel()
-                timer.join()
-            if pidfile.exists():
+            if not settled and pidfile.exists():
                 try: os.kill(int(pidfile.read_text()), signal.SIGKILL)
                 except ProcessLookupError: pass
 
