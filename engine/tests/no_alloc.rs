@@ -33,6 +33,8 @@ mod bitcrusher;
 mod character_delay;
 #[path = "realtime/fattener.rs"]
 mod fattener;
+#[path = "realtime/mixer_runtime.rs"]
+mod mixer_runtime;
 #[path = "realtime/saturation.rs"]
 mod saturation;
 
