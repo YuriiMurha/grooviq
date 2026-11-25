@@ -114,6 +114,20 @@ class AgentTests(unittest.TestCase):
             self.assertFalse(self.agent.stopped.exists())
         self.assertEqual(self.agent.run_tick.call_count, 4)
 
+    def test_exit_seventy_five_skips_busy_lock_and_next_tick_runs(self):
+        self.agent.set_order(ORDER)
+        self.agent.run_tick.side_effect = [
+            subprocess.CompletedProcess([], 75, "fixture exit output\n"),
+            subprocess.CompletedProcess([], 1, "tree mismatch\n"),
+        ]
+        result = self.agent.tick()
+        self.assertEqual(result["status"], "skipped: busy")
+        self.assertEqual(result["exit_code"], 75)
+        self.assertFalse(self.agent.stopped.exists())
+        self.assertIn("skipped: busy", self.agent.log.read_text())
+        self.assertEqual(self.agent.tick()["status"], "stopped")
+        self.assertTrue(self.agent.stopped.exists())
+
     def test_log_keeps_approximately_two_thousand_recent_lines(self):
         self.agent.set_order(ORDER)
         self.agent.run_tick.return_value = subprocess.CompletedProcess(

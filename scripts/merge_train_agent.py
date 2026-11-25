@@ -181,11 +181,13 @@ class Agent:
         revision = self.refresh_main()
         with self.checkout(revision) as (worktree, script):
             result = self.run_tick(worktree, script, entries)
+            status = {0: "completed", 1: "stopped", os.EX_TEMPFAIL: "skipped: busy"}.get(
+                result.returncode, "error"
+            )
             if result.returncode == 1:
                 atomic_json(safe_path(self.stopped), {"recorded_utc": stamp(), "output": result.stdout,
                             "order_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()})
-            self.log_output(f"source {revision}, tick exit {result.returncode}", result.stdout)
-        status = {0: "completed", 1: "stopped"}.get(result.returncode, "error")
+            self.log_output(f"source {revision}, tick exit {result.returncode} ({status})", result.stdout)
         return {"status": status, "exit_code": result.returncode, "log": str(self.log)}
 
     def launch(self, *args, check=True):
