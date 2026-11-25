@@ -116,8 +116,8 @@ jobs:
       matrix:
         browser: [webkit, chromium]
     runs-on: ubuntu-latest
-    # 4 setup + 8 suite + 3 diagnostics + 1 container minute.
-    timeout-minutes: 16
+    # 4 setup + 9 suite + 3 diagnostics + 1 container minute.
+    timeout-minutes: 17
     container:
       # Keep this version equal to @playwright/test in app/ui/package-lock.json.
       image: mcr.microsoft.com/playwright:v1.64.1-noble
@@ -139,7 +139,7 @@ jobs:
       # Leave room for diagnostics; container initialization also uses the job budget.
       - name: Discover full inventory and run browser
         id: suite
-        timeout-minutes: 8
+        timeout-minutes: 9
         env:
           GROOVIQ_E2E_JSON: ${{ github.workspace }}/app/ui/browser-accounting/report.json
         run: |
