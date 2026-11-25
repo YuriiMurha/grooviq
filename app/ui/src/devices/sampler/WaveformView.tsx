@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { subscribeThemeChange } from "../../theme/changes";
 import { drawnScale, useBoxSize, useLatest } from "../controls/gesture";
 import { useDeviceScale } from "../deviceScale";
 import type { Gesture } from "../paramGestures";
@@ -58,7 +59,7 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
   const lo = Math.min(region.start, region.end);
   const hi = Math.max(region.start, region.end);
   const loopAt = markerPosition("loop_start", region);
-  useEffect(() => {
+  const draw = useCallback(() => {
     const c = canvas.current;
     const el = host.current;
     if (!c || !el || w <= 0 || h <= 0) return;
@@ -124,6 +125,10 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
     for (let y = 0; y < H; y += 2 * dash) g.fillRect(Math.round(loopAt * W - line / 2), y, line, dash);
     g.globalAlpha = 1;
   }, [peaks, w, h, scale, lo, hi, loopAt, loop, region.start, region.end, region.reverse]);
+  useEffect(() => {
+    draw();
+    return subscribeThemeChange(draw);
+  }, [draw]);
 
   const local = (e: PointerEvent<HTMLElement>) => {
     const r = host.current!.getBoundingClientRect();
