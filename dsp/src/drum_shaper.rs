@@ -90,7 +90,9 @@ impl Device for DrumShaper {
     ) {
         self.fresh = false;
         for (l, r) in l.iter_mut().zip(r) {
-            let x = [sane(*l), sane(*r)];
+            // Match detector headroom and the ±16 input policy of other devices;
+            // finite hostile samples must not overflow shaping or saturation gains.
+            let x = [sane(*l).clamp(-16.0, 16.0), sane(*r).clamp(-16.0, 16.0)];
             let level = x[0].abs().max(x[1].abs()).min(16.0);
             let mut weights = [0.0; 3];
             for (m, weight) in weights.iter_mut().enumerate() {
