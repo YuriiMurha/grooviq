@@ -33,14 +33,15 @@ static FIR: [Band; BANDS + 1] = {
     table
 };
 
-/// Fade the interpolator in over a narrow range above unity so a glide crossing unity has
-/// continuous gain. The cubic read at and below unity retains its original floating-point bits.
-const FADE_WIDTH: f64 = 1.0 / 64.0;
+/// Keep detune and 48 kHz sources at 44.1 kHz on the exact cubic path. Fade to the FIR as
+/// the step increases so a glide does not abruptly change the interpolator's gain.
+const FADE_START: f64 = 1.09;
+const FADE_END: f64 = 1.25;
 
 #[inline]
 pub(super) fn read(sample: &SampleBuf, voice: &Voice) -> (f32, f32) {
     let step = voice.step.abs();
-    if step >= 1.0 + FADE_WIDTH {
+    if step >= FADE_END {
         return sinc(sample, voice, step);
     }
     let (l, r) = if voice.looping {
@@ -55,11 +56,11 @@ pub(super) fn read(sample: &SampleBuf, voice: &Voice) -> (f32, f32) {
             hermite(&sample.r, voice.pos, |k| k),
         )
     };
-    if step <= 1.0 {
+    if step <= FADE_START {
         return (l, r);
     }
     let (sl, sr) = sinc(sample, voice, step);
-    let mix = ((step - 1.0) / FADE_WIDTH) as f32;
+    let mix = ((step - FADE_START) / (FADE_END - FADE_START)) as f32;
     (l + mix * (sl - l), r + mix * (sr - r))
 }
 
@@ -144,4 +145,86 @@ fn sinc(sample: &SampleBuf, voice: &Voice, step: f64) -> (f32, f32) {
         (a + b) + (c + d)
     };
     (sum(sl), sum(sr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn alternating_sample() -> SampleBuf {
+        let l: Vec<f32> = (0..128)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let r = l.iter().map(|&x| x * -0.5).collect();
+        SampleBuf {
+            rate: 48_000.0,
+            l,
+            r,
+        }
+    }
+
+    #[test]
+    fn detune_and_device_rate_conversion_use_exact_hermite() {
+        let sample = alternating_sample();
+        for step in [1.007, 48_000.0 / 44_100.0, 1.09] {
+            for direction in [-1.0, 1.0] {
+                let voice = Voice {
+                    pos: 64.25,
+                    end: sample.len() as f64,
+                    step: direction * step,
+                    ..Voice::OFF
+                };
+                let (l, r) = read(&sample, &voice);
+                assert_eq!(
+                    l.to_bits(),
+                    hermite(&sample.l, voice.pos, |k| k).to_bits(),
+                    "step {}",
+                    voice.step
+                );
+                assert_eq!(
+                    r.to_bits(),
+                    hermite(&sample.r, voice.pos, |k| k).to_bits(),
+                    "step {}",
+                    voice.step
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn glide_changes_the_interpolator_without_a_step_in_gain() {
+        let sample = alternating_sample();
+        // Hold the phase fixed to measure gain jumps due to the glide's step updates,
+        // separately from waveform motion. This Nyquist probe has very different gains
+        // under the two interpolators, so an abrupt switch is easy to detect.
+        let mut voice = Voice {
+            pos: 64.25,
+            start: 0.0,
+            end: sample.len() as f64,
+            step: 1.0,
+            base: 1.0,
+            track: true,
+            root: 60.0,
+            pitch: 60.0,
+            ..Voice::OFF
+        };
+        let original = read(&sample, &voice).0;
+        let mut previous = original;
+        let mut largest_jump = 0.0_f32;
+        voice.glide_to(65.0, 200.0, 48_000.0);
+        while voice.pitch != voice.target {
+            voice.glide();
+            let current = read(&sample, &voice).0;
+            largest_jump = largest_jump.max((current - previous).abs());
+            previous = current;
+        }
+        assert!(
+            (previous - original).abs() > 0.5,
+            "the glide reaches the FIR"
+        );
+        assert!(
+            largest_jump < 0.01,
+            "largest frame-to-frame gain jump {largest_jump}"
+        );
+    }
 }

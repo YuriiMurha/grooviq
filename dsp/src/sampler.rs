@@ -2,9 +2,9 @@
 //!
 //! Each note picks a region of the sample (`start`..`end`, optionally reversed), plays it at a
 //! rate set at note-on (`source_rate / engine_rate * 2^(semitones / 12)`) and shapes it with an
-//! attack/decay/sustain/release envelope. Cubic Hermite handles steps up to one source frame;
-//! faster reads use a low-pass FIR. In one-shot mode a
-//! note plays to the end of its region and ignores note-off; in gate mode note-off releases it.
+//! attack/decay/sustain/release envelope. Reads use cubic Hermite up to a step of 1.09 and
+//! crossfade to a low-pass FIR by 1.25. A one-shot note plays to the end of its region and
+//! ignores note-off. In gate mode note-off releases it.
 //! Loop mode repeats the region's tail (from `loop_start`, a fraction of the played region in
 //! play order) until note-off, then releases, also in one-shot mode. Each voice runs a 12 dB/oct
 //! state-variable filter (low-, high- or band-pass) whose cutoff follows its own envelope and

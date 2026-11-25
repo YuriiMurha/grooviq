@@ -116,7 +116,7 @@ fn sampler_block(bencher: Bencher, voices: usize) {
     sampler_blocks(bencher, noise_sample(SR), chord(55, voices), true);
 }
 
-#[divan::bench(args = [90, 150, 400], consts = [1, 16])]
+#[divan::bench(args = [90, 117, 150, 400], consts = [1, 16])]
 fn sampler_fixed_step_block<const N: usize>(bencher: Bencher, percent: u32) {
     // Disable pitch tracking so every active voice reads at the same measured step.
     sampler_blocks(

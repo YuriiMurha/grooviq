@@ -114,6 +114,46 @@ fn faster_reads_keep_trimmed_stereo_edges_isolated() {
     }
 }
 
+#[test]
+fn fir_loop_matches_unrolled_audio_in_both_directions() {
+    let source = noise(512);
+    for rate in [72_000.0, 192_000.0] {
+        for loop_frames in [32, 128] {
+            for reverse in [false, true] {
+                let mut unrolled = source.clone();
+                if reverse {
+                    unrolled.reverse();
+                }
+                let repeated = unrolled[512 - loop_frames..].repeat(160);
+                unrolled.extend(repeated);
+                if reverse {
+                    unrolled.reverse();
+                }
+                let mut looping = sampler(SR, buf(rate, source.clone()));
+                let mut linear = sampler(SR, buf(rate, unrolled));
+                for s in [&mut looping, &mut linear] {
+                    s.set_param(p("reverse"), f32::from(reverse));
+                }
+                looping.set_param(p("loop"), 1.0);
+                looping.set_param(p("loop_start"), 1.0 - loop_frames as f32 / 512.0);
+                let note = [on(0, 60, 1.0)];
+                let (looped, _) = render(&mut looping, 1_024, &note);
+                let (unrolled, _) = render(&mut linear, 1_024, &note);
+                // Compare whole seams after the first wrap, including taps that reach
+                // back through the near edge of a long loop.
+                for frame in 512..1_024 {
+                    assert!(
+                        (looped[frame] - unrolled[frame]).abs() <= 1e-5,
+                        "rate {rate}, loop {loop_frames}, reverse {reverse}, frame {frame}: {} vs {}",
+                        looped[frame],
+                        unrolled[frame]
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Deterministic non-zero noise in (-1, 1) without exact zeros.
 fn noise(len: usize) -> Vec<f32> {
     let mut s = 0x1234_5678u32;
