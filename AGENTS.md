@@ -55,8 +55,10 @@ Read the code; it is the documentation. `make help` lists the supported commands
 
 CI quirks:
 
-- `rust (macos-latest)` is sometimes cancelled at about 15 minutes with zero steps (no runner).
-  Re-run it with `gh run rerun <run-id> --failed`.
+- `rerun-no-runner.yml` automatically re-runs `rust (macos-latest)` once on the current head after a
+  zero-step runner acquisition cancellation. If the job is still cancelled with zero steps after that
+  workflow ran (no attempt 2, or attempt 2 cancelled the same way) and the run's commit is still the
+  PR head, run `gh run rerun <run-id> --failed`. A stale commit needs no rerun: the new head has its own run.
 - Branch protection is strict. After another merge, run `gh pr update-branch <n>`.
 - Auto-merge sometimes stalls at CLEAN. Then merge with `gh pr merge <n> --squash`.
 
@@ -74,9 +76,11 @@ CI quirks:
 
 ## Review
 
-- Every behaviour change gets an independent review on a different model family than the implementer.
-- Reviewer: GPT 6.1 Sol (`gpt-6.1-sol` on Codex, high effort), each round a fresh `delegate_task`
-  with `role: "review"`. Fallback: GPT 6 Astra, then the thread's own model; say so in the PR.
+- Lead (orchestrator) threads run Claude Opus 5.5 at extra-high effort. Implementers are subagents on
+  GPT 6.2 Sol (`gpt-6.2-sol` on Codex, high effort; fast mode for sequential work).
+- Every behaviour change gets an independent review on a different model family than the implementer:
+  Claude Opus 5.5 reviews GPT work, GPT 6.2 Sol (high) reviews Claude work. Each round is a fresh
+  `delegate_task` with `role: "review"`. Fallback: GPT 6 Astra, then the thread's own model; say so in the PR.
 - The reviewer is read-only. It replies:
 
   ```text

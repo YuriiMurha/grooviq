@@ -389,6 +389,66 @@ fn settle_ms(sr: f32) -> f32 {
         * 1000.
         / sr
 }
+fn colour_settle_ms(sr: f32) -> f32 {
+    // A quiet DC signal keeps the compressor idle. Warm the tilt filter first,
+    // then measure the Colour step reaching 99% of its audible output change.
+    let mut d = Fattener::new(sr);
+    d.set_param(0, 1.);
+    d.set_param(1, -1.);
+    let n = (sr * 0.2) as usize;
+    let (mut l, mut r) = (vec![0.01; n], vec![0.01; n]);
+    d.process(&mut l, &mut r, None, &[]);
+    let initial = l[n - 1];
+    d.set_param(1, 1.);
+    l.fill(0.01);
+    r.fill(0.01);
+    d.process(&mut l, &mut r, None, &[]);
+    let final_value = l[n - 1];
+    assert!((initial - final_value).abs() > 0.01);
+    let tolerance = (initial - final_value).abs() * 0.01;
+    (l.iter()
+        .position(|v| (v - final_value).abs() <= tolerance)
+        .unwrap()
+        + 1) as f32
+        * 1000.
+        / sr
+}
+
+#[test]
+fn colour_smoothing_has_physical_duration() {
+    for sr in [22050., 48000., 192000.] {
+        let ms = colour_settle_ms(sr);
+        // The 10 ms control smoother should take roughly 4.6 time constants
+        // to cover 99% of the step; allow for the nonlinear output mapping.
+        assert!(
+            (40. ..55.).contains(&ms),
+            "Colour settle at {sr} Hz: {ms} ms"
+        );
+    }
+}
+
+#[test]
+fn empty_process_before_preset_matches_fresh_device() {
+    for sr in [22050., 48000., 192000.] {
+        for name in PRESETS {
+            let mut fresh = Fattener::new(sr);
+            let mut empty = Fattener::new(sr);
+            empty.process(&mut [], &mut [], None, &[]);
+            for d in [&mut fresh, &mut empty] {
+                for (i, v) in preset(name).unwrap() {
+                    d.set_param(i, v);
+                }
+            }
+            let (mut fl, mut fr) = (sig(4096, 0), sig(4096, 1));
+            let (mut el, mut er) = (fl.clone(), fr.clone());
+            fresh.process(&mut fl, &mut fr, None, &[]);
+            empty.process(&mut el, &mut er, None, &[]);
+            assert_eq!(el, fl, "{name}, {sr} Hz, left");
+            assert_eq!(er, fr, "{name}, {sr} Hz, right");
+        }
+    }
+}
+
 fn release_ms(sr: f32) -> f32 {
     // right hit then quiet: ms for the left to recover to 90% of its steady value
     let n = sr as usize;
@@ -421,16 +481,17 @@ fn tilt_db(sr: f32) -> f32 {
 }
 #[test]
 fn time_constants_and_tilt_follow_sample_rate() {
-    for (a, b, what) in [
-        (settle_ms(48000.), settle_ms(192000.), "smooth"),
-        (release_ms(48000.), release_ms(192000.), "release"),
-        (tilt_db(48000.), tilt_db(192000.), "tilt"),
-    ] {
-        println!("{what}: {a} vs {b}");
-        assert!(
-            (a - b).abs() <= 0.1 * a.abs().max(b.abs()),
-            "{what}: {a} vs {b}"
-        );
+    for sr in [22050., 48000., 192000.] {
+        for (value, expected, tolerance, what) in [
+            (settle_ms(sr), 50., 5., "Amount settle ms"),
+            (release_ms(sr), 135., 14., "release ms"),
+            (tilt_db(sr), 0.49, 0.05, "tilt dB"),
+        ] {
+            assert!(
+                (value - expected).abs() <= tolerance,
+                "{what} at {sr} Hz: {value}, expected {expected} ± {tolerance}"
+            );
+        }
     }
 }
 
@@ -445,9 +506,13 @@ fn short_transient_attack_tracks_physical_time() {
         d.process(&mut l, &mut r, None, &[]);
         l[n - 1]
     };
-    let (a, b) = (probe(48000.), probe(192000.));
-    println!("attack endpoint: {a} vs {b}");
-    assert!((a - b).abs() < 0.005);
+    for sr in [22050., 48000., 192000.] {
+        let value = probe(sr);
+        assert!(
+            (value - 0.1515).abs() < 0.005,
+            "1 ms attack endpoint at {sr} Hz: {value}"
+        );
+    }
 }
 #[test]
 fn extreme_inputs_both_colour_signs() {

@@ -101,6 +101,8 @@ jobs:
         run: node --test ../../scripts/e2e-browser-results.test.mjs
       - name: E2e diagnostic safety tests
         run: node --test ../../scripts/e2e-diagnostics.test.mjs
+      - name: Runner acquisition retry tests
+        run: node --test ../../scripts/rerun-no-runner.test.cjs
       - name: Real Session / mock semantic replay
         run: npm run e2e -- --config playwright.replay.config.ts --project chromium
       - name: Largest grid CPU budget
