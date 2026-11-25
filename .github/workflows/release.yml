@@ -83,7 +83,7 @@ jobs:
         with:
           projectPath: app/src-tauri
           tauriScript: npm --prefix ../ui run tauri
-          args: --locked --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} -- --locked
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: installer-${{ matrix.bundle }}
@@ -117,8 +117,13 @@ jobs:
           [[ ${#dmg[@]} == 1 && ${#exe[@]} == 1 ]]
           # Never append assets to an existing (possibly public) release.
           # A rerun requires the owner to remove its previous draft first.
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          if response=$(gh api --include "repos/$GH_REPO/releases/tags/$RELEASE_TAG" 2>&1); then
             echo 'A release already exists for this tag; refusing to modify it.' >&2
+            exit 1
+          fi
+          status=$(printf '%s\n' "$response" | awk '/^HTTP\// { print $2; exit }')
+          if [[ "$status" != 404 ]]; then
+            echo 'Cannot verify release absence; refusing to continue.' >&2
             exit 1
           fi
           gh release create "$RELEASE_TAG" "${dmg[0]}" "${exe[0]}" \
