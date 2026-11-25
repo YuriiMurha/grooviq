@@ -232,10 +232,13 @@ function nativeWorkDelta(run: () => void): number {
 }
 
 describe.skipIf(performanceGate)("counted native work", () => {
-  it.each([
-    { kind: "Array", prototype: Array.prototype, sample: () => [2, 4, 6] },
-    { kind: "TypedArray", prototype: Reflect.getPrototypeOf(Int32Array.prototype)!, sample: () => new Int32Array([2, 4, 6]) },
-  ])("charges $kind methods by length except the constant-time methods", ({ kind, prototype, sample }) => {
+  // Two sizes, so a constant weight cannot pass for both.
+  const sized = (size: number) => Array.from({ length: size }, (_, i) => 2 * (i + 1));
+
+  it.each([3, 5].flatMap((size) => [
+    { kind: "Array", size, prototype: Array.prototype, sample: () => sized(size) },
+    { kind: "TypedArray", size, prototype: Reflect.getPrototypeOf(Int32Array.prototype)!, sample: () => new Int32Array(sized(size)) },
+  ]))("charges $kind methods by length ($size) except the constant-time methods", ({ kind, prototype, sample }) => {
     // This exemption list is the test's contract, independent of the wrapper's list.
     const exempt = new Set<PropertyKey>(["at", "push", "pop", "subarray"]);
     const callback = () => 1;
@@ -268,11 +271,11 @@ describe.skipIf(performanceGate)("counted native work", () => {
     }
   });
 
-  it.each([
-    { kind: "Map", collection: new Map([[1, 2], [3, 4], [5, 6]]) },
-    { kind: "Set", collection: new Set([2, 4, 6]) },
-  ])("charges $kind iteration by size", ({ kind, collection }) => {
-    const { size } = collection;
+  it.each([3, 5].flatMap((size) => [
+    { kind: "Map", size, collection: new Map(sized(size).map((key) => [key, key + 1] as const)) },
+    { kind: "Set", size, collection: new Set(sized(size)) },
+  ]))("charges $kind iteration by size ($size)", ({ kind, size, collection }) => {
+    expect(collection.size).toBe(size);
     for (const method of [Symbol.iterator, "entries", "keys", "values"] as const) {
       expect(nativeWorkDelta(() => { collection[method](); }), `${kind}.${String(method)}`).toBe(size);
     }
