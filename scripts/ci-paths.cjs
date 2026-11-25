@@ -2,6 +2,8 @@ const ALL_JOBS = { rust: "true", wasm: "true", e2e: "true" };
 const RUST_CRATE_DIRS = ["dsp/", "engine/", "project/", "tests/golden/", "app/src-tauri/", "tools/qa-fixture/"];
 const SHARED_DIRS = [".github/", ".config/", ".cargo/", ".githooks/", "scripts/", "tests/fixtures/"];
 const FILE_STATUSES = new Set(["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"]);
+const UI_BUILD_FILES = new Set(["app/ui/package.json", "app/ui/package-lock.json", "app/ui/index.html"]);
+const UI_BUILD_CONFIG = /^app\/ui\/(?:vite\.config\.[^/]+|vite[^/]*\.(?:ts|js|mjs)|tsconfig[^/]*\.json)$/;
 
 function classifyPath(path) {
   if (typeof path !== "string" || !path || SHARED_DIRS.some((dir) => path.startsWith(dir))) {
@@ -9,6 +11,8 @@ function classifyPath(path) {
   }
   // The Tauri command-parity test reads the mock source. Tauri's build embeds frontendDist.
   if (path === "app/ui/e2e/mockTauri.ts" || path.startsWith("app/ui/dist/")) return "shared";
+  // The Rust jobs also install native npm dependencies and build frontendDist on both desktop OSes.
+  if (UI_BUILD_FILES.has(path) || UI_BUILD_CONFIG.test(path)) return "shared";
   if (path.startsWith("app/ui/")) return "ui";
   if (RUST_CRATE_DIRS.some((dir) => path.startsWith(dir))) return "rust";
   if (path.startsWith("docs/") || path.endsWith(".md") || path === "LICENSE") return "inert";

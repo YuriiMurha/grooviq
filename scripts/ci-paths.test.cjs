@@ -23,7 +23,7 @@ const check = async (expected, ...paths) =>
   assert.deepEqual(await selectJobs(request(paths.map(file))), expected, paths.join(", "));
 
 test("UI, Rust, and inert paths skip only unrelated checks", async () => {
-  await check(uiOnly, "app/ui/src/App.tsx", "app/ui/package-lock.json", "README.md");
+  await check(uiOnly, "app/ui/src/App.tsx", "app/ui/public/icon.svg", "README.md");
   for (const path of ["dsp/src/lib.rs", "engine/tests/data/blip.mp3", "project/src/lib.rs",
     "tests/golden/src/lib.rs", "app/src-tauri/tauri.conf.json", "tools/qa-fixture/src/main.rs"]) {
     await check(rustOnly, path, "docs/images/banner.png");
@@ -34,6 +34,8 @@ test("UI, Rust, and inert paths skip only unrelated checks", async () => {
 
 test("shared inputs, tooling and unknown paths retain all checks", async () => {
   for (const path of ["app/ui/e2e/mockTauri.ts", "app/ui/dist/index.html", "tests/fixtures/session-replay.json",
+    "app/ui/package.json", "app/ui/package-lock.json", "app/ui/index.html", "app/ui/vite.config.ts",
+    "app/ui/vite.config.mts", "app/ui/vite-helpers.mjs", "app/ui/tsconfig.json", "app/ui/tsconfig.app.json",
     "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "Makefile",
     ".config/nextest.toml", ".cargo/config.toml", ".githooks/pre-commit", ".github/pull_request_template.md",
     "scripts/future.md", "package.json", "unknown/data"]) {
@@ -71,12 +73,15 @@ test("the current PR must match both event SHAs and the file count", async () =>
     args.rest.pulls.get = async () => ({ data: { ...args.pullRequest, ...changed } });
     assert.deepEqual(await selectJobs(args), all);
   }
-  const missing = request([file("docs/a.md")]);
-  delete missing.pullRequest.head.sha;
-  assert.deepEqual(await selectJobs(missing), all);
+  for (const ref of ["head", "base"]) {
+    const missing = request([file("docs/a.md")]);
+    delete missing.pullRequest[ref].sha;
+    assert.deepEqual(await selectJobs(missing), all, `missing ${ref} SHA in both payloads`);
+  }
 });
 
 test("non-PR events, API exceptions and malformed responses run everything", async () => {
+  assert.deepEqual(await selectJobs({ ...request([file("docs/a.md")]), eventName: "push" }), all);
   for (const eventName of ["push", "workflow_dispatch", "merge_group"]) {
     assert.deepEqual(await selectJobs({ eventName }), all);
   }
