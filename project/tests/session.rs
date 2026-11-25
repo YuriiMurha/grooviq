@@ -3917,3 +3917,68 @@ fn backup_barriers_fail_before_target_and_retry_duplicate() {
         assert!(!s.view().dirty);
     }
 }
+
+#[test]
+fn sample_provenance_serializes_file_identity_independently_of_decode() {
+    let (mut session, _, _) = rig();
+    let mut loaded = loaded_with_a_missing_sample();
+    loaded.project.channels[1].sample.as_mut().unwrap().path = "samples/27-1-snare.wav".into();
+    let decoded = decode_samples(&loaded);
+    let view = session
+        .open(Path::new("/p/beat.grooviq"), loaded, decoded)
+        .unwrap()
+        .view;
+    let json = serde_json::to_value(&view).unwrap();
+    assert_eq!(json["channels"][0]["sampleNameBasis"], "availableFile");
+    assert_eq!(json["channels"][1]["sampleName"], "27-1-snare.wav");
+    assert_eq!(json["channels"][1]["sampleNameBasis"], "storedReference");
+    assert_eq!(
+        json["channels"][1]["sampleReference"],
+        "samples/27-1-snare.wav"
+    );
+    assert_eq!(json["channels"][2]["sampleNameBasis"], "availableFile");
+    assert_eq!(json["channels"][2]["sampleReference"], "/gone/hat.wav");
+    assert_eq!(json["channels"][2]["missing"], true);
+    let view = session
+        .set_channel_sample(
+            2,
+            Path::new("/new/12-snare.wav"),
+            sample_file("12-snare.wav"),
+            buffer(),
+            Instant::now(),
+        )
+        .unwrap();
+    let json = serde_json::to_value(view).unwrap();
+    assert_eq!(json["channels"][1]["sampleName"], "12-snare.wav");
+    assert_eq!(json["channels"][1]["sampleNameBasis"], "availableFile");
+    assert_eq!(json["channels"][1]["sampleReference"], "/new/12-snare.wav");
+}
+
+#[test]
+fn sample_provenance_is_null_without_a_sample() {
+    let (mut session, _, _) = rig();
+    let mut loaded = loaded_with_a_missing_sample();
+    loaded.project.channels[1].sample = None;
+    let decoded = decode_samples(&loaded);
+    let view = session
+        .open(Path::new("/p/beat.grooviq"), loaded, decoded)
+        .unwrap()
+        .view;
+    let json = serde_json::to_value(view).unwrap();
+    for key in ["sampleNameBasis", "sampleReference"] {
+        assert!(json["channels"][1].as_object().unwrap().contains_key(key));
+        assert!(json["channels"][1][key].is_null());
+    }
+    let id = add_synth(&mut session, "Init");
+    let json = serde_json::to_value(session.view()).unwrap();
+    let synth = json["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == id)
+        .unwrap();
+    for key in ["sampleNameBasis", "sampleReference"] {
+        assert!(synth.as_object().unwrap().contains_key(key));
+        assert!(synth[key].is_null());
+    }
+}
