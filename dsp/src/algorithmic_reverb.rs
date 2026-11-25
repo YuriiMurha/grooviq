@@ -492,4 +492,169 @@ mod tests {
             }
         }
     }
+    // Isolate wet-delay modulation from input diffusion and size delay.
+    fn charged_wet(phase: f64) -> AlgorithmicReverb {
+        let mut d = AlgorithmicReverb::with_seed(48000., 16384);
+        for (i, v) in [(4, 0.), (5, 0.), (6, 1.), (9, 1.), (10, 1.)] {
+            d.set_param(i, v);
+        }
+        d.phase = phase;
+        d
+    }
+
+    #[test]
+    fn network_output_channels_keep_their_signed_taps() {
+        for model in 0..4 {
+            let mut n = Network::new(48000., model);
+            // With decay effectively infinite and damping zero, the four
+            // independently charged taps must project to +2 and -1.
+            for (line, value) in n.lines.iter_mut().zip([1., 2., 3., 4.]) {
+                for _ in 0..5000 {
+                    line.push(value);
+                }
+            }
+            let out = n.tick([0.; 2], model, 1e20, 0., 48000.);
+            assert!(
+                (out[0] - 2.).abs() < 1e-6 && (out[1] + 1.).abs() < 1e-6,
+                "{out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn moving_stereo_modulation_reads_independent_delay_coordinates() {
+        for phase in [0.0, 0.23, 0.61] {
+            let mut d = charged_wet(phase);
+            // A linear history turns a delay coordinate into a known value.
+            for line in &mut d.wet {
+                for i in 0..5000 {
+                    line.push(i as f32 * 0.0001);
+                }
+            }
+            let mut low_state = [0.; 2];
+            let mut high_state = [0.; 2];
+            for frame in 0..200 {
+                let expected_phase = phase + frame as f64 * 0.31 / 48000.;
+                let mut expected = [0.; 2];
+                for (c, value) in expected.iter_mut().enumerate() {
+                    let delay = (0.002
+                        + 0.001
+                            * libm::sin((expected_phase + c as f64 * 0.37) * std::f64::consts::TAU)
+                                as f32)
+                        * 48000.;
+                    // At frame 0 push adds a zero; old sample 4999 is one sample back.
+                    let sample = |offset: usize| {
+                        let index = 5000 + frame - offset;
+                        if index < 5000 {
+                            index as f32 * 0.0001
+                        } else {
+                            0.
+                        }
+                    };
+                    let whole = delay as usize;
+                    let fraction = delay - whole as f32;
+                    let v = sample(whole) * (1. - fraction) + sample(whole + 1) * fraction;
+                    let lo = 1. - libm::expf(-std::f32::consts::TAU * 80. / 48000.);
+                    let hi = 1. - libm::expf(-std::f32::consts::TAU * 16000. / 48000.);
+                    low_state[c] += lo * (v - low_state[c]);
+                    high_state[c] += hi * (v - low_state[c] - high_state[c]);
+                    *value = high_state[c];
+                }
+                let mut l = [0.];
+                let mut r = [0.];
+                d.process(&mut l, &mut r, None, &[]);
+                assert!(
+                    (l[0] - expected[0]).abs() < 2e-7 && (r[0] - expected[1]).abs() < 2e-7,
+                    "phase {phase} frame {frame}: {l:?}/{r:?} expected {expected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn separated_seed_phases_replay_after_reset() {
+        let render = |d: &mut AlgorithmicReverb| {
+            let mut l = vec![0.; 12000];
+            let mut r = l.clone();
+            l[0] = 1.;
+            r[0] = 0.37;
+            d.process(&mut l, &mut r, None, &[]);
+            l.extend(r);
+            l
+        };
+        let mut outputs = Vec::new();
+        for seed in [0, 16384, 49152] {
+            let mut d = AlgorithmicReverb::with_seed(22050., seed);
+            d.set_param(6, 1.);
+            d.set_param(10, 1.);
+            let first = render(&mut d);
+            d.reset();
+            assert_eq!(first, render(&mut d));
+            outputs.push(first);
+        }
+        for pair in outputs.windows(2) {
+            let delta: f64 = pair[0]
+                .iter()
+                .zip(&pair[1])
+                .map(|(&a, &b)| {
+                    let delta = f64::from(a - b);
+                    delta * delta
+                })
+                .sum();
+            assert!(
+                delta > 1e-5,
+                "separated seeds lost modulation phase: {delta}"
+            );
+        }
+    }
+
+    #[test]
+    fn nonlinear_signed_alternating_reflections_and_diffusion_crossfeed() {
+        // 25 kHz and 100 ms make tap positions integer multiples of 100
+        // samples. The left impulse diffuses at 75 samples (same channel)
+        // and 175 samples (opposite channel), before the finite tap cloud.
+        for diffusion in [0., 1.] {
+            let mut d = AlgorithmicReverb::new(25000.);
+            for (i, v) in [
+                (0, 4.),
+                (2, 0.),
+                (4, 0.),
+                (5, diffusion),
+                (6, 0.),
+                (7, 20.),
+                (8, 10000.),
+                (10, 1.),
+                (12, 0.1),
+            ] {
+                d.set_param(i, v);
+            }
+            let mut expected = vec![[0f64; 2]; 3000];
+            for tap in 1..=24 {
+                let t = tap as f64 / 25.;
+                let amplitude = 0.7 * t * t * (1. - t) * if tap % 3 == 0 { -1. } else { 1. };
+                let channel = tap % 2;
+                expected[tap * 100][channel] += amplitude * (1. - f64::from(diffusion) * 0.5);
+                expected[tap * 100 + 75][channel] += amplitude * f64::from(diffusion) * 0.25;
+                expected[tap * 100 + 175][1 - channel] += amplitude * f64::from(diffusion) * 0.25;
+            }
+            let lo = 1. - libm::exp(-std::f64::consts::TAU * 20. / 25000.);
+            let hi = 1. - libm::exp(-std::f64::consts::TAU * 10000. / 25000.);
+            let mut low = [0.; 2];
+            let mut high = [0.; 2];
+            for (frame, raw) in expected.iter().enumerate() {
+                for c in 0..2 {
+                    low[c] += lo * (raw[c] - low[c]);
+                    high[c] += hi * (raw[c] - low[c] - high[c]);
+                }
+                let mut l = [if frame == 0 { 1. } else { 0. }];
+                let mut r = [0.];
+                d.process(&mut l, &mut r, None, &[]);
+                assert!(
+                    (f64::from(l[0]) - high[0]).abs() < 2e-5
+                        && (f64::from(r[0]) - high[1]).abs() < 2e-5,
+                    "diffusion {diffusion} frame {frame}: {l:?}/{r:?} expected {high:?}"
+                );
+            }
+        }
+    }
 }

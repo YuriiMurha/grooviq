@@ -414,3 +414,81 @@ fn acoustic_rt60_slope_is_in_seconds_and_decibels_for_uneven_tone_bursts() {
         }
     }
 }
+
+// Reverse-integrated stereo impulse energy: T20 spans -5 to -25 dB,
+// extrapolated to 60 dB. A missing crossing is a measurement failure.
+#[test]
+fn schroeder_decay_calibration() {
+    for sr in [22050., 48000.] {
+        for model in 0..4 {
+            for decay in [0.5, 2.] {
+                let mut d = patch(sr, model as f32);
+                d.set_param(3, decay);
+                d.set_param(5, 1.);
+                let mut l = vec![0.; (sr * decay * 4.) as usize];
+                let mut r = l.clone();
+                l[0] = 1.;
+                r[0] = 0.37;
+                run(&mut d, &mut l, &mut r, 127);
+                let mut edc: Vec<f64> = l
+                    .iter()
+                    .zip(&r)
+                    .map(|(&a, &b)| f64::from(a) * f64::from(a) + f64::from(b) * f64::from(b))
+                    .collect();
+                let mut sum = 0.;
+                for e in edc.iter_mut().rev() {
+                    sum += *e;
+                    *e = sum;
+                }
+                assert!(sum > 0.);
+                let crossing = |db: f64| {
+                    edc.iter()
+                        .position(|e| *e <= sum * libm::pow(10., db / 10.))
+                        .expect("missing decay threshold crossing")
+                };
+                let seconds = 3. * (crossing(-25.) - crossing(-5.)) as f64 / f64::from(sr);
+                let ratio = seconds / f64::from(decay);
+                eprintln!(
+                    "T20 sr={sr} model={model} setting={decay} seconds={seconds:.5} ratio={ratio:.5}"
+                );
+                // T20 is a modal estimate and includes frequency-dependent damping.
+                // Allow 25% calibration error, rather than fitting the observed
+                // 0.847..0.967 range. RT40 predicts 1.5x before damping.
+                assert!(
+                    (0.75..1.25).contains(&ratio),
+                    "decay calibration ratio {ratio}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn models_have_gain_invariant_temporal_shapes() {
+    let responses: Vec<Vec<f32>> = (0..4)
+        .map(|model| {
+            let mut d = patch(22050., model as f32);
+            let mut l = vec![0.; 11025];
+            let mut r = l.clone();
+            l[0] = 1.;
+            r[0] = 0.37;
+            run(&mut d, &mut l, &mut r, 127);
+            l.extend(r);
+            l
+        })
+        .collect();
+    for a in 0..4 {
+        for b in a + 1..4 {
+            let dot: f64 = responses[a]
+                .iter()
+                .zip(&responses[b])
+                .map(|(&x, &y)| f64::from(x) * f64::from(y))
+                .sum();
+            let correlation = dot / libm::sqrt(energy(&responses[a]) * energy(&responses[b]));
+            assert!(
+                correlation.abs() < 0.95,
+                "models {a}/{b}: normalized correlation {correlation}"
+            );
+        }
+    }
+}
