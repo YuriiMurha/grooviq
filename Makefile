@@ -23,6 +23,28 @@ merge-train: ## Quality only: advance a tested batch (ORDER="12=<approved SHA> 3
 test-merge-train: ## Test ordered protected merges without calling GitHub
 	python3 -B -m unittest discover -s scripts -p test_merge_train.py -v
 
+.PHONY: merge-train-agent-enable merge-train-agent-disable merge-train-agent-status merge-train-agent-resume merge-train-agent-tick merge-train-order test-merge-train-agent
+merge-train-agent-enable: ## Enable optional three-minute merge-train ticks from merged main
+	$(REFRESH_PYTHON) -B scripts/merge_train_agent.py enable
+
+merge-train-agent-disable: ## Disable future merge-train ticks without interrupting an active tick
+	$(REFRESH_PYTHON) -B scripts/merge_train_agent.py disable
+
+merge-train-agent-status: ## Show the local approved order and any merge-train stop record
+	$(REFRESH_PYTHON) -B scripts/merge_train_agent.py status
+
+merge-train-agent-resume: ## Clear the agent stop record after investigating it
+	$(REFRESH_PYTHON) -B scripts/merge_train_agent.py resume
+
+merge-train-agent-tick: ## Run the same guarded tick that launchd runs
+	$(REFRESH_PYTHON) -B scripts/merge_train_agent.py tick
+
+merge-train-order: ## Save Quality's approved order (ORDER="12=<approved SHA> 34=<approved SHA>")
+	$(REFRESH_PYTHON) -B scripts/merge_train_agent.py set-order --make-order="$$ORDER"
+
+test-merge-train-agent: ## Exercise the merge-train agent with fake launchd and local Git fixtures
+	$(REFRESH_PYTHON) -B -m unittest discover -s scripts -p test_merge_train_agent.py -v
+
 .PHONY: test-pre-commit
 test-pre-commit: ## Exercise staged conflict checks in disposable Git repositories
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_pre_commit.py -v
