@@ -30,12 +30,22 @@ const setTheme = (page: Page, value: string | null) => page.evaluate((theme) => 
   else document.documentElement.dataset.theme = theme;
 }, value);
 
-const disableWebgl = (page: Page) => page.addInitScript(() => {
+type ContextLog = { __contextCalls: (canvas: HTMLCanvasElement) => string[] };
+
+/** Logs every context request per canvas: each renderer build asks once, a repaint never does
+ * (a canvas hands back the same context object, so comparing contexts proves nothing). */
+const instrumentContexts = (page: Page, webgl: boolean) => page.addInitScript((webgl) => {
   const get = HTMLCanvasElement.prototype.getContext;
+  const calls = new WeakMap<HTMLCanvasElement, string[]>();
+  (window as unknown as ContextLog).__contextCalls = (canvas) => [...(calls.get(canvas) ?? [])];
   HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string, options?: unknown) {
-    return kind === "webgl2" ? null : get.call(this, kind, options);
+    calls.set(this, [...(calls.get(this) ?? []), kind]);
+    return kind === "webgl2" && !webgl ? null : get.call(this, kind, options);
   } as typeof get;
-});
+}, webgl);
+
+const contextCalls = (locator: Locator) =>
+  locator.evaluate((canvas: HTMLCanvasElement) => (window as unknown as ContextLog).__contextCalls(canvas));
 
 const sameNode = (locator: Locator, original: ElementHandle) => locator.evaluate((node, before) => node === before, original);
 
@@ -49,7 +59,7 @@ rollProject.pattern.notes = [
 for (const renderer of ["webgl2", "canvas2d"] as const) {
   test.describe(`live theme / ${renderer}`, () => {
     test.beforeEach(async ({ page }) => {
-      if (renderer === "canvas2d") await disableWebgl(page);
+      await instrumentContexts(page, renderer === "webgl2");
     });
 
     test.describe("step grid", () => {
@@ -64,16 +74,17 @@ for (const renderer of ["webgl2", "canvas2d"] as const) {
         await expect.poll(async () => colourDistance(await sample(), ink)).toBeLessThan(8);
         const before = await sample();
         const element = await g.elementHandle();
-        const kind = renderer === "webgl2" ? "webgl2" : "2d";
-        const context = await g.evaluateHandle((c: HTMLCanvasElement, kind) => c.getContext(kind), kind);
-        expect(await context.evaluate((ctx) => ctx !== null)).toBe(true);
+        // The app's own requests on this canvas show which renderer drew it and how often it was built.
+        const contexts = await contextCalls(g);
+        expect(contexts.length).toBeGreaterThan(0);
+        expect(new Set(contexts)).toEqual(new Set([renderer === "webgl2" ? "webgl2" : "2d"]));
         await g.screenshot({ path: info.outputPath("grid-original.png") });
 
         await setTheme(app, "probe");
         await expect.poll(async () => colourDistance(await sample(), PROBE.ink), { message: "lit cell uses the probe ink" }).toBeLessThan(8);
         expect(colourDistance(before, PROBE.ink)).toBeGreaterThan(80);
         expect(await sameNode(g, element)).toBe(true);
-        expect(await g.evaluate((c: HTMLCanvasElement, { kind, before }) => c.getContext(kind) === before, { kind, before: context })).toBe(true);
+        expect(await contextCalls(g), "a theme change repaints without rebuilding the renderer").toEqual(contexts);
         await expect(g).toBeFocused();
         expect(await mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(false);
         await g.screenshot({ path: info.outputPath("grid-probe.png") });
@@ -81,6 +92,7 @@ for (const renderer of ["webgl2", "canvas2d"] as const) {
         await setTheme(app, original);
         await expect.poll(async () => colourDistance(await sample(), before)).toBeLessThan(8);
         expect(await sameNode(g, element)).toBe(true);
+        expect(await contextCalls(g)).toEqual(contexts);
       });
     });
 
