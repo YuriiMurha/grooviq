@@ -128,7 +128,7 @@ fn media_ticket_rejects_out_of_range_and_duplicate_live_values() {
     assert!(s.cancel_media_ticket(max));
     assert!(s.check_media_intent(&intent).is_err());
     assert!(s.check_media_intent(&duplicate).is_ok());
-    s.release_media_ticket(max);
+    s.release_media_ticket(max, &intent);
     s.register_media_ticket(max, &duplicate).unwrap();
 }
 
@@ -150,6 +150,67 @@ fn media_ticket_tombstones_evict_only_the_oldest_at_capacity() {
     for ticket in 2..=65 {
         assert!(s.register_media_ticket(ticket, &intent).is_err());
     }
+}
+
+#[test]
+fn media_ticket_invalid_or_repeated_cancels_keep_an_early_cancel() {
+    let (mut s, _, _, _) = rig(1 << 20);
+    let v = s.arrangement_view();
+    let intent = s
+        .media_intent(
+            v.generation,
+            v.revision,
+            import(s.project().arrangement.tracks[0].id),
+        )
+        .unwrap();
+    // Fill the ring exactly: the early cancel 9 is the oldest entry.
+    assert!(!s.cancel_media_ticket(9));
+    for ticket in 10..=72 {
+        assert!(!s.cancel_media_ticket(ticket));
+    }
+    assert!(!s.cancel_media_ticket(0));
+    assert!(!s.cancel_media_ticket(1 << 53));
+    assert!(!s.cancel_media_ticket(10));
+    assert!(s.register_media_ticket(9, &intent).is_err());
+}
+
+#[test]
+fn media_ticket_release_after_replacement_keeps_the_new_imports_ticket() {
+    let (mut s, _, _, _) = rig(1 << 20);
+    let v = s.arrangement_view();
+    let old = s
+        .media_intent(
+            v.generation,
+            v.revision,
+            import(s.project().arrangement.tracks[0].id),
+        )
+        .unwrap();
+    s.register_media_ticket(7, &old).unwrap();
+    s.new_project().unwrap();
+    let v = s.arrangement_view();
+    let track = s
+        .edit_arrangement(
+            v.generation,
+            v.revision,
+            vec![ArrangementEdit::CreateTrack {
+                name: "T".into(),
+                color: 0,
+            }],
+            Instant::now(),
+        )
+        .unwrap()
+        .created_ids[0];
+    let v = s.arrangement_view();
+    let new = s
+        .media_intent(v.generation, v.revision, import(track))
+        .unwrap();
+    s.register_media_ticket(7, &new).unwrap();
+    // The old import finishing late must not release the new project's ticket.
+    s.release_media_ticket(7, &old);
+    assert!(s.cancel_media_ticket(7));
+    assert!(s.check_media_intent(&new).is_err());
+    s.release_media_ticket(7, &new);
+    assert!(!s.cancel_media_ticket(7));
 }
 
 #[test]

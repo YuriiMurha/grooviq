@@ -167,19 +167,33 @@ impl Session {
         Ok(())
     }
     pub fn cancel_media_ticket(&mut self, ticket: u64) -> bool {
+        if !(1..=MAX_MEDIA_TICKET).contains(&ticket) {
+            return false;
+        }
         if let Some(cancelled) = self.media_tickets.get(&ticket) {
             cancelled.store(true, Ordering::SeqCst);
             return true;
         }
-        // Cancel can arrive before the import command registers its ticket.
-        if self.cancelled_media_tickets.len() == CANCELLED_MEDIA_TICKET_LIMIT {
-            self.cancelled_media_tickets.pop_front();
+        // Cancel can arrive before the import command registers its ticket. Invalid or
+        // repeated tickets must not evict a real early cancel from the bounded ring.
+        if !self.cancelled_media_tickets.contains(&ticket) {
+            if self.cancelled_media_tickets.len() == CANCELLED_MEDIA_TICKET_LIMIT {
+                self.cancelled_media_tickets.pop_front();
+            }
+            self.cancelled_media_tickets.push_back(ticket);
         }
-        self.cancelled_media_tickets.push_back(ticket);
         false
     }
-    pub fn release_media_ticket(&mut self, ticket: u64) {
-        self.media_tickets.remove(&ticket);
+    /// Releases the ticket only while it still belongs to `intent`: after a project
+    /// replacement, a new import may already have registered the same number.
+    pub fn release_media_ticket(&mut self, ticket: u64, intent: &MediaIntent) {
+        if self
+            .media_tickets
+            .get(&ticket)
+            .is_some_and(|cancelled| Arc::ptr_eq(cancelled, &intent.cancelled))
+        {
+            self.media_tickets.remove(&ticket);
+        }
     }
     pub(super) fn media_version(&self, id: u32) -> MediaVersion {
         MediaVersion {

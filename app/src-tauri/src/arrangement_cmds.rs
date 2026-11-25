@@ -220,10 +220,8 @@ async fn prepare_media(
     if result.is_err() {
         s.cancel_media_request(intent.request());
     }
-    // Replacement already cleared this ticket. A new project may have reused its number.
-    if s.generation() == generation {
-        s.release_media_ticket(ticket);
-    }
+    // Identity-checked: a replacement may have cleared this ticket and a new import reused it.
+    s.release_media_ticket(ticket, &intent);
     reply(&s, result, Some(intent.request()))
 }
 #[tauri::command]
@@ -461,7 +459,7 @@ mod tests {
             .unwrap();
         s.register_media_ticket(ticket, &intent)
             .expect("finished command left its ticket live");
-        s.release_media_ticket(ticket);
+        s.release_media_ticket(ticket, &intent);
         assert!(s.pending_media_requests().is_empty());
     }
     #[test]
@@ -490,7 +488,7 @@ mod tests {
         let mut s = lock(&session);
         assert_eq!(s.pending_media_requests(), vec![previous.request()]);
         assert!(s.cancel_media_request(previous.request()));
-        s.release_media_ticket(1);
+        s.release_media_ticket(1, &intent);
         assert!(s.pending_media_requests().is_empty());
         assert_eq!(s.project(), &before);
         assert_eq!(s.history_usage(), history);
