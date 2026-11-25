@@ -241,8 +241,6 @@ void assigned;`);
     moduleResolution: ts.ModuleResolutionKind.Bundler,
     allowImportingTsExtensions: true,
     target: ts.ScriptTarget.ES2022,
-    // Imported declarations still resolve. The probe needs no ambient @types packages.
-    types: [],
   });
   const probe = program.getSourceFile(file);
   if (!probe) throw new Error(`Missing TypeScript probe: ${file}`);
