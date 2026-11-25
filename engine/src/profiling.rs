@@ -109,12 +109,11 @@ fn report(client: Client, timeline: GpuContext, epoch: Instant, mut samples: Con
                 if connected {
                     timeline.begin_span(span_location!("AudioProcessor::process"), CALLBACK_BEGIN);
                     timeline.upload_gpu_timestamp(CALLBACK_BEGIN, nanos(begin));
-                    if dropped != 0 {
-                        client.plot(
-                            plot_name!("Profiling callbacks dropped (reporter time)"),
-                            f64::from(dropped),
-                        );
-                    }
+                    // Every callback, zeros included, so a burst does not look like steady loss.
+                    client.plot(
+                        plot_name!("Profiling callbacks dropped (reporter time)"),
+                        f64::from(dropped),
+                    );
                 }
             }
             Ok(Sample::Block {
