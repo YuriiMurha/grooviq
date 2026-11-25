@@ -1,7 +1,15 @@
 import type { Page } from "@playwright/test";
 import type { ArrangementPage } from "../src/api/arrangement";
 import { expect, project, soundsFor, test } from "./fixture";
-test.use({ seed: { project: project(["Kick"], { 1: [0, 4, 8, 12] }), files: soundsFor(["Kick"]) } });
+const groupStartTicks = [960, 5760];
+test.use({ seed: { project: project(["Kick"], { 1: [0, 4, 8, 12] }, { nextId: 5, arrangement: {
+  tracks: [{ id: 2, name: "Track 1", color: 0, mute: false }],
+  clips: groupStartTicks.map((startTick, index) => ({
+    id: 3 + index, track: 2, name: "Pattern 1", startTick, muted: false,
+    content: { type: "pattern", pattern: 0, offsetTick: 0, lengthTicks: 3840 },
+  })),
+  audioAssets: [], loopRegion: null,
+} }), files: soundsFor(["Kick"]) } });
 const state = (page: Page): Promise<ArrangementPage> => page.evaluate(() => (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args: unknown) => Promise<ArrangementPage> } }).__TAURI_INTERNALS__.invoke("arrangement_view", { offset: 0, limit: 256 }));
 async function setup(page: Page) {
   await expect(page.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
@@ -9,11 +17,9 @@ async function setup(page: Page) {
   const playlist = page.getByRole("region", { name: "Playlist", exact: true });
   const canvas = playlist.getByRole("application", { name: "Playlist clips" });
   await expect(canvas).toHaveAttribute("aria-disabled", "false");
+  await expect(playlist.getByRole("status")).toHaveText("2 clips");
+  expect((await state(page)).clips.map(clip => clip.startTick)).toEqual(groupStartTicks);
   const box = await canvas.boundingBox(); if (!box) throw new Error("Missing playlist canvas");
-  await page.mouse.click(box.x + 48, box.y + 32);
-  await expect.poll(async () => (await state(page)).total).toBe(1);
-  await page.mouse.click(box.x + 288, box.y + 32);
-  await expect.poll(async () => (await state(page)).total).toBe(2);
   await playlist.getByRole("button", { name: "Select", exact: true }).click();
   await page.mouse.move(box.x + 10, box.y + 8); await page.mouse.down();
   await page.mouse.move(box.x + 490, box.y + 62, { steps: 6 }); await page.mouse.up();
@@ -143,6 +149,10 @@ test("Save cancels held group input before saving canonical clips", async ({ app
   expect(await mock.calls("arrangement_edit")).toHaveLength(calls.length);
 });
 test("replacement retires group capture and selection", async ({ app, mock }) => {
+  const bpm = app.getByRole("textbox", { name: "BPM", exact: true });
+  await bpm.fill("121");
+  await bpm.press("Enter");
+  await expect.poll(async () => (await mock.view()).dirty).toBe(true);
   const { box, playlist } = await setup(app), before = await state(app), calls = await mock.calls("arrangement_edit");
   await app.mouse.move(box.x + 140, box.y + 40); await app.mouse.down(); await app.mouse.move(box.x + 188, box.y + 40);
   await app.keyboard.press("ControlOrMeta+n");
