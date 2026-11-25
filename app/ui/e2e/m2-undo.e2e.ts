@@ -296,7 +296,8 @@ test.describe("the live fixture's length log", () => {
 
   test("keeps_consecutive_lengths_set_by_hand_small", async ({ mockPage }) => {
     // Each manual length replaces the previous one immediately. Cycle through all 200 values
-    // five times here; the Rust Session test exercises the same rule over 100,000 edits.
+    // five times here. `a_hundred_thousand_lengths_set_by_hand_keep_the_log_small` in
+    // project/tests/undo.rs exercises the same rule over 100,000 Session edits.
     const out = await inPage<{ log: number; steps: number; undone: number }>(mockPage, `
       await add(5000);
       for (let i = 0; i < 1000; i++) await edit({ kind: "setPatternLength", steps: 1 + (i % 200) });
