@@ -1209,6 +1209,35 @@ fn audio_metadata_does_not_replace_runtime_bank() {
     );
 }
 #[test]
+fn track_only_audio_move_keeps_the_bank_and_refreshes_its_route() {
+    let (mut s, _, _, _) = rig();
+    let clip = edit(&mut s, vec![draw(audio(false), 0)]).created_ids[0];
+    let track = edit(
+        &mut s,
+        vec![Op::CreateTrack {
+            name: "B".into(),
+            color: 0,
+        }],
+    )
+    .created_ids[0];
+    let before = s.checked_export_state().unwrap().song.audio;
+    assert_eq!(before.tracks(), vec![(clip, 2)]);
+    edit(
+        &mut s,
+        vec![Op::Move {
+            clip,
+            track,
+            start_tick: 0,
+        }],
+    );
+    let after = s.checked_export_state().unwrap().song.audio;
+    assert!(
+        before.shares_bank(&after),
+        "a track-only move must keep sounding clips"
+    );
+    assert_eq!(after.tracks(), vec![(clip, u64::from(track))]);
+}
+#[test]
 fn batch_streams_point_caps_before_trailing_syntax_with_kind_in_any_position() {
     for (kind, fields) in [
         (

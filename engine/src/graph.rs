@@ -61,6 +61,11 @@ pub(crate) struct Graph {
     /// The block of the node being rendered, checked by the guard before it joins the master.
     node_l: [f32; BLOCK],
     node_r: [f32; BLOCK],
+    /// `None`: LegacyDirect. Otherwise every source is pulled once per block into its keyed
+    /// buffer and the prepared mixer renders the master.
+    mix: Option<Box<crate::mixer::live::LiveMix>>,
+    /// The controller's revision of the mix this graph runs.
+    mix_revision: u64,
 }
 
 /// Samples in a de-click ramp at `sample_rate`.
@@ -94,7 +99,41 @@ impl Graph {
             splits: [0; MAX_CHOKES],
             node_l: [0.0; BLOCK],
             node_r: [0.0; BLOCK],
+            mix: None,
+            mix_revision: 0,
         }
+    }
+
+    /// The mix a freshly built graph starts with (off the audio thread).
+    pub(crate) fn set_initial_mix(
+        &mut self,
+        mix: Option<Box<crate::mixer::live::LiveMix>>,
+        revision: u64,
+    ) {
+        self.mix = mix;
+        self.mix_revision = revision;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mix_revision(&self) -> u64 {
+        self.mix_revision
+    }
+
+    /// Installs a prepared mix at this block boundary if it was prepared for this graph's
+    /// generation (rate) and the revision it replaces is the one running; otherwise it is
+    /// refused and stays in `install`. Surviving devices move into the new mix first. The
+    /// leaving mix ends up in `install` either way, to retire off-thread. Real-time safe:
+    /// boxes and devices are swapped, nothing is allocated or freed.
+    pub(crate) fn install_mix(&mut self, install: &mut crate::mixer::live::MixInstall) {
+        if install.generation != self.generation || install.base != self.mix_revision {
+            return;
+        }
+        if let (Some(new), Some(old)) = (install.live.as_mut(), self.mix.as_mut()) {
+            new.adopt(old, &install.transfers, &install.params);
+        }
+        std::mem::swap(&mut self.mix, &mut install.live);
+        self.mix_revision = install.revision;
+        install.installed = true;
     }
 
     pub(crate) fn synth_meter(&self, instance: u64) -> Option<crate::SynthMeter> {
@@ -117,11 +156,16 @@ impl Graph {
 
     /// Fades the tone and the synth out over 5 ms (each resets once silent) and chokes every
     /// channel: the notes it holds or has queued fade over 3 ms, and later notes play in full.
+    /// A routed mix also clears its insert tails (delay lines, reverbs) at once: all sound
+    /// off includes what the mixer still rings with. Seek, stop and loops keep the tails.
     pub(crate) fn all_sound_off(&mut self) {
         self.tone.switch_off();
         self.synth.fade_out();
         for channel in &mut self.channels {
             channel.choke_all();
+        }
+        if let Some(mix) = &mut self.mix {
+            mix.kernel.reset();
         }
     }
 
@@ -296,15 +340,30 @@ impl Graph {
     pub(crate) fn sequence(&mut self, clock: &TransportClock, f0: u64) {
         self.audio_l.fill(0.0);
         self.audio_r.fill(0.0);
+        // Every pulled source starts the block at zero, before any source adds into it.
+        if let Some(mix) = &mut self.mix {
+            mix.sources.clear(BLOCK);
+        }
         if self.playback_mode == crate::PlaybackMode::Song {
-            self.audio.render(
-                &self.song.audio,
-                self.song_loop,
-                clock,
-                f0,
-                &mut self.audio_l,
-                &mut self.audio_r,
-            );
+            match &mut self.mix {
+                None => self.audio.render(
+                    &self.song.audio,
+                    self.song_loop,
+                    clock,
+                    f0,
+                    &mut crate::audio_clip::Direct(&mut self.audio_l, &mut self.audio_r),
+                ),
+                Some(mix) => self.audio.render(
+                    &self.song.audio,
+                    self.song_loop,
+                    clock,
+                    f0,
+                    &mut crate::audio_clip::Routed {
+                        schedule: &self.song.audio,
+                        sources: &mut mix.sources,
+                    },
+                ),
+            }
         }
         let channels = &mut self.channels;
         let mut sink = |id, event| match channels.iter_mut().find(|c| c.id() == id && !c.leaving())
@@ -434,6 +493,9 @@ impl Graph {
         r: &mut [f32; BLOCK],
         events: &[NoteEvent],
     ) -> u32 {
+        if self.mix.is_some() {
+            return self.render_routed(l, r, events);
+        }
         let mut silenced = 0;
         let (node_l, node_r) = (&mut self.node_l, &mut self.node_r);
 
@@ -481,6 +543,129 @@ impl Graph {
             mix_in(l, r, &self.audio_l, &self.audio_r);
         }
         silenced
+    }
+}
+
+impl Graph {
+    /// The routed form of [`Self::render`]: the same nodes, in the same order, with the
+    /// same guards, chokes and fades, each added into its own keyed source buffer instead of
+    /// the master; then the prepared mixer renders the master from those buffers. A source
+    /// the mix does not name still renders. Song audio was pulled in [`Self::sequence`].
+    fn render_routed(
+        &mut self,
+        l: &mut [f32; BLOCK],
+        r: &mut [f32; BLOCK],
+        events: &[NoteEvent],
+    ) -> u32 {
+        use crate::mixer::{SourceId, SystemSource};
+        let Self {
+            tone,
+            synth,
+            channels,
+            chokes,
+            splits,
+            node_l,
+            node_r,
+            host,
+            mix,
+            ..
+        } = self;
+        let Some(mix) = mix.as_mut() else {
+            return 0;
+        };
+        let mut silenced = 0;
+
+        tone.render(node_l, node_r);
+        if guard(node_l, node_r) {
+            tone.reset();
+            silenced += 1;
+        }
+        pull(mix, SourceId::System(SystemSource::Tone), node_l, node_r);
+
+        if let Some(host) = host {
+            synth.device.set_transport(host);
+        }
+        synth.render(node_l, node_r, events);
+        if guard(node_l, node_r) {
+            synth.reset();
+            silenced += 1;
+        }
+        pull(mix, SourceId::System(SystemSource::Synth), node_l, node_r);
+
+        let chokes = collect_chokes(channels, chokes);
+        for channel in channels.iter_mut() {
+            if channel.departed() {
+                continue;
+            }
+            let splits = splits_for(channel, chokes, splits);
+            channel.set_host(*host);
+            if !channel.render(node_l, node_r, splits) {
+                continue;
+            }
+            if guard(node_l, node_r) {
+                channel.reset();
+                silenced += 1;
+                continue;
+            }
+            // A leaving channel keeps its route until it is collected.
+            let id = SourceId::Channel(u64::from(channel.id().0));
+            pull(mix, id, node_l, node_r);
+        }
+        for index in 0..mix.sources.ids().len() {
+            if matches!(mix.sources.ids()[index], SourceId::AudioTrack(_)) {
+                let (bl, br) = mix.sources.block_mut(index);
+                if guard(bl, br) {
+                    silenced += 1;
+                }
+            }
+        }
+        let transport = host.unwrap_or_else(|| idle_host(mix.kernel.sample_rate()));
+        match mix.kernel.render_pulled(&transport, &mix.sources, l, r) {
+            Ok(report) => silenced += report.silenced,
+            Err(_) => {
+                l.fill(0.0);
+                r.fill(0.0);
+            }
+        }
+        silenced
+    }
+}
+
+/// Adds a rendered node into its source buffer, if the mix names that source.
+fn pull(
+    mix: &mut crate::mixer::live::LiveMix,
+    id: crate::mixer::SourceId,
+    node_l: &[f32; BLOCK],
+    node_r: &[f32; BLOCK],
+) {
+    if let Some(index) = mix.sources.index(id) {
+        let (l, r) = mix.sources.block_mut(index);
+        for (a, x) in l.iter_mut().zip(node_l) {
+            *a += x;
+        }
+        for (a, x) in r.iter_mut().zip(node_r) {
+            *a += x;
+        }
+    }
+}
+
+/// Stopped pattern-domain facts for a graph rendered before the processor gave it a host.
+fn idle_host(sample_rate: f32) -> grooviq_dsp::HostTransport {
+    grooviq_dsp::HostTransport {
+        domain: grooviq_dsp::HostDomain::Pattern,
+        frame: 0,
+        frames: BLOCK as u32,
+        sample_rate,
+        bpm: 120.0,
+        playing: false,
+        anchor_frame: 0,
+        anchor_tick: 0.0,
+        shift: 0,
+        loop_start: 0,
+        loop_end: 0,
+        stream_generation: 0,
+        discontinuity: 0,
+        changed: false,
     }
 }
 

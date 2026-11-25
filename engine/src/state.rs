@@ -285,6 +285,8 @@ pub struct EngineState {
     /// `(beats, unit)`: beats in a bar, 1..=16, and the note value of a beat, 2, 4, 8 or 16. The
     /// metronome clicks every `3840 / unit` ticks.
     pub time_signature: (u8, u8),
+    /// How sources reach the output; LegacyDirect by default.
+    pub mix: crate::mixer::MixSetup,
 }
 
 impl Default for EngineState {
@@ -298,6 +300,7 @@ impl Default for EngineState {
             playback_mode: crate::PlaybackMode::Pattern,
             song_loop: None,
             time_signature: (4, 4),
+            mix: crate::mixer::MixSetup::LegacyDirect,
         }
     }
 }
@@ -324,7 +327,9 @@ impl EngineState {
         if !song.valid_loop(self.song_loop) {
             return Err(ControlError::Rejected);
         }
+        self.mix.validate()?;
         Ok(Self {
+            mix: self.mix,
             song,
             playback_mode: self.playback_mode,
             song_loop: self.song_loop,

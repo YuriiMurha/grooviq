@@ -1,13 +1,16 @@
-//! Routing descriptors, deterministic admission/compilation, and a static serial renderer.
-//! Descriptors and compilation are control-thread only and construct no devices. The
-//! renderer takes caller-prepared devices and caller-resolved source blocks; only its
-//! `render`, `reset` and `set_param` run on the audio thread. No live graph is changed here,
-//! and legacy source reduction/identity bypass remains a separate runtime contract.
+//! Routing descriptors, deterministic admission/compilation, a static serial renderer and
+//! the live install (`live`). Descriptors and compilation are control-thread only and
+//! construct no devices. The renderer takes caller-prepared devices and caller-resolved
+//! or pulled source blocks; only its `render*`, `reset`, `set_param` and `transfer_from` run
+//! on the audio thread. LegacyDirect stays a separate graph path: a routed canonical sum is
+//! not claimed to reproduce the legacy addition order.
 mod compile;
 mod insert;
+pub(crate) mod live;
 mod model;
 mod runtime;
 pub use compile::*;
-pub use insert::{ParamError, PreparedInsert};
+pub use insert::{InsertIdentity, ParamError, PreparedInsert};
+pub use live::{InsertDevice, MixSetup, RoutedMix, insert_kinds};
 pub use model::*;
 pub use runtime::*;

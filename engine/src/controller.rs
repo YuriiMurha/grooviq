@@ -116,6 +116,9 @@ pub struct Controller {
     /// Which channel each id is now, see [`Self::channel_instance`].
     instances: BTreeMap<ChannelId, u64>,
     next_instance: u64,
+    /// The revision of the mix the queued messages lead to; never reused (a loaded state
+    /// takes a new one), so an install prepared against any other revision is stale.
+    mix_revision: u64,
     /// Counts `reconfigure` calls. Every graph carries the generation it was built in, and the
     /// processor drops a replacement from an earlier one.
     generation: u64,
@@ -164,6 +167,7 @@ impl Controller {
             instances: BTreeMap::new(),
             next_instance: 0,
             generation: 0,
+            mix_revision: 0,
             record_mark: 0,
             recording_armed: false,
             seen_faults: 0,
@@ -446,6 +450,40 @@ impl Controller {
         Ok(())
     }
 
+    /// Replaces how sources reach the output, without rebuilding the graph: instruments,
+    /// held notes, song audio voices and the transport carry on. The new mix is prepared
+    /// here (devices constructed and set, buffers reserved) and installed at the next block
+    /// boundary as one queue message; an insert that keeps its ID, kind and seed keeps its
+    /// live device (tails, envelopes) and only receives the parameters that changed.
+    /// Refused as a whole (`Rejected` for an invalid mix, `BuildFailed` if a device panics,
+    /// `Full` with no queue room): then nothing changes. Returns the new revision.
+    pub fn set_mix(&mut self, mix: crate::mixer::MixSetup) -> Result<u64, ControlError> {
+        use crate::mixer::live;
+        mix.validate()?;
+        let rate = self.sample_rate;
+        let prepared = catch_unwind(AssertUnwindSafe(|| live::prepare(&mix, rate)))
+            .map_err(|_| ControlError::BuildFailed)??;
+        let (transfers, params) = live::plan(&self.state.mix, &mix)?;
+        let revision = self.mix_revision + 1;
+        self.push(Msg::SetMix(Box::new(live::MixInstall {
+            generation: self.generation,
+            base: self.mix_revision,
+            revision,
+            live: prepared,
+            transfers,
+            params,
+            installed: false,
+        })))?;
+        self.mix_revision = revision;
+        self.state.mix = mix;
+        Ok(revision)
+    }
+
+    /// The revision of the latest accepted mix (see [`Self::set_mix`]).
+    pub fn mix_revision(&self) -> u64 {
+        self.mix_revision
+    }
+
     pub fn set_pattern(&mut self, pattern: PatternData) -> Result<(), ControlError> {
         let pattern = pattern.checked()?;
         self.push(Msg::SetPattern(Box::new(pattern.clone())))?;
@@ -468,10 +506,12 @@ impl Controller {
         }
         // The old state (and the samples only it held) is freed here, on this thread.
         let old = std::mem::replace(&mut self.state, state);
+        self.mix_revision += 1;
         let graph = match self.try_build_graph() {
             Some(graph) => graph,
             None => {
                 self.state = old;
+                self.mix_revision -= 1;
                 return Err(ControlError::BuildFailed);
             }
         };
@@ -816,6 +856,10 @@ impl Controller {
         graph.set_song(Box::new(self.state.song.clone()));
         graph.playback_mode = self.state.playback_mode;
         graph.song_loop = self.state.song_loop;
+        // A fresh graph gets fresh insert devices; the state was validated on admission.
+        let mix = crate::mixer::live::prepare(&self.state.mix, self.sample_rate)
+            .expect("the mirrored mix prepares");
+        graph.set_initial_mix(mix, self.mix_revision);
         // Every channel starts at its mix: nothing ramps in a fresh graph.
         graph.settle();
         graph

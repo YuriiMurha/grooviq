@@ -111,6 +111,16 @@ pub fn compile_song(
             .map_err(|e| e.to_string())?
             .0
     };
+    // Routes live outside the (possibly reused) bank, so a track-only move refreshes them
+    // while every sounding clip keeps its place.
+    let routes: Vec<_> = project
+        .arrangement
+        .clips
+        .iter()
+        .filter(|c| matches!(c.content, ClipContent::Audio { .. }))
+        .map(|c| (c.id, u64::from(c.track)))
+        .collect();
+    let audio = audio.with_tracks(&routes).map_err(|e| e.to_string())?;
     let mut curves = Vec::new();
     for c in project.arrangement.clips.iter().filter(|c| audible(c)) {
         if let ClipContent::Automation {

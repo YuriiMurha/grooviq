@@ -488,6 +488,12 @@ impl AudioProcessor {
                     }
                     self.discard(Trash::Timeline(update, removed));
                 }
+                Msg::SetMix(mut install) => {
+                    if !self.faulted {
+                        self.graph.install_mix(&mut install);
+                    }
+                    self.discard(Trash::Mix(install));
+                }
                 Msg::SetSong(song) => {
                     let old = if self.faulted {
                         song
@@ -1152,6 +1158,112 @@ mod tests {
             panic!("a graph handed back");
         };
         assert_eq!(stale.generation(), 0);
+    }
+    fn tone_mix() -> crate::mixer::MixSetup {
+        use crate::mixer::*;
+        MixSetup::Routed(RoutedMix {
+            mixer: Mixer {
+                tracks: vec![Track {
+                    id: MASTER,
+                    output: None,
+                    inserts: vec![Insert {
+                        id: InsertId(1),
+                        latency_frames: 0,
+                        memory_bytes: 0,
+                    }],
+                }],
+                sources: vec![Source {
+                    id: SourceId::System(SystemSource::Tone),
+                    destination: MASTER,
+                }],
+                ..Mixer::default()
+            },
+            gains: vec![],
+            devices: vec![InsertDevice {
+                insert: InsertId(1),
+                kind: "utility".into(),
+                seed: 0,
+                params: vec![],
+            }],
+        })
+    }
+
+    fn install(generation: u64, base: u64, revision: u64) -> Msg {
+        Msg::SetMix(Box::new(crate::mixer::live::MixInstall {
+            generation,
+            base,
+            revision,
+            live: crate::mixer::live::prepare(&tone_mix(), SR).unwrap(),
+            transfers: vec![],
+            params: vec![],
+            installed: false,
+        }))
+    }
+
+    /// The retired envelope: whether it installed, and whether it carries a mix.
+    fn retired(trash: &mut Consumer<Trash>) -> (bool, bool) {
+        match trash.pop() {
+            Ok(Trash::Mix(m)) => (m.installed, m.live.is_some()),
+            _ => panic!("a mix install always retires its envelope"),
+        }
+    }
+
+    #[test]
+    fn stale_or_foreign_mix_installs_are_refused_whole() {
+        let (mut p, mut commands, mut trash) = processor();
+        let mut buf = [0.0; BLOCK * 2];
+        // Prepared against a revision the graph does not run.
+        assert!(commands.push(install(0, 5, 6)).is_ok());
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.mix_revision(), 0);
+        assert_eq!(retired(&mut trash), (false, true));
+        // Prepared for another generation (rate).
+        assert!(commands.push(install(1, 0, 1)).is_ok());
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.mix_revision(), 0);
+        assert_eq!(retired(&mut trash), (false, true));
+        // A faulted graph takes nothing; its replacement carries the mirrored mix.
+        p.faulted = true;
+        assert!(commands.push(install(0, 0, 1)).is_ok());
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.mix_revision(), 0);
+        assert_eq!(retired(&mut trash), (false, true));
+        p.faulted = false;
+        // Current: installs, and the leaving LegacyDirect (no mix) retires.
+        assert!(commands.push(install(0, 0, 1)).is_ok());
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.mix_revision(), 1);
+        assert_eq!(retired(&mut trash), (true, false));
+        // The next one carries the displaced routed mix back, never dropping it here.
+        assert!(commands.push(install(0, 1, 2)).is_ok());
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.mix_revision(), 2);
+        assert_eq!(retired(&mut trash), (true, true));
+    }
+
+    #[test]
+    fn a_mix_install_waits_for_trash_room() {
+        let (mut p, mut commands, mut trash) = processor();
+        let mut buf = [0.0; BLOCK * 2];
+        for _ in 0..2 {
+            assert!(
+                commands
+                    .push(Msg::ReplaceGraph(Box::new(Graph::new(SR, 0))))
+                    .is_ok()
+            );
+        }
+        assert!(commands.push(install(0, 0, 1)).is_ok());
+        p.process(&mut buf, 2);
+        // One graph in the queue, one parked: the install waits, nothing changed.
+        assert!(p.unsent.is_some());
+        assert_eq!(p.graph.mix_revision(), 0);
+        assert_eq!(commands.slots(), QUEUE_CAPACITY - 1);
+        assert!(trash.pop().is_ok());
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.mix_revision(), 1);
+        assert!(matches!(trash.pop(), Ok(Trash::Graph(_))));
+        p.process(&mut buf, 2);
+        assert_eq!(retired(&mut trash), (true, false));
     }
 }
 

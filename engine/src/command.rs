@@ -301,6 +301,9 @@ pub(crate) enum Msg {
         mode_changed: bool,
         loop_changed: bool,
     },
+    /// A prepared mix (or LegacyDirect) and its survivor plan; whatever leaves the graph
+    /// goes back through the trash queue inside the same envelope.
+    SetMix(Box<crate::mixer::live::MixInstall>),
     /// Queues [`crate::RecordEvent::Mark`] with this id in the recording queue.
     RecordMark(u32),
     /// Completion identity for an exhausted recovery transaction.
@@ -360,7 +363,9 @@ pub(crate) fn rebuilt_queue(queued: Vec<Msg>) -> Vec<Msg> {
                 cut.push(id);
                 continue;
             }
-            Msg::AddChannel(_) | Msg::SetPattern(_) | Msg::SetSong(_) => continue,
+            Msg::AddChannel(_) | Msg::SetPattern(_) | Msg::SetSong(_) | Msg::SetMix(_) => {
+                continue;
+            }
             Msg::Timeline(update, mode_changed, loop_changed) => {
                 if let Some(id) = update.remove_channel {
                     cut.push(id);
@@ -446,6 +451,7 @@ pub(crate) enum Trash {
     Pattern(Box<PatternData>),
     Song(Box<crate::SongData>),
     Timeline(Box<TimelineUpdate>, Option<Box<ChannelNode>>),
+    Mix(Box<crate::mixer::live::MixInstall>),
 }
 
 #[cfg(test)]
