@@ -1,0 +1,624 @@
+/* The mixer: strips + pinned master + selected inspector (the approved M4 composition), in the
+   Riso tokens. Strips are 94 px wide on a 98 px pitch (Mixer.tsx windows them by that pitch). */
+
+.mx {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-l);
+  overflow: hidden;
+}
+
+.mx-console {
+  display: flex;
+  min-width: 0;
+  padding: 12px 0 12px 12px;
+  background: var(--panel);
+}
+
+.mx-scroll {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 10px;
+  scrollbar-color: var(--line) var(--well);
+  scrollbar-width: thin;
+}
+
+.mx-row {
+  position: relative;
+  height: 100%;
+  min-height: 452px;
+}
+
+.mx-row > .mx-strip {
+  position: absolute;
+  top: 0;
+}
+
+/* ---------------- strips ---------------- */
+.mx-strip {
+  --ink: var(--ink-1);
+  display: flex;
+  flex-direction: column;
+  width: 94px;
+  height: 452px;
+  padding: 10px 8px 8px;
+  background: var(--dev-card);
+  border: 1px solid transparent;
+  border-radius: var(--radius-m);
+}
+
+.mx-strip.selected {
+  border-color: var(--select);
+}
+
+.mx-strip.master {
+  flex: none;
+  margin: 0 12px 10px 4px;
+  background: color-mix(in srgb, var(--ink-6) 14%, var(--dev-card));
+  box-shadow: -8px 0 14px -6px rgba(5, 7, 20, 0.7);
+}
+
+.mx-strip.master.selected {
+  border-color: var(--select);
+}
+
+.mx-strip.pending > :not(.mx-pick) {
+  opacity: 0.55;
+}
+
+.mx-ink {
+  width: 22px;
+  height: 3px;
+  margin-bottom: 6px;
+  border-radius: 3px;
+  background: var(--ink);
+}
+
+.mx-pick {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 2px 0;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-s);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mx-pick:hover .mx-name {
+  color: var(--ok);
+}
+
+.mx-kind {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.mx-name {
+  display: block;
+  max-width: 76px;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mx-slots {
+  height: 46px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mx-slots li {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mx-slots li.bypassed {
+  color: var(--faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--line);
+}
+
+.mx-slots .mx-more,
+.mx-slots .mx-none {
+  color: var(--faint);
+}
+
+.mx-tools {
+  display: flex;
+  gap: 4px;
+  margin: 8px 0 10px;
+}
+
+.mx-tool {
+  flex: 1;
+  height: 22px;
+  padding: 0;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mx-tool:hover:not(:disabled) {
+  border-color: var(--muted);
+  color: var(--text);
+}
+
+.mx-tool[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--ink-3) 22%, var(--raised));
+  border-color: var(--ink-3);
+  color: var(--text);
+}
+
+.mx-tool.solo[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--ok) 20%, var(--raised));
+  border-color: var(--ok);
+}
+
+.mx-tool.clip {
+  flex: 1.4;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.mx-tool.clip.on {
+  background: var(--rec);
+  border-color: var(--rec);
+  color: var(--well);
+}
+
+.mx-tool:disabled {
+  cursor: default;
+}
+
+.mx-tool.clip:disabled {
+  color: var(--faint);
+  background: var(--well);
+  border-color: var(--line-soft);
+}
+
+/* ---------------- fader and meter ---------------- */
+.mx-bank {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  height: 168px; /* FADER_PX + the track's 20 px inset */
+}
+
+.mx-fader {
+  position: relative;
+  width: 34px;
+  height: 100%;
+  border-radius: var(--radius-m);
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.mx-fader[aria-disabled="true"] {
+  cursor: default;
+}
+
+.mx-fader-track {
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 50%;
+  width: 4px;
+  margin-left: -2px;
+  border-radius: 2px;
+  background: var(--knob-track);
+}
+
+.mx-fader-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 2px;
+  background: var(--ink);
+  transform-origin: bottom;
+}
+
+.mx-fader-zero {
+  position: absolute;
+  left: -7px;
+  width: 18px;
+  height: 1px;
+  background: var(--muted);
+}
+
+.mx-fader-cap {
+  position: absolute;
+  left: 50%;
+  /* Rides the track's travel, inset 10 px top and bottom (FADER_PX in Fader.tsx). */
+  bottom: calc(10px + (100% - 20px) * var(--n, 0));
+  width: 26px;
+  height: 12px;
+  margin: 0 0 -6px -13px;
+  border-radius: 3px;
+  background: var(--paper);
+  box-shadow:
+    0 2px 4px rgba(5, 7, 20, 0.6),
+    inset 0 -2px 0 color-mix(in srgb, var(--ink) 70%, var(--paper));
+}
+
+.mx-fader:hover .mx-fader-cap,
+.mx-fader.dragging .mx-fader-cap {
+  background: var(--text);
+  box-shadow:
+    0 2px 6px rgba(5, 7, 20, 0.7),
+    inset 0 -2px 0 var(--ink);
+}
+
+.mx-meter {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 100%;
+  padding: 3px;
+  background: var(--well);
+  border-radius: var(--radius-s);
+  box-shadow: inset 0 0 0 1px var(--line-soft);
+}
+
+.mx-meter-bar {
+  display: block;
+  width: 6px;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--ok);
+  transform: scaleY(0);
+  transform-origin: bottom;
+}
+
+.mx-meter-bar.clip {
+  background: var(--rec);
+}
+
+.mx-db {
+  display: block;
+  margin: 8px 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.mx-pan {
+  display: flex;
+  justify-content: center;
+}
+
+.mx-pan[aria-disabled="true"] {
+  pointer-events: none;
+}
+
+.mx-out {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin: auto 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.mx-out span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mx-icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mx-empty {
+  margin: 0;
+  padding: 24px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ---------------- inspector ---------------- */
+.mx-inspector {
+  min-width: 0;
+  padding: 16px;
+  background: var(--bg);
+  border-left: 1px solid var(--line);
+}
+
+.mx-inspector.pending .mx-routefields,
+.mx-inspector.pending .mx-sends {
+  opacity: 0.6;
+}
+
+.mx-ihead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.mx-ihead h2 {
+  min-width: 0;
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.mx-ihead .mx-kind {
+  flex: none;
+  width: auto;
+}
+
+.mx-field {
+  display: grid;
+  gap: 5px;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.mx-field select {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mx-field select:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+.mx-field select:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+
+.mx-inserts {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mx-insert {
+  margin-top: 6px;
+  padding: 6px;
+  background: var(--raised);
+  border-radius: var(--radius-m);
+}
+
+.mx-insert-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mx-bare {
+  display: contents;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.mx-open {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 4px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-s);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mx-open span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mx-open:hover {
+  color: var(--ok);
+}
+
+.mx-insert.bypassed .mx-open {
+  color: var(--faint);
+}
+
+.mx-icon-btn {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: var(--well);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-s);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.mx-icon-btn:hover:not(:disabled) {
+  border-color: var(--muted);
+  color: var(--text);
+}
+
+.mx-icon-btn:disabled {
+  color: var(--line);
+  cursor: default;
+}
+
+.mx-detector {
+  margin-top: 8px;
+}
+
+.mx-note {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.mx-sends {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.mx-sends h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.mx-send {
+  margin-top: 10px;
+  padding: 8px;
+  background: var(--raised);
+  border-radius: var(--radius-m);
+}
+
+.mx-send-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mx-send-top strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mx-send-amount {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.mx-send-amount[aria-disabled="true"] {
+  pointer-events: none;
+}
+
+.mx-mini {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.mx-send-amount .mx-mini {
+  margin: 0;
+}
+
+.mx-notice {
+  min-height: 18px;
+  margin: 12px 0 0;
+  color: var(--ink-3b);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mx-notice:empty {
+  min-height: 0;
+}
+
+.mx-inspector.empty .mx-empty {
+  padding: 0;
+}
+
+/* Compact: the inspector moves under the console, its fields in two columns. */
+@media (max-width: 960px) {
+  .mx {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mx-inspector {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0 24px;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .mx-ihead,
+  .mx-notice {
+    grid-column: 1 / -1;
+  }
+
+  .mx-sends {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  .mx-sends h3 {
+    margin-top: 12px;
+  }
+}
+
+@media (max-width: 500px) {
+  .mx-inspector {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mx-sends {
+    margin-top: 16px;
+    padding-top: 2px;
+    border-top: 1px solid var(--line);
+  }
+}
