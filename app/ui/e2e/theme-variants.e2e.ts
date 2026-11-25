@@ -165,10 +165,18 @@ for (const { id } of themes) {
       expect((await stats(app)).renderer).toBe(renderer);
       const note = await local(app, 800, 60);
       const velocity = { x: (await local(app, 480, 60)).x + 1, y: 20 };
-      const [noteFill, slideFill] = await pixelsAt(app, canvas(app), [note, await local(app, 2800, 67)]);
+      const [noteFill, slideFill, halfVelocityFill] = await pixelsAt(app, canvas(app), [
+        note, await local(app, 2800, 67), await local(app, 1650, 64),
+      ]);
       const [bar] = await pixelsAt(app, lane(app), [velocity]);
       expect(colourDistance(noteFill, bytes("--ink-4")), "full-velocity Bass note").toBeLessThan(8);
       expect(colourDistance(slideFill, bytes("--ink-4b")), "full-velocity Bass slide note").toBeLessThan(8);
+      const halfVelocityInk = bytes("--ink-4").map((channel) => channel * 0.725);
+      expect(colourDistance(halfVelocityFill, halfVelocityInk), "half-velocity Bass note").toBeLessThan(8);
+      // Taste's shade-only slide ink can read as a quieter normal note. See #642.
+      if (id !== "taste") {
+        expect(colourDistance(slideFill, halfVelocityFill), "slide versus half-velocity Bass note").toBeGreaterThanOrEqual(48);
+      }
       expect(colourDistance(bar, bytes("--ink-4")), "velocity bar").toBeLessThan(8);
 
       const [ghost, row] = await pixelsAt(app, canvas(app), [await local(app, 800, 64), await local(app, 3200, 64)]);

@@ -2,6 +2,8 @@ import "@fontsource-variable/manrope";
 import "./theme/riso.css";
 import "./theme/taste.css";
 import "./theme/luminous.css";
+import "./theme/slate-system.css";
+import "./theme/console.css";
 import "./app.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
