@@ -151,6 +151,10 @@ test.describe("the synth editor", () => {
     await expect.poll(() => x(amp)).toBeGreaterThan(sustainX);
     await shot(app, info, "measured-release");
     await app.setViewportSize({ width: 900, height: 800 });
+    await expect.poll(async () => {
+      const bounds = await editor(app).boundingBox();
+      return bounds !== null && bounds.x >= 0 && bounds.x + bounds.width <= 900.5;
+    }).toBe(true);
     await shot(app, info, "measured-release-900");
     await app.getByRole("button", { name: "Dismiss", exact: true }).click();
     await app.setViewportSize({ width: 900, height: 560 });
