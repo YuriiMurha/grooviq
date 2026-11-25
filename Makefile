@@ -106,8 +106,8 @@ profile: ## Profile the render benchmark with samply (cargo install --locked sam
 	CARGO_PROFILE_BENCH_DEBUG=line-tables-only $(CARGO) bench -p grooviq-golden --bench render --no-run > target/render-build.log 2>&1 || { cat target/render-build.log; exit 1; }
 	$(SAMPLY) -o target/render-profile.json.gz -- "$$(sed -n 's/^ *Executable .*(\(.*\))$$/\1/p' target/render-build.log)" $(ARGS)
 
-profile-tracy: ui-install ## Build the debug Grooviq.app with Tracy audio profiling
-	npm --prefix $(UI) run tauri build -- --debug --bundles app --features profiling
+profile-tracy: ui-install ## Build an optimised profiling bundle in target/profiling
+	CARGO_TARGET_DIR="$(CURDIR)/target/profiling" npm --prefix $(UI) run tauri build -- --bundles app --features profiling
 
 build-app: ui-install ## Build the release Grooviq.app (no .dmg) into target/release/bundle/macos
 	npm --prefix $(UI) run tauri build -- --bundles app

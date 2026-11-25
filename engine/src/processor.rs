@@ -163,6 +163,19 @@ impl AudioProcessor {
         Ok(())
     }
 
+    #[cfg(all(feature = "profiling", feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn with_stalled_profiling_for_test(
+        &mut self,
+        capacity: usize,
+        run: impl FnOnce(&mut Self),
+    ) {
+        let (profile, _drain) = Profile::channel(capacity);
+        let previous = self.profile.replace(profile);
+        run(self);
+        self.profile = previous;
+    }
+
     /// Fills `out`, interleaved with `channels` channels, of any length. Channels 0 and 1 get
     /// left and right (a single channel gets their average); further channels and a trailing
     /// partial frame get silence. Real-time safe.

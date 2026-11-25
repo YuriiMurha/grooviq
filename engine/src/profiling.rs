@@ -3,7 +3,7 @@ use std::io;
 use std::sync::atomic::{Ordering, fence};
 use std::thread;
 use std::time::{Duration, Instant};
-use tracy_client::{Client, GpuContext, GpuContextType, frame_name, plot_name, span_location};
+use tracy_client::{Client, GpuContext, GpuContextType, plot_name, span_location};
 
 const CAPACITY: usize = 2048;
 const CALLBACK_BEGIN: u16 = 0;
@@ -11,8 +11,11 @@ const CALLBACK_END: u16 = 1;
 const BLOCK_BEGIN: u16 = 2;
 const BLOCK_END: u16 = 3;
 
-enum Sample {
-    CallbackBegin(Instant),
+pub(crate) enum Sample {
+    CallbackBegin {
+        begin: Instant,
+        dropped: u32,
+    },
     Block {
         begin: Instant,
         end: Instant,
@@ -24,6 +27,7 @@ enum Sample {
 pub(crate) struct Profile {
     samples: Producer<Sample>,
     recording: bool,
+    dropped: u32,
 }
 
 impl Profile {
@@ -42,14 +46,23 @@ impl Profile {
                 1.0,
             )
             .map_err(io::Error::other)?;
-        let (samples, drain) = RingBuffer::new(CAPACITY);
+        let (profile, drain) = Self::channel(CAPACITY);
         thread::Builder::new()
             .name("grooviq-tracy".into())
             .spawn(move || report(client, timeline, epoch, drain))?;
-        Ok(Self {
-            samples,
-            recording: false,
-        })
+        Ok(profile)
+    }
+
+    pub(crate) fn channel(capacity: usize) -> (Self, Consumer<Sample>) {
+        let (samples, drain) = RingBuffer::new(capacity);
+        (
+            Self {
+                samples,
+                recording: false,
+                dropped: 0,
+            },
+            drain,
+        )
     }
 
     pub(crate) fn begin_callback(&mut self, blocks: usize) {
@@ -57,7 +70,12 @@ impl Profile {
         // pushes cannot fail, even if the reporter stalls. Drop whole callbacks under pressure.
         self.recording = self.samples.slots() >= blocks + 2;
         if self.recording {
-            let _ = self.samples.push(Sample::CallbackBegin(Instant::now()));
+            let _ = self.samples.push(Sample::CallbackBegin {
+                begin: Instant::now(),
+                dropped: std::mem::take(&mut self.dropped),
+            });
+        } else {
+            self.dropped = self.dropped.saturating_add(1);
         }
     }
 
@@ -86,12 +104,17 @@ fn report(client: Client, timeline: GpuContext, epoch: Instant, mut samples: Con
     let mut connected = false;
     loop {
         match samples.pop() {
-            Ok(Sample::CallbackBegin(begin)) => {
+            Ok(Sample::CallbackBegin { begin, dropped }) => {
                 connected = Client::is_connected();
                 if connected {
-                    client.secondary_frame_mark(frame_name!("Grooviq audio callback"));
                     timeline.begin_span(span_location!("AudioProcessor::process"), CALLBACK_BEGIN);
                     timeline.upload_gpu_timestamp(CALLBACK_BEGIN, nanos(begin));
+                    if dropped != 0 {
+                        client.plot(
+                            plot_name!("Profiling callbacks dropped (reporter time)"),
+                            f64::from(dropped),
+                        );
+                    }
                 }
             }
             Ok(Sample::Block {
@@ -103,8 +126,9 @@ fn report(client: Client, timeline: GpuContext, epoch: Instant, mut samples: Con
                 timeline.end_span(BLOCK_END);
                 timeline.upload_gpu_timestamp(BLOCK_BEGIN, nanos(begin));
                 timeline.upload_gpu_timestamp(BLOCK_END, nanos(end));
+                // Tracy stamps plot points when the reporter submits them.
                 client.plot(
-                    plot_name!("Engine block time (% of deadline)"),
+                    plot_name!("Block time % of deadline (reporter time)"),
                     (end - begin).as_secs_f64() * f64::from(sample_rate) * 100.0
                         / crate::BLOCK as f64,
                 );
@@ -134,14 +158,11 @@ mod tests {
 
     #[test]
     fn a_full_queue_drops_whole_callbacks_and_can_resume() {
-        let (samples, mut drain) = RingBuffer::new(3);
+        let (profile, mut drain) = Profile::channel(3);
         let (_, mut processor) = engine(EngineConfig {
             sample_rate: 48_000.0,
         });
-        processor.profile = Some(Profile {
-            samples,
-            recording: false,
-        });
+        processor.profile = Some(profile);
 
         // Two blocks cannot fit. The processor still renders them and consumes one extra
         // frame, leaving the rest of that block for future calls.
@@ -152,7 +173,11 @@ mod tests {
         // Another callback while full must not leave unmatched start or end markers.
         processor.process(&mut [], 0);
 
-        let Sample::CallbackBegin(callback_start) = drain.pop().unwrap() else {
+        let Sample::CallbackBegin {
+            begin: callback_start,
+            dropped: 1,
+        } = drain.pop().unwrap()
+        else {
             panic!("missing callback start");
         };
         let Sample::Block {
@@ -171,7 +196,16 @@ mod tests {
 
         // A callback served entirely from the leftover block still has its own zone.
         processor.process(&mut [0.0; BLOCK - 1], 1);
-        assert!(matches!(drain.pop(), Ok(Sample::CallbackBegin(_))));
+        assert!(matches!(
+            drain.pop(),
+            Ok(Sample::CallbackBegin { dropped: 1, .. })
+        ));
+        assert!(matches!(drain.pop(), Ok(Sample::CallbackEnd(_))));
+        processor.process(&mut [], 0);
+        assert!(matches!(
+            drain.pop(),
+            Ok(Sample::CallbackBegin { dropped: 0, .. })
+        ));
         assert!(matches!(drain.pop(), Ok(Sample::CallbackEnd(_))));
         assert!(drain.is_empty());
     }
