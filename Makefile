@@ -61,14 +61,14 @@ check-changed: ## Only the checks the changes against origin/main need (ARGS=--p
 	node scripts/check-changed.mjs $(ARGS)
 
 .PHONY: replay replay-update
-replay: ui-install ## Compare the real offline Session and both browser mocks against the shared command transcript
+replay: ## Compare the real offline Session and MIDI hub against both browser mocks
+replay-update: ## Regenerate the real Session and MIDI transcripts intentionally, then verify both browser mocks
+replay replay-update: ui-install
+	npm --prefix $(UI) run build
+	$(if $(filter replay-update,$@),GROOVIQ_UPDATE_REPLAY=1 node scripts/semantic-replay.mjs)
 	node scripts/semantic-replay.mjs
 	npm --prefix $(UI) exec -- playwright install chromium webkit
 	npm --prefix $(UI) run e2e -- --config playwright.replay.config.ts
-
-replay-update: ## Regenerate the real-Session transcript intentionally, then verify both browser mocks
-	GROOVIQ_UPDATE_REPLAY=1 node scripts/semantic-replay.mjs
-	$(MAKE) replay
 
 qa-ui: ui-install ## Playwright on the web build with the mock engine (WebKit and Chromium); shots in app/ui/e2e-results
 	cd $(UI) && npx playwright install chromium webkit && npm run e2e

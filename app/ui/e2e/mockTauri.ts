@@ -197,6 +197,12 @@ export function installMockTauri(seed: MockSeed): void {
     nextId: 1,
   });
 
+  type MidiPlayer = { down: Set<number>; held: Set<number>; pedal: boolean };
+  type MidiHold = { owners: Set<string>; presses: number[] };
+  const midiPlayer = (): MidiPlayer => ({ down: new Set(), held: new Set(), pedal: false });
+  const midiPresent = [...new Set(seed.midi?.inputs ?? [])].sort();
+  const midiDisabled = [...(seed.midi?.disabled ?? [])];
+
   // --- The mock's state, readable from the tests as `window.__grooviqMock`. ---
   const files = new Map<string, MockFile>(Object.entries(seed.files ?? {}));
   const calls: { cmd: string; args: unknown; at: number }[] = [];
@@ -225,9 +231,15 @@ export function installMockTauri(seed: MockSeed): void {
     metronome: false,
     /** The channel MIDI plays (`channel_select`). */
     selected: null as number | null,
-    /** The MIDI inputs plugged in (sorted, no duplicates: midi/hub.rs `poll`) and the names
-     * switched off (`midiDisabled` in settings.json, kept while a device is unplugged). */
-    midi: { present: [...new Set(seed.midi?.inputs ?? [])].sort(), disabled: [...(seed.midi?.disabled ?? [])] },
+    midi: {
+      present: midiPresent,
+      disabled: midiDisabled,
+      players: new Map(midiPresent.filter((id) => !midiDisabled.includes(id)).map((id) => [id, midiPlayer()])),
+      keys: new Map<number, MidiHold>(),
+      // Object identity stands for Controller::channel_instance. Reopening can reuse numeric IDs.
+      owed: new Map<MockChannel, Map<number, number[]>>(),
+      stalled: false,
+    },
     /** Live notes sounding now, "channel:key" -> velocity (`channel_note`). */
     live: new Map<string, number>(),
     /** Live presses handed out and not released yet: press -> "channel:key" (notes_cmds.rs
@@ -236,8 +248,6 @@ export function installMockTauri(seed: MockSeed): void {
     presses: new Map<number, string>(),
     /** The presses `channel_preview` made, of those. */
     previewPresses: new Set<number>(),
-    /** One logical MIDI input, without sustain: repeated note-ons each owe a release. */
-    midiPresses: new Map<number, { channel: number; presses: number[] }>(),
     nextPress: 1,
     /** Notes being recorded, by press: where and how hard they started (recorder.rs pairs a
      * note-off with its own press's note-on). */
@@ -795,7 +805,15 @@ export function installMockTauri(seed: MockSeed): void {
         p.channels.splice(i, 1);
         clearHistory();
         // The engine drops the channel's live notes with it (Task 5).
-        for (const k of [...s.live.keys()]) if (k.startsWith(`${String(e.channel)}:`)) s.live.delete(k);
+        const prefix = `${String(e.channel)}:`;
+        for (const key of s.live.keys()) if (key.startsWith(prefix)) s.live.delete(key);
+        for (const [press, key] of s.presses) {
+          if (!key.startsWith(prefix)) continue;
+          s.presses.delete(press);
+          s.previewPresses.delete(press);
+          s.recordOpen.delete(press);
+        }
+        if (s.selected === e.channel) midiDiscardKeys();
         return true;
       }
       case "setInstrumentParam": {
@@ -946,6 +964,11 @@ export function installMockTauri(seed: MockSeed): void {
   };
   const openProject = (p: Project, path: string | null, unsaved: boolean) => {
     stopTransport();
+    // Like Controller::load_state, replacing the graph cuts live notes without sending offs.
+    s.live.clear();
+    s.presses.clear();
+    s.previewPresses.clear();
+    midiDiscardKeys();
     s.generation += 1;
     trimIdentities.clear(); trimUndo = []; trimRedo = []; clipUndo = []; clipRedo = []; arrangementRevision = 0; workspaceRefusal = null;
     s.project = normalise(clone(p));
@@ -1632,10 +1655,7 @@ export function installMockTauri(seed: MockSeed): void {
     channel_select: (a) => {
       if (a.channel !== null) channelIndex(a.channel);
       if (s.selected !== a.channel) {
-        for (const [key, held] of s.midiPresses) {
-          for (const press of held.presses) liveOff(held.channel, key, press);
-        }
-        s.midiPresses.clear();
+        for (const port of [...s.midi.players.keys()].sort()) midiReleasePlayer(port, true);
       }
       s.selected = a.channel as number | null;
       return null;
@@ -1674,7 +1694,13 @@ export function installMockTauri(seed: MockSeed): void {
       const id = a.id as string;
       const was = !s.midi.disabled.includes(id);
       s.midi.disabled = s.midi.disabled.filter((n) => n !== id);
-      if (!a.enabled) s.midi.disabled.push(id);
+      if (!a.enabled) {
+        s.midi.disabled.push(id);
+        midiRetire(id);
+      } else {
+        midiAttach(id);
+      }
+      midiRetry();
       if (was !== Boolean(a.enabled)) emit("midi-inputs-changed", null);
       return null;
     },
@@ -1826,6 +1852,107 @@ export function installMockTauri(seed: MockSeed): void {
     if (![...s.presses.values()].includes(where)) s.live.delete(where);
     closeRecorded(id as number, ticksNow());
     return null;
+  };
+
+  const midiTarget = () => s.project.channels.find((channel) => channel.id === s.selected);
+
+  // hub.rs Player::release and Ledger::release: retire one owner, then send every accepted
+  // press, oldest first, when no port still holds or sustains the key.
+  const midiDisown = (port: string, key: number) => {
+    const held = s.midi.keys.get(key);
+    if (!held?.owners.delete(port) || held.owners.size) return;
+    s.midi.keys.delete(key);
+    const target = midiTarget();
+    if (!target) return;
+    const debt = s.midi.owed.get(target) ?? new Map<number, number[]>();
+    const presses = debt.get(key) ?? [];
+    presses.push(...held.presses);
+    debt.set(key, presses);
+    s.midi.owed.set(target, debt);
+    midiPay(target, key);
+  };
+
+  // sink.rs ControllerSink::release/retry: retry by instance and by press ID. Only MIDI
+  // admission stalls here. The fixture controls full/available explicitly, with no timer.
+  const midiPay = (target: MockChannel, key: number) => {
+    if (!s.project.channels.includes(target)) {
+      s.midi.owed.delete(target);
+      return;
+    }
+    if (s.midi.stalled) return;
+    const debt = s.midi.owed.get(target);
+    if (!debt) return;
+    for (const press of debt.get(key) ?? []) liveOff(target.id, key, press);
+    debt.delete(key);
+    if (!debt.size) s.midi.owed.delete(target);
+  };
+  const midiRetry = () => {
+    for (const [target, debt] of [...s.midi.owed].sort(([a], [b]) => a.id - b.id)) {
+      for (const key of [...debt.keys()].sort((a, b) => a - b)) midiPay(target, key);
+    }
+  };
+
+  const midiReleasePlayer = (port: string, includeDown: boolean) => {
+    const player = s.midi.players.get(port);
+    if (!player) return;
+    const keys = [...player.held, ...(includeDown ? player.down : [])].sort((a, b) => a - b);
+    player.held.clear();
+    if (includeDown) player.down.clear();
+    for (const key of keys) midiDisown(port, key);
+  };
+  const midiAttach = (port: string) => {
+    if (s.midi.present.includes(port) && !s.midi.disabled.includes(port) && !s.midi.players.has(port)) {
+      s.midi.players.set(port, midiPlayer());
+    }
+  };
+  const midiRetire = (port: string) => {
+    midiReleasePlayer(port, true);
+    s.midi.players.delete(port);
+  };
+  const midiDiscardKeys = () => {
+    // The graph cut these notes. Drop their ownership while keeping connected ports' pedals.
+    s.midi.keys.clear();
+    for (const player of s.midi.players.values()) {
+      player.down.clear();
+      player.held.clear();
+    }
+  };
+
+  const midiMessage = (port: string, bytes: number[]) => {
+    const [status, data, value] = bytes;
+    const kind = status & 0xf0;
+    const player = s.midi.players.get(port);
+    if (!player || bytes.length !== 3 || !isInt(status, 255) || !isInt(data, 127) || !isInt(value, 127)) return null;
+
+    let press = null;
+    if (kind === 0x90 && value > 0) {
+      const target = midiTarget();
+      // A refused note-on never acquires ownership or changes an existing hold.
+      if (target && !s.midi.stalled) {
+        press = liveOn(target.id, data, value / 127);
+        player.held.delete(data);
+        player.down.add(data);
+        const held = s.midi.keys.get(data) ?? { owners: new Set(), presses: [] };
+        held.owners.add(port);
+        held.presses.push(press);
+        s.midi.keys.set(data, held);
+      }
+    } else if (kind === 0x80 || kind === 0x90) {
+      if (player.down.delete(data)) {
+        if (player.pedal) player.held.add(data);
+        else midiDisown(port, data);
+      }
+    } else if (kind === 0xb0 && data === 64) {
+      player.pedal = value >= 64;
+      if (!player.pedal) midiReleasePlayer(port, false);
+    } else if (kind === 0xb0 && (data === 120 || data === 123)) {
+      midiReleasePlayer(port, true);
+    } else {
+      return null;
+    }
+    // hub.rs callback retries after every parsed message from an open port.
+    midiRetry();
+    return press;
   };
 
   // Argument types as serde reads them from the payload (the command signatures, `Edit`,
@@ -2096,35 +2223,28 @@ export function installMockTauri(seed: MockSeed): void {
         growToNotes(pat, [note]);
       })) changed();
     },
-    /** A MIDI keyboard is plugged in or out; the shell's poll notices within 2 s and tells the UI. */
-    midiPlug: (name: string) => {
-      s.midi.present = [...new Set([...s.midi.present, name])].sort();
-      emit("midi-inputs-changed", null);
+    /** A plug or unplug includes the hub poll that observes it. */
+    midiPlug: (port: string) => {
+      const changed = !s.midi.present.includes(port);
+      if (changed) s.midi.present = [...s.midi.present, port].sort();
+      midiAttach(port);
+      midiRetry();
+      if (changed) emit("midi-inputs-changed", null);
     },
-    midiUnplug: (name: string) => {
-      s.midi.present = s.midi.present.filter((n) => n !== name);
-      emit("midi-inputs-changed", null);
+    midiUnplug: (port: string) => {
+      const changed = s.midi.present.includes(port);
+      s.midi.present = s.midi.present.filter((id) => id !== port);
+      midiRetire(port);
+      midiRetry();
+      if (changed) emit("midi-inputs-changed", null);
     },
-    /** One logical MIDI producer, independent of typing/preview ownership. Velocity uses
-     * decoded MIDI bytes, like Player::handle_in; zero-velocity NoteOn is a release.
-     * Port, pedal, multi-input and project/channel-instance invalidation remain #247. */
-    midiNote: (key: number, velocity: number, on: boolean) => {
-      if (!Number.isInteger(key) || key < 0 || key > 127 || !Number.isInteger(velocity) || velocity < 0 || velocity > 127) {
-        throw "MIDI key and velocity must be bytes in 0..127.";
-      }
-      if (on && velocity > 0) {
-        if (s.selected === null) return null;
-        const press = liveOn(s.selected, key, velocity / 127);
-        const held = s.midiPresses.get(key) ?? { channel: s.selected, presses: [] };
-        held.presses.push(press);
-        s.midiPresses.set(key, held);
-        return press;
-      }
-      const held = s.midiPresses.get(key);
-      if (held) for (const press of held.presses) liveOff(held.channel, key, press);
-      s.midiPresses.delete(key);
-      return null;
-    },
+    midiMessage,
+    midiNote: (port: string, key: number, velocity: number, on: boolean) =>
+      midiMessage(port, [on ? 0x90 : 0x80, key, velocity]),
+    midiStall: (stalled: boolean) => { s.midi.stalled = stalled; },
+    midiRetry,
+    midiOwed: () => [...s.midi.owed.values()].reduce((total, debt) =>
+      total + [...debt.values()].reduce((count, presses) => count + presses.length, 0), 0),
     /** The names of the MIDI inputs switched off. */
     midiDisabled: () => [...s.midi.disabled],
     /** Recorded notes did not fit (the note cap): recording switches itself off, as the
