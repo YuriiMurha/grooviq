@@ -30,6 +30,9 @@ jobs:
       - name: Local refresh safety tests
         if: matrix.os == 'macos-latest'
         run: make test-refresh-app
+      - name: Staged conflict safety tests
+        if: matrix.os == 'macos-latest'
+        run: make test-pre-commit
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       # `tauri-build` needs the built UI (`frontendDist`) to compile the app crate.
@@ -42,6 +45,9 @@ jobs:
         if: matrix.os == 'macos-latest'
         timeout-minutes: 2
         run: make test-instruction-profiles
+      - name: Private QA command tests
+        if: matrix.os == 'macos-latest'
+        run: make test-qa-driver
       - run: npm ci
         working-directory: app/ui
       - run: npm run build
@@ -110,7 +116,8 @@ jobs:
       matrix:
         browser: [webkit, chromium]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 4 setup + 8 suite + 3 diagnostics + 1 container minute.
+    timeout-minutes: 16
     container:
       # Keep this version equal to @playwright/test in app/ui/package-lock.json.
       image: mcr.microsoft.com/playwright:v1.64.1-noble
@@ -132,7 +139,7 @@ jobs:
       # Leave room for diagnostics; container initialization also uses the job budget.
       - name: Discover full inventory and run browser
         id: suite
-        timeout-minutes: 7
+        timeout-minutes: 8
         env:
           GROOVIQ_E2E_JSON: ${{ github.workspace }}/app/ui/browser-accounting/report.json
         run: |

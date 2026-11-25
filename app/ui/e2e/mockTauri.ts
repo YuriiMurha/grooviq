@@ -23,7 +23,10 @@ export interface MockProject {
   patterns?: MockProject["pattern"][];
   patternClips?: { id: number; pattern: number }[];
   playMode?: "pattern" | "song";
-  arrangement?: { tracks: never[]; clips: never[]; audioAssets: never[]; loopRegion: null };
+  arrangement?: { tracks: { id: number; name: string; color: number; mute: boolean }[];
+    clips: { id: number; track: number; name: string; startTick: number; muted: boolean;
+      content: { type: "pattern"; pattern: number; offsetTick: number; lengthTicks: number } }[];
+    audioAssets: never[]; loopRegion: null };
   nextId: number;
   key?: { root: number; scale: string } | null;
 }
@@ -253,7 +256,8 @@ export function installMockTauri(seed: MockSeed): void {
 
   type History = typeof s.history;
   const emptyHistory = (): History => ({ undo: [], redo: [], notes: 0, base: 0, log: [], nextId: 0 });
-  const patternBank = new Map<number, { pattern: Project["pattern"]; revision: number; history: History }>();
+  type PatternEntry = { pattern: Project["pattern"]; revision: number; history: History };
+  const patternBank = new Map<number, PatternEntry>();
   let patternsRevision = 0;
   let historyOrder = 0;
   let arrangementRevision = 0;
@@ -261,6 +265,10 @@ export function installMockTauri(seed: MockSeed): void {
     before: [number | undefined, number | undefined]; after: [number | undefined, number | undefined] };
   let trimUndo: TrimChange[] = [];
   let trimRedo: TrimChange[] = [];
+  type Arrangement = NonNullable<Project["arrangement"]>;
+  type AddedPattern = { initial: Project["pattern"]; dormant?: PatternEntry };
+  type ClipChange = { order: number; before: Arrangement; after: Arrangement; addedPatterns: AddedPattern[] };
+  let clipUndo: ClipChange[] = [], clipRedo: ClipChange[] = [];
   let workspaceRefusal: string | null = null;
   const workspaceTrace: { command: string; generation: number; revision: number; status: string; effect?: unknown }[] = [];
 
@@ -364,8 +372,8 @@ export function installMockTauri(seed: MockSeed): void {
       recording: s.recording,
       canUndo: s.history.undo.length > 0,
       canRedo: s.history.redo.length > 0,
-      projectCanUndo: noteHistories().some((history) => history.undo.length > 0) || trimUndo.length > 0,
-      projectCanRedo: noteHistories().some((history) => history.redo.length > 0) || trimRedo.length > 0,
+      projectCanUndo: noteHistories().some((history) => history.undo.length > 0) || trimUndo.length > 0 || clipUndo.length > 0,
+      projectCanRedo: noteHistories().some((history) => history.redo.length > 0) || trimRedo.length > 0 || clipRedo.length > 0,
       generation: s.generation,
       patternRevision: patternsRevision,
     };
@@ -511,11 +519,14 @@ export function installMockTauri(seed: MockSeed): void {
     .filter(([id]) => id !== s.project.pattern.id).map(([, entry]) => entry.history)];
   const pruneWorkspaceHistory = () => {
     const histories = noteHistories();
-    while (histories.reduce((count, history) => count + history.undo.length + history.redo.length, 0) + trimUndo.length + trimRedo.length > MAX_UNDO) {
+    while (histories.reduce((count, history) => count + history.undo.length + history.redo.length, 0) + trimUndo.length + trimRedo.length + clipUndo.length + clipRedo.length > MAX_UNDO) {
       const note = histories.flatMap((history) => [...history.undo,...history.redo].map((step) => ({ history, step })))
         .sort((a,b) => (a.step.order ?? 0)-(b.step.order ?? 0))[0];
       const trim = [...trimUndo,...trimRedo].sort((a,b) => a.order-b.order)[0];
-      if (trim && (!note || trim.order < (note.step.order ?? 0))) {
+      const clip = [...clipUndo,...clipRedo].sort((a,b) => a.order-b.order)[0];
+      if (clip && (!note || clip.order < (note.step.order ?? 0)) && (!trim || clip.order < trim.order)) {
+        clipUndo = clipUndo.filter(entry => entry !== clip); clipRedo = clipRedo.filter(entry => entry !== clip);
+      } else if (trim && (!note || trim.order < (note.step.order ?? 0))) {
         trimUndo = trimUndo.filter((entry) => entry !== trim); trimRedo = trimRedo.filter((entry) => entry !== trim);
       } else if (note) {
         const active = note.history.undo.includes(note.step); const list = active ? note.history.undo : note.history.redo;
@@ -537,10 +548,12 @@ export function installMockTauri(seed: MockSeed): void {
   };
   const clearOtherNoteRedo = () => {
     for (const h of noteHistories()) if (h !== s.history) clearRedo(h);
+    clipRedo = [];
   };
   const clearWorkspaceRedo = () => {
     for (const h of noteHistories()) clearRedo(h);
     trimRedo = [];
+    clipRedo = [];
   };
   /** undo.rs `NoteHistory::add`: a note change clears redo (and its growth leaves the log); the
    * first step starts the log at `steps`. */
@@ -929,7 +942,7 @@ export function installMockTauri(seed: MockSeed): void {
   const openProject = (p: Project, path: string | null, unsaved: boolean) => {
     stopTransport();
     s.generation += 1;
-    trimIdentities.clear(); trimUndo = []; trimRedo = []; arrangementRevision = 0; workspaceRefusal = null;
+    trimIdentities.clear(); trimUndo = []; trimRedo = []; clipUndo = []; clipRedo = []; arrangementRevision = 0; workspaceRefusal = null;
     s.project = normalise(clone(p));
     clearHistory();
     notesChanged();
@@ -1174,8 +1187,8 @@ export function installMockTauri(seed: MockSeed): void {
       throw "The pattern changed before this gesture finished. Reload its notes.";
     }
   };
-  const patternsView = () => { saveActivePattern(); return { generation: s.generation, revision: patternsRevision,
-    selected: s.project.pattern.id, patterns: [...patternBank.entries()].map(([id, entry]) => ({ id, name: entry.pattern.name, revision: entry.revision })), view: view() }; };
+  const patternsView = () => { saveActivePattern(); return { generation: s.generation, revision: patternsRevision, arrangementRevision,
+    selected: s.project.pattern.id, patterns: [...patternBank.entries()].map(([id, entry]) => ({ id, name: entry.pattern.name, revision: entry.revision, steps: entry.pattern.steps })), view: view() }; };
   const managePattern = (a: Record<string, unknown>) => {
     type Request = { kind: string; pattern?: number; name?: string; clip?: number };
     const edit = a.edit as Request;
@@ -1196,12 +1209,13 @@ export function installMockTauri(seed: MockSeed): void {
     const candidate = new Map([...patternBank].map(([id, entry]) => [id, { pattern: clone(entry.pattern), revision: entry.revision, history: entry.history }]));
     let nextId = s.project.nextId;
     const allocate = () => {
-      while (nextId < 0xffffffff && (candidate.has(nextId) || s.project.channels.some((c) => c.id === nextId) || s.project.patternClips?.some((c) => c.id === nextId))) nextId++;
+      while (nextId < 0xffffffff && (candidate.has(nextId) || s.project.channels.some((c) => c.id === nextId) || s.project.patternClips?.some((c) => c.id === nextId) || s.project.arrangement?.tracks.some(t => t.id === nextId) || s.project.arrangement?.clips.some(c => c.id === nextId))) nextId++;
       if (nextId >= 0xffffffff) return null;
       return nextId++;
     };
     let selected = s.project.pattern.id;
     const clips = clone(s.project.patternClips ?? []);
+    if (edit.kind === "delete" && s.project.arrangement?.clips.some(c => c.content.pattern === edit.pattern)) return refuse("referencedPattern", "This pattern is still used by a clip.");
     if (["select", "delete", "rename", "duplicate"].includes(edit.kind) && !candidate.has(edit.pattern!)) return refuse("unknownPattern", `Pattern ${edit.pattern} no longer exists. Reload the pattern list.`);
     if ((edit.kind === "select" && edit.pattern === selected) || (edit.kind === "rename" && candidate.get(edit.pattern!)!.pattern.name === edit.name)) return { status:"applied", state:patternsView(), settlement };
     if (edit.kind === "create" || edit.kind === "duplicate" || edit.kind === "makeUnique") {
@@ -1236,7 +1250,7 @@ export function installMockTauri(seed: MockSeed): void {
 
   const nextChannelIdentity = () => {
     let id=s.project.nextId;
-    while (id < 0xffffffff && (s.project.channels.some((c) => c.id===id) || patternBank.has(id) || s.project.patternClips?.some((c) => c.id===id))) id++;
+    while (id < 0xffffffff && (s.project.channels.some((c) => c.id===id) || patternBank.has(id) || s.project.patternClips?.some((c) => c.id===id) || s.project.arrangement?.tracks.some(t => t.id===id) || s.project.arrangement?.clips.some(c => c.id===id))) id++;
     if (id>=0xffffffff) throw "Project ids are exhausted.";
     return id;
   };
@@ -1251,9 +1265,9 @@ export function installMockTauri(seed: MockSeed): void {
     if (args.revision !== arrangementRevision) throw "Stale arrangement revision; reload arrangement";
     if (arrangementRevision >= Number.MAX_SAFE_INTEGER) throw "Arrangement revisions exhausted; reopen project";
   };
-  const workspaceAdmit = (candidate: Project, scoped = true) => {
+  const workspaceAdmit = (candidate: Project, scoped = true, patterns = allPatterns()) => {
     if (scoped && workspaceRefusal !== null) { const error = workspaceRefusal; workspaceRefusal = null; throw error; }
-    if (new TextEncoder().encode(JSON.stringify({ ...candidate, patterns: allPatterns() })).length > 64 * 1024 * 1024) throw "The project is too big to save.";
+    if (new TextEncoder().encode(JSON.stringify({ ...candidate, patterns })).length > 64 * 1024 * 1024) throw "The project is too big to save.";
   };
   const admitTrimInverse = (entry: TrimChange, undo: boolean, scoped = true) => {
     if (trimView(entry.channel).stamp !== entry.stamp) throw "Sample or trim changed; reload trim";
@@ -1265,15 +1279,17 @@ export function installMockTauri(seed: MockSeed): void {
     workspaceAdmit(candidate, scoped);
   };
   const workspaceView = (args: Record<string, unknown>) => {
-    requireEmptyArrangement();
     const limit = Number(args.limit); if (limit < 1 || limit > 1024) throw "Read 1..1024 clips per page";
-    return { generation: s.generation, revision: arrangementRevision, offset: Number(args.offset), total: 0,
-      clips: [], tracks: [], audioAssets: [], loopRegion: null, playMode: s.project.playMode ?? "pattern",
+    if (s.project.patternClips?.length) requireEmptyArrangement();
+    const arrangement = s.project.arrangement ?? { tracks: [], clips: [], audioAssets: [], loopRegion: null };
+    const offset = Number(args.offset);
+    return { generation: s.generation, revision: arrangementRevision, offset, total: arrangement.clips.length,
+      clips: clone(arrangement.clips.slice(offset, offset + limit)), tracks: clone(arrangement.tracks), audioAssets: clone(arrangement.audioAssets), loopRegion: arrangement.loopRegion, playMode: s.project.playMode ?? "pattern",
       songError: null, pendingRequests: [], warnings: [] };
   };
   const workspaceMode = (args: Record<string, unknown>) => {
     try {
-      requireEmptyArrangement(); workspaceStamp(args);
+      workspaceStamp(args);
       const mode = args.mode as "pattern" | "song"; const changedMode = (s.project.playMode ?? "pattern") !== mode;
       if (changedMode) { workspaceAdmit({ ...s.project, playMode: mode }); s.project.playMode = mode; changed(); }
       return { status: "applied", generation: s.generation, revision: arrangementRevision, request: null, createdIds: [], changed: changedMode, reload: false, message: null, warnings: [] };
@@ -1281,7 +1297,8 @@ export function installMockTauri(seed: MockSeed): void {
   };
   const stepProjectHistory = (args: Record<string, unknown>) => {
     try {
-      requireEmptyArrangement(); workspaceStamp(args); saveActivePattern();
+      if (s.project.patternClips?.length) requireEmptyArrangement();
+      workspaceStamp(args); saveActivePattern();
       const undo = args.undo === true;
       const notes = [...patternBank].flatMap(([pattern, entry]) => {
         const next = (undo ? entry.history.undo : entry.history.redo).at(-1);
@@ -1289,8 +1306,44 @@ export function installMockTauri(seed: MockSeed): void {
       }).sort((a,b) => (a.change.order ?? 0)-(b.change.order ?? 0));
       const note = undo ? notes.at(-1) : notes[0];
       const trim = (undo ? trimUndo : trimRedo).at(-1);
-      let effect: { kind: "empty" } | { kind: "notes"; pattern: number } | { kind: "samplerTrim"; channel: number } = { kind: "empty" };
-      if (trim && (!note || (undo ? trim.order > (note.change.order ?? 0) : trim.order < (note.change.order ?? 0)))) {
+      const clip = (undo ? clipUndo : clipRedo).at(-1);
+      const earlier = (a: number, b: number) => undo ? a > b : a < b;
+      let effect: { kind: "empty" } | { kind: "arrangement" } | { kind: "notes"; pattern: number } | { kind: "samplerTrim"; channel: number } = { kind: "empty" };
+      if (clip && (!note || earlier(clip.order, note.change.order ?? 0)) && (!trim || earlier(clip.order, trim.order))) {
+        const candidate = clone(s.project); candidate.arrangement = clone(undo ? clip.before : clip.after);
+        const bank = new Map(patternBank);
+        for (const added of clip.addedPatterns) {
+          const id = added.initial.id;
+          if (undo) {
+            if (!bank.delete(id)) throw "Unique source no longer exists";
+          } else {
+            if (bank.has(id)) throw "Unique source already exists";
+            const floor = added.dormant;
+            const pattern = clone(added.initial);
+            pattern.nextNoteId = Math.max(pattern.nextNoteId ?? 1, floor?.pattern.nextNoteId ?? 1);
+            bank.set(id, { pattern, revision: (floor?.revision ?? 1) + 1, history: floor?.history ?? emptyHistory() });
+          }
+        }
+        const selected = bank.get(candidate.pattern.id) ?? bank.values().next().value;
+        if (!selected) throw "No pattern remains";
+        candidate.pattern = selected.pattern;
+        workspaceAdmit(candidate, true, [...bank.values()].map(entry => entry.pattern));
+        if (clip.addedPatterns.length) {
+          for (const added of clip.addedPatterns) {
+            if (undo) added.dormant = patternBank.get(added.initial.id);
+          }
+          patternBank.clear();
+          for (const [id, entry] of bank) patternBank.set(id, entry);
+          s.project.pattern = selected.pattern;
+          s.notesRevision = selected.revision;
+          s.history = selected.history;
+          patternsRevision++;
+        }
+        s.project.arrangement = candidate.arrangement;
+        if (undo) { clipUndo = clipUndo.filter(entry => entry !== clip); clipRedo.push(clip); }
+        else { clipRedo = clipRedo.filter(entry => entry !== clip); clipUndo.push(clip); }
+        changed(); effect = { kind: "arrangement" };
+      } else if (trim && (!note || earlier(trim.order, note.change.order ?? 0))) {
         admitTrimInverse(trim, undo); moveTrimHistory(trim, undo); effect = { kind: "samplerTrim", channel: trim.channel };
       } else if (note) {
         const entry = patternBank.get(note.pattern)!;
@@ -1307,12 +1360,97 @@ export function installMockTauri(seed: MockSeed): void {
       return { status: "applied", generation: s.generation, revision: arrangementRevision, effect };
     } catch (error) { return { status: "refused", generation: s.generation, revision: arrangementRevision, message: String(error), reload: true }; }
   };
+  /** Finite pattern-clip counterpart to Session::edit_arrangement, not an audio/automation
+   * engine. Candidate data, native-shaped refusal and real inverse snapshots are compared
+   * to the offline Session fixture before browser outcomes earn integration grade. */
+  const editPatternClips = (args: Record<string, unknown>) => {
+    try {
+      workspaceStamp(args); saveActivePattern();
+      if (s.project.patternClips?.length) throw "Legacy clip records are outside the finite playlist fixture";
+      const raw = String(args.editsJson); if (new TextEncoder().encode(raw).length > 64 * 1024 * 1024) throw "Arrangement request too large";
+      const operations: Record<string, unknown>[] = JSON.parse(raw);
+      if (!Array.isArray(operations) || operations.length > 100_000) throw "Invalid arrangement batch";
+      const before: Arrangement = clone(s.project.arrangement ?? { tracks: [], clips: [], audioAssets: [], loopRegion: null });
+      if (before.audioAssets.length || before.loopRegion) throw "Audio/automation editing is outside the finite pattern fixture";
+      const candidate = clone(s.project); const arrangement = clone(before); candidate.arrangement = arrangement;
+      const addedPatterns = new Map<number, PatternEntry>();
+      const sourcePattern = (id: number) => addedPatterns.get(id) ?? patternBank.get(id);
+      let next = candidate.nextId; const issued = new Set([...candidate.channels.map(c => c.id), ...patternBank.keys(), ...arrangement.tracks.map(t => t.id), ...arrangement.clips.map(c => c.id)]);
+      const ids: number[] = [], tracksByOperation = new Map<number, number>();
+      const allocate = () => { while (next < 0xffffffff && issued.has(next)) next++; if (next >= 0xffffffff) throw "Project ids exhausted"; const id = next++; issued.add(id); return id; };
+      const int = (value: unknown, max = 38_400_000): number => { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > max) throw "Invalid arrangement integer"; return value; };
+      const name = (value: unknown): string => { if (typeof value !== "string") throw "Invalid clip name"; return value; };
+      const content = (value: unknown): Arrangement["clips"][number]["content"] => {
+        if (!value || typeof value !== "object" || !("type" in value) || value.type !== "pattern" || !("pattern" in value) || !("offsetTick" in value) || !("lengthTicks" in value)) throw "Only pattern content is supported by this finite fixture";
+        const pattern = int(value.pattern, 0xffffffff), offsetTick = int(value.offsetTick), lengthTicks = int(value.lengthTicks);
+        if (!sourcePattern(pattern) || lengthTicks < 1) throw "Invalid pattern source or length";
+        return { type: "pattern", pattern, offsetTick, lengthTicks };
+      };
+      const track = (value: unknown) => { const id = int(value, 0xffffffff); if (!arrangement.tracks.some(t => t.id === id)) throw "Unknown track"; return id; };
+      const clip = (value: unknown) => { const id = int(value, 0xffffffff); const result = arrangement.clips.find(c => c.id === id); if (!result) throw "Unknown clip"; return result; };
+      operations.forEach((op, index) => {
+        if (!op || typeof op !== "object") throw "Invalid arrangement operation";
+        if (op.kind === "createTrack") {
+          const id = allocate(); arrangement.tracks.push({ id, name: name(op.name), color: int(op.color, 5), mute: false }); ids.push(id); tracksByOperation.set(index, id);
+        } else if (op.kind === "createClip" || op.kind === "createClipOnCreatedTrack") {
+          const target = op.kind === "createClip" ? track(op.track) : tracksByOperation.get(int(op.trackOperation, 100_000));
+          if (target === undefined) throw "Track must refer to an earlier CreateTrack";
+          if (typeof op.muted !== "boolean") throw "Invalid muted flag";
+          const id = allocate(); arrangement.clips.push({ id, track: target, name: name(op.name), startTick: int(op.startTick), muted: op.muted, content: content(op.content) }); ids.push(id);
+        } else if (op.kind === "move" || op.kind === "copy") {
+          const source = clip(op.clip), destination = track(op.track), start = int(op.startTick);
+          if (op.kind === "copy") { const copy = clone(source); copy.id = allocate(); copy.track = destination; copy.startTick = start; arrangement.clips.push(copy); ids.push(copy.id); }
+          else { source.track = destination; source.startTick = start; }
+        } else if (op.kind === "slice") {
+          const source = clip(op.clip), tick = int(op.tick), cut = tick - source.startTick;
+          if (op.audioFirstFrames != null || cut <= 0 || cut >= source.content.lengthTicks) throw "Invalid musical slice";
+          const period = sourcePattern(source.content.pattern)!.pattern.steps * STEP_TICKS;
+          const right = clone(source); right.id = allocate(); right.startTick = tick;
+          right.content.offsetTick = (source.content.offsetTick + cut) % period;
+          right.content.lengthTicks -= cut; source.content.lengthTicks = cut;
+          arrangement.clips.push(right); ids.push(right.id);
+        } else if (op.kind === "resize") {
+          const source = clip(op.clip), resized = content(op.content);
+          if (source.content.pattern !== resized.pattern) throw "Resize cannot retarget its source";
+          const duration = sourcePattern(source.content.pattern)!.pattern.steps * STEP_TICKS;
+          const phase = ((source.content.offsetTick + int(op.startTick) - source.startTick) % duration + duration) % duration;
+          if (resized.offsetTick !== phase) throw "Resize must preserve pattern source phase";
+          source.content = resized; source.startTick = int(op.startTick);
+        } else if (op.kind === "setClip") {
+          const source = clip(op.clip);
+          if (typeof op.muted !== "boolean") throw "Invalid muted flag";
+          source.name = name(op.name); source.muted = op.muted;
+        } else if (op.kind === "deleteClip") {
+          const source = clip(op.clip);
+          arrangement.clips = arrangement.clips.filter(candidate => candidate.id !== source.id);
+        } else if (op.kind === "makeUnique") {
+          const target = clip(op.clip);
+          const source = sourcePattern(target.content.pattern);
+          if (!source) throw "Unknown pattern source";
+          const id = allocate();
+          addedPatterns.set(id, { pattern: { ...clone(source.pattern), id }, revision: 1, history: emptyHistory() });
+          target.content.pattern = id;
+          ids.push(id);
+        } else throw "This arrangement operation is outside the finite pattern fixture";
+      });
+      if (arrangement.tracks.length > 256 || arrangement.clips.length > 100_000 || arrangement.clips.some(c => c.startTick + c.content.lengthTicks > 38_400_000)) throw "Arrangement bounds exceeded";
+      if (!addedPatterns.size && JSON.stringify(before) === JSON.stringify(arrangement)) return { status: "applied", generation: s.generation, revision: arrangementRevision, request: null, createdIds: [], changed: false, reload: false, message: null, warnings: [] };
+      candidate.nextId = next;
+      workspaceAdmit(candidate, true, [...allPatterns(), ...Array.from(addedPatterns.values(), entry => entry.pattern)]);
+      clearWorkspaceRedo();
+      clipUndo.push({ order: historyOrder++, before, after: clone(arrangement), addedPatterns: Array.from(addedPatterns.values(), entry => ({ initial: clone(entry.pattern) })) });
+      for (const [id, entry] of addedPatterns) patternBank.set(id, entry);
+      if (addedPatterns.size) patternsRevision++;
+      s.project.arrangement = arrangement; s.project.nextId = next; pruneWorkspaceHistory(); changed();
+      return { status: "applied", generation: s.generation, revision: arrangementRevision, request: null, createdIds: ids, changed: true, reload: false, message: null, warnings: [] };
+    } catch (error) { return { status: "refused", generation: s.generation, revision: arrangementRevision, request: null, createdIds: [], changed: false, reload: true, message: String(error), warnings: [] }; }
+  };
   // Clip/media editing remains native-only. Reduced workspace history above applies
   // only real note/trim inverses; it cannot skip unsupported arrangement operations.
   const nativeArrangementOnly = () => { throw "Arrangement/media commands are not simulated by this browser fixture; use native offline acceptance."; };
   const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
     arrangement_view: workspaceView,
-    arrangement_edit: nativeArrangementOnly,
+    arrangement_edit: editPatternClips,
     arrangement_history: stepProjectHistory,
     arrangement_curve: nativeArrangementOnly,
     audio_import: nativeArrangementOnly,
@@ -1723,6 +1861,7 @@ export function installMockTauri(seed: MockSeed): void {
     arrangement_view: { offset: u64, limit: u64 },
     arrangement_mode: { generation: u64, revision: u64, mode: (value) => value === "pattern" || value === "song" ? null : "expected pattern or song" },
     arrangement_history: { generation: u64, revision: u64, undo: bool },
+    arrangement_edit: { generation: u64, revision: u64, editsJson: str },
     sampler_trim_view: { channel:u32 },
     sampler_trim_reset: { channel:u32,stamp:str },
     sampler_trim_undo: { channel:u32,stamp:str,token:str },
@@ -1761,7 +1900,7 @@ export function installMockTauri(seed: MockSeed): void {
     holds.set("audio_log", { promise, release });
   }
   const replyHolds = new Map<string, { promise: Promise<void>; release: () => void }>();
-  const replyHoldCommands = new Set(["pattern_list", "pattern_edit", "arrangement_view", "arrangement_mode", "arrangement_history"]);
+  const replyHoldCommands = new Set(["pattern_list", "pattern_edit", "arrangement_view", "arrangement_mode", "arrangement_history", "arrangement_edit"]);
   const refusals = new Map<string, string>();
   const invoke = async (cmd: string, args: Record<string, unknown> = {}) => {
     calls.push({ cmd, args: clone(args ?? {}), at: performance.now() });
@@ -1945,6 +2084,7 @@ export function installMockTauri(seed: MockSeed): void {
     recordingStopsItself: (dropped: number) => stopsItself(dropped),
     /** The notes as the engine holds them. */
     notes: () => clone(s.project.pattern.notes),
+    patterns: allPatterns,
     /** Live notes sounding now, as "channel:key". */
     live: () => [...s.live.keys()],
     autosave: () => {

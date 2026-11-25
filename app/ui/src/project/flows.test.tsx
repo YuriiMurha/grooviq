@@ -97,6 +97,13 @@ const emit = (name: string, payload: unknown) =>
   });
 
 beforeEach(() => {
+  // jsdom has no layout/ResizeObserver. These scenes prove project commands;
+  // actual pane geometry is exercised by the browser fixture.
+  vi.stubGlobal("ResizeObserver", class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  });
   mocks.calls.length = 0;
   mocks.handlers.clear();
   mocks.listeners.clear();
@@ -108,7 +115,7 @@ beforeEach(() => {
   const patterns = () => {
     const view = mocks.currentView ?? VIEW;
     return { generation: view.generation, revision: view.patternRevision ?? 0, selected: view.pattern.id,
-      patterns: [{ id: view.pattern.id, name: view.pattern.name, revision: view.notesRevision }], view };
+      arrangementRevision: 0, patterns: [{ id: view.pattern.id, name: view.pattern.name, revision: view.notesRevision, steps: view.pattern.steps }], view };
   };
   reply("pattern_list", patterns);
   // These project-flow scenes have an empty Pattern-mode arrangement; the picker reads it.

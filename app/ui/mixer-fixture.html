@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mixer components · synthetic fixture</title>
+    <style>
+      body { user-select: auto; }
+      #root { height: auto; }
+      .fx { max-width: 1280px; margin: 0 auto; padding: 20px 16px 32px; }
+      .fx-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+      .fx-head h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+      .fx-head p { margin: 4px 0 0; max-width: 70ch; color: var(--muted); font-size: 12px; }
+      .fx-count { flex: none; color: var(--ok) !important; }
+      ::selection { background: var(--accent); color: var(--well); }
+      @media (max-width: 500px) { .fx-head { display: block; } }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./src/mixer/fixture.tsx"></script>
+  </body>
+</html>

@@ -11,6 +11,42 @@ use std::{
 };
 use tauri::Manager;
 const LIMIT: usize = 65536;
+static FORCED_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn forced_shutdown_requested() -> bool {
+    FORCED_SHUTDOWN.load(std::sync::atomic::Ordering::Acquire)
+}
+
+#[derive(Debug, PartialEq)]
+enum Control {
+    Shutdown,
+    Quit,
+    Script,
+}
+
+impl Control {
+    fn forces(&self) -> bool {
+        matches!(self, Self::Shutdown)
+    }
+}
+
+fn classify(bytes: &[u8]) -> Control {
+    match bytes {
+        b"{\"shutdown\":true}" => Control::Shutdown,
+        b"{\"quit\":true}" => Control::Quit,
+        _ => Control::Script,
+    }
+}
+
+struct Endpoint(PathBuf);
+
+/// Called on actual exit, including a guarded Quit confirmed by the person.
+pub(crate) fn cleanup(app: &tauri::AppHandle) {
+    if let Some(endpoint) = app.try_state::<Endpoint>() {
+        let _ = std::fs::remove_file(endpoint.0.join("control.sock"));
+        let _ = std::fs::remove_dir(&endpoint.0);
+    }
+}
 
 pub fn enabled() -> bool {
     std::env::var_os("GROOVIQ_QA_DRIVER").is_some()
@@ -160,20 +196,29 @@ pub fn start(app: tauri::AppHandle, dir: PathBuf) -> Result<(), Box<dyn std::err
     let socket = dir.join("control.sock");
     let listener = UnixListener::bind(&socket)?;
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+    app.manage(Endpoint(dir.clone()));
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
             let request = read_request(&mut stream);
             let bytes = request.as_ref().cloned().unwrap_or_default();
-            let shutdown = bytes == b"{\"shutdown\":true}";
-            if shutdown {
+            let control = classify(&bytes);
+            if control != Control::Script {
                 let _ = write_response_until(
                     &mut stream,
                     b"{\"ok\":true}",
                     Instant::now() + Duration::from_secs(3),
                 );
+                if control.forces() {
+                    // Only this explicit cleanup request bypasses unsaved-close.
+                    FORCED_SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
+                }
                 app.exit(0);
-                break;
+                if control.forces() {
+                    break;
+                }
+                // Cancel must leave the driver available for subsequent requests.
+                continue;
             }
             let result = (|| -> Result<String, String> {
                 request.map_err(|e| e.to_string())?;
@@ -213,6 +258,26 @@ pub fn start(app: tauri::AppHandle, dir: PathBuf) -> Result<(), Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_the_exact_shutdown_request_forces_close() {
+        let shutdown = classify(br#"{"shutdown":true}"#);
+        assert_eq!(shutdown, Control::Shutdown);
+        assert!(shutdown.forces());
+        let quit = classify(br#"{"quit":true}"#);
+        assert_eq!(quit, Control::Quit);
+        assert!(!quit.forces());
+        for bytes in [
+            br#"{"shutdown":false}"#.as_slice(),
+            br#"{"shutdown":true,"script":"return 1"}"#,
+            br#"{"quit":true,"shutdown":true}"#,
+            br#"{"script":"return 1"}"#,
+            b"garbage",
+        ] {
+            let control = classify(bytes);
+            assert_eq!(control, Control::Script);
+            assert!(!control.forces());
+        }
+    }
     #[test]
     fn response_bytes_are_preserved() {
         let (mut writer, mut reader) = UnixStream::pair().unwrap();

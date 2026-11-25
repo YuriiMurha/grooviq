@@ -1,7 +1,11 @@
 #!/bin/sh
-# Read-only formatting check of the staged Rust files: the content being committed, not
-# the working tree. Enabled by `make hooks`. Fix with `make fmt`, then stage again.
+# Read-only checks of the staged content, not the working tree. Enabled by `make hooks`.
+# Fix Rust formatting with `make fmt`, then stage again.
 # The UI has no formatter yet, so TypeScript is not checked here.
+if ! git diff --cached --check; then
+  echo "pre-commit: fix staged conflict markers or whitespace errors."
+  exit 1
+fi
 PATH="$HOME/.cargo/bin:$PATH"
 export PATH
 if git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' |

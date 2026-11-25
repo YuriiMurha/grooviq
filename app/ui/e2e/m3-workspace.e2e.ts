@@ -312,6 +312,21 @@ test("T9 reduced: history admission refusal preserves real stacks, values, revis
 });
 for (const refused of [false, true]) test(`T9 mode transition fences new gestures and releases after refusal ${refused}`, async ({ app, mock }) => {
   const mode = app.getByRole("combobox", { name: "Playback mode" });
+  const hint = app.getByLabel("Hint");
+  const expectTransportHints = async (applied: "pattern" | "song") => {
+    const other = applied === "song" ? "pattern" : "song";
+    await app.mouse.move(0, 0);
+    const play = app.getByRole("button", { name: "Play", exact: true });
+    await play.focus();
+    await expect(play).toBeFocused();
+    await expect(hint).toContainText(new RegExp(`\\b${applied}\\b`));
+    await expect(hint).not.toContainText(new RegExp(`\\b${other}\\b`));
+    await app.getByRole("timer", { name: "Position" }).hover();
+    await expect(hint).toContainText(new RegExp(`\\b${applied}\\b`));
+    await expect(hint).not.toContainText(new RegExp(`\\b${other}\\b`));
+  };
+  await expect(mode).toHaveValue("pattern");
+  await expectTransportHints("pattern");
   const before = (await mock.calls("project_edit")).length;
   // A local tempo draft must enter the session queue before the mode's revision is read.
   await app.getByRole("textbox", { name: "BPM" }).fill("137");
@@ -320,6 +335,9 @@ for (const refused of [false, true]) test(`T9 mode transition fences new gesture
   if (refused) await mock.eval("(m) => m.refuseWorkspaceNext('generated mode admission refusal')");
   await mode.selectOption("song");
   await expect.poll(async () => (await mock.calls("arrangement_mode")).length).toBe(1);
+  await expect(mode).toBeDisabled();
+  expect((await arrangement(app)).playMode).toBe("pattern");
+  await expectTransportHints("pattern");
   const edits = (await mock.calls("project_edit")).length;
   expect(edits).toBe(before + 1);
   expect((await mock.view()).bpm).toBe(137);
@@ -331,6 +349,8 @@ for (const refused of [false, true]) test(`T9 mode transition fences new gesture
   await mock.eval("(m) => m.releaseCommand('arrangement_mode')");
   await expect(mode).toBeEnabled();
   await expect(mode).toHaveValue(refused ? "pattern" : "song");
+  expect((await arrangement(app)).playMode).toBe(refused ? "pattern" : "song");
+  await expectTransportHints(refused ? "pattern" : "song");
   if (refused) await expect(app.getByRole("status", { name: "Messages" })).toContainText("generated mode admission refusal");
   await clickCell(app, 0, 4);
   await expect.poll(async () => (await mock.calls("project_edit")).length).toBe(edits + 1);
@@ -405,7 +425,8 @@ test("T9 F5 preserves the open roll, selected channel and requested split", asyn
   const splitter = app.getByRole("separator", { name: "Resize the channel rack and the piano roll" });
   await splitter.focus();
   await splitter.press("ArrowDown");
-  const requested = await splitter.getAttribute("aria-valuenow");
+  const requested = await app.locator(".workspace").evaluate((node) => (node as HTMLElement).style.getPropertyValue("--split"));
+  expect(parseFloat(requested)).toBeGreaterThan(0);
   const workspace = await app.locator(".workspace").elementHandle();
   expect(workspace).not.toBeNull();
   for (const visible of [true, false, true, false]) {
@@ -415,7 +436,15 @@ test("T9 F5 preserves the open roll, selected channel and requested split", asyn
     expect(await workspace!.evaluate((node) => node.isConnected)).toBe(true);
     await expect(roll).toBeVisible();
     await expect(channel).toHaveAttribute("aria-current", "true");
-    await expect(splitter).toHaveAttribute("aria-valuenow", requested!);
+    expect(await workspace!.evaluate((node) => (node as HTMLElement).style.getPropertyValue("--split"))).toBe(requested);
+    // ARIA describes the fitted display; the requested preference survives F5 and
+    // returns when the playlist gives the inner viewport its height back.
+    await expect.poll(async () => {
+      const rackHeight = (await app.locator(".panel-rack").boundingBox())!.height;
+      const contentHeight = (await app.locator(".workspace").boundingBox())!.height;
+      return Math.abs(Number(await splitter.getAttribute("aria-valuenow")) - rackHeight / contentHeight * 100);
+    }).toBeLessThanOrEqual(0.05);
+    if (!visible) await expect.poll(async () => Number(await splitter.getAttribute("aria-valuenow"))).toBe(Math.round(parseFloat(requested) * 10) / 10);
   }
 });
 test("T9 reduced: absent original trim entries survive inverse and failed Open preserves capabilities", async ({ app, mock }) => {

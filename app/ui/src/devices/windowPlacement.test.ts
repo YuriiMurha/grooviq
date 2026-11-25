@@ -19,6 +19,25 @@ describe("device window placement", () => {
     expect(q.y).toBeLessThanOrEqual(800 - 80);
   });
 
+  it.each([
+    { width: 900, height: 560 },
+    { width: 901, height: 561 },
+    { width: 1279, height: 799 },
+  ])("contains new cascades at $width × $height", ({ width, height }) => {
+    const scale = fitScale(width, height);
+    for (const index of [0, 1, 2, 40]) {
+      const placement = initialPlacement(width, height, scale, index);
+      expect(placement.x).toBeGreaterThanOrEqual(0);
+      expect(placement.y).toBeGreaterThanOrEqual(0);
+      expect(placement.x + DESIGN_W * scale).toBeLessThanOrEqual(width);
+      expect(placement.y + DESIGN_H * scale).toBeLessThanOrEqual(height);
+    }
+  });
+
+  it("anchors new windows when the minimum physical size cannot fit", () => {
+    expect(initialPlacement(100, 80, fitScale(100, 80), 3)).toEqual({ x: 0, y: 0 });
+  });
+
   it("windows_open_centred_then_cascade", () => {
     const first = initialPlacement(1280, 800, 1, 0);
     expect(first).toEqual({ x: (1280 - DESIGN_W) / 2, y: (800 - DESIGN_H) / 2 });

@@ -2,6 +2,8 @@ import { arrangementHistory, arrangementView } from "./api/arrangement";
 import { dispatchGlobalHistory } from "./project/globalHistory";
 import { projectGeneration } from "./project/replacement";
 import { usePatterns } from "./patterns/usePatterns";
+import { Playlist } from "./playlist/Playlist";
+import { usePlaylist } from "./playlist/usePlaylist";
 import { PickerRail, PatternModeControls } from "./patterns/PickerRail";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -117,6 +119,7 @@ export function App() {
   const session = useSession(useCallback((message: string) => toast(message, true), [toast]));
   const { view } = session;
   const patterns = usePatterns({ view, publishPatterns: session.publishPatterns, enqueue: session.enqueue, run: session.context.run });
+  const playlist = usePlaylist(session);
 
   // A project that is replaced must not go on playing, nor keep notes held on its channels.
   const stopIfPlaying = useCallback(async () => {
@@ -133,7 +136,7 @@ export function App() {
     enqueue: session.enqueue,
     toast,
     stopIfPlaying,
-    unsettled: () => session.unsettled() || rollEditsUnsettled() || patterns.unsettled(),
+    unsettled: () => session.unsettled() || rollEditsUnsettled() || patterns.unsettled() || playlist.unsettled(),
     settle: settleProjectEdits,
   });
   const { perform, modalOpen } = flows;
@@ -446,6 +449,7 @@ export function App() {
               playing={playing}
               latest={latest}
               sampleRate={sampleRate}
+              playMode={patterns.mode}
               modeControls={<PatternModeControls picker={patterns} />}
               onPlay={play}
               onStop={stop}
@@ -488,7 +492,7 @@ export function App() {
           </div>
         </header>
         <main className="stage">
-          {view && <Workspace picker={<PickerRail key={view.generation} picker={patterns} />} latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
+          {view && <Workspace picker={<PickerRail key={view.generation} picker={patterns} />} playlist={<Playlist model={playlist} patterns={patterns.state.canonical} bpm={view.bpm} beats={view.timeSignature.beats} unit={view.timeSignature.unit} />} latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
         </main>
         <HintBar />
         <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />
