@@ -1,6 +1,6 @@
 use wide::f32x4;
 
-use super::{SampleBuf, Voice, hermite};
+use super::{SampleBuf, Voice};
 
 include!(concat!(env!("OUT_DIR"), "/sampler-fir.rs"));
 
@@ -38,28 +38,60 @@ static FIR: [Band; BANDS + 1] = {
 const FADE_START: f64 = 1.09;
 const FADE_END: f64 = 1.25;
 
-#[inline]
+#[inline(always)]
 pub(super) fn read(sample: &SampleBuf, voice: &Voice) -> (f32, f32) {
     let step = voice.step.abs();
-    if step >= FADE_END {
-        return sinc(sample, voice, step);
-    }
-    let (l, r) = if voice.looping {
-        let at = |k| voice.loop_index(k);
-        (
-            hermite(&sample.l, voice.pos, at),
-            hermite(&sample.r, voice.pos, at),
-        )
-    } else {
-        (
-            hermite(&sample.l, voice.pos, |k| k),
-            hermite(&sample.r, voice.pos, |k| k),
-        )
-    };
     if step <= FADE_START {
-        return (l, r);
+        cubic(sample, voice)
+    } else {
+        band_limited(sample, voice, step)
     }
+}
+
+/// Share the phase in stereo and check a contiguous four-frame window once per channel.
+#[inline(always)]
+fn cubic(sample: &SampleBuf, voice: &Voice) -> (f32, f32) {
+    let i = voice.pos.floor() as i64;
+    let t = (voice.pos - i as f64) as f32;
+    let first = (i - 1) as usize;
+    if !voice.looping
+        && let Some(l) = sample.l.get(first..).and_then(<[f32]>::first_chunk::<4>)
+        && let Some(r) = sample.r.get(first..).and_then(<[f32]>::first_chunk::<4>)
+    {
+        (polynomial(*l, t), polynomial(*r, t))
+    } else {
+        cubic_edges(sample, voice, i, t)
+    }
+}
+
+#[inline(never)]
+fn cubic_edges(sample: &SampleBuf, voice: &Voice, i: i64, t: f32) -> (f32, f32) {
+    let taps = [i - 1, i, i + 1, i + 2];
+    let taps = if voice.looping {
+        taps.map(|k| voice.loop_index(k))
+    } else {
+        taps
+    };
+    let channel =
+        |x: &[f32]| polynomial(taps.map(|k| x.get(k as usize).copied().unwrap_or(0.0)), t);
+    (channel(&sample.l), channel(&sample.r))
+}
+
+#[inline(always)]
+fn polynomial([y0, y1, y2, y3]: [f32; 4], t: f32) -> f32 {
+    let c1 = 0.5 * (y2 - y0);
+    let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
+    let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
+    ((c3 * t + c2) * t + c1) * t + y1
+}
+
+#[inline(never)]
+fn band_limited(sample: &SampleBuf, voice: &Voice, step: f64) -> (f32, f32) {
     let (sl, sr) = sinc(sample, voice, step);
+    if step >= FADE_END {
+        return (sl, sr);
+    }
+    let (l, r) = cubic(sample, voice);
     let mix = ((step - FADE_START) / (FADE_END - FADE_START)) as f32;
     (l + mix * (sl - l), r + mix * (sr - r))
 }
@@ -150,6 +182,7 @@ fn sinc(sample: &SampleBuf, voice: &Voice, step: f64) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sampler::hermite;
 
     fn alternating_sample() -> SampleBuf {
         let l: Vec<f32> = (0..128)
@@ -168,27 +201,57 @@ mod tests {
         let sample = alternating_sample();
         for step in [1.007, 48_000.0 / 44_100.0, 1.09] {
             for direction in [-1.0, 1.0] {
-                let voice = Voice {
-                    pos: 64.25,
-                    end: sample.len() as f64,
-                    step: direction * step,
-                    ..Voice::OFF
-                };
-                let (l, r) = read(&sample, &voice);
-                assert_eq!(
-                    l.to_bits(),
-                    hermite(&sample.l, voice.pos, |k| k).to_bits(),
-                    "step {}",
-                    voice.step
-                );
-                assert_eq!(
-                    r.to_bits(),
-                    hermite(&sample.r, voice.pos, |k| k).to_bits(),
-                    "step {}",
-                    voice.step
-                );
+                for (pos, looping) in [
+                    (0.25, false),
+                    (64.25, false),
+                    (127.25, false),
+                    (17.25, true),
+                    (110.75, true),
+                ] {
+                    let voice = Voice {
+                        pos,
+                        end: sample.len() as f64,
+                        step: direction * step,
+                        looping,
+                        wrapped: true,
+                        lo: 17.0,
+                        hi: 111.0,
+                        len: 94.0,
+                        ..Voice::OFF
+                    };
+                    let index = |k| if looping { voice.loop_index(k) } else { k };
+                    let (l, r) = read(&sample, &voice);
+                    let expected = (
+                        hermite(&sample.l, pos, index).to_bits(),
+                        hermite(&sample.r, pos, index).to_bits(),
+                    );
+                    assert_eq!(
+                        (l.to_bits(), r.to_bits()),
+                        expected,
+                        "step {}, pos {pos}",
+                        voice.step
+                    );
+                }
             }
         }
+    }
+
+    #[test]
+    fn crossover_is_active_at_step_1_12() {
+        let sample = alternating_sample();
+        let voice = Voice {
+            pos: 64.25,
+            end: sample.len() as f64,
+            step: 1.12,
+            ..Voice::OFF
+        };
+        let actual = read(&sample, &voice).0;
+        let pure_cubic = hermite(&sample.l, voice.pos, |k| k);
+        let pure_sinc = sinc(&sample, &voice, voice.step).0;
+        assert!(
+            pure_sinc < actual && actual < pure_cubic,
+            "{actual} must be inside the crossover"
+        );
     }
 
     #[test]
@@ -223,7 +286,7 @@ mod tests {
             "the glide reaches the FIR"
         );
         assert!(
-            largest_jump < 0.01,
+            largest_jump < 0.004,
             "largest frame-to-frame gain jump {largest_jump}"
         );
     }

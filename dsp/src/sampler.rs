@@ -942,7 +942,7 @@ fn coefs(p: &[f32; PARAMS], sr: f32) -> Coefs {
 
 /// Cubic Hermite read of one channel at `pos`, sample index `k` read from `index(k)` (frames
 /// outside the sample read as zero). At an integer position it returns that sample itself.
-#[inline]
+#[cfg(test)]
 fn hermite(x: &[f32], pos: f64, index: impl Fn(i64) -> i64) -> f32 {
     let n = x.len() as i64;
     let i = pos.floor() as i64;
