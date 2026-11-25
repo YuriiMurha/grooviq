@@ -53,6 +53,9 @@ it("matches canonical native arithmetic order and the project's f32 tempo contra
       }
     }
   }
+  // Divide-first order yields 2560.0000000000005 here; multiply-first yields exactly 2560.
+  expect(audioDurationTicks(48000, 44100, 147)).toBe(2561);
+  expect(audioSlice({ ...clip, sourceStart: 0, sourceEnd: 48001, fadeIn: 0, fadeOut: 0 }, 960, 48000, 44100, 147).tick).toBe(960 + 2561);
 });
 it("rejects invalid geometry instead of emitting unsafe native edits", () => {
   for (const frames of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) expect(() => audioDurationTicks(frames, 48000, 120)).toThrow();
@@ -60,4 +63,8 @@ it("rejects invalid geometry instead of emitting unsafe native edits", () => {
   expect(() => sourceFrameDelta(Infinity, 48000, 120)).toThrow();
   expect(() => trimAudio(clip, "end", 1.5, 2000)).toThrow();
   expect(() => trimAudio(clip, "end", 1, 100)).toThrow();
+  for (const bpm of [19.9, 400.5]) expect(() => audioDurationTicks(100, 48000, bpm)).toThrow();
+  expect(audioDurationTicks(100, 48000, 400)).toBe(14);
+  expect(() => trimAudio({ ...clip, fadeIn: 1001 }, "end", 0, 2000)).toThrow();
+  expect(() => trimAudio({ ...clip, fadeOut: 1001 }, "end", 0, 2000)).toThrow();
 });
