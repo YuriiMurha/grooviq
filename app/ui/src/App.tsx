@@ -501,3 +501,5 @@ export function App() {
     </ProjectContext.Provider>
   );
 }
+
+// CI path selector probe.
