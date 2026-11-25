@@ -200,3 +200,45 @@ test("an edit after undoing a group duplicate keeps the restored originals selec
     ...editArgs(undone, mute.operations),
   ]);
 });
+
+test("undoing an edit on the copies and then the duplicate re-selects the originals", async ({ app, mock }) => {
+  const duplicate = cases.find(entry => entry.action === "duplicate");
+  if (!duplicate) throw new Error("Missing duplicate case");
+  const group = await selectGroup(app);
+  await invokeAction(group, "duplicate");
+  await expect.poll(async () => (await state(app)).clips).toEqual(duplicate.after);
+  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
+  const copied = await state(app);
+
+  await invokeAction(group, "mute");
+  await expect.poll(async () => (await state(app)).clips.filter(clip => clip.id > 5).map(clip => clip.muted)).toEqual([true, true]);
+  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
+  await expect(group.selected).toHaveText("2 selected");
+
+  await app.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => (await state(app)).clips).toEqual(duplicate.after);
+  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
+  await app.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => (await state(app)).clips).toEqual(group.before.clips);
+  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
+  await expect(group.selected).toHaveText("2 selected");
+  const restored = await state(app);
+
+  // Delete proves which clips are selected: the restored originals, not the removed copies.
+  await invokeAction(group, "delete");
+  await expect.poll(async () => (await state(app)).clips).toEqual([clips[2]]);
+  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
+  expect(await argsFor(mock, "arrangement_edit")).toEqual([
+    ...editArgs(group.before, duplicate.operations),
+    ...editArgs(copied, [
+      { kind: "setClip", clip: 6, name: "Kick in", muted: true },
+      { kind: "setClip", clip: 7, name: "Kick out", muted: true },
+    ]),
+    ...editArgs(restored, [{ kind: "deleteClip", clip: 3 }, { kind: "deleteClip", clip: 4 }]),
+  ]);
+  // Like any group delete, one Undo restores the deleted originals and re-selects them.
+  await app.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => (await state(app)).clips).toEqual(group.before.clips);
+  await expect(group.canvas).toHaveAttribute("aria-disabled", "false");
+  await expect(group.selected).toHaveText("2 selected");
+});

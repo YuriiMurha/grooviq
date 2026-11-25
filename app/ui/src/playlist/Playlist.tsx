@@ -188,10 +188,10 @@ export function Playlist({ model, patterns, bpm, beats, unit }: Props) {
       // A single-clip delete closes its inspector (#449). A group delete keeps its IDs so
       // one Undo re-selects the restored group.
       setSelected(current => current === selectedState ? null : current);
-    } else if (selectedState?.originals) {
-      // Any later edit ends the duplicate's Undo fallback: deleting the copies must not
-      // silently re-select their originals. Keep what was visibly selected (the originals
-      // after an Undo of the duplicate), so the edit doesn't drop the user's selection.
+    } else if (action === "delete" && selectedState?.originals) {
+      // The duplicate's Undo fallback survives other edits, so undoing them and then the
+      // duplicate still re-selects the originals. A delete ends it: a second Delete must
+      // not hit originals the user never re-selected.
       setSelected(current => current && current === selectedState ? { generation: current.generation, ids: selectedIds } : current);
     }
   };
