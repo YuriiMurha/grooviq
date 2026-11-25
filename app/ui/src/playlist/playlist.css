@@ -29,3 +29,7 @@
 .playlist-readonly { margin: 0; padding: 4px 8px; color: var(--muted); font-size: 11px; }
 .playlist-empty { position: absolute; pointer-events: none; top: 96px; left: 20px; max-width: 32ch; margin: 0; color: var(--muted); }
 @media (max-width: 960px) { .playlist-tools { gap: 4px; } .playlist-snap { display: none; } .playlist-status { flex-wrap: wrap; gap: 4px; } }
+
+.playlist-ruler { touch-action: none; cursor: crosshair; }
+.playlist-loop { position: absolute; top: 0; bottom: 0; background: var(--select); opacity: .25; pointer-events: none; border-inline: 1px solid var(--select); }
+.playlist-loop[data-enabled="false"] { opacity: .1; }
