@@ -90,6 +90,22 @@ pub struct ShimmerReverb {
     initial: [f32; 4],
     fresh: bool,
 }
+const LINE_SECONDS: [f32; 4] = [0.071, 0.089, 0.107, 0.127];
+
+fn line_layout(sr: f32, seconds: f32) -> (f32, f32, usize) {
+    let base = sr * seconds;
+    let window = sr * 0.06;
+    (base, window, (base + window + sr * 0.002) as usize + 4)
+}
+
+pub(crate) fn memory_payload(sr: f32) -> crate::insert_memory::Payload {
+    let mut payload = crate::insert_memory::Payload::boxed::<ShimmerReverb>();
+    for seconds in LINE_SECONDS {
+        payload.array::<f32>(line_layout(sr, seconds).2, 1);
+    }
+    payload
+}
+
 impl ShimmerReverb {
     pub fn new(sr: f32) -> Self {
         Self::with_seed(sr, 0x739ac51)
@@ -107,12 +123,11 @@ impl ShimmerReverb {
             (seed >> 40) as f32 / 16777216.
         };
         let initial = std::array::from_fn(|_| random());
-        let lines = std::array::from_fn(|i| {
-            let base = sr * [0.071, 0.089, 0.107, 0.127][i];
-            let window = sr * 0.06;
+        let lines = LINE_SECONDS.map(|seconds| {
+            let (base, window, capacity) = line_layout(sr, seconds);
             let initial = std::array::from_fn(|_| random());
             Line {
-                data: vec![0.; (base + window + sr * 0.002) as usize + 4],
+                data: vec![0.; capacity],
                 pos: 0,
                 phase: initial,
                 initial,

@@ -23,6 +23,19 @@ pub const SPEC: [(f32, f32, f32); 9] = [
     (40.0, 300.0, 140.0),      // 8 bpm
 ];
 
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 9] = [
+    "sync",
+    "division",
+    "time_ms",
+    "feedback",
+    "ping_pong",
+    "low_cut",
+    "high_cut",
+    "mix",
+    "bpm",
+];
+
 /// Division lengths in quarter-note beats, `SPEC` index order.
 pub const DIVISION_BEATS: [f32; 9] = [
     0.125,
