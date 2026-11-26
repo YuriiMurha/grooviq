@@ -51,6 +51,7 @@
   --roll-key-white: #c3cad2; /* muted steel keeps the shared dark octave labels readable */
   --roll-key-black: #21282f;
 
+  --dev-amp: #dc7780;
   --dev-card: #293038;
   --dev-shadow: 0 28px 70px -24px rgba(8, 11, 16, 0.85), 0 0 0 1px var(--line);
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);

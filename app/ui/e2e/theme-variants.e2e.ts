@@ -102,9 +102,6 @@ for (const { id } of themes) {
       const sectionInks = ["--dev-osc1", "--dev-osc2", "--dev-filter", "--dev-amp", "--dev-lfo", "--dev-mix", "--dev-voice"];
       for (const [index, ink] of sectionInks.entries()) {
         for (const other of sectionInks.slice(index + 1)) {
-          // These two shipped pairs fail both thresholds. See #767.
-          if (ink === "--dev-amp" && ((id === "riso" && other === "--dev-voice") ||
-            (id === "slate-system" && other === "--dev-lfo"))) continue;
           const distance = colourDistance(bytes(ink), bytes(other));
           const deltaE = oklabDeltaE(rgb(ink), rgb(other));
           expect(distance >= 48 || deltaE >= 0.10,
