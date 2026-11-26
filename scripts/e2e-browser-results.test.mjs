@@ -174,7 +174,7 @@ for (const sharded of [false, true]) {
       writeFileSync(join(dir, 'report.json'), JSON.stringify(results));
       const result = cli('receipt', dir, project, ...(shard ? [shard.index, shard.total].map(String) : []));
       assert.equal(result.status, 0, result.stderr);
-      assert.deepEqual(readJSON(dir, 'receipt.json').shard, shard);
+      assert.deepEqual(readJSON(dir, 'receipt.json').shard, shard ?? { index: 1, total: 1 });
     }
     const result = cli('aggregate', root);
     assert.equal(result.status, 0, result.stderr);

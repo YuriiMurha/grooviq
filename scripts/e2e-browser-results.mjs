@@ -122,13 +122,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const [mode, root, project, ...shardArgs] = process.argv.slice(2);
   if (mode === 'receipt') {
     requireThat(projects.includes(project), 'invalid project');
-    // Missing reports remain missing evidence; the receipt must still record external outcome.
-    const r = { ...metadata(), project, outcome: process.env.SUITE_OUTCOME };
     if (shardArgs.length) {
       requireThat(shardArgs.length === 2 && shardArgs.every(arg => /^[0-9]+$/.test(arg)), 'invalid shard arguments');
-      const [index, total] = shardArgs.map(Number);
-      r.shard = checkedShard({ index, total });
     }
+    const [index = 1, total = 1] = shardArgs.map(Number);
+    // Missing reports remain missing evidence; the receipt must still record external outcome.
+    const r = { ...metadata(), project, outcome: process.env.SUITE_OUTCOME, shard: checkedShard({ index, total }) };
     for (const name of ['inventory', 'report']) {
       try { r[name] = readJSON(root, `${name}.json`); } catch (error) { r[`${name}Error`] = error.message; }
     }
