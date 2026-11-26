@@ -2341,21 +2341,23 @@ export function installMockTauri(seed: MockSeed): void {
   // Argument types as serde reads them from the payload (the command signatures, `Edit`,
   // `ExportRequest`): a wrong type is refused before the command runs, as in the shell.
   type RawCheck = (v: unknown) => string | null;
-  // Reject validators that are either stricter or looser than the generated field type.
-  type Check<T> = RawCheck & { readonly checkedType?: (value: T) => T };
+  // Migrated fields require a declared validator type, and it must match exactly.
+  type Check<T> = RawCheck & { readonly checkedType: (value: T) => T };
+  // The marker is type-only. Require the validator's type at its declaration.
+  const validator = <T>(check: RawCheck): Check<NoInfer<T>> => check as Check<T>;
   type Checks<T> = { [K in keyof T]-?: Check<T[K]> };
   type Checked<C> = C extends Check<infer T> ? T : never;
   const isInt = (v: unknown, max: number) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= max;
-  const u8: Check<number> = (v) => (isInt(v, 255) ? null : `invalid value: ${JSON.stringify(v)}, expected u8`);
-  const u32: Check<number> = (v) => (isInt(v, 0xffffffff) ? null : `invalid value: ${JSON.stringify(v)}, expected u32`);
-  const wireU64: Check<number> = (v) => isInt(v, 2 ** 64) && Number(v) < 2 ** 64 ? null : "expected u64";
+  const u8 = validator<number>((v) => (isInt(v, 255) ? null : `invalid value: ${JSON.stringify(v)}, expected u8`));
+  const u32 = validator<number>((v) => (isInt(v, 0xffffffff) ? null : `invalid value: ${JSON.stringify(v)}, expected u32`));
+  const wireU64 = validator<number>((v) => isInt(v, 2 ** 64) && Number(v) < 2 ** 64 ? null : "expected u64");
   // A u64 as JavaScript numbers carry it exactly (the presses the shell hands out stay far below).
-  const u64: Check<number> = (v) => (isInt(v, Number.MAX_SAFE_INTEGER) ? null : `invalid value: ${JSON.stringify(v)}, expected u64`);
+  const u64 = validator<number>((v) => (isInt(v, Number.MAX_SAFE_INTEGER) ? null : `invalid value: ${JSON.stringify(v)}, expected u64`));
   // JSON has no NaN or infinity: they arrive as null.
-  const f32: Check<number> = (v) => (typeof v === "number" && Number.isFinite(v) ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected f32`);
-  const bool: Check<boolean> = (v) => (typeof v === "boolean" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a boolean`);
-  const str: Check<string> = (v) => (typeof v === "string" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a string`);
-  const fields = <S extends Record<string, RawCheck>>(spec: S): Check<{ [K in keyof S]: Checked<S[K]> }> => (v) => {
+  const f32 = validator<number>((v) => (typeof v === "number" && Number.isFinite(v) ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected f32`));
+  const bool = validator<boolean>((v) => (typeof v === "boolean" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a boolean`));
+  const str = validator<string>((v) => (typeof v === "string" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a string`));
+  const checkFields = (spec: Record<string, RawCheck>, v: unknown): string | null => {
     if (typeof v !== "object" || v === null) return "expected a map";
     for (const [key, check] of Object.entries(spec)) {
       const why = check((v as Record<string, unknown>)[key]);
@@ -2363,7 +2365,9 @@ export function installMockTauri(seed: MockSeed): void {
     }
     return null;
   };
-  const nullable = <T>(check: Check<T>): Check<T | null> => (v) => v === null ? null : check(v);
+  const fields = <S extends Record<string, RawCheck>>(spec: S) =>
+    validator<{ [K in keyof S]: Checked<S[K]> }>((v) => checkFields(spec, v));
+  const nullable = <T>(check: Check<T>) => validator<T | null>((v) => v === null ? null : check(v));
   const EDITS = {
     removeChannel: { channel: u32 },
     setChannelMix: { channel: u32, volume: f32, pan: f32, mute: bool, solo: bool },
@@ -2380,18 +2384,18 @@ export function installMockTauri(seed: MockSeed): void {
     setChoke: { channel: u32, group: u8 },
     setProjectKey: { key: nullable(fields({ root: u8, scale: str })) },
   } satisfies { [K in Edit["kind"]]: Checks<Omit<Extract<Edit, { kind: K }>, "kind">> };
-  const optional = <T>(check: Check<T>): Check<T | null | undefined> =>
-    (v) => (v === null || v === undefined ? null : check(v));
-  const list = (check: RawCheck): RawCheck => (v) => {
+  const optional = <T>(check: Check<T>) =>
+    validator<T | null | undefined>((v) => v === null || v === undefined ? null : check(v));
+  const list = <T>(check: Check<T>) => validator<T[]>((v) => {
     if (!Array.isArray(v)) return `invalid type: ${JSON.stringify(v ?? null)}, expected a sequence`;
     for (const item of v) {
       const why = check(item);
       if (why) return why;
     }
     return null;
-  };
+  });
   const newNote = fields({ channel: u32, tick: u32, length: u32, key: u8, velocity: f32, slide: bool });
-  const notesEditArg: RawCheck = fields({
+  const notesEditArg = fields({
     generation: u64,
     patternId: u32,
     baseRevision: u32,
@@ -2399,16 +2403,16 @@ export function installMockTauri(seed: MockSeed): void {
     update: list(fields({ id: u32, channel: u32, tick: u32, length: u32, key: u8, velocity: f32, slide: bool })),
     delete: list(u32),
   });
-  const edit: Check<Edit> = (v) => {
+  const edit = validator<Edit>((v) => {
     const kind = (v as { kind?: unknown } | null)?.kind;
     const check = typeof kind === "string" && Object.hasOwn(EDITS, kind) ? EDITS[kind as Edit["kind"]] : undefined;
-    return check ? fields<Record<string, RawCheck>>(check)(v) : `unknown variant ${JSON.stringify(kind ?? null)}`;
-  };
-  const exportOptions: RawCheck = (v) =>
+    return check ? checkFields(check, v) : `unknown variant ${JSON.stringify(kind ?? null)}`;
+  });
+  const exportOptions = validator<unknown>((v) =>
     fields({ sampleRate: u32, loops: u32 })(v) ??
     (["pcm24", "float32"].includes((v as { format?: unknown }).format as string)
       ? null
-      : `format: unknown variant ${JSON.stringify((v as { format?: unknown }).format ?? null)}, expected \`pcm24\` or \`float32\``);
+      : `format: unknown variant ${JSON.stringify((v as { format?: unknown }).format ?? null)}, expected \`pcm24\` or \`float32\``));
   type ArgChecks = {
     [K in keyof CommandMap as CommandMap[K]["args"] extends undefined ? never : K]:
       Checks<CommandMap[K]["args"]>;
