@@ -103,7 +103,9 @@ fn faster_reads_reject_folded_tones() {
         // Closer to Nyquist, enough of a cutoff increase will lift this fold first.
         (48_000.0, 84, 6_750.0, 21_000.0, 1_000.0, 4_000.0, -50.0),
         // Step 3 interpolates partly widened rows, where taps outside the window must be zero.
-        (144_000.0, 60, 31_000.0, 17_000.0, 1_000.0, 1_000.0, -60.0),
+        (144_000.0, 60, 31_000.0, 17_000.0, 1_000.0, 1_000.0, -70.0),
+        // Near Nyquist at step 3, extra cutoff boost in the partly widened bands lifts this first.
+        (144_000.0, 60, 27_000.0, 21_000.0, 1_000.0, 1_000.0, -48.0),
         (72_000.0, 60, 31_500.0, 16_500.0, 1_000.0, 1_000.0, -60.0),
         (98_400.0, 60, 43_000.0, 5_000.0, 16_000.0, 16_000.0, -60.0),
     ] {
