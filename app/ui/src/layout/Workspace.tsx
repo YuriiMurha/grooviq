@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type RefObject, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { channelSelect } from "../api/notes";
 import { errorText, type ChannelView } from "../api/project";
 import { DeviceWindows } from "../devices/DeviceWindows";
 import { useTypingKeyboard } from "../keyboard/useTypingKeyboard";
 import type { LiveFrame } from "../live/decode";
+import { MixerPanel } from "../mixer/MixerPanel";
 import { useProject } from "../project/context";
 import { isTypingTarget, modalIsOpen } from "../project/shortcuts";
 import { relinkChannel } from "../rack/audioFiles";
@@ -98,7 +99,13 @@ export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError,
   const { view, runFor, stamp } = useProject();
   const [panels, setPanels] = useState<Panels>(DEFAULT_PANELS);
   const [playlistVisible, setPlaylistVisible] = useState(false);
+  const [mixerVisible, setMixerVisible] = useState(false);
   const [chosen, setChosen] = useState<number | null>(null);
+  const mixerId = useId();
+  const mixerToggle = useRef<HTMLButtonElement>(null);
+  const mixerFocus = useRef<HTMLElement>(null);
+  const mixerOpener = useRef<HTMLElement | null>(null);
+  const mixerFocusPending = useRef(false);
   const viewport = useRef<HTMLDivElement>(null);
   const area = useRef<HTMLDivElement>(null);
   const rackPane = useRef<HTMLDivElement>(null);
@@ -129,6 +136,32 @@ export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError,
     setPanels((p) => ({ ...p, roll: true }));
   }, []);
 
+  const toggleMixer = useCallback((opener?: HTMLElement) => {
+    if (!mixerToggle.current) return;
+    if (!mixerVisible) {
+      const focused = document.activeElement;
+      mixerOpener.current = opener ?? (focused instanceof HTMLElement && focused !== document.body ? focused : null);
+    }
+    mixerFocusPending.current = true;
+    setMixerVisible(!mixerVisible);
+  }, [mixerVisible]);
+
+  useLayoutEffect(() => {
+    if (!mixerFocusPending.current) return;
+    mixerFocusPending.current = false;
+    if (mixerVisible) {
+      mixerFocus.current?.focus({ preventScroll: true });
+      return;
+    }
+    const opener = mixerOpener.current;
+    mixerOpener.current = null;
+    if (opener?.isConnected) {
+      opener.focus({ preventScroll: true });
+      if (document.activeElement === opener) return;
+    }
+    mixerToggle.current?.focus({ preventScroll: true });
+  }, [mixerVisible]);
+
   useEffect(() => {
     const onKeyDown = (e: globalThis.KeyboardEvent) => {
       const panel = panelFor(e.key);
@@ -144,13 +177,15 @@ export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError,
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "F5" || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || modalIsOpen() || isTypingTarget(event.target)) return;
+      if ((event.key !== "F5" && event.key !== "F9") || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || modalIsOpen() || isTypingTarget(event.target)) return;
       event.preventDefault();
-      if (!event.repeat) setPlaylistVisible((visible) => !visible);
+      if (event.repeat) return;
+      if (event.key === "F9") toggleMixer();
+      else setPlaylistVisible((visible) => !visible);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [toggleMixer]);
 
   const both = panels.rack && panels.roll;
   const layout = measurement ? fitPanelLayout({ viewportHeight: measurement.height, requestedRatio: panels.split, chrome: measurement.chrome }) : null;
@@ -212,6 +247,20 @@ export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError,
       <div className="pattern-workspace">
         {picker}
         <div className="pattern-workspace-content">
+          <div className="mx-workspace-tools">
+            <button
+              ref={mixerToggle}
+              className="btn mx-workspace-toggle"
+              type="button"
+              title="Mixer (F9)"
+              aria-keyshortcuts="F9"
+              aria-expanded={mixerVisible}
+              aria-controls={mixerId}
+              onClick={(event) => toggleMixer(event.currentTarget)}
+            >
+              Mixer
+            </button>
+          </div>
           {playlistVisible && (playlist ?? <section className="pattern-playlist-shell" aria-label="Playlist">
             <h2>Playlist</h2><p>Your patterns are ready. Timeline editing is not available yet. F5 hides the playlist.</p>
           </section>)}
@@ -277,6 +326,9 @@ export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError,
         )}
       </div>
       </div>
+          <div id={mixerId} className="mx-workspace-mixer" hidden={!mixerVisible}>
+            {mixerVisible && <MixerPanel focusRef={mixerFocus} />}
+          </div>
         </div>
       </div>
       <DeviceWindows generation={view.generation} channels={view.channels} onError={onError} onRelink={relink} />

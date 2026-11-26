@@ -28,7 +28,7 @@ export interface MixerInsert {
 export interface MixerSend {
   id: string;
   destinationId: string;
-  /** 0..1 gain; 0 is off. */
+  /** Linear gain 0..4; 0 is off and 1 is unity. */
   amount: number;
   /** Taken before the track fader (true) or after it. */
   pre: boolean;
@@ -166,7 +166,7 @@ export function availableSends({ sendDestinations, sends, outputId }: Pick<Mixer
 /** Fader view: the finite bottom stop denotes off, matching the approved prototype. */
 export const LEVEL: ParamRange = { min: -60, max: 6, default: 0, curve: "lin", stepped: false };
 export const PAN: ParamRange = { min: -1, max: 1, default: 0, curve: "lin", stepped: false };
-export const SEND: ParamRange = { min: 0, max: 1, default: 0, curve: "lin", stepped: false };
+export const SEND: ParamRange = { min: 0, max: 4, default: 0, curve: "lin", stepped: false };
 
 export function formatDb(db: number): string {
   if (db <= LEVEL.min) return "−∞ dB";
