@@ -61,7 +61,7 @@ def locked(path):
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise LockBusy(path) from error
-        yield
+        yield handle
 
 
 def place(stage, app, previous, verify):

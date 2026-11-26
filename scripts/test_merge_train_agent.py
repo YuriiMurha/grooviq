@@ -3,6 +3,7 @@ from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_st
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import plistlib
 import signal
@@ -38,6 +39,7 @@ class AgentTests(unittest.TestCase):
         self.agent = agent_module.Agent(self.root / "repo", home=self.root / "home",
                                         launchctl=self.run_launchctl)
         # Never use a real repo or run the actual train in these tests.
+        self.agent.prune_checkouts = Mock()
         self.agent.refresh_main = Mock(return_value=HEAD)
         self.agent.remote_tips = Mock(return_value={"main": HEAD, "batch": None})
         self.agent.run_tick = Mock(return_value=subprocess.CompletedProcess([], 0, "waiting\n"))
@@ -166,61 +168,64 @@ class AgentTests(unittest.TestCase):
     def landed_tick(self, *, landed_tree=TREE, run_id=123):
         self.agent.set_order(ORDER)
         self.agent.remote_tips.side_effect = [
-            {"main": HEAD, "batch": TESTED}, {"main": LANDED, "batch": NEXT},
+            {"main": HEAD, "batch": NEXT}, {"main": NEXT, "batch": NEXT},
         ]
         self.agent.commit_tree = Mock(side_effect=lambda sha: TREE if sha == TESTED else landed_tree)
         self.agent.ci_run_id = Mock(return_value=run_id)
         self.agent.run_tick.return_value = subprocess.CompletedProcess(
-            [], 1, f"Merged #12 at {LANDED}\nHeld #13: checks pending\nMerged #14 at {LANDED}\n"
+            [], 1, f"Tested batch {TESTED}\nMerged #12 at {LANDED}\nHeld #13: checks pending\nMerged #14 at {LANDED}\n"
         )
 
-    def test_tick_log_records_refs_and_landed_evidence_using_the_pre_tick_batch(self):
+    def test_ledger_uses_reported_landing_even_if_main_moved_again(self):
         self.landed_tick()
         self.assertEqual(self.agent.tick()["status"], "stopped")
-        record = json.loads(self.agent.ticks.read_text())
-        self.assertRegex(record["recorded_utc"], r"^\d{4}-\d{2}-\d{2}T")
-        self.assertEqual(record["exit_code"], 1)
-        self.assertEqual(record["before"], {"main": HEAD, "batch": TESTED})
-        self.assertEqual(record["after"], {"main": LANDED, "batch": NEXT})
-        self.assertEqual(record["stdout"], self.agent.run_tick.return_value.stdout.splitlines())
-        self.assertEqual(record["tested_batch"], TESTED)
-        self.assertEqual(record["landed_main"], LANDED)
-        self.assertEqual(record["tree"], TREE)
-        self.assertTrue(record["tree_matches_tested_batch"])
-        self.assertEqual(record["ci_run_id"], 123)
+        tick = json.loads(self.agent.ticks.read_text())
+        self.assertEqual(tick["before"], {"main": HEAD, "batch": NEXT})
+        self.assertEqual(tick["after"], {"main": NEXT, "batch": NEXT})
+        self.assertEqual(tick["stdout"], self.agent.run_tick.return_value.stdout.splitlines())
+        self.agent.commit_tree.assert_any_call(LANDED)
         self.agent.ci_run_id.assert_called_once_with(TESTED)
         self.assertEqual(self.agent.ledger(), [
-            f"| {TESTED} | https://github.com/YuriiMurha/grooviq/actions/runs/123 | {LANDED} | {TREE} | #12, #14 |"
+            f"| {TESTED} | https://github.com/YuriiMurha/grooviq/actions/runs/123 | "
+            f"{LANDED} | {TREE} | {TREE} | yes | complete |"
         ])
 
     def test_tree_mismatch_and_ci_failure_remain_visible_after_merge(self):
         self.landed_tick(landed_tree=NEXT)
         self.agent.ci_run_id.side_effect = RuntimeError("run lookup failed")
+        self.agent.run_tick.return_value.stderr = f"Merge train stopped: main tree {NEXT} != tested tree {TREE}.\n"
         self.assertEqual(self.agent.tick()["status"], "stopped")
-        record = json.loads(self.agent.ticks.read_text())
-        self.assertFalse(record["tree_matches_tested_batch"])
+        record = json.loads((self.agent.state / "ledger.jsonl").read_text())
         self.assertIn("run lookup failed", record["ci_error"])
         self.assertEqual(self.agent.ledger(), [
-            f"| {TESTED} | — | {LANDED} | {NEXT} | #12, #14 |"
+            f"| {TESTED} | — | {LANDED} | {NEXT} | {TREE} | no | mismatch |"
         ])
 
-    def test_unrelated_main_move_and_unchanged_main_produce_no_ledger_row(self):
+    def test_recovered_prefix_is_partial_and_survives_tick_rotation(self):
+        self.landed_tick(landed_tree=NEXT)
+        self.agent.run_tick.return_value = subprocess.CompletedProcess(
+            [], 0, f"Tested batch {TESTED}\nMerged #12 at {LANDED}\nRecovered landed prefix of batch {TESTED} (12).\n"
+        )
+        with patch.object(agent_module, "TICK_HISTORY", 1):
+            self.assertEqual(self.agent.tick()["status"], "completed")
+            self.agent.remote_tips.side_effect = None
+            self.agent.run_tick.return_value = subprocess.CompletedProcess([], 0, "Skipped: Merged #12")
+            self.agent.tick()
+        self.assertEqual(len(self.agent.ticks.read_text().splitlines()), 1)
+        self.assertEqual(self.agent.ledger(), [
+            f"| {TESTED} | https://github.com/YuriiMurha/grooviq/actions/runs/123 | "
+            f"{LANDED} | {NEXT} | {TREE} | no | partial |"
+        ])
+
+    def test_tick_record_has_a_byte_cap_and_keeps_valid_json(self):
         self.agent.set_order(ORDER)
-        self.agent.ci_run_id = Mock(return_value=123)
-        self.agent.commit_tree = Mock(return_value=TREE)
-        self.agent.remote_tips.side_effect = [
-            {"main": HEAD, "batch": TESTED}, {"main": LANDED, "batch": TESTED},
-            {"main": LANDED, "batch": TESTED}, {"main": LANDED, "batch": TESTED},
-        ]
-        self.agent.run_tick.side_effect = [
-            subprocess.CompletedProcess([], 0, f"Skipped: Merged #12 at {LANDED}\n"),
-            subprocess.CompletedProcess([], 0, f"Merged #12 at {LANDED}\n"),
-        ]
+        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 0, "é😀" * 100_000)
         self.agent.tick()
-        self.agent.tick()
-        self.agent.ci_run_id.assert_not_called()
-        self.assertEqual(self.agent.ledger(), [])
-        self.assertEqual(len(self.agent.ticks.read_text().splitlines()), 2)
+        raw = self.agent.ticks.read_bytes()
+        self.assertLessEqual(len(raw), 65_536)
+        record = json.loads(raw)
+        self.assertEqual(record["exit_code"], 0)
+        self.assertTrue(record["output_truncated"])
 
     def test_tick_log_rotates_and_keeps_latest_records(self):
         self.agent.set_order(ORDER)
@@ -268,7 +273,29 @@ class AgentTests(unittest.TestCase):
                     self.assertEqual(exit_status.exception.code, 0)
                 else:
                     self.assertEqual(agent_module.main(), 0)
-                self.assertIn(command, output.getvalue().splitlines())
+                lines = output.getvalue().splitlines()
+                self.assertEqual(lines[:4], [
+                    "touch ~/.grooviq-train/STOP", "make merge-train-agent-disable",
+                    "launchctl disable gui/$(id -u)/io.github.yuriimurha.grooviq.merge-train", command,
+                ])
+
+    def test_status_reports_stop_launchd_state_and_old_tick(self):
+        self.agent.set_order(ORDER)
+        self.agent.kill_switch.parent.mkdir()
+        self.agent.kill_switch.touch()
+        self.agent.append_tick({"recorded_utc": "2000-01-01T00:00:00+00:00", "status": "fixture"})
+        self.run_launchctl.side_effect = [
+            subprocess.CompletedProcess([], 0, "state = running"),
+            subprocess.CompletedProcess([], 0, f'"{agent_module.LABEL}" => disabled'),
+        ]
+        status = self.agent.status()
+        self.assertTrue(status["stop_file_present"])
+        self.assertTrue(status["launchd"]["loaded"])
+        self.assertTrue(status["launchd"]["disabled"])
+        self.assertEqual(status["last_tick"]["status"], "fixture")
+        self.assertTrue(status["last_tick_stale"])
+        self.assertGreater(status["last_tick_age_seconds"], 2 * agent_module.INTERVAL)
+
 
     def test_nonzero_exits_except_tempfail_latch_with_stderr_tail(self):
         self.agent.set_order(ORDER)
@@ -288,28 +315,97 @@ class AgentTests(unittest.TestCase):
     def test_network_failures_latch_after_three_and_clean_ticks_reset_streak(self):
         self.agent.set_order(ORDER)
         results = [
-            (75, "gh: service unavailable (HTTP 503)", "skipped: busy"),
-            (0, "Connection reset by peer", "completed"),
+            (1, "HTTP/2 502", "retry: network"),
+            (75, "Could not resolve host", "skipped: busy"),
+            (1, "HTTP/2 502", "retry: network"),
             (0, "waiting", "completed"),
-            (0, "HTTP/2 502", "completed"),
-            (75, "Could not resolve host: github.com", "skipped: busy"),
-            (0, "connection timed out", "stopped"),
+            (1, "HTTP/2 502", "retry: network"),
+            (1, "Could not resolve host: github.com", "retry: network"),
+            (1, "connection timed out", "stopped"),
         ]
         for code, message, status in results:
             self.agent.run_tick.return_value = subprocess.CompletedProcess([], code, "", message)
             self.assertEqual(self.agent.tick()["status"], status)
             self.assertEqual(self.agent.stopped.exists(), status == "stopped")
         records = [json.loads(line) for line in self.agent.ticks.read_text().splitlines()]
-        self.assertEqual([record["network_streak"] for record in records], [1, 2, 0, 1, 2, 3])
+        self.assertEqual([record["network_streak"] for record in records], [1, 0, 1, 0, 1, 2, 3])
         self.assertIn("connection timed out", records[-1]["reason"])
         self.assertEqual(self.agent.tick()["status"], "latched")
-        self.agent.resume()
-        self.assertEqual(self.agent.tick()["status"], "completed")
+
+    def test_network_failure_after_write_latches_immediately(self):
+        self.agent.set_order(ORDER)
+        for stdout, stderr in (
+            (f"Merged #12 at {LANDED}\n", ""),
+            (f"Pushed batch {TESTED}\n", ""),
+            ("Removed #12 from the train\n", ""),
+            ("Stopped at #12: failure\n", ""),
+            ("", "Merge train stopped: Git push failed: "),
+            ("", "Merge train stopped: GitHub DELETE failed: "),
+        ):
+            with self.subTest(stdout=stdout, stderr=stderr):
+                self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, stdout, stderr + "HTTP 502")
+                self.assertEqual(self.agent.tick()["status"], "stopped")
+                self.assertEqual(json.loads(self.agent.ticks.read_text().splitlines()[-1])["network_streak"], 0)
+                self.agent.resume()
+
+    def test_failed_pending_write_never_starts_train(self):
+        self.agent.set_order(ORDER)
+        with patch.object(agent_module, "atomic_json", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                self.agent.tick()
+        self.agent.run_tick.assert_not_called()
+
+    def test_sigkill_leaves_pending_record_and_next_tick_latches(self):
+        self.agent.set_order(ORDER)
+        def kill_agent(*_, **__):
+            os.kill(os.getpid(), signal.SIGKILL)
+        self.agent.run_tick.side_effect = kill_agent
+        pid = os.fork()
+        if pid == 0:
+            try:
+                self.agent.tick()
+            finally:
+                os._exit(2)
+        _, status = os.waitpid(pid, 0)
+        self.assertEqual(os.waitstatus_to_exitcode(status), -signal.SIGKILL)
+        self.assertTrue(json.loads(self.agent.stopped.read_text())["pending"])
+        self.agent.run_tick.reset_mock()
+        self.assertEqual(self.agent.tick()["status"], "latched")
+        stopped = json.loads(self.agent.stopped.read_text())
+        self.assertFalse(stopped["pending"])
+        self.assertIn("previous tick did not finish", stopped["reason"])
+        self.agent.run_tick.assert_not_called()
+
+    def test_resume_cannot_clear_the_stop_record_during_a_tick(self):
+        self.agent.set_order(ORDER)
+        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, "tree mismatch")
+        self.agent.tick()
+        with agent_module.locked(self.agent.tick_lock), self.assertRaises(agent_module.LockBusy):
+            self.agent.resume()
+        self.assertTrue(self.agent.stopped.exists())
+
+    def test_stop_appearing_after_checkout_prevents_child_start(self):
+        self.agent.set_order(ORDER)
+        @contextmanager
+        def checkout(_):
+            self.agent.kill_switch.parent.mkdir()
+            self.agent.kill_switch.symlink_to(self.root / "nonexistent")
+            yield self.root, self.root / "train.py"
+
+        self.agent.checkout = checkout
+        self.assertEqual(self.agent.tick()["status"], "skipped: STOP file")
+        self.agent.run_tick.assert_not_called()
+
+    def test_dangling_stop_link_blocks_all_train_setup(self):
+        self.agent.kill_switch.parent.mkdir(parents=True)
+        self.agent.kill_switch.symlink_to(self.root / "nonexistent")
+        self.assertEqual(self.agent.tick()["status"], "skipped: STOP file")
+        self.agent.refresh_main.assert_not_called()
 
     def test_snapshot_failure_latches_and_records_git_stderr(self):
         self.agent.set_order(ORDER)
         self.agent.refresh_main.side_effect = subprocess.CalledProcessError(
-            128, ["git", "fetch"], stderr=b"fatal: authentication failed\n"
+            128, ["git", "remote", "get-url"], stderr=b"fatal: authentication failed\n"
         )
         self.assertEqual(self.agent.tick()["status"], "error")
         self.assertEqual(self.agent.tick()["status"], "latched")
@@ -334,6 +430,18 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(records[0]["stdout"], ["waiting"])
         self.assertIn("checkout cleanup failed", records[0]["agent_error"])
 
+    def test_cleanup_failure_cannot_overwrite_final_train_latch(self):
+        self.agent.set_order(ORDER)
+        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, "", "original train stop")
+        @contextmanager
+        def checkout(_):
+            yield self.root, self.root / "train.py"
+            raise RuntimeError("cleanup failed after train stopped")
+
+        self.agent.checkout = checkout
+        self.assertEqual(self.agent.tick()["status"], "error")
+        self.assertEqual(json.loads(self.agent.stopped.read_text())["reason"], ["original train stop"])
+
     def test_timed_out_train_is_killed_as_a_group_and_latched(self):
         self.agent.set_order(ORDER)
         self.agent.run_tick = agent_module.Agent.run_tick.__get__(self.agent)
@@ -345,16 +453,25 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(self.agent.tick()["status"], "stopped")
         self.assertEqual(process.communicate.call_args_list[0].kwargs, {"timeout": 600})
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertEqual(len(popen.call_args.kwargs["pass_fds"]), 1)
         kill.assert_called_once_with(321, signal.SIGKILL)
         record = json.loads(self.agent.ticks.read_text())
         self.assertTrue(record["timed_out"])
         self.assertIn("last error", record["reason"])
+        self.assertIn("wall-clock limit", " ".join(record["reason"]))
         self.assertTrue(self.agent.stopped.exists())
+
+    def test_timeout_retains_stdout_from_real_unbuffered_child(self):
+        script = self.root / "train.py"
+        script.write_text("import time\nprint('visible before hang')\ntime.sleep(60)\n")
+        with patch.object(agent_module, "TICK_TIMEOUT", 0.75), self.assertRaises(subprocess.TimeoutExpired) as error:
+            agent_module.Agent.run_tick(self.agent, self.root, script, [], 4)
+        self.assertEqual(error.exception.stdout, "visible before hang\n")
 
     def test_git_allow_list_rejects_github_writes_before_subprocess(self):
         self.assertEqual(set(agent_module.GIT_COMMANDS), {
             ("remote", "get-url"), ("fetch",), ("rev-parse",), ("show",), ("ls-remote",),
-            ("-c", "core.hooksPath=/dev/null", "worktree", "add"), ("worktree", "remove"),
+            ("-c", "core.hooksPath=/dev/null", "worktree", "add"), ("worktree", "remove"), ("worktree", "list"),
         })
         with patch.object(agent_module.subprocess, "run") as runner:
             for args in (("push", "origin", "main"), ("remote", "set-url"), ("worktree", "prune")):
@@ -390,7 +507,7 @@ class AgentTests(unittest.TestCase):
         self.agent.set_order(ORDER)
         self.agent.plist.parent.mkdir(parents=True)
         self.agent.plist.touch()
-        def disable_during_tick(*_):
+        def disable_during_tick(*_, **__):
             self.assertEqual(self.agent.disable()["status"], "unload deferred")
             self.assertEqual(self.agent.tick()["status"], "busy")
             self.run_launchctl.assert_not_called()
@@ -444,7 +561,11 @@ def git(*args):
 print(json.dumps({'marker': MARKER, 'argv': sys.argv[1:], 'cwd': os.getcwd(),
                   'rev': git('rev-parse', 'HEAD'),
                   'common': git('rev-parse', '--path-format=absolute', '--git-common-dir'),
-                  'status': git('status', '--porcelain')}))
+                  'files': os.listdir(), 'path': os.environ.get('PATH'),
+                  'developer_dir': os.environ.get('DEVELOPER_DIR'), 'git_dir': os.environ.get('GIT_DIR'),
+                  'extra': sorted(k for k in os.environ if k.startswith(('PYTHON', 'GIT_CONFIG_'))
+                                  or k in ('GIT_SSH_COMMAND', 'GIT_EXEC_PATH')),
+                  'flags': [sys.flags.isolated, sys.flags.ignore_environment, sys.flags.no_user_site]}))
 """
         stale = self.publish({"merge_train.py": "MARKER = 'stale'\n" + fixture})
         lane = self.root / "lane"
@@ -454,20 +575,46 @@ print(json.dumps({'marker': MARKER, 'argv': sys.argv[1:], 'cwd': os.getcwd(),
         self.git(self.repo, "update-ref", "refs/remotes/origin/main", stale)
         self.script.write_text("raise SystemExit('dirty shared checkout executed')")
         (lane / "scripts/merge_train.py").write_text("raise SystemExit('dirty lane executed')")
-        agent = agent_module.Agent(lane, home=self.home, launchctl=self.launchctl,
-                                   origins=(str(self.origin),))
+        before_worktrees = self.git(self.repo, "worktree", "list", "--porcelain")
+        injected = {key: "fixture-value" for key in (
+            "PATH", "DEVELOPER_DIR", "GIT_DIR", "PYTHONPATH", "PYTHONUNBUFFERED",
+            "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_SSH_COMMAND", "GIT_EXEC_PATH",
+        )}
+        with patch.dict(os.environ, injected):
+            agent = agent_module.Agent(lane, home=self.home, launchctl=self.launchctl,
+                                       origins=(str(self.origin),))
         agent.set_order(ORDER)
-        self.assertEqual(agent.tick()["status"], "completed")
+        outcome = agent.tick()
+        self.assertEqual(outcome["status"], "completed", outcome)
         data = json.loads(next(line for line in agent.log.read_text().splitlines() if line.startswith("{")))
         self.assertEqual(data["marker"], "protected")
         self.assertEqual(data["argv"], ["--order", f"12={HEAD}", "--batch", "4"])
         self.assertEqual(json.loads(agent.ticks.read_text())["before"], {"main": current, "batch": stale})
         self.assertEqual(data["rev"], current)
-        self.assertEqual(data["status"], "")
+        self.assertEqual(data["files"], [".git"])
+        self.assertEqual(data["path"], "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+        self.assertEqual(data["developer_dir"], "/Library/Developer/CommandLineTools")
+        self.assertIsNone(data["git_dir"])
+        self.assertEqual(data["flags"], [1, 1, 1])
+        self.assertEqual(data["extra"], [])
         self.assertEqual(Path(data["common"]), self.repo / ".git")
         self.assertTrue(Path(data["cwd"]).is_relative_to(agent.state))
         self.assertFalse(Path(data["cwd"]).exists())
         self.assertIn("dirty lane", (lane / "scripts/merge_train.py").read_text())
+        self.assertEqual(self.git(self.repo, "worktree", "list", "--porcelain"), before_worktrees)
+
+    def test_tick_prunes_leftover_worktrees_and_dirs(self):
+        revision = self.publish({"merge_train.py": "print('fixture')\n"})
+        self.agent.set_order(ORDER)
+        before_worktrees = self.git(self.repo, "worktree", "list", "--porcelain")
+        stale = self.agent.state / "tick-leftover"
+        stale.mkdir()
+        self.git(self.repo, "worktree", "add", "--detach", "--no-checkout", stale / "checkout", revision)
+        (self.agent.state / "tick-dir-only").mkdir()
+        outcome = self.agent.tick()
+        self.assertEqual(outcome["status"], "completed", outcome)
+        self.assertEqual(list(self.agent.state.glob("tick-*")), [])
+        self.assertEqual(self.git(self.repo, "worktree", "list", "--porcelain"), before_worktrees)
 
     def test_plist_registers_a_pinned_merged_runner_with_bounded_logging(self):
         names = ("merge_train_agent.py", "refresh_install.py")
@@ -477,15 +624,16 @@ print(json.dumps({'marker': MARKER, 'argv': sys.argv[1:], 'cwd': os.getcwd(),
         self.assertEqual(plist["Label"], "io.github.yuriimurha.grooviq.merge-train")
         self.assertEqual(plist["StartInterval"], 180)
         self.assertFalse(plist["RunAtLoad"])
-        self.assertEqual(plist["StandardOutPath"], "/dev/null")
-        self.assertEqual(plist["StandardErrorPath"], "/dev/null")
+        self.assertEqual(plist["StandardOutPath"], str(self.agent.state / "launchd.stderr.log"))
+        self.assertEqual(plist["StandardErrorPath"], plist["StandardOutPath"])
         runner = self.agent.state / "versions" / revision / names[0]
-        self.assertEqual(plist["ProgramArguments"],
-                         [str(Path(sys.executable).resolve()), "-S", "-B", str(runner),
-                          "--repo", str(self.repo), "tick"])
+        wrapper = Path(plist["ProgramArguments"][0])
+        self.assertTrue(os.access(wrapper, os.X_OK))
+        self.assertIn("-E -s", wrapper.read_text())
+        self.assertTrue(self.agent.status()["pinned_python_exists"])
         for name in names:
             self.assertEqual(runner.with_name(name).read_bytes(), (CHECKOUT / name).read_bytes())
-        self.assertEqual(self.launchctl.call_args.args[0][1], "bootstrap")
+        self.assertEqual(self.launchctl.call_args_list[0].args[0][1], "bootstrap")
 
     def test_enable_refuses_unmerged_runner(self):
         self.publish({"merge_train_agent.py": "# other revision\n",
@@ -505,12 +653,38 @@ print(json.dumps({'marker': MARKER, 'argv': sys.argv[1:], 'cwd': os.getcwd(),
         self.assertIn("canonical Grooviq origin", outcome["error"])
         self.assertNotIn("must never run", self.agent.log.read_text())
 
-    def test_failed_fetch_does_not_use_stale_main(self):
+    def test_foreign_fetch_destination_is_rejected_with_canonical_push(self):
         self.publish({"merge_train.py": "print('must never run')\n"})
-        self.origin.rename(self.root / "offline.git")
+        foreign = self.root / "foreign.git"
+        self.git(self.root, "clone", "--bare", self.origin, foreign)
+        self.git(self.repo, "remote", "set-url", "--push", "origin", self.origin)
+        self.git(self.repo, "remote", "set-url", "origin", foreign)
         self.agent.set_order(ORDER)
         self.assertEqual(self.agent.tick()["status"], "error")
         self.assertNotIn("must never run", self.agent.log.read_text())
+
+    def test_failed_fetch_does_not_use_stale_main_and_counts_toward_streak(self):
+        self.publish({"merge_train.py": "print('must never run')\n"})
+        self.origin.rename(self.root / "offline.git")
+        self.agent.set_order(ORDER)
+        for expected in ("retry: network", "retry: network", "stopped"):
+            self.assertEqual(self.agent.tick()["status"], expected)
+        self.assertNotIn("must never run", self.agent.log.read_text())
+
+    def test_wrapper_logs_missing_interpreter_and_caps_existing_log(self):
+        names = ("merge_train_agent.py", "refresh_install.py")
+        self.publish({name: (CHECKOUT / name).read_text() for name in names})
+        self.agent.python = str(self.root / "missing-python")
+        self.agent.enable()
+        self.assertFalse(self.agent.status()["pinned_python_exists"])
+        plist = plistlib.loads(self.agent.plist.read_bytes())
+        log = self.agent.state / "launchd.stderr.log"
+        log.write_bytes(b'x' * 100_000)
+        with log.open("ab") as stream:
+            result = subprocess.run(plist["ProgramArguments"], stdout=stream, stderr=stream)
+        self.assertEqual(result.returncode, 127)
+        self.assertLess(log.stat().st_size, 65_536)
+        self.assertIn("pinned Python", log.read_text())
 
 
 if __name__ == "__main__":

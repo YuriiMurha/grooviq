@@ -974,6 +974,20 @@ class GitHubTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     repo.checks(sha(10))
 
+    def test_remote_write_attempts_are_visible_before_ambiguous_failures(self):
+        for layer, operation, marker in (
+            (train.Git(), lambda layer: layer.publish(sha(10), ""), "Git push"),
+            (GitHub(), lambda layer: layer.api("issues/10/comments", method="POST"), "GitHub POST"),
+        ):
+            with self.subTest(marker=marker), patch.object(train.subprocess, "run") as run, \
+                    patch("sys.stderr", new_callable=io.StringIO) as errors:
+                def fail(*args, **kwargs):
+                    self.assertIn(marker, errors.getvalue())
+                    raise subprocess.CalledProcessError(1, args[0], stderr="HTTP 502")
+                run.side_effect = fail
+                with self.assertRaises(subprocess.CalledProcessError):
+                    operation(layer)
+
     def test_changed_head_after_comment_keeps_label(self):
         repo = GitHub()
         calls = []
