@@ -23,13 +23,17 @@ on:
         description: 'Verified measured synthetic head, full SHA'
         type: string
         default: 'bab875e7063ca5cc3427f4fa54c4f4b698758ac7'
+      rt_workers_probe:
+        description: 'Measure Windows worker idle CPU and wake latency only'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
   group: >-
-    perf-${{ (inputs.capture_only && github.run_id) ||
+    perf-${{ ((inputs.capture_only || inputs.rt_workers_probe) && github.run_id) ||
     (github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.ref)) ||
     github.event.pull_request.number ||
     github.ref }}
@@ -39,7 +43,7 @@ concurrency:
 
 jobs:
   optional-inputs:
-    if: ${{ !inputs.capture_only }}
+    if: ${{ !inputs.capture_only && !inputs.rt_workers_probe }}
     name: Optional performance inputs
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -98,7 +102,7 @@ jobs:
   bench:
     needs: optional-inputs
     # A failed selector must retain coverage; only an explicit false skips work.
-    if: ${{ !inputs.capture_only && always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
+    if: ${{ !inputs.capture_only && !inputs.rt_workers_probe && always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
     name: bench (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -207,7 +211,7 @@ jobs:
   instructions:
     needs: optional-inputs
     # A failed selector must retain coverage; only an explicit false skips work.
-    if: ${{ !inputs.capture_only && always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
+    if: ${{ !inputs.capture_only && !inputs.rt_workers_probe && always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
     name: instructions (ubuntu-latest)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -316,7 +320,7 @@ jobs:
           exit $status
 
   capture:
-    if: github.event_name == 'workflow_dispatch' && inputs.capture_only
+    if: github.event_name == 'workflow_dispatch' && inputs.capture_only && !inputs.rt_workers_probe
     name: historical profiles (Linux only)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -372,5 +376,117 @@ jobs:
         with:
           name: instruction-profiles-${{ github.run_id }}
           path: ${{ runner.temp }}/instruction-profiles/
+          retention-days: 7
+          if-no-files-found: warn
+
+  rt-workers-probe:
+    if: github.event_name == 'workflow_dispatch' && inputs.rt_workers_probe
+    name: Worker pool probe (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CARGO_NET_OFFLINE: 'true'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Key the Rust cache on the root manifest
+        run: |
+          "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> $env:GITHUB_ENV
+      - run: rustup toolchain install
+        timeout-minutes: 3
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+        timeout-minutes: 2
+      - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 3
+        with:
+          key: rt-workers-probe
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Fetch locked benchmark dependencies (infrastructure)
+        timeout-minutes: 4
+        run: python scripts/perf-fetch.py
+      - name: Build the worker benchmark once
+        run: |
+          $messages = cargo bench --locked --offline -p grooviq-engine --bench rt_workers --no-run --message-format=json-render-diagnostics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $executables = @(
+            foreach ($line in $messages) {
+              if (!$line.StartsWith('{')) { continue }
+              $artifact = ConvertFrom-Json -InputObject $line
+              if ($artifact.reason -eq 'compiler-artifact' -and
+                  $artifact.target.name -eq 'rt_workers' -and $artifact.target.kind -contains 'bench' -and
+                  $artifact.executable) {
+                $artifact.executable
+              }
+            }
+          )
+          if ($executables.Count -ne 1 -or !(Test-Path -LiteralPath $executables[0] -PathType Leaf)) {
+            throw 'Cargo did not report exactly one rt_workers benchmark executable.'
+          }
+          "RT_WORKERS_BENCH=$($executables[0])" >> $env:GITHUB_ENV
+      - name: Measure idle process CPU and wake latency
+        timeout-minutes: 2
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'rt-workers-probe.txt'
+          function Write-ProbeLine([string] $line) {
+            Add-Content -LiteralPath $report -Value $line
+            Write-Host $line
+          }
+          function Write-RunnerLoad([string] $phase) {
+            $load = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'"
+            Write-ProbeLine "Guest CPU load $($phase): $($load.PercentProcessorTime)% across logical cores (snapshot)"
+          }
+
+          Write-ProbeLine 'Hosted Windows performance observation. Compare runs on the same runner class.'
+          try {
+            $cpu = (Get-CimInstance Win32_Processor).Name | Sort-Object -Unique
+            $os = Get-CimInstance Win32_OperatingSystem
+            $rust = rustc --version
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Write-ProbeLine "CPU: $($cpu -join ', '), $([Environment]::ProcessorCount) logical cores available"
+            Write-ProbeLine "OS: $($os.Caption) $($os.Version) ($env:RUNNER_ARCH); image: $env:ImageOS $env:ImageVersion"
+            Write-ProbeLine "Rust: $rust; source SHA: $env:GITHUB_SHA"
+
+            foreach ($workers in 2, 4) {
+              $argument = "--idle-cpu=$workers"
+              Write-RunnerLoad "before $argument"
+              $start = [Diagnostics.ProcessStartInfo]::new($env:RT_WORKERS_BENCH, $argument)
+              $start.UseShellExecute = $false
+              $watch = [Diagnostics.Stopwatch]::StartNew()
+              $process = [Diagnostics.Process]::Start($start)
+              try {
+                $process.WaitForExit()
+                $watch.Stop()
+                if ($process.ExitCode -ne 0) {
+                  Write-ProbeLine "$argument exited $($process.ExitCode)"
+                  exit $process.ExitCode
+                }
+                $elapsed = $watch.Elapsed.TotalSeconds
+                $cpuSeconds = $process.TotalProcessorTime.TotalSeconds
+                Write-ProbeLine ('{0} (n=1): {1:F4} s CPU (user + kernel) / {2:F3} s elapsed = {3:F3}% of one core' -f
+                  $argument, $cpuSeconds, $elapsed, (100 * $cpuSeconds / $elapsed))
+              } finally {
+                $process.Dispose()
+              }
+            }
+
+            Write-RunnerLoad 'before --wake-latency'
+            Write-ProbeLine '--wake-latency (microseconds; each percentile uses only worker claims)'
+            & $env:RT_WORKERS_BENCH --wake-latency | ForEach-Object { Write-ProbeLine $_ }
+            if ($LASTEXITCODE -ne 0) {
+              Write-ProbeLine "--wake-latency exited $LASTEXITCODE"
+              exit $LASTEXITCODE
+            }
+            Write-RunnerLoad 'after --wake-latency'
+          } finally {
+            @('## Windows worker pool probe', '', '```text', (Get-Content -Raw -LiteralPath $report), '```') >> $env:GITHUB_STEP_SUMMARY
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rt-workers-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rt-workers-probe.txt
           retention-days: 7
           if-no-files-found: warn
