@@ -1,12 +1,15 @@
+#[cfg(feature = "test-hooks")]
+use grooviq_dsp::NoteEvent;
 use grooviq_dsp::{
-    Device, HostDomain, HostTransport, NoteEvent, comp::Comp, saturation::Saturation,
-    utility::Utility,
+    Device, HostDomain, HostTransport, comp::Comp, saturation::Saturation, utility::Utility,
 };
 use grooviq_engine::mixer::*;
 
 /// Writes NaN into its next block once armed through parameter 0.
+#[cfg(feature = "test-hooks")]
 #[derive(Default)]
 struct Fault(bool);
+#[cfg(feature = "test-hooks")]
 impl Device for Fault {
     fn set_param(&mut self, _: u32, value: f32) {
         self.0 = value > 0.5;
@@ -138,10 +141,12 @@ fn mixer_runtime_realtime() {
             input(0.13, 0.8),
         );
         let (mut ol, mut or) = (vec![0.0f32; frames], vec![0.0f32; frames]);
-        let mut refusals = [None; 4];
+        let mut cold_refusals = [None; 4];
+        let mut warmed_refusals = [None; 4];
         let mut reports = [RenderReport::default(); 18];
         let mut unknown = Ok(());
         let reset_at = SPANS.iter().sum::<usize>();
+        let warmed_at = reset_at + SPANS[..4].iter().sum::<usize>();
         let param_at = reset_at * 2;
 
         super::realtime(|| {
@@ -169,15 +174,22 @@ fn mixer_runtime_realtime() {
                         },
                     ];
                     let t = transport(sr, at as u64, n);
-                    if call == 0 {
+                    let refusals = if at == 0 {
+                        Some(&mut cold_refusals)
+                    } else if at == warmed_at {
+                        Some(&mut warmed_refusals)
+                    } else {
+                        None
+                    };
+                    if let Some(refusals) = refusals {
                         let swapped = [blocks[1], blocks[0]];
                         let none: [SourceBlock; 0] = [];
-                        refusals = [
+                        *refusals = [
                             k.render(&t, &swapped, &mut ol[at..at + n], &mut or[at..at + n])
                                 .err(),
                             k.render(&t, &none, &mut ol[at..at + n], &mut or[at..at + n])
                                 .err(),
-                            k.render(&transport(sr, 0, 129), &blocks, &mut ol, &mut or)
+                            k.render(&transport(sr, at as u64, 129), &blocks, &mut ol, &mut or)
                                 .err(),
                             k.render(
                                 &transport(sr * 2.0, at as u64, n),
@@ -199,7 +211,7 @@ fn mixer_runtime_realtime() {
                                 right: &[],
                             },
                         ];
-                        k.render(&transport(sr, 0, 0), &empty, &mut [], &mut [])
+                        k.render(&transport(sr, at as u64, 0), &empty, &mut [], &mut [])
                             .unwrap();
                     }
                     reports[call] = k
@@ -211,7 +223,20 @@ fn mixer_runtime_realtime() {
             }
         });
 
-        assert!(refusals.iter().all(Option::is_some), "{refusals:?}");
+        let expected_refusals = [
+            Some(RenderError::SourceOrder { index: 0 }),
+            Some(RenderError::SourceCount {
+                expected: 2,
+                got: 0,
+            }),
+            Some(RenderError::TooManyFrames {
+                frames: 129,
+                max: 128,
+            }),
+            Some(RenderError::SampleRate),
+        ];
+        assert_eq!(cold_refusals, expected_refusals, "{sr} Hz, cold");
+        assert_eq!(warmed_refusals, expected_refusals, "{sr} Hz, warmed");
         assert_eq!(unknown, Err(ParamError::UnknownInsert(InsertId(42))));
         assert!(reports.iter().all(|r| r.silenced == 0 && r.frames > 0));
 
@@ -246,59 +271,69 @@ fn mixer_runtime_realtime() {
                 at += n;
             }
         }
-        assert_eq!(ol, rl, "{sr} Hz");
-        assert_eq!(or, rr, "{sr} Hz");
+        for (channel, actual, expected) in [("left", &ol, &rl), ("right", &or, &rr)] {
+            for (frame, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "{sr} Hz, {channel} frame {frame} (warmed refusals at {warmed_at})"
+                );
+            }
+        }
         let dry: Vec<f32> = s1l.iter().zip(&s2l).map(|(a, b)| a + b).collect();
         assert_ne!(ol, dry);
         assert!(ol.iter().any(|x| x.abs() > 0.05));
 
         // Fault path: a NaN block on track 1 is zeroed and its chain reset, inside the guard.
-        let m = Mixer {
-            tracks: vec![track(0, None, &[]), track(1, Some(0), &[1, 2])],
-            sources: vec![source(1, 1)],
-            ..Mixer::default()
-        };
-        let devices = vec![
-            PreparedInsert::new(InsertId(1), Box::new(sat(sr))),
-            PreparedInsert::new(InsertId(2), Box::new(Fault::default())),
-        ];
-        let mut k =
-            PreparedMixer::prepare(compile(&m, Budget::default()).unwrap(), devices, &[], cfg)
-                .unwrap();
-        let mut silenced = [0; 3];
-        let (mut fl, mut fr) = ([1.0f32; 128], [1.0f32; 128]);
-        let mut after = [0.0f32; 128];
-        super::realtime(|| {
-            for (b, slot) in silenced.iter_mut().enumerate() {
-                if b == 1 {
-                    k.set_param(InsertId(2), 0, 1.0).unwrap();
+        #[cfg(feature = "test-hooks")]
+        {
+            let m = Mixer {
+                tracks: vec![track(0, None, &[]), track(1, Some(0), &[1, 2])],
+                sources: vec![source(1, 1)],
+                ..Mixer::default()
+            };
+            let devices = vec![
+                PreparedInsert::new(InsertId(1), Box::new(sat(sr))),
+                PreparedInsert::new(InsertId(2), Box::new(Fault::default())),
+            ];
+            let mut k =
+                PreparedMixer::prepare(compile(&m, Budget::default()).unwrap(), devices, &[], cfg)
+                    .unwrap();
+            let mut silenced = [0; 3];
+            let (mut fl, mut fr) = ([1.0f32; 128], [1.0f32; 128]);
+            let mut after = [0.0f32; 128];
+            super::realtime(|| {
+                for (b, slot) in silenced.iter_mut().enumerate() {
+                    if b == 1 {
+                        k.set_param(InsertId(2), 0, 1.0).unwrap();
+                    }
+                    let blocks = [SourceBlock {
+                        id: SourceId::Channel(1),
+                        left: &s1l[..128],
+                        right: &s1r[..128],
+                    }];
+                    *slot = k
+                        .render(
+                            &transport(sr, b as u64 * 128, 128),
+                            &blocks,
+                            &mut fl,
+                            &mut fr,
+                        )
+                        .unwrap()
+                        .silenced;
+                    if b == 1 {
+                        after = fl;
+                    }
                 }
-                let blocks = [SourceBlock {
-                    id: SourceId::Channel(1),
-                    left: &s1l[..128],
-                    right: &s1r[..128],
-                }];
-                *slot = k
-                    .render(
-                        &transport(sr, b as u64 * 128, 128),
-                        &blocks,
-                        &mut fl,
-                        &mut fr,
-                    )
-                    .unwrap()
-                    .silenced;
-                if b == 1 {
-                    after = fl;
-                }
-            }
-        });
-        assert_eq!(silenced, [0, 1, 0]);
-        assert_eq!(after, [0.0; 128]);
-        // The block after the fault is a fresh saturation of the same input.
-        let mut fresh = sat(sr);
-        let (mut l, mut r) = (s1l[..128].to_vec(), s1r[..128].to_vec());
-        fresh.process(&mut l, &mut r, None, &[]);
-        assert_eq!(fl.to_vec(), l);
-        assert_ne!(fl.to_vec(), s1l[..128].to_vec());
+            });
+            assert_eq!(silenced, [0, 1, 0]);
+            assert_eq!(after, [0.0; 128]);
+            // The block after the fault is a fresh saturation of the same input.
+            let mut fresh = sat(sr);
+            let (mut l, mut r) = (s1l[..128].to_vec(), s1r[..128].to_vec());
+            fresh.process(&mut l, &mut r, None, &[]);
+            assert_eq!(fl.to_vec(), l);
+            assert_ne!(fl.to_vec(), s1l[..128].to_vec());
+        }
     }
 }
