@@ -1,6 +1,6 @@
 import type { ArrangementStamp } from "../api/arrangement";
 import type { MixerEdit, MixerInsertTarget, MixerSend as WireSend, MixerSnapshot, MixerTrack as WireTrack } from "../api/mixer";
-import { LEVEL, unsupportedReason, type MixerCommand, type MixerMaster, type MixerOption, type MixerProps, type MixerTrack } from "./mixerModel";
+import { LEVEL, unsupportedReason, type MixerCommand, type MixerMaster, type MixerOption, type MixerProps, type MixerTrack, type ParamTarget } from "./mixerModel";
 
 export type MixerIntent =
   | { kind: "edit"; stamp: ArrangementStamp; edit: MixerEdit }
@@ -15,6 +15,7 @@ export type MixerBinding = Readonly<{
   props: Pick<MixerProps, "tracks" | "master" | "effects" | "unsupported">;
   stamp: ArrangementStamp;
   resolveTrack: (nodeId: string) => number | undefined;
+  ownsParamTarget: (target: ParamTarget) => boolean;
   translate: (command: MixerCommand) => MixerIntent;
 }>;
 
@@ -229,6 +230,10 @@ export function bindMixerSnapshot(snapshot: MixerSnapshot): MixerBinding {
     },
     stamp,
     resolveTrack: (id) => tracksByNode.get(id)?.id,
+    ownsParamTarget: (target) => {
+      const track = tracksByNode.get(target.nodeId);
+      return track !== undefined && (target.kind !== "send" || sendsById.get(target.sendId)?.from === track.id);
+    },
     translate,
   };
 }
