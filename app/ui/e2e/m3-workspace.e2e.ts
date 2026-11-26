@@ -445,7 +445,11 @@ test("T9 F5 preserves the open roll, selected channel and requested split", asyn
       const contentHeight = (await app.locator(".workspace").boundingBox())!.height;
       return Math.abs(Number(await splitter.getAttribute("aria-valuenow")) - rackHeight / contentHeight * 100);
     }).toBeLessThanOrEqual(0.05);
-    if (!visible) await expect.poll(async () => Number(await splitter.getAttribute("aria-valuenow"))).toBe(Math.round(parseFloat(requested) * 10) / 10);
+    if (!visible) await expect.poll(async () => {
+      const rackHeight = (await app.locator(".panel-rack").boundingBox())!.height;
+      const contentHeight = (await app.locator(".workspace").boundingBox())!.height;
+      return rackHeight - Math.round(contentHeight * (parseFloat(requested) / 100));
+    }).toBe(0);
   }
 });
 test("T9 reduced: absent original trim entries survive inverse and failed Open preserves capabilities", async ({ app, mock }) => {

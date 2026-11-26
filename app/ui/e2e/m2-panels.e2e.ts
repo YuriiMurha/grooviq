@@ -361,9 +361,14 @@ test.describe("roll channels in the rack", () => {
     expect((await noteBody.boundingBox())!.height).toBeGreaterThanOrEqual(112);
     expect((await noteCanvas.boundingBox())!.height).toBeGreaterThanOrEqual(112);
     await splitter.focus();
-    const v = Number(await splitter.getAttribute("aria-valuenow"));
+    const initialValue = Number(await splitter.getAttribute("aria-valuenow"));
+    const workspaceHeight = (await app.locator(".workspace").boundingBox())!.height;
     await app.keyboard.press("ArrowUp");
-    await expect(splitter).toHaveAttribute("aria-valuenow", String(v - 5));
+    // Allow one pixel across the two rounded heights and a tenth of a point across the ARIA readings.
+    await expect.poll(async () => {
+      const value = Number(await splitter.getAttribute("aria-valuenow"));
+      return Math.abs(initialValue - value - 5);
+    }).toBeLessThanOrEqual(100 / workspaceHeight + 0.1);
     await shot(app, info, "both-panels");
     await app.keyboard.press("F6");
     await expect(rack).toBeHidden();

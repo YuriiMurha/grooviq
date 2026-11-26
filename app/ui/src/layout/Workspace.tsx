@@ -156,7 +156,7 @@ export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError,
   const layout = measurement ? fitPanelLayout({ viewportHeight: measurement.height, requestedRatio: panels.split, chrome: measurement.chrome }) : null;
   const minimum = measurement ? panelMinimums(measurement.chrome) : null;
   const contentHeight = both ? layout?.contentHeight : measurement && minimum
-    ? Math.max(measurement.height, panels.roll ? minimum.roll : panels.rack ? minimum.rack : 0) : undefined;
+    ? Math.max(Math.floor(measurement.height), panels.roll ? minimum.roll : panels.rack ? minimum.rack : 0) : undefined;
   const onSplitDown = (e: PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     const current = readPanels(viewport.current, area.current);

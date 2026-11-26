@@ -83,9 +83,17 @@ describe("measured panel layout", () => {
     const measured = { rackHeader: 40.001, firstRackRow: 28.007, rackPadding: 16.002,
       rollHeader: 40.003, tools: 105.5859375, velocity: 72.006, splitter: 6.004 };
     const layout = fitPanelLayout({ viewportHeight: 300.001, requestedRatio: 0.85, chrome: measured });
+    expect(panelMinimums(measured).rack).toBe(85);
     expect(layout.rackHeight).toBeGreaterThanOrEqual(measured.rackHeader + measured.firstRackRow + measured.rackPadding);
     expect(noteRoom(layout.rollHeight, measured)).toBeGreaterThanOrEqual(112);
     expect(layout.contentHeight - layout.rackHeight - layout.rollHeight).toBeGreaterThanOrEqual(measured.splitter);
+    expect([layout.contentHeight, layout.rackHeight, layout.rollHeight].every(Number.isInteger)).toBe(true);
+    expect(layout.rackHeight + Math.ceil(measured.splitter) + layout.rollHeight).toBe(layout.contentHeight);
+  });
+
+  test("a fractional viewport with room for both panes rounds down", () => {
+    const layout = fitPanelLayout({ viewportHeight: 472.65625, requestedRatio: 0.5, chrome });
+    expect(layout.contentHeight).toBe(472);
   });
 
   test("accepted input uses feasible bounds rather than the remembered request", () => {

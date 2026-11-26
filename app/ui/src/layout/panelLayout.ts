@@ -30,9 +30,10 @@ export function fitPanelLayout({ viewportHeight, requestedRatio, chrome }: Panel
   if (!Number.isFinite(requestedRatio)) throw new RangeError("The requested split must be finite");
   const minimum = panelMinimums(chrome);
   // Whole-pixel allocations keep WebKit's overflow clipping from trimming the final lane.
-  const contentHeight = Math.ceil(Math.max(viewportHeight,
+  // Round the available height down. Only the pane minima can require scrolling.
+  const contentHeight = Math.max(Math.floor(viewportHeight), Math.ceil(Math.max(
     minimum.rack + minimum.splitter + minimum.roll,
-    (minimum.roll + minimum.splitter) / (1 - SPLIT_MIN), minimum.rack / SPLIT_MAX));
+    (minimum.roll + minimum.splitter) / (1 - SPLIT_MIN), minimum.rack / SPLIT_MAX)));
   if (!Number.isSafeInteger(contentHeight)) throw new RangeError("Panel content height must be a safe integer");
   // Round the available interval inward to preserve both the chrome and the split bounds.
   const lowerHeight = Math.ceil(Math.max(minimum.rack, contentHeight * SPLIT_MIN));
