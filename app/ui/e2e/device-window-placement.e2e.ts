@@ -27,7 +27,7 @@ test("a_second_device_opens_fully_inside_the_compact_viewport", async ({ app }, 
   // Manual dragging may park a window offscreen while its title stays reachable.
   const parkedTitle = await title.boundingBox();
   if (!parkedTitle) throw new Error("The parked synth must remain reachable");
-  expect(parkedTitle.x).toBeGreaterThanOrEqual(0);
+  expect(parkedTitle.x).toBeGreaterThan(titleBounds.x);
   expect(parkedTitle.x + parkedTitle.width).toBeLessThanOrEqual(900);
 
   await app.getByRole("button", { name: "Edit the Kick sampler", exact: true }).click();

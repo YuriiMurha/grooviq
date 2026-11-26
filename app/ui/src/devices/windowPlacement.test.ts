@@ -2,12 +2,20 @@ import { describe, expect, it } from "vitest";
 import { DESIGN_H, DESIGN_W, clampPlacement, containPlacement, fitScale, initialPlacement } from "./windowPlacement";
 
 describe("device window placement", () => {
-  it("scales_down_to_fit_but_never_up", () => {
+  it("never scales above the design size", () => {
     expect(fitScale(1920, 1080)).toBe(1);
-    expect(fitScale(DESIGN_W + 32, DESIGN_H + 32)).toBe(1);
-    const s = fitScale(600, 1000);
-    expect(DESIGN_W * s).toBeLessThanOrEqual(600 - 32);
-    expect(DESIGN_W * s).toBeGreaterThan(600 - 33);
+  });
+
+  it("draws at design size at the supported minimum", () => {
+    expect(fitScale(900, 560)).toBe(1);
+  });
+
+  it("scales down between the supported minimum and the design size", () => {
+    expect(fitScale(890, 540)).toBeCloseTo(870 / 880, 6);
+  });
+
+  it("scales down when height limits the fit", () => {
+    expect(fitScale(900, 530)).toBeCloseTo(510 / 520, 6);
   });
 
   it("a_dragged_window_stays_reachable", () => {

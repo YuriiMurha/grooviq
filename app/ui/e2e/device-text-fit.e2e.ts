@@ -37,7 +37,7 @@ async function openEditor(page: Page, name: string): Promise<Locator> {
   });
   expect(fontLoaded, "bundled Manrope is loaded").toBe(true);
   if (page.viewportSize()?.width === 900) {
-    expect(await dialog.evaluate((el) => el.getBoundingClientRect().width / el.clientWidth), "minimum window scales the device").toBeLessThan(1);
+    expect(await dialog.evaluate((el) => el.getBoundingClientRect().width / el.clientWidth), "minimum window draws the device at design size").toBe(1);
   }
   return dialog;
 }

@@ -4,8 +4,8 @@
 /** The synth and sampler editors' design size, CSS px, title bar included. */
 export const DESIGN_W = 880;
 export const DESIGN_H = 520;
-/** Space kept free around a window that is scaled to fit. */
-const MARGIN = 16;
+/** Fit gutter small enough to draw at 1:1 in a 900 px-wide app window. */
+const MARGIN = 10;
 /** How much of a dragged window must stay on screen to grab it again. */
 const KEEP = 80;
 /** Each window opened after the first starts this much further down and right. */
