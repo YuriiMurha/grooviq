@@ -35,7 +35,7 @@ export function classifyRoute(source: RouteSource, target: MixerOption | null): 
 }
 
 export type RouteGesture = { start: Point; moving: boolean };
-export type RouteEnd = "drop" | "escape" | "blur" | "pointercancel" | "lostpointercapture" | "pending" | "target-removed";
+export type RouteEnd = "drop" | "escape" | "blur" | "pointercancel" | "lostpointercapture" | "pending" | "target-changed";
 
 export function moveRoute(gesture: RouteGesture, point: Point): RouteGesture {
   if (gesture.moving || Math.hypot(point.x - gesture.start.x, point.y - gesture.start.y) < 5) return gesture;

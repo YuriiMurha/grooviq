@@ -325,6 +325,25 @@ test("removing the previewed strip cancels the route drag without retargeting th
   await expect(routeNote(page)).toBeHidden();
 });
 
+test("host layout changes cannot retarget a stationary route drag", async ({ fixture }) => {
+  const page = await fixture();
+  const bank = page.getByRole("group", { name: /^Mixer tracks/ });
+  const drop = { x: (await center(strip(page, "Room"))).x, y: (await center(routeHandle(page, "Kick"))).y };
+  const scrollLeft = await bank.evaluate((element) => element.scrollLeft);
+  await dragRoute(page, "Kick", "Room");
+  await expect(routeNote(page)).toContainText("Kick → Room");
+  await page.evaluate(() => window.mixerFixture.remove("n-music"));
+  await expect(strip(page, "Music bus")).toHaveCount(0);
+  await expect(strip(page, "Room")).toBeVisible();
+  await expect.poll(() => page.evaluate(({ x, y }) =>
+    document.elementFromPoint(x, y)?.closest(".mx-strip")?.getAttribute("data-node"), drop)).toBe("n-echo");
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  expect(await bank.evaluate((element) => element.scrollLeft)).toBe(scrollLeft);
+  await page.mouse.up();
+  expect(await log(page)).toEqual([]);
+  await expect(routeNote(page)).toBeHidden();
+});
+
 test("route drag to an existing send or main output focuses its control without a command", async ({ fixture }) => {
   const page = await fixture();
   await dragRoute(page, "Snare", "Room");

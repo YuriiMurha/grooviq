@@ -111,7 +111,7 @@ export function useSendRouting(
       }
     }
 
-    function draw(drag: Drag) {
+    function draw(drag: Drag, target: MixerTrack | null) {
       const scroller = bank.current;
       const source = host.current.nodes.get(drag.nodeId);
       if (!scroller || !source || source.pending) {
@@ -120,7 +120,6 @@ export function useSendRouting(
       }
       const bounds = scroller.getBoundingClientRect();
       const anchor = drag.anchor.getBoundingClientRect();
-      const target = targetAt(drag.point);
       drag.targetId = target?.id;
       const { kind, message } = classifyRoute(source, target);
       const start = { x: Math.max(bounds.left + 3, Math.min(bounds.right - 3, anchor.x + anchor.width / 2)), y: anchor.y + anchor.height / 2 };
@@ -135,14 +134,21 @@ export function useSendRouting(
     function scroll(drag: Drag, previousFrame: number, now: number) {
       const scroller = bank.current;
       if (active.current !== drag || !scroller) return;
+      const target = targetAt(drag.point);
+      // Cancel when a strip shifts under the pointer before the drag scrolls the bank.
+      if (target?.id !== drag.targetId) {
+        finish("target-changed");
+        return;
+      }
       const { x, y } = drag.point;
       const bounds = scroller.getBoundingClientRect();
+      const scrollLeft = scroller.scrollLeft;
       if (y >= bounds.top && y < bounds.bottom && x >= bounds.left && x < bounds.right) {
         const distance = routeScrollDistance(now - previousFrame);
         if (x < bounds.left + EDGE) scroller.scrollLeft -= distance;
         else if (x > bounds.right - EDGE) scroller.scrollLeft += distance;
       }
-      draw(drag);
+      draw(drag, scroller.scrollLeft === scrollLeft ? target : targetAt(drag.point));
       if (active.current === drag) drag.frame = requestAnimationFrame((next) => scroll(drag, now, next));
     }
 
@@ -164,8 +170,10 @@ export function useSendRouting(
       const options = { signal: listeners.signal, capture: true };
       window.addEventListener("pointermove", (e) => {
         if (e.pointerId !== drag.pointerId) return;
+        const point = pointOf(e);
+        if (point.x === drag.point.x && point.y === drag.point.y) return;
         const wasMoving = drag.gesture.moving;
-        drag.point = pointOf(e);
+        drag.point = point;
         drag.gesture = moveRoute(drag.gesture, drag.point);
         if (!drag.gesture.moving) return;
         if (!wasMoving) {
@@ -173,7 +181,7 @@ export function useSendRouting(
           const startedAt = performance.now();
           drag.frame = requestAnimationFrame((now) => scroll(drag, startedAt, now));
         }
-        draw(drag);
+        draw(drag, targetAt(point));
       }, options);
       window.addEventListener("pointerup", (e) => {
         if (e.pointerId === drag.pointerId && e.button === 0) finish("drop", pointOf(e));
@@ -215,7 +223,7 @@ export function useSendRouting(
     if (drag) {
       const source = nodes.get(drag.nodeId);
       if (!source || source.pending) routing.finish("pending");
-      else if (drag.targetId !== undefined && !nodes.has(drag.targetId)) routing.finish("target-removed");
+      else if (drag.targetId !== undefined && !nodes.has(drag.targetId)) routing.finish("target-changed");
     }
     const request = focusNext.current;
     if (!request) return;
