@@ -36,6 +36,10 @@ ATTENDED_TRAIN = ("Run make merge-train-agent-disable, then make merge-train ORD
                   "make merge-train-agent-enable, and make merge-train-agent-resume.")
 FAILED_TRAIN_GUIDANCE = (ATTENDED_TRAIN + " To drop suspects from the order, use make merge-train-order, "
                          "then make merge-train-agent-resume.")
+E2E_READ_ERRORS = (OSError, subprocess.SubprocessError, ValueError)
+E2E_HOLD_GUIDANCE = ("Review the archived evidence. Repair and requalify the affected heads, "
+                     "or record a scoped infrastructure false alarm. "
+                     f"Then use the attended hold workflow. {ATTENDED_TRAIN}")
 
 
 class TickDeadline(RuntimeError):
@@ -363,14 +367,12 @@ def merge_batch(repo, git, active, batch, order, mismatch_file, *, agent_deadlin
         # This is a snapshot. Failures published after the lookup can escape detection.
         try:
             failed_run = repo.failed_e2e_run(active)
-        except (OSError, subprocess.SubprocessError, ValueError):
+        except E2E_READ_ERRORS:
             print(f"Could not read advisory aggregate e2e evidence for batch {active}.", file=sys.stderr)
             failed_run = None
         if failed_run:
             raise RuntimeError(f"Held batch {active}: aggregate e2e reported failure at {failed_run}\n"
-                               "Review the archived evidence. Repair and requalify the affected heads, "
-                               "or record a scoped infrastructure false alarm. "
-                               f"Then use the attended hold workflow. {ATTENDED_TRAIN}")
+                               f"{E2E_HOLD_GUIDANCE}")
     merged = []
     expected_main = batch.base
     try:
@@ -554,10 +556,23 @@ class GitHub:
         if not candidates:
             return None
 
+        def read_confirmation(path, run_ids):
+            try:
+                return self.api(path)
+            except E2E_READ_ERRORS as error:
+                # Keep the observed failure in the stop record. Raw transport errors
+                # would send the agent through its transient-network retry path.
+                links = ", ".join(f"{ACTIONS_RUN_URL}{run_id}" for run_id in sorted(run_ids))
+                raise RuntimeError(
+                    f"Held batch {sha}: aggregate e2e reported failure at {links}; "
+                    f"current-attempt verification unavailable.\n{E2E_HOLD_GUIDANCE}"
+                ) from error
+
         # The Checks API can expose history for the same SHA. Confirm the suite and latest job
         # against the batch push's CI workflow. An ambiguous push or job is insufficient evidence.
         query = urlencode({"branch": BATCH_BRANCH, "event": "push", "head_sha": sha, "per_page": 1})
-        runs = self.api(f"actions/workflows/ci.yml/runs?{query}")
+        runs = read_confirmation(f"actions/workflows/ci.yml/runs?{query}",
+                                 {run_id for run_id, _, _ in candidates})
         if runs["total_count"] != 1 or len(runs["workflow_runs"]) != 1:
             return None
         run = runs["workflow_runs"][0]
@@ -568,7 +583,7 @@ class GitHub:
         if not any(candidate[:2] == (run_id, suite_id) for candidate in candidates):
             return None
 
-        jobs = self.api(f"actions/runs/{run_id}/jobs?filter=latest&per_page=100")
+        jobs = read_confirmation(f"actions/runs/{run_id}/jobs?filter=latest&per_page=100", (run_id,))
         if jobs["total_count"] != len(jobs["jobs"]):
             return None
         aggregate = [job for job in jobs["jobs"] if job.get("name") == "e2e"]

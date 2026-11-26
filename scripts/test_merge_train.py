@@ -934,11 +934,20 @@ class CliTests(unittest.TestCase):
     def test_unattended_merge_does_not_wait_for_a_later_aggregate_result(self):
         self.exercise_aggregate_failure(unattended=True, reported_late=True)
 
-    def test_unavailable_advisory_read_does_not_latch_the_train(self):
-        self.exercise_aggregate_failure(unattended=True, lookup_unavailable=True)
+    def test_unavailable_initial_advisory_read_does_not_latch_the_train(self):
+        self.exercise_aggregate_failure(unattended=True, unavailable=E2E_CHECKS_PATH,
+                                        read_error=subprocess.TimeoutExpired("gh", 45))
+
+    def test_unavailable_confirmation_preserves_failure_evidence_without_squash(self):
+        for path in (E2E_WORKFLOW_PATH, E2E_JOBS_PATH):
+            for error in (subprocess.CalledProcessError(1, "gh", stderr="HTTP 503"),
+                          subprocess.TimeoutExpired("gh", 45)):
+                with self.subTest(path=path, error=type(error).__name__):
+                    self.exercise_aggregate_failure(unattended=True, holds=True,
+                                                    unavailable=path, read_error=error)
 
     def exercise_aggregate_failure(self, *, unattended, holds=False, reported_late=False,
-                                   lookup_unavailable=False):
+                                   unavailable=None, read_error=None):
         fixture = Repo()
         git = FakeGit(fixture)
         git.batch([10])
@@ -965,13 +974,15 @@ class CliTests(unittest.TestCase):
                            "status": "completed", "conclusion": "success"} for name in REQUIRED]
                 if head == E2E_BATCH:
                     batch_reads.append(path)
+                    if unavailable == path and len(batch_reads) == 2:
+                        raise read_error
                     if not reported_late or len(batch_reads) > 2:
                         checks.append(E2E_CHECK)
                 return [{"check_runs": checks}]
             aggregate_reads.append(path)
+            if unavailable == path:
+                raise read_error
             if path == E2E_WORKFLOW_PATH:
-                if lookup_unavailable:
-                    raise subprocess.CalledProcessError(1, "gh", stderr="HTTP 503")
                 return {"total_count": 1, "workflow_runs": [E2E_WORKFLOW]}
             if path == E2E_JOBS_PATH:
                 return {"total_count": 1, "jobs": [E2E_JOB]}
@@ -999,12 +1010,17 @@ class CliTests(unittest.TestCase):
             for evidence in (E2E_BATCH, E2E_RUN, "aggregate e2e", "archived evidence",
                              "requalify", "infrastructure false alarm", "make merge-train-agent-disable"):
                 self.assertIn(evidence, message)
+            if unavailable:
+                self.assertIn("current-attempt verification unavailable", message)
+                self.assertNotIn("HTTP 503", message)
+                expected_reads = [E2E_WORKFLOW_PATH, E2E_JOBS_PATH]
+                self.assertEqual(aggregate_reads, expected_reads[:expected_reads.index(unavailable) + 1])
         else:
             self.assertEqual(code, 0, stderr.getvalue())
             self.assertEqual(writes, [("PUT", "pulls/10/merge")])
-            self.assertEqual(aggregate_reads, [E2E_WORKFLOW_PATH] if lookup_unavailable else [])
+            self.assertEqual(aggregate_reads, [])
             self.assertEqual(batch_reads, [E2E_CHECKS_PATH] * (2 if unattended else 1))
-            if lookup_unavailable:
+            if unavailable:
                 self.assertIn(E2E_BATCH, stderr.getvalue())
 
     def test_make_treats_a_busy_lock_as_success_and_keeps_real_stops_fatal(self):
