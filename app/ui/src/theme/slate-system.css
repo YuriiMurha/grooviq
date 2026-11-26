@@ -9,17 +9,19 @@
   --muted: #c3cad2;
   --faint: #a7b1bc;
   --accent: #396bc4;
+  --on-accent: #ffffff;
   --select: #76a5ef;
   --ok: #6fd087;
+  --mute: #d98b80;
   --warn: #ebc16b;
   --error: #fa8d87;
   /* The lab's 24% washes (coral resolves to #4e3d42) are too dim for slide fills. */
-  --ink-1: #dd807e; --ink-1b: #c4649e;
+  --ink-1: #dd807e; --ink-1b: #c764aa;
   --ink-2: #e5c878; --ink-2b: #c47d2c;
   --ink-3: #93c794; --ink-3b: #3b9c87;
   --ink-4: #e49b68; --ink-4b: #b47daf;
   --ink-5: #c6aee4; --ink-5b: #d889a4;
-  --ink-6: #d28bb3; --ink-6b: #a575c9;
+  --ink-6: #d28bb3; --ink-6b: #b366dc;
   --font: "Manrope Variable", system-ui, sans-serif;
   --radius-s: 4px;
   --radius-m: 6px;

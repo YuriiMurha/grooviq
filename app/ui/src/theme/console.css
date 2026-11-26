@@ -8,17 +8,18 @@
   --text: #ebe7db;
   --muted: #b0bab3;
   --faint: #909d93;
-  --accent: #62df92; /* the lit play cap; the time cursor keeps its tally red */
-  --select: #ffd46a; /* brighter amber separates the ring from the mustard channel */
+  --accent: var(--ok); /* the green running lamp also lights the Play cap */
+  --select: #fffb73; /* the yellow lamp edge separates selection from mustard ink */
   --ok: #43d17a;
-  --warn: #f0c43c;
+  --mute: var(--text);
+  --warn: #e29434;
   --error: #ff7b6e;
   /* The cap shadows from the lab are lifted and hue-shifted for slide fills. */
   --ink-1: #6a9cf5; --ink-1b: #2d8d92;
-  --ink-2: #ad90f6; --ink-2b: #8165ed;
-  --ink-3: #e8dfc6; --ink-3b: #8e7655;
+  --ink-2: #ad90f6; --ink-2b: #6367e8;
+  --ink-3: #e8dfc6; --ink-3b: #b86439;
   --ink-4: #e8b23f; --ink-4b: #bb746b;
-  --ink-5: #4ccab3; --ink-5b: #349151;
+  --ink-5: #4ccab3; --ink-5b: #579639;
   --ink-6: #ee86ad; --ink-6b: #a451b4;
   --font: "Manrope Variable", system-ui, sans-serif;
   --radius-s: 3px;
@@ -44,7 +45,7 @@
   --roll-line: rgba(235, 231, 219, 0.05);
   --roll-beat: rgba(235, 231, 219, 0.11);
   --roll-bar: rgba(235, 231, 219, 0.24);
-  --roll-box: rgba(255, 189, 59, 0.10);
+  --roll-box: rgba(255, 251, 115, 0.10);
   --roll-playhead: var(--rec);
   --roll-key-white: #ebe6d9;
   --roll-key-black: #29322f;

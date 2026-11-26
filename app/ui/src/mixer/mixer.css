@@ -175,8 +175,8 @@
 }
 
 .mx-tool[aria-pressed="true"] {
-  background: color-mix(in srgb, var(--ink-3) 22%, var(--raised));
-  border-color: var(--ink-3);
+  background: color-mix(in srgb, var(--mute) 22%, var(--raised));
+  border-color: var(--mute);
   color: var(--text);
 }
 

@@ -21,6 +21,16 @@ test.use({ seed: { project: beat, files: soundsFor(["Kick", "Snare", "Hat"]) }, 
 type Renderer = "webgl2" | "canvas2d";
 type RenderProbe = Window & { themeTestRenderers?: WeakMap<HTMLCanvasElement, Renderer> };
 
+const quietNoteStrength = 0.45;
+
+function nearestVelocityShadeDistance(primary: number[], slide: number[]) {
+  // Both renderers scale the primary RGB from 45% to 100%. Project onto that segment.
+  const lengthSquared = primary.reduce((sum, channel) => sum + channel * channel, 0);
+  const projection = primary.reduce((sum, channel, index) => sum + channel * slide[index], 0);
+  const strength = lengthSquared === 0 ? 1 : Math.max(quietNoteStrength, Math.min(1, projection / lengthSquared));
+  return colourDistance(primary.map((channel) => channel * strength), slide);
+}
+
 for (const { id } of themes) {
   for (const renderer of ["webgl2", "canvas2d"] as const) {
     test(`${id} paints the rack and roll on ${renderer} after a preference reload`, async ({ app, mock }, info) => {
@@ -73,11 +83,16 @@ for (const { id } of themes) {
         for (const row of ["--roll-row", "--roll-row-black"]) {
           expect(contrastRatio(rgb(ink), rgb(row)), `${ink} over ${row}`).toBeGreaterThanOrEqual(3);
         }
+        const primary = ink.slice(0, -1);
         if (id === "taste") {
-          const primary = ink.slice(0, -1);
+          // Taste's shade-only slide inks still collide with normal velocities. See #642.
           expect(colourDistance(bytes(ink), bytes(primary)), `${ink} versus ${primary}`).toBeGreaterThanOrEqual(48);
+        } else {
+          expect(nearestVelocityShadeDistance(bytes(primary), bytes(ink)),
+            `${ink} versus the closest velocity shade of ${primary}`).toBeGreaterThanOrEqual(48);
         }
       }
+      expect(contrastRatio(rgb("--on-accent"), rgb("--accent")), "accent foreground").toBeGreaterThanOrEqual(4.5);
       for (const text of ["--text", "--muted", "--faint", "--error", "--warn"]) {
         for (const surface of ["--bg", "--panel", "--raised"]) {
           // Riso retains its existing Bright Red at 4.40:1 on raised controls. See #634.
@@ -88,7 +103,8 @@ for (const { id } of themes) {
       for (const surface of ["--well", "--line-soft"]) {
         expect(contrastRatio(rgb("--error"), rgb(surface)), `meter clip indicator over ${surface}`).toBeGreaterThanOrEqual(3);
       }
-      for (const status of ["--ok", "--error"]) {
+      expect(colourDistance(bytes("--mute"), bytes("--ok")), "mute versus solo").toBeGreaterThanOrEqual(48);
+      for (const status of ["--ok", "--error", "--select"]) {
         expect(colourDistance(bytes("--warn"), bytes(status)), `--warn versus ${status}`).toBeGreaterThanOrEqual(48);
       }
       if (id === "luminous") {
@@ -107,13 +123,14 @@ for (const { id } of themes) {
         }
       }
       for (const state of ["--select", "--grid-focus", "--roll-select", "--grid-playhead", "--roll-playhead"]) {
+        const playhead = state.endsWith("playhead");
+        const risoPlayhead = id === "riso" && playhead;
+        // Thin selection and focus outlines need more separation from note and step fills.
+        const minimumDistance = risoPlayhead ? 32 : playhead ? 48 : 80;
         for (const ink of inks) {
           // Keep the existing Riso playhead palette covered while its pink collision awaits #546.
-          const risoPlayhead = id === "riso" && state.endsWith("playhead");
           if (risoPlayhead && ink === "--ink-1") continue;
-          // 48 is nearly a fifth of one RGB channel's range. This catches close palette
-          // collisions well above the screenshot tolerance, without prescribing a hue.
-          expect(colourDistance(bytes(state), bytes(ink)), `${state} versus ${ink}`).toBeGreaterThanOrEqual(risoPlayhead ? 32 : 48);
+          expect(colourDistance(bytes(state), bytes(ink)), `${state} versus ${ink}`).toBeGreaterThanOrEqual(minimumDistance);
         }
       }
 
@@ -171,7 +188,7 @@ for (const { id } of themes) {
       const [bar] = await pixelsAt(app, lane(app), [velocity]);
       expect(colourDistance(noteFill, bytes("--ink-4")), "full-velocity Bass note").toBeLessThan(8);
       expect(colourDistance(slideFill, bytes("--ink-4b")), "full-velocity Bass slide note").toBeLessThan(8);
-      const halfVelocityInk = bytes("--ink-4").map((channel) => channel * 0.725);
+      const halfVelocityInk = bytes("--ink-4").map((channel) => channel * (1 + quietNoteStrength) / 2);
       expect(colourDistance(halfVelocityFill, halfVelocityInk), "half-velocity Bass note").toBeLessThan(8);
       // Taste's shade-only slide ink can read as a quieter normal note. See #642.
       if (id !== "taste") {
