@@ -233,7 +233,8 @@ test("visible sends use host options and send their own pre/post, amount and rem
   await expect(amount).toHaveAttribute("aria-valuetext", "0%");
   await amount.press("PageUp");
   await expect(amount).toHaveAttribute("aria-valuetext", "10%");
-  await expect(add).toBeDisabled();
+  await add.press("Enter");
+  await expect(addList).toBeHidden();
   await echo.getByRole("button", { name: "Remove send to Echo" }).press("Enter");
   await expect(echo).toHaveCount(0);
   await room.getByRole("button", { name: "Remove send to Room" }).click();
@@ -249,6 +250,196 @@ test("visible sends use host options and send their own pre/post, amount and rem
     { type: "removeSend", nodeId: "n-snare", sendId: echoAmount?.target.kind === "send" ? echoAmount.target.sendId : "" },
     { type: "removeSend", nodeId: "n-snare", sendId: expect.any(String) },
   ]);
+});
+
+const routeHandle = (page: Page, name: string) => strip(page, name).getByRole("button", { name: `Add send from ${name}` });
+const sendKnob = (page: Page, source: string, target: string) =>
+  strip(page, source).getByRole("slider", { name: `Send to ${target} amount` });
+const routeStatus = (page: Page) => page.locator(".mx-route-status");
+const routeNote = (page: Page) => page.locator(".mx-route-note");
+
+async function startRoute(page: Page, source: string) {
+  const from = await center(routeHandle(page, source));
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+}
+
+async function dragRoute(page: Page, source: string, destination: string) {
+  const from = await center(routeHandle(page, source));
+  const to = await center(strip(page, destination));
+  await startRoute(page, source);
+  await page.mouse.move(to.x, from.y, { steps: 4 });
+}
+
+test("route drag emits only on admitted drop and focuses the send when the host adds it", async ({ fixture, browserName }, info) => {
+  const page = await fixture("?still=1");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => window.mixerFixture.deferNextCommit());
+  await dragRoute(page, "Kick", "Room");
+  await expect(routeNote(page)).toContainText("Kick → Room");
+  expect(await log(page), "moving over an admitted strip").toEqual([]);
+  if (process.env.GROOVIQ_ROUTE_CAPTURES && browserName === "chromium") {
+    await page.screenshot({ path: info.outputPath("ready-1440x900.png") });
+  }
+  await page.mouse.up();
+  await expect(routeNote(page)).toBeHidden();
+  await expect(page.getByRole("listbox")).toBeHidden();
+  expect(await log(page)).toEqual([
+    { type: "addSend", nodeId: "n-kick", destinationId: "n-air", pre: false, amount: 0 },
+  ]);
+  await expect(routeHandle(page, "Kick")).toBeFocused();
+  await expect(sendKnob(page, "Kick", "Room")).toHaveCount(0);
+  await page.evaluate(() => window.mixerFixture.settleCommit(true));
+  await expect(sendKnob(page, "Kick", "Room")).toBeFocused();
+  await expect(routeStatus(page)).toHaveText("Kick → Room added");
+});
+
+test("route drag with a delayed host refusal leaves focus on the handle and creates no send", async ({ fixture }) => {
+  const page = await fixture();
+  await page.evaluate(() => window.mixerFixture.deferNextCommit());
+  await dragRoute(page, "Kick", "Room");
+  await expect(routeNote(page)).toContainText("Kick → Room");
+  await page.mouse.up();
+  await page.evaluate(() => window.mixerFixture.settleCommit(false));
+  await expect(routeStatus(page)).toContainText("Route refused:");
+  await expect(routeHandle(page, "Kick")).toBeFocused();
+  await expect(sendKnob(page, "Kick", "Room")).toHaveCount(0);
+  expect(await log(page)).toEqual([
+    { type: "addSend", nodeId: "n-kick", destinationId: "n-air", pre: false, amount: 0 },
+  ]);
+});
+
+test("route drag to an existing send or main output focuses its control without a command", async ({ fixture }) => {
+  const page = await fixture();
+  await dragRoute(page, "Snare", "Room");
+  await expect(routeNote(page)).toContainText("send already exists");
+  await page.mouse.up();
+  await expect(sendKnob(page, "Snare", "Room")).toBeFocused();
+
+  await dragRoute(page, "Snare", "Kit bus");
+  await expect(routeNote(page)).toContainText("already the main output");
+  await page.mouse.up();
+  await expect(strip(page, "Snare").getByRole("button", { name: "Main output for Snare" })).toBeFocused();
+  expect(await log(page)).toEqual([]);
+});
+
+for (const target of ["Snare", "Master"]) {
+  test(`route drag refuses a non-listed strip (${target})`, async ({ fixture, browserName }, info) => {
+    const page = await fixture("?still=1");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await dragRoute(page, "Kick", target);
+    await expect(routeNote(page)).toContainText(`${target} isn't available`);
+    if (target === "Snare" && process.env.GROOVIQ_ROUTE_CAPTURES && browserName === "chromium") {
+      await page.screenshot({ path: info.outputPath("refused-1440x900.png") });
+    }
+    await page.mouse.up();
+    expect(await log(page)).toEqual([]);
+    await expect(routeStatus(page)).toContainText("Route refused:");
+  });
+}
+
+for (const cause of ["Escape", "blur", "pending", "pointercancel", "lostpointercapture"] as const) {
+  test(`route drag ${cause} discards the admitted target and never commits on release`, async ({ fixture }) => {
+    const page = await fixture();
+    const handle = routeHandle(page, "Kick");
+    await handle.evaluate((el) => el.addEventListener("pointerdown", (event) => {
+      if (event instanceof PointerEvent) el.setAttribute("data-test-pointer", String(event.pointerId));
+    }, { once: true }));
+    await dragRoute(page, "Kick", "Room");
+    await expect(routeNote(page)).toContainText("Kick → Room");
+    if (cause === "Escape") await page.keyboard.press("Escape");
+    else if (cause === "blur") await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    else if (cause === "pending") await page.evaluate(() => window.mixerFixture.setPending("n-kick", true));
+    else {
+      await handle.evaluate((el, reason) => {
+        const pointerId = Number(el.getAttribute("data-test-pointer"));
+        if (reason === "pointercancel") el.dispatchEvent(new PointerEvent("pointercancel", { pointerId, bubbles: true }));
+        else el.releasePointerCapture(pointerId);
+      }, cause);
+      if (cause === "lostpointercapture") {
+        const room = await center(strip(page, "Room"));
+        await page.mouse.move(room.x, room.y);
+      }
+    }
+    await expect(routeNote(page)).toBeHidden();
+    if (cause === "pending") await page.evaluate(() => window.mixerFixture.setPending("n-kick", false));
+    await page.mouse.up();
+    expect(await log(page)).toEqual([]);
+    await expect(page.getByRole("listbox")).toBeHidden();
+  });
+}
+
+test("route drag auto-scrolls to an off-screen destination and keeps the source mounted", async ({ fixture }) => {
+  const page = await fixture("?tracks=35&offscreen-send=1");
+  const destination = strip(page, "Track 35");
+  await expect(destination).toHaveCount(0);
+  const from = await center(routeHandle(page, "Track 1"));
+  const bank = (await page.getByRole("group", { name: "Mixer tracks (35)" }).boundingBox())!;
+  await startRoute(page, "Track 1");
+  await page.mouse.move(bank.x + bank.width - 3, from.y);
+  await expect(routeNote(page)).toContainText("Track 1 → Track 35", { timeout: 9000 });
+  await expect(routeHandle(page, "Track 1")).toBeAttached();
+  expect(await log(page)).toEqual([]);
+  await page.mouse.up();
+  expect(await log(page)).toEqual([
+    { type: "addSend", nodeId: "n-1", destinationId: "n-35", pre: false, amount: 0 },
+  ]);
+  await expect(sendKnob(page, "Track 1", "Track 35")).toBeFocused();
+  await expect(sendKnob(page, "Track 1", "Track 35")).toBeInViewport();
+});
+
+for (const key of ["Enter", "Space"]) {
+  test(`route handle ${key} opens the send picker and only confirmation adds one send`, async ({ fixture }) => {
+    const page = await fixture();
+    const handle = routeHandle(page, "Snare");
+    await handle.press(key);
+    const picker = page.getByRole("listbox", { name: "Add send from Snare" });
+    await expect(picker.getByRole("option")).toHaveText(["Echo"]);
+    expect(await log(page)).toEqual([]);
+    await page.keyboard.press("Enter");
+    expect(await log(page)).toEqual([
+      { type: "addSend", nodeId: "n-snare", destinationId: "n-echo", pre: false, amount: 0 },
+    ]);
+  });
+}
+
+test("route drag with reduced motion has a stationary cable until the pointer moves", async ({ fixture }) => {
+  const page = await fixture("?still=1");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await dragRoute(page, "Kick", "Room");
+  const line = page.locator(".mx-route-cable path").last();
+  await expect(line).toBeVisible();
+  const read = () => line.evaluate(async (path) => {
+    const before = path.getAttribute("d");
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    return { before, after: path.getAttribute("d"), animations: path.getAnimations().length };
+  });
+  const still = await read();
+  expect(still.after).toBe(still.before);
+  expect(still.animations).toBe(0);
+  const echo = await center(strip(page, "Echo"));
+  await page.mouse.move(echo.x, echo.y);
+  await expect(routeNote(page)).toContainText("Kick → Echo");
+  expect((await read()).after).not.toBe(still.after);
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  expect(await log(page)).toEqual([]);
+});
+
+test("a fader drag commits only its own strip subtree", async ({ fixture }) => {
+  const page = await fixture("?tracks=35&measure=1");
+  const fader = page.getByRole("slider", { name: "Track 2 level" });
+  const at = await center(fader);
+  const counts = () => page.evaluate(() => window.mixerFixture.stats().stripCommits);
+  await page.mouse.move(at.x, at.y);
+  await page.mouse.down();
+  const before = await counts();
+  expect(Object.keys(before).length).toBeGreaterThan(10);
+  await page.mouse.move(at.x, at.y - 36, { steps: 6 });
+  await expect.poll(async () => (await counts())["n-2"]).toBeGreaterThan(before["n-2"]);
+  const after = await counts();
+  expect(Object.entries(after).filter(([id, count]) => id !== "n-2" && before[id] !== count)).toEqual([]);
+  await page.mouse.up();
 });
 
 test("the strip and rack output pickers offer exactly the host's destinations", async ({ fixture }) => {
