@@ -4,6 +4,8 @@ import { Icon } from "./icons";
 import { availableSends, type MixerTrack } from "./mixerModel";
 import type { StripActions } from "./TrackStrip";
 
+const openingKeys = ["Enter", "ArrowDown", "ArrowUp"];
+
 export function RouteHandle({ track, routing }: { track: MixerTrack; routing: StripActions["routing"] }) {
   const options = availableSends(track.sendDestinations, track.sends);
   const empty = options.length === 0;
@@ -28,7 +30,7 @@ export function RouteHandle({ track, routing }: { track: MixerTrack; routing: St
       }}
       onKeyDownCapture={(event) => {
         if (!(event.target instanceof HTMLButtonElement) ||
-          (!empty && !routing.dragging()) || !["Enter", " ", "ArrowDown", "ArrowUp"].includes(event.key)) return;
+          (!empty && !routing.dragging()) || !openingKeys.includes(event.key)) return;
         event.preventDefault();
         event.stopPropagation();
         if (empty && !track.pending) routing.announce("No destinations available.");
@@ -41,6 +43,7 @@ export function RouteHandle({ track, routing }: { track: MixerTrack; routing: St
         value={null}
         placeholder={empty ? "No destinations available" : "Drag or choose a destination"}
         disabled={track.pending}
+        openingKeys={openingKeys}
         onCommit={(destinationId) => routing.pick(track.id, destinationId)}
       />
       <Icon name="route" />

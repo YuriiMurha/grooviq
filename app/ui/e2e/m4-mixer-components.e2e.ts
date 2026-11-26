@@ -395,20 +395,33 @@ test("route drag auto-scrolls to an off-screen destination and keeps the source 
   await expect(sendKnob(page, "Track 1", "Track 35")).toBeInViewport();
 });
 
-for (const key of ["Enter", "Space"]) {
-  test(`route handle ${key} opens the send picker and only confirmation adds one send`, async ({ fixture }) => {
-    const page = await fixture();
-    const handle = routeHandle(page, "Snare");
-    await handle.press(key);
-    const picker = page.getByRole("listbox", { name: "Add send from Snare" });
-    await expect(picker.getByRole("option")).toHaveText(["Echo"]);
-    expect(await log(page)).toEqual([]);
-    await page.keyboard.press("Enter");
-    expect(await log(page)).toEqual([
-      { type: "addSend", nodeId: "n-snare", destinationId: "n-echo", pre: false, amount: 0 },
-    ]);
+test("a closed route handle passes Space to transport and Enter opens its picker", async ({ fixture }) => {
+  const page = await fixture();
+  const handle = routeHandle(page, "Snare");
+  const picker = page.getByRole("listbox", { name: "Add send from Snare" });
+  await handle.focus();
+  await page.evaluate(() => {
+    for (const type of ["keydown", "keyup"]) {
+      window.addEventListener(type, (event) => {
+        if (!(event instanceof KeyboardEvent) || event.key !== " ") return;
+        document.body.dataset[type] = event.defaultPrevented ? "canceled" : "received";
+      }, { once: true });
+    }
   });
-}
+  await page.keyboard.press("Space");
+  await expect(picker).toBeHidden();
+  expect(await log(page)).toEqual([]);
+  await expect(page.locator("body")).toHaveAttribute("data-keydown", "received");
+  await expect(page.locator("body")).toHaveAttribute("data-keyup", "received");
+
+  await handle.press("Enter");
+  await expect(picker.getByRole("option")).toHaveText(["Echo"]);
+  expect(await log(page)).toEqual([]);
+  await page.keyboard.press("Enter");
+  expect(await log(page)).toEqual([
+    { type: "addSend", nodeId: "n-snare", destinationId: "n-echo", pre: false, amount: 0 },
+  ]);
+});
 
 test("route drag with reduced motion has a stationary cable until the pointer moves", async ({ fixture }) => {
   const page = await fixture("?still=1");

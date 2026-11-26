@@ -12,9 +12,10 @@ type Props = {
   reason?: string;
   className?: string;
   align?: ListPickerAlign;
+  openingKeys?: readonly string[];
 };
 
-const openingKeys = ["Enter", " ", "ArrowDown", "ArrowUp"];
+const defaultOpeningKeys = ["Enter", " ", "ArrowDown", "ArrowUp"];
 
 function listAction(event: KeyboardEvent<HTMLDivElement>): ListPickerAction | undefined {
   switch (event.key) {
@@ -33,11 +34,12 @@ function listAction(event: KeyboardEvent<HTMLDivElement>): ListPickerAction | un
 }
 
 /** A controlled single-choice button with an independent, temporary listbox highlight. */
-export function ListPicker({ label, options, value, placeholder, onCommit, disabled, reason, className, align }: Props) {
+export function ListPicker({ label, options, value, placeholder, onCommit, disabled, reason, className, align, openingKeys = defaultOpeningKeys }: Props) {
   const listId = useId();
   const reasonId = `${listId}-reason`;
   const trigger = useRef<HTMLButtonElement>(null);
   const popup = useRef<HTMLDivElement>(null);
+  const ignoreSpaceClick = useRef(false);
   const [state, setState] = useState<ListPickerState>(null);
   const open = state !== null;
   const activeIndex = state?.highlight?.index;
@@ -134,14 +136,25 @@ export function ListPicker({ label, options, value, placeholder, onCommit, disab
         aria-describedby={description ? reasonId : undefined}
         title={disabled ? description : displayedName}
         onPointerDown={(event) => {
+          ignoreSpaceClick.current = false;
           if (open && event.button === 0) event.preventDefault();
         }}
-        onClick={() => act({ type: open ? "dismiss" : "open" })}
+        onClick={(event) => {
+          if (event.detail === 0 && ignoreSpaceClick.current) return;
+          act({ type: open ? "dismiss" : "open" });
+        }}
+        onBlur={() => { ignoreSpaceClick.current = false; }}
         onKeyDown={(event) => {
+          ignoreSpaceClick.current = event.key === " " && !openingKeys.includes(" ");
           if (!openingKeys.includes(event.key)) return;
           event.preventDefault();
           event.stopPropagation();
           if (!event.repeat) act({ type: "open", fromEnd: event.key === "ArrowUp" });
+        }}
+        onKeyUp={(event) => {
+          if (event.key !== " " || !ignoreSpaceClick.current) return;
+          // The native button can click after keyup. Leave the key event to the transport.
+          setTimeout(() => { ignoreSpaceClick.current = false; }, 0);
         }}
       >
         <span className="list-picker-value">{displayedName}</span>
