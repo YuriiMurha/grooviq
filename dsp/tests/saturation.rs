@@ -107,17 +107,19 @@ fn reset_empty_and_nonfinite() {
 }
 #[test]
 fn dry_latency_and_silence() {
-    let mut d = Saturation::new(48000.);
-    assert_eq!(d.latency(), 49);
-    d.set_param(7, 0.);
-    let mut a = [0.; 128];
-    let mut b = a;
-    a[0] = 1.;
-    b[0] = -0.5;
-    d.process(&mut a, &mut b, None, &[]);
-    for i in 0..128 {
-        assert_eq!(a[i], if i == 49 { 1. } else { 0. });
-        assert_eq!(b[i], if i == 49 { -0.5 } else { 0. });
+    for sr in [22_050., 48_000., 192_000.] {
+        let mut d = Saturation::new(sr);
+        assert_eq!(d.latency(), 49);
+        d.set_param(7, 0.);
+        let mut a = [0.; 128];
+        let mut b = a;
+        a[0] = 1.;
+        b[0] = -0.5;
+        d.process(&mut a, &mut b, None, &[]);
+        for i in 0..128 {
+            assert_eq!(a[i], if i == 49 { 1. } else { 0. }, "left at {sr} Hz");
+            assert_eq!(b[i], if i == 49 { -0.5 } else { 0. }, "right at {sr} Hz");
+        }
     }
     for p in PRESETS {
         let mut d = Saturation::new(48000.);

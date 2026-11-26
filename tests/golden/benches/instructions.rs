@@ -24,7 +24,7 @@ mod counts {
     use std::hint::black_box;
     use std::sync::Arc;
 
-    use grooviq_dsp::sampler::{SampleBuf, Sampler};
+    use grooviq_dsp::sampler::{PARAM_IDS, SampleBuf, Sampler, VOICES};
     use grooviq_dsp::synth::{Synth, preset};
     use grooviq_dsp::{Device, NoteEvent};
     use grooviq_engine::{
@@ -100,12 +100,48 @@ mod counts {
 
     // 100 blocks of 64 frames. (Plain comments: the macro rejects doc attributes.)
     #[library_benchmark]
+    #[bench::voices_0(sampler(0))]
+    #[bench::voices_2(sampler(2))]
     #[bench::voices_16(sampler(16))]
     #[bench::filter_static_16(scenario(0.0, false))]
     #[bench::filter_envelope_16(scenario(0.7, false))]
     #[bench::filter_velocity_16(scenario(0.7, true))]
     fn sampler_blocks(mut s: Sampler) -> f32 {
         render(&mut s)
+    }
+
+    fn mono_glide_and_steals() -> (Sampler, [NoteEvent; 48]) {
+        let mut s = sampler(1);
+        for (id, value) in [("voice_mode", 1.0), ("glide", 2.5)] {
+            let i = PARAM_IDS.iter().position(|&key| key == id).unwrap();
+            s.set_param(i as u32, value);
+        }
+        let notes = std::array::from_fn(|i| NoteEvent {
+            offset: i as u32,
+            key: 55 + (i % 16) as u8,
+            velocity: 0.8,
+            on: true,
+            slide: false,
+            id: 100 + i as u64,
+        });
+        let (mut l, mut r) = ([0.0; BLOCK], [0.0; BLOCK]);
+        for _ in 0..3 {
+            s.process(&mut l, &mut r, None, &notes);
+        }
+        assert_eq!(s.active_voices(), VOICES * 4 + 1);
+        assert!(l.iter().chain(&r).any(|v| v.abs() > 1e-6));
+        (s, notes)
+    }
+
+    #[library_benchmark]
+    #[bench::mono_glide_fade_pressure(mono_glide_and_steals())]
+    fn sampler_event_blocks(workload: (Sampler, [NoteEvent; 48])) -> f32 {
+        let (mut s, notes) = workload;
+        let (mut l, mut r) = ([0.0; BLOCK], [0.0; BLOCK]);
+        for _ in 0..COUNTED_BLOCKS {
+            s.process(black_box(&mut l), black_box(&mut r), None, &notes);
+        }
+        l[BLOCK - 1] + r[BLOCK - 1]
     }
 
     // 100 blocks of 64 frames. (Plain comments: the macro rejects doc attributes.)
@@ -187,7 +223,7 @@ mod counts {
         (controller, processor, buf)
     }
 
-    library_benchmark_group!(name = dsp; benchmarks = sampler_blocks, synth_blocks, synth_idle_blocks);
+    library_benchmark_group!(name = dsp; benchmarks = sampler_blocks, sampler_event_blocks, synth_blocks, synth_idle_blocks);
     library_benchmark_group!(name = engine; benchmarks = scene_second);
 }
 

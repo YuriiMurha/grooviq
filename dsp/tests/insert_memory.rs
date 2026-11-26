@@ -68,11 +68,25 @@ fn assert_payload_bound(id: &str, rate: f32) {
             allocated <= bound,
             "{id} {rate}: {allocated} > bound {bound}"
         );
-        // Allow 256 bytes or 1% extra for rounding and conservative scratch-space bounds.
-        assert!(
-            bound - allocated <= 256.max(allocated / 100),
-            "{id} {rate}: bound {bound} is too loose for {allocated} bytes"
-        );
+        if matches!(
+            id,
+            "algorithmic_reverb"
+                | "character_delay"
+                | "delay"
+                | "drive"
+                | "lofi_colour"
+                | "reverb"
+                | "saturation"
+                | "shimmer_reverb"
+        ) {
+            assert_eq!(bound, allocated, "{id} {rate}: ring-backed allocation");
+        } else {
+            // Allow 256 bytes or 1% extra for conservative scratch-space bounds.
+            assert!(
+                bound - allocated <= 256.max(allocated / 100),
+                "{id} {rate}: bound {bound} is too loose for {allocated} bytes"
+            );
+        }
         let (mut left, mut right) = ([0.25], [-0.25]);
         device.process(&mut left, &mut right, None, &[]);
         let (_, live_bytes) = measure(|| {
