@@ -32,7 +32,7 @@ use grooviq_engine::{
     STEP_TICKS, decode_sample,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -578,6 +578,8 @@ pub struct Session {
     media_budget: grooviq_engine::media_budget::MediaBudget,
     media_requests: HashMap<u32, MediaIntent>,
     latest_media_requests: HashMap<u32, u64>,
+    media_tickets: HashMap<u64, Arc<std::sync::atomic::AtomicBool>>,
+    cancelled_media_tickets: VecDeque<u64>,
     media_peaks: HashMap<u32, Arc<grooviq_engine::waveform::PeakPyramid>>,
     project: Project,
     /// Each channel's sample bytes, saved with the project.
@@ -752,6 +754,8 @@ impl Session {
             media_budget: Default::default(),
             media_requests: Default::default(),
             latest_media_requests: Default::default(),
+            media_tickets: Default::default(),
+            cancelled_media_tickets: Default::default(),
             media_peaks: Default::default(),
             files: SampleFiles::new(),
             decoded: HashMap::new(),
@@ -3041,6 +3045,8 @@ impl Session {
         }
         self.media_requests.clear();
         self.latest_media_requests.clear();
+        self.media_tickets.clear();
+        self.cancelled_media_tickets.clear();
         self.media_peaks.clear();
         self.revision += 1;
         self.saved_revision = self.revision;

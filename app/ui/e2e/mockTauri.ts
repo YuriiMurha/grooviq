@@ -1760,6 +1760,7 @@ export function installMockTauri(seed: MockSeed): void {
     audio_import: (a) => prepareAudio(a, { kind: "import", track: Number(a.track), startTick: Number(a.startTick), name: String(a.name) }),
     audio_relink: (a) => prepareAudio(a, { kind: "relink", asset: Number(a.asset) }),
     audio_cancel: nativeArrangementOnly,
+    audio_cancel_ticket: nativeArrangementOnly,
     arrangement_waveform: arrangementWaveform,
     arrangement_mode: workspaceMode,
     arrangement_loop: nativeArrangementOnly,
