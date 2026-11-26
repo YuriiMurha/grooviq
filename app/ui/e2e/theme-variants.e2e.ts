@@ -166,8 +166,6 @@ for (const { id } of themes) {
       expect(colourDistance(playFill, bytes("--play")), "Play button fill").toBeLessThan(8);
       for (const text of ["--text", "--muted", "--faint", "--error", "--warn"]) {
         for (const surface of ["--bg", "--panel", "--raised"]) {
-          // Riso retains its existing Bright Red at 4.40:1 on raised controls. See #634.
-          if (id === "riso" && text === "--error" && surface === "--raised") continue;
           expect(contrastRatio(rgb(text), rgb(surface)), `${text} over ${surface}`).toBeGreaterThanOrEqual(4.5);
         }
       }
