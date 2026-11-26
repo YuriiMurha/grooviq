@@ -1,6 +1,6 @@
 // Owner checklist 9, 10 and 12: Space after the transport fields, swing released outside, and
 // the pattern length changed while playing.
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { expect, position, project, soundsFor, test, type Mock } from "./fixture";
 
 const KIT = ["Kick", "Snare", "Hat"];
@@ -9,12 +9,14 @@ test.use({ seed: { project: project(KIT, { 1: [0, 4, 8, 12], 3: [2, 6, 10, 14] }
 const playing = (mock: Mock) => mock.eval<boolean>("(m) => m.state.transport.playing");
 
 /** Space toggles playback twice from where focus is now. */
-async function spaceToggles(page: Page, mock: Mock) {
+async function spaceToggles(page: Page, mock: Mock, closedList?: Locator) {
   const before = await playing(mock);
   await page.keyboard.press("Space");
   await expect.poll(() => playing(mock)).toBe(!before);
+  if (closedList) await expect(closedList).toBeHidden();
   await page.keyboard.press("Space");
   await expect.poll(() => playing(mock)).toBe(before);
+  if (closedList) await expect(closedList).toBeHidden();
 }
 
 test.describe("Space after the transport fields (check 9)", () => {
@@ -39,6 +41,26 @@ test.describe("Space after the transport fields (check 9)", () => {
     await spaceToggles(app, mock);
     // Space did not move the slider either.
     await expect(swing).toHaveValue("2");
+  });
+
+  test("after picking 3/4 with the mouse and then editing the beat value with the keyboard", async ({ app, mock }) => {
+    const beats = app.getByRole("button", { name: /^Beats per bar:/ });
+    const beatsList = app.getByRole("listbox", { name: "Beats per bar", exact: true });
+    await beats.click();
+    await beatsList.getByRole("option", { name: "3", exact: true }).click();
+    await expect(beats).toHaveAccessibleName("Beats per bar: 3");
+    await expect(beats).toBeFocused();
+    await spaceToggles(app, mock, beatsList);
+
+    const unit = app.getByRole("button", { name: /^Beat note value:/ });
+    const unitList = app.getByRole("listbox", { name: "Beat note value", exact: true });
+    await unit.press("Enter");
+    await expect(unitList).toBeFocused();
+    await app.keyboard.press("ArrowUp");
+    await app.keyboard.press("Enter");
+    await expect(unit).toHaveAccessibleName("Beat note value: 2");
+    await expect(unit).toBeFocused();
+    await spaceToggles(app, mock, unitList);
   });
 
   test("after typing a pattern length and pressing Enter", async ({ app, mock }) => {
@@ -93,23 +115,23 @@ test("time-signature arrows and Escape leave the project alone until Enter commi
       await app.getByRole("textbox", { name: "BPM" }).focus();
       await expect(list).toBeHidden();
       expect(await edits()).toEqual(committed);
+      await mock.view();
+      expect(await edits()).toEqual(committed);
     });
   }
 
   await app.screenshot({ path: info.outputPath("time-signature-900x560.png") });
 });
 
-test("Space chooses a time signature, then plays again when focus leaves the picker", async ({ app, mock }) => {
+test("Space chooses a time signature in the open list without toggling playback", async ({ app, mock }) => {
   const beats = app.getByRole("button", { name: /^Beats per bar:/ });
   const list = app.getByRole("listbox", { name: "Beats per bar" });
-  await beats.press("Space");
+  await beats.press("Enter");
   await expect(list).toBeFocused();
   await app.keyboard.press("ArrowUp");
   await app.keyboard.press("Space");
   await expect(beats).toHaveAccessibleName("Beats per bar: 3");
   expect((await mock.calls()).filter((call) => call.cmd.startsWith("transport_"))).toEqual([]);
-  await app.getByRole("button", { name: "Stop", exact: true }).focus();
-  await spaceToggles(app, mock);
 });
 
 test.describe("swing while playing (check 10)", () => {

@@ -708,14 +708,20 @@ describe("transport", () => {
     await waitFor(() => expect(called("transport_play")).toHaveLength(1));
   });
 
-  it("Space plays while the swing slider has focus without editing swing", async () => {
+  it("Space plays while the swing slider or the closed time-signature picker has focus", async () => {
     const user = await start(CLEAN);
     reply("transport_play", null);
     const swing = screen.getByRole("slider", { name: "Swing" }) as HTMLInputElement;
     act(() => swing.focus());
     await user.keyboard(" ");
     await waitFor(() => expect(called("transport_play")).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Play" }).getAttribute("aria-pressed")).toBe("true"));
+    const beats = screen.getByRole("button", { name: "Beats per bar: 4" });
+    act(() => beats.focus());
+    await user.keyboard(" ");
+    await waitFor(() => expect(called("transport_stop")).toHaveLength(1));
     expect(swing.value).toBe("0");
+    expect(beats.getAttribute("aria-expanded")).toBe("false");
     expect(called("project_edit")).toHaveLength(0);
   });
 
