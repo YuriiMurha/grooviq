@@ -1,7 +1,7 @@
 import { cellPoint, colourDistance, expect, grid, pixelsAt, project, soundsFor, test, workspaceReady } from "./fixture";
 import { boxSelect, canvas, lane, local, openRoll, stats, twoChannels } from "./rollHelpers";
 import { parseColor } from "../src/rack/palette";
-import { contrastRatio } from "../src/theme/contrast";
+import { contrastRatio, oklabDeltaE } from "../src/theme/contrast";
 import { THEME_COLOR_TOKENS, themeTokenProblems } from "../src/theme/contract";
 import { themes, THEME_PREFERENCE_KEY } from "../src/theme/preference";
 
@@ -122,15 +122,16 @@ for (const { id } of themes) {
           }
         }
       }
-      for (const state of ["--select", "--grid-focus", "--roll-select", "--grid-playhead", "--roll-playhead"]) {
-        const playhead = state.endsWith("playhead");
-        const risoPlayhead = id === "riso" && playhead;
-        // Thin selection and focus outlines need more separation from note and step fills.
-        const minimumDistance = risoPlayhead ? 32 : playhead ? 48 : 80;
+      for (const state of ["--select", "--grid-focus", "--roll-select"]) {
+        for (const ink of inks) {
+          expect(oklabDeltaE(rgb(state), rgb(ink)), `${state} versus ${ink} in OKLab`).toBeGreaterThanOrEqual(0.10);
+        }
+      }
+      for (const state of ["--grid-playhead", "--roll-playhead"]) {
         for (const ink of inks) {
           // Keep the existing Riso playhead palette covered while its pink collision awaits #546.
-          if (risoPlayhead && ink === "--ink-1") continue;
-          expect(colourDistance(bytes(state), bytes(ink)), `${state} versus ${ink}`).toBeGreaterThanOrEqual(minimumDistance);
+          if (id === "riso" && ink === "--ink-1") continue;
+          expect(colourDistance(bytes(state), bytes(ink)), `${state} versus ${ink}`).toBeGreaterThanOrEqual(id === "riso" ? 32 : 48);
         }
       }
 
