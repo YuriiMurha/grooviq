@@ -1613,7 +1613,6 @@ impl Session {
                 deleted_index,
                 &mut self.pattern_note_floors,
             );
-            self.trim_history = Default::default();
         }
         self.patterns_revision += 1;
         self.changed_outside_history(true, now);
