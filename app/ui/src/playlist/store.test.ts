@@ -423,6 +423,89 @@ describe("playlist audio admission and publication", () => {
     expect(await r.controller.settleMedia()).toBe(true);
   });
 
+  it("keeps refresh guidance when a cancelled reply reports a newer revision", async () => {
+    const r = rig();
+    const decode = deferred<ArrangementReply>();
+    const invoked = deferred<void>();
+    await r.controller.reload();
+    const snapshot = r.controller.state.snapshot!;
+    r.audioImport(() => { invoked.resolve(); return decode.promise; });
+    r.cancelAudio(async () => true);
+    const result = r.controller.importAudio(snapshot, input);
+    await invoked.promise;
+    await r.controller.cancelMedia();
+    const reply = { ...cancelled, revision: snapshot.revision + 1 };
+    decode.resolve(reply);
+    expect(await result).toEqual({ status: "cancelled", reply });
+    expect(r.controller.state).toMatchObject({ snapshot, cancelledMedia: "import", requiresRefresh: true,
+      message: expect.stringMatching(/refresh the playlist/i) });
+    expect(await r.controller.settleMedia()).toBe(false);
+  });
+
+  it.each([
+    { cancelRequested: false, message: "Older or cancelled media request" },
+    { cancelRequested: true, message: "Decode failed" },
+  ])("shows a refusal with reason '$message' when user cancel is $cancelRequested", async ({ cancelRequested, message }) => {
+    const r = rig();
+    const decode = deferred<ArrangementReply>();
+    const invoked = deferred<void>();
+    await r.controller.reload();
+    r.audioImport(() => { invoked.resolve(); return decode.promise; });
+    r.cancelAudio(async () => true);
+    const result = r.controller.importAudio(r.controller.state.snapshot!, input);
+    await invoked.promise;
+    if (cancelRequested) await r.controller.cancelMedia();
+    const reply = { ...cancelled, message };
+    decode.resolve(reply);
+    expect(await result).toEqual({ status: "refused", reply });
+    expect(r.controller.state).toMatchObject({ cancelledMedia: null, message, requiresRefresh: false });
+  });
+
+  it("allows retrying cancellation after the live cancel command rejects", async () => {
+    const r = rig();
+    const decode = deferred<ArrangementReply>();
+    const invoked = deferred<number>();
+    const attempts: number[] = [];
+    await r.controller.reload();
+    r.audioImport((_stamp, _input, ticket) => { invoked.resolve(ticket); return decode.promise; });
+    r.cancelAudio(async ticket => {
+      attempts.push(ticket);
+      if (attempts.length === 1) throw new Error("Lost connection");
+      return true;
+    });
+    const result = r.controller.importAudio(r.controller.state.snapshot!, input);
+    const ticket = await invoked.promise;
+    await r.controller.cancelMedia();
+    expect(r.controller.state).toMatchObject({ media: "import", cancelRequested: false });
+    await r.controller.cancelMedia();
+    expect(attempts).toEqual([ticket, ticket]);
+    decode.resolve(cancelled);
+    expect(await result).toEqual({ status: "cancelled", reply: cancelled });
+  });
+
+  it.each(["unsettled", "stale"] as const)("reports cancellation when the pre-send check would be %s", async status => {
+    const r = rig();
+    const settlement = deferred<boolean>();
+    const settling = deferred<void>();
+    let imports = 0;
+    await r.controller.reload();
+    const snapshot = r.controller.state.snapshot!;
+    cleanups.push(registerSettlement(() => { settling.resolve(); return settlement.promise; }));
+    r.audioImport(async () => { imports++; return applied; });
+    r.cancelAudio(async () => false);
+    const result = r.controller.importAudio(snapshot, input);
+    await settling.promise;
+    await r.controller.cancelMedia();
+    if (status === "stale") {
+      r.replaceSnapshot({ ...page(), revision: snapshot.revision + 1 });
+      await r.controller.reload();
+    }
+    settlement.resolve(status === "stale");
+    expect(await result).toEqual({ status: "cancelled" });
+    expect(imports).toBe(0);
+    expect(r.controller.state).toMatchObject({ media: null, cancelledMedia: "import", message: null });
+  });
+
   it("keeps a native-published edit when cancellation loses the race", async () => {
     const r = rig();
     const decode = deferred<ArrangementReply>();

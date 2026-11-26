@@ -19,7 +19,8 @@ export type PlaylistState = Readonly<{
   waveformVersions: ReadonlyMap<number, number>;
 }>;
 export type PlaylistResult =
-  | Readonly<{ status: "applied" | "refused" | "cancelled"; reply: ArrangementReply }>
+  | Readonly<{ status: "applied" | "refused"; reply: ArrangementReply }>
+  | Readonly<{ status: "cancelled"; reply?: ArrangementReply }>
   | Readonly<{ status: "stale" | "blocked" | "unsettled" }>
   | Readonly<{ status: "unpublished"; native: "applied" | "unknown"; message: string }>;
 export type PlaylistAdapter = Readonly<{
@@ -183,8 +184,15 @@ export class PlaylistController {
         const finish = this.adapter.beginTransition();
         let decoding: Promise<ArrangementReply>;
         try {
-          if (!await settleProjectEdits(this.settleMedia)) return { status: "unsettled" };
-          if (!current() || !this.value.snapshot || !stampEquals(stamp, this.value.snapshot)) return { status: "stale" };
+          const settled = await settleProjectEdits(this.settleMedia);
+          const isCurrent = current();
+          if (!settled || !isCurrent || !this.value.snapshot || !stampEquals(stamp, this.value.snapshot)) {
+            if (flight.cancelRequested) {
+              if (isCurrent) this.set({ ...this.value, cancelledMedia: kind });
+              return { status: "cancelled" };
+            }
+            return { status: settled ? "stale" : "unsettled" };
+          }
           invoked = true;
           decoding = invoke(stamp, flight.ticket);
         } finally {
@@ -198,9 +206,11 @@ export class PlaylistController {
           if (reply.generation !== stamp.generation || reply.revision < stamp.revision) throw new Error("Invalid native audio acknowledgement");
           if (reply.status === "refused") {
             const cancelled = flight.cancelRequested && mediaCancellationReasons.has(reply.message ?? "");
-            this.set({ ...this.value, requiresRefresh: reply.reload && reply.revision !== stamp.revision,
+            const requiresRefresh = reply.reload && reply.revision !== stamp.revision;
+            const cancelledMessage = requiresRefresh ? `The project changed during the audio ${kind}. Refresh the playlist.` : null;
+            this.set({ ...this.value, requiresRefresh,
               cancelledMedia: cancelled ? kind : null,
-              message: cancelled ? null : reply.message ?? (kind === "import" ? "The audio import was refused" : "The audio relink was refused") });
+              message: cancelled ? cancelledMessage : reply.message ?? (kind === "import" ? "The audio import was refused" : "The audio relink was refused") });
             return { status: cancelled ? "cancelled" : "refused", reply };
           }
           if (reply.status !== "applied" || !reply.changed || reply.revision <= stamp.revision) throw new Error("Invalid native audio outcome");

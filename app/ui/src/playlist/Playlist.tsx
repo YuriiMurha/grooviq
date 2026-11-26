@@ -63,6 +63,12 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
   const [relinkError, setRelinkError] = useState<{ generation: number; message: string } | null>(null);
   const [displayError, setDisplayError] = useState<string | null>(null);
   const canvas = useRef<HTMLCanvasElement>(null), scroll = useRef<HTMLDivElement>(null);
+  const restoreCancelFocus = useRef(false);
+  useEffect(() => {
+    if (state.media !== null || !restoreCancelFocus.current) return;
+    restoreCancelFocus.current = false;
+    if (document.activeElement === document.body && !isProjectReplacing() && !modalIsOpen()) canvas.current?.focus();
+  }, [state.media]);
   const renderer = useRef<PlaylistRenderer | null>(null), active = useRef<Active | null>(null);
   const draw = useRef<() => void>(() => {});
   const projection = useMemo(() => {
@@ -536,7 +542,10 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
       <span id="playlist-help">In Select, modifier-click toggles clips and a drag from empty space selects a box. Drag a group to move it or Alt-drag to copy it. Escape cancels.</span>
       <span aria-live="polite">{selectedIds.length} selected</span>
       <span role="status">{status}</span>
-      {state.media && <button type="button" disabled={state.cancelRequested} onClick={() => { void model.cancelMedia(); }}>Cancel</button>}
+      {state.media && <button type="button" disabled={state.cancelRequested} aria-label={state.media === "import" ? "Cancel audio import" : "Cancel audio relink"} onClick={event => {
+        restoreCancelFocus.current = event.detail === 0;
+        void model.cancelMedia();
+      }}>Cancel</button>}
     </div>
     <div className="playlist-selection"><label htmlFor="selected-playlist-clip">Selected clip</label><select id="selected-playlist-clip" aria-label="Selected playlist clip" value={selected ?? ""} disabled={state.busy || state.media !== null} onChange={event => { cancel(); setSelected(event.target.value ? { generation: snapshot?.generation ?? 0, ids: [Number(event.target.value)] } : null); }}><option value="">None</option>{clips.filter(clip => clip.id === selected || visibleIds.has(clip.id)).map(clip => <option key={clip.id} value={clip.id ?? ""}>{clip.name} · Track {clip.trackIndex + 1} · {clip.startTick} ticks</option>)}</select>
       <button type="button" aria-label={`${unmuteSelection ? "Unmute" : "Mute"} selected ${clipLabel}`} disabled={busy || !actionClips.length} onClick={() => { void selectedAction("mute"); }}>{unmuteSelection ? "Unmute" : "Mute"}</button>

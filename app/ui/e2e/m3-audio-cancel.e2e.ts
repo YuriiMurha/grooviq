@@ -63,8 +63,8 @@ async function openPlaylist(app: Page, mock: Mock) {
     args.event === "tauri://drag-leave").length).toBe(2);
   const box = await canvas.boundingBox();
   if (!box) throw new Error("Playlist canvas is unavailable");
-  return { playlist, point: { x: box.x + 60, y: box.y + 32 },
-    cancel: playlist.getByRole("button", { name: "Cancel", exact: true }),
+  return { playlist, canvas, point: { x: box.x + 60, y: box.y + 32 },
+    cancelImport: playlist.getByRole("button", { name: "Cancel audio import", exact: true }),
     selection: playlist.getByRole("combobox", { name: "Selected playlist clip" }) };
 }
 
@@ -74,7 +74,7 @@ test.afterEach(async ({ mock }) => {
 });
 
 test("cancels while reading and leaves the arrangement, history and selection intact", async ({ app, mock }) => {
-  const { playlist, point, cancel, selection } = await openPlaylist(app, mock);
+  const { playlist, canvas, point, cancelImport, selection } = await openPlaylist(app, mock);
   const before = await arrangement(app);
   const view = await projectView(app);
   const selected = await selection.inputValue();
@@ -84,11 +84,12 @@ test("cancels while reading and leaves the arrangement, history and selection in
   await mock.dropAudio(audio, point);
   const ticket = await ticketFor(mock, "audio_import");
   expect(await arrangement(app)).toEqual(before);
-  await cancel.click();
+  await cancelImport.press("Enter");
   await expect.poll(() => cancellationReplies(app)).toEqual([true]);
   await expect(playlist).toHaveAttribute("aria-busy", "true");
   await mock.releaseAudioRead(audio);
   await expect(playlist).toHaveAttribute("aria-busy", "false");
+  await expect(canvas).toBeFocused();
   await expect(playlist.getByRole("alert")).toHaveCount(0);
   await expect(selection).toHaveValue(selected);
   expect(await arrangement(app)).toEqual(before);
@@ -100,14 +101,14 @@ test("cancels while reading and leaves the arrangement, history and selection in
 });
 
 test("keeps an import that has already published and undoes it in one step", async ({ app, mock }) => {
-  const { playlist, point, cancel, selection } = await openPlaylist(app, mock);
+  const { playlist, point, cancelImport, selection } = await openPlaylist(app, mock);
   const { generation, revision } = await arrangement(app);
   await observeCancellation(app, true);
   await mock.dropAudio(audio, point);
   const ticket = await ticketFor(mock, "audio_import");
   await expect.poll(async () => (await arrangement(app)).clips.length).toBe(1);
   const imported = await arrangement(app);
-  await cancel.click();
+  await cancelImport.click();
   await expect.poll(() => cancellationReplies(app)).toEqual([false]);
   expect(await arrangement(app)).toEqual(imported);
   await app.evaluate(() => window.dispatchEvent(new Event("release-audio-import-reply")));
@@ -132,7 +133,7 @@ test.describe("a missing asset", () => {
     arrangement: { ...scene.arrangement, tracks: [track], clips: [clip], audioAssets: [asset], loopRegion: null } }, files: soundsFor(["Kick"]) } });
 
   test("cancels a relink while its decoder is held", async ({ app, mock }) => {
-    const { playlist, cancel, selection } = await openPlaylist(app, mock);
+    const { playlist, selection } = await openPlaylist(app, mock);
     const before = await arrangement(app);
     const view = await projectView(app);
     const { generation, revision } = before;
@@ -145,7 +146,7 @@ test.describe("a missing asset", () => {
     await relink.click();
     const ticket = await ticketFor(mock, "audio_relink");
     await expect.poll(async () => (await arrangement(app)).pendingRequests.length).toBe(1);
-    await cancel.click();
+    await playlist.getByRole("button", { name: "Cancel audio relink", exact: true }).click();
     await expect.poll(() => cancellationReplies(app)).toEqual([true]);
     await mock.releaseAudio(audio);
     await expect(relink).toBeEnabled();
