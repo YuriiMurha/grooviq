@@ -90,8 +90,17 @@ jobs:
       - name: Run workspace tests
         id: nextest
         run: cargo nextest run --workspace --all-features --profile ci
+      # App and project dev-dependencies enable grooviq-engine/test-hooks in --workspace builds.
+      # Add a separate -p lint for any crate that gains a test-only feature.
+      - name: Default-feature engine test lint
+        if: runner.os == 'macOS'
+        run: cargo clippy -p grooviq-engine --tests --locked -- -D warnings
+      - name: Default-feature no_alloc run
+        if: runner.os == 'macOS'
+        id: default_no_alloc
+        run: rm -f target/nextest/ci/junit.xml && cargo nextest run -p grooviq-engine --locked --test no_alloc --profile ci
       - name: Upload failed Rust test results
-        if: failure() && steps.nextest.outcome == 'failure'
+        if: failure() && (steps.default_no_alloc.outcome == 'failure' || steps.nextest.outcome == 'failure')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rust-junit-${{ runner.os }}-${{ github.run_attempt }}

@@ -1452,6 +1452,7 @@ fn a_plainly_added_routed_channel_gets_its_fade_route_and_must_be_routed() {
 }
 
 #[test]
+#[cfg(feature = "test-hooks")]
 fn retiring_an_older_graph_keeps_fades_of_the_newer_one() {
     let (mut c, mut p) = engine_with(
         EngineConfig { sample_rate: SR },
