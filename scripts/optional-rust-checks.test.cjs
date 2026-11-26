@@ -208,3 +208,104 @@ test("unknown workflow fails open without touching the PR API", async () => {
   assert.equal(await shouldRun(request("other", docs, { paginate })), true);
   assert.equal(called, false);
 });
+
+const batchRef = "refs/heads/merge-train/batch";
+const batchSha = "a".repeat(40);
+const batchRepo = { owner: "o", repo: "r" };
+
+function batch(files, overrides = {}) {
+  const compare = Symbol("compareCommitsWithBasehead");
+  return {
+    workflow: "rtsan", eventName: "push", ref: batchRef, after: batchSha, repo: batchRepo, load,
+    rest: {
+      repos: { compareCommitsWithBasehead: compare },
+      git: {
+        getRef: async params => {
+          assert.deepEqual(params, { ...batchRepo, ref: "heads/merge-train/batch" });
+          return { data: { object: { sha: batchSha } } };
+        },
+      },
+    },
+    paginate: async (method, params, map) => {
+      assert.equal(method, compare);
+      assert.deepEqual(params, { ...batchRepo, basehead: `main...${batchSha}`, per_page: 1 });
+      let done = false;
+      const result = map({ data: { files, total_commits: 3 } }, () => { done = true; });
+      assert.equal(done, true, "only the first compare page lists changed files");
+      return [].concat(result);
+    },
+    ...overrides,
+  };
+}
+
+test("RTSan compares the pushed batch SHA with main and classifies the changed files", async () => {
+  assert.equal(await shouldRun(batch([file("app/ui/src/App.tsx")])), false);
+  assert.equal(await shouldRun(batch([file("engine/src/lib.rs")])), true);
+  assert.equal(await shouldRun(batch([
+    { filename: "docs/new.md", status: "renamed", previous_filename: "engine/src/old.rs" },
+  ])), true);
+  assert.equal(await shouldRun(batch([file("scripts/optional-rust-checks.cjs")])), true);
+});
+
+test("other pushes and manual events bypass the batch compare", async () => {
+  for (const overrides of [
+    { ref: "refs/heads/main" }, { workflow: "perf" }, { eventName: "workflow_dispatch" },
+  ]) {
+    let compared = false;
+    const paginate = async () => { compared = true; return docs; };
+    assert.equal(await shouldRun(batch(docs, { ...overrides, paginate })), true);
+    assert.equal(compared, false);
+  }
+});
+
+test("missing, malformed and deleted batch SHAs run RTSan without comparing", async () => {
+  for (const after of [undefined, "invalid", "0".repeat(40)]) {
+    let compared = false;
+    const paginate = async () => { compared = true; return docs; };
+    assert.equal(await shouldRun(batch(docs, { after, paginate })), true);
+    assert.equal(compared, false);
+  }
+});
+
+test("batch compare and ref API errors run RTSan", async () => {
+  const denied = async () => { throw Error("GitHub API denied access"); };
+  assert.equal(await shouldRun(batch(docs, { paginate: denied })), true);
+  const args = batch(docs);
+  args.rest.git.getRef = denied;
+  assert.equal(await shouldRun(args), true);
+});
+
+test("truncated batch comparisons run RTSan", async () => {
+  for (const size of [299, 300, 301]) {
+    const files = Array.from({ length: size }, (_, i) => file(`app/ui/${i}.ts`));
+    assert.equal(await shouldRun(batch(files)), size >= 300);
+  }
+});
+
+test("missing and empty batch comparisons run RTSan", async () => {
+  const arrayLike = { 0: docs[0], length: 1, [Symbol.isConcatSpreadable]: true };
+  for (const files of [undefined, arrayLike, []]) {
+    assert.equal(await shouldRun(batch(files)), true);
+  }
+});
+
+test("a batch ref that moved or disappeared since the push runs RTSan", async () => {
+  for (const sha of ["b".repeat(40), undefined]) {
+    const args = batch(docs);
+    args.rest.git.getRef = async () => ({ data: { object: { sha } } });
+    assert.equal(await shouldRun(args), true);
+  }
+});
+
+test("RTSan rechecks the batch ref after the comparison", async () => {
+  const args = batch(docs);
+  let sha = batchSha;
+  const compare = args.paginate;
+  args.paginate = async (...params) => {
+    const files = await compare(...params);
+    sha = "b".repeat(40);
+    return files;
+  };
+  args.rest.git.getRef = async () => ({ data: { object: { sha } } });
+  assert.equal(await shouldRun(args), true);
+});

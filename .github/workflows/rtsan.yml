@@ -46,6 +46,8 @@ jobs:
             return await shouldRun({
               workflow: 'rtsan',
               eventName: context.eventName,
+              ref: context.ref,
+              after: context.payload.after,
               pullRequest: context.payload.pull_request,
               repo: context.repo,
               rest: github.rest,

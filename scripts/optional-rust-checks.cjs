@@ -25,6 +25,7 @@ const UNRELATED_FILES = new Set([
   ".gitattributes", ".gitignore", ".github/pull_request_template.md",
 ]);
 const FILE_STATUSES = new Set(["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"]);
+const BATCH_BRANCH = "merge-train/batch";
 const under = (path, dir) => path === dir || path.startsWith(`${dir}/`);
 
 function readCargoMetadata() {
@@ -78,19 +79,43 @@ function isInput(path, workflow, { inputs, workspaceDirs }) {
     !UNRELATED_DIRS.some(dir => under(path, dir));
 }
 
-async function shouldRun({ workflow, eventName, pullRequest, repo, rest, paginate, load = loadPolicy }) {
-  if (eventName !== "pull_request" || !Object.hasOwn(ROOT_PACKAGES, workflow)) return true;
-  try {
-    const args = { ...repo, pull_number: pullRequest.number };
-    const files = await paginate(rest.pulls.listFiles, { ...args, per_page: 100 });
-    // GitHub caps this endpoint at 3,000 files. Compare both snapshots before allowing a skip.
-    if (!Array.isArray(files) || !files.length || files.length >= 3000 ||
-        files.length !== pullRequest.changed_files) return true;
-    const { data: current } = await rest.pulls.get(args);
-    if (!pullRequest.head.sha || !pullRequest.base.sha ||
-        current.head.sha !== pullRequest.head.sha || current.base.sha !== pullRequest.base.sha ||
-        current.changed_files !== files.length) return true;
+async function listPullFiles({ pullRequest, repo, rest, paginate }) {
+  const args = { ...repo, pull_number: pullRequest.number };
+  const files = await paginate(rest.pulls.listFiles, { ...args, per_page: 100 });
+  // GitHub caps this endpoint at 3,000 files. Compare both snapshots before allowing a skip.
+  if (!Array.isArray(files) || !files.length || files.length >= 3000 ||
+      files.length !== pullRequest.changed_files) return null;
+  const { data: current } = await rest.pulls.get(args);
+  if (!pullRequest.head.sha || !pullRequest.base.sha ||
+      current.head.sha !== pullRequest.head.sha || current.base.sha !== pullRequest.base.sha ||
+      current.changed_files !== files.length) return null;
+  return files;
+}
 
+async function listBatchFiles({ after, repo, rest, paginate }) {
+  if (!/^[a-f0-9]{40}$/.test(after ?? "") || after === "0".repeat(40)) return null;
+  const files = await paginate(rest.repos.compareCommitsWithBasehead, {
+    ...repo, basehead: `main...${after}`, per_page: 1,
+  }, ({ data }, done) => {
+    // The first compare page lists files for the entire diff. Later pages only list commits.
+    done();
+    if (!Array.isArray(data.files)) throw Error("Missing compare file list");
+    return data.files;
+  });
+  // The compare API has a hard cap of 300 files and exposes no total file count.
+  if (files.length >= 300) return null;
+  const { data } = await rest.git.getRef({ ...repo, ref: `heads/${BATCH_BRANCH}` });
+  return data.object.sha === after ? files : null;
+}
+
+async function shouldRun(request) {
+  const { workflow, eventName, ref, load = loadPolicy } = request;
+  if (!Object.hasOwn(ROOT_PACKAGES, workflow)) return true;
+  const isBatchPush = workflow === "rtsan" && eventName === "push" && ref === `refs/heads/${BATCH_BRANCH}`;
+  if (eventName !== "pull_request" && !isBatchPush) return true;
+  try {
+    const files = await (isBatchPush ? listBatchFiles(request) : listPullFiles(request));
+    if (!files?.length) return true;
     const policy = load();
     const filenames = new Set();
     for (const file of files) {

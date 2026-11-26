@@ -8,7 +8,7 @@ name: perf
 
 on:
   push:
-    branches: [main, merge-train/batch]
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
