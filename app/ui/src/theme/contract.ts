@@ -11,6 +11,7 @@ export const THEME_COLOR_TOKENS = [
   "--roll-row", "--roll-row-black", "--roll-outside", "--roll-dim", "--roll-line", "--roll-beat", "--roll-bar",
   "--roll-select", "--roll-box", "--roll-playhead", "--roll-key-white", "--roll-key-black", "--roll-key-held", "--roll-key-scale",
   "--dev-osc1", "--dev-osc2", "--dev-filter", "--dev-amp", "--dev-lfo", "--dev-mix", "--dev-voice", "--dev-card",
+  "--solo",
 ] as const;
 
 const OFFSET_PATTERN = /^-?\d+(?:\.\d+)?(?:px)?$/;

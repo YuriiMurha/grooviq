@@ -12,6 +12,7 @@
   --select: #fffb73; /* the yellow lamp edge separates selection from mustard ink */
   --ok: #43d17a;
   --mute: var(--text);
+  --solo: var(--ink-1);
   --warn: #e29434;
   --error: #ff7b6e;
   /* The cap shadows from the lab are lifted and hue-shifted for slide fills. */

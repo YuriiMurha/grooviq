@@ -146,7 +146,11 @@
   border-color: var(--mute);
 }
 
-.mx-tool.solo[aria-pressed="true"],
+.mx-tool.solo[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--solo) 17%, var(--raised));
+  border-color: var(--solo);
+}
+
 .mx-bypass[aria-checked="true"] {
   background: color-mix(in srgb, var(--ok) 17%, var(--raised));
   border-color: var(--ok);

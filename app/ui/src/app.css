@@ -795,8 +795,8 @@ input[type="checkbox"] {
 }
 
 .solo[aria-pressed="true"] {
-  background: var(--ink-3);
-  border-color: var(--ink-3);
+  background: var(--solo);
+  border-color: var(--solo);
   color: var(--bg);
 }
 
