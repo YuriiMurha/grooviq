@@ -87,6 +87,34 @@ it.each([
   expect(publish.mock.lastCall?.[0]).toEqual([]);
 });
 
+it.each([
+  { change: "start", source: { sourceStart: 100 } },
+  { change: "end", source: { sourceEnd: 1500 } },
+  { change: "direction", source: { reverse: true } },
+])("drops the last waveform when the clip's source $change changes", async ({ source }) => {
+  const [target] = visibleWaveforms(arrangement, clips, view, new Set());
+  const fetch = vi.fn().mockResolvedValueOnce(packet).mockReturnValue(new Promise(() => {}));
+  const publish = vi.fn();
+  const loader = createWaveformLoader(fetch, publish);
+  loader.update(3, new Map(), [asset], [target]);
+  await vi.waitFor(() => expect(publish.mock.lastCall?.[0]).toHaveLength(1));
+  loader.update(3, new Map(), [asset], [{ ...target, content: { ...target.content, ...source }, key: { ...target.key, end: 800 } }]);
+  expect(publish.mock.lastCall?.[0]).toEqual([]);
+});
+
+it("drops a held waveform when the new bucket fails for another reason", async () => {
+  const [target] = visibleWaveforms(arrangement, clips, view, new Set());
+  const fetch = vi.fn().mockResolvedValueOnce(packet).mockRejectedValueOnce("Generated native failure");
+  const publish = vi.fn();
+  const loader = createWaveformLoader(fetch, publish);
+  loader.update(3, new Map(), [asset], [target]);
+  await vi.waitFor(() => expect(publish.mock.lastCall?.[0]).toHaveLength(1));
+  loader.update(3, new Map(), [asset], [{ ...target, key: { ...target.key, end: 800 } }]);
+  expect(publish.mock.lastCall?.[0]).toHaveLength(1);
+  await vi.waitFor(() => expect(publish.mock.lastCall?.[0]).toEqual([]));
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
 it("clears a held waveform when native reports its source was replaced", async () => {
   const [target] = visibleWaveforms(arrangement, clips, view, new Set());
   const fetch = vi.fn()

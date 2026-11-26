@@ -209,11 +209,14 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
         if (replacements !== projectGeneration()) return;
         const id = result.status === "applied" ? result.reply.createdIds.at(-1) : undefined;
         if (id !== undefined) setSelected({ generation: stamp.generation, ids: [id] });
-        if (result.status === "applied" && skipped > 0) {
-          const files = skipped === 1 ? "1 more file was skipped" : `${skipped} more files were skipped`;
-          notifyAudioDrop(`Imported ${input.name}. ${files}. Drop one audio file at a time.`);
-        } else if (result.status === "blocked" || result.status === "stale" || result.status === "unsettled") {
+        if (result.status === "blocked" || result.status === "stale" || result.status === "unsettled") {
           notifyAudioDrop("The playlist couldn’t accept audio. Try dropping it again.");
+        } else if (skipped > 0) {
+          // The first file's own outcome is shown elsewhere; always say the others were not tried.
+          const files = skipped === 1 ? "1 more file was skipped" : `${skipped} more files were skipped`;
+          notifyAudioDrop(result.status === "applied"
+            ? `Imported ${input.name}. ${files}. Drop one audio file at a time.`
+            : `${input.name} wasn’t imported, and ${files}. Drop one audio file at a time.`);
         }
       });
     },

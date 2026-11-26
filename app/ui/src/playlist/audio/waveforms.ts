@@ -46,7 +46,11 @@ export function createWaveformLoader(fetch: (request: Request) => Promise<Packet
       if (entry?.packet) return [{ ...target, packet: entry.packet }];
       if (!entry || entry.failed || invalidated?.has(target.key.asset)) return [];
       const last = previous.get(target.clip.id);
-      return last && last.key.generation === target.key.generation && last.key.asset === target.key.asset
+      // A held packet maps frames through the clip's source range, so it must match exactly or
+      // bars would land outside a trimmed or reversed clip.
+      return last && last.key.generation === target.key.generation && last.key.asset === target.key.asset &&
+        last.content.sourceStart === target.content.sourceStart && last.content.sourceEnd === target.content.sourceEnd &&
+        last.content.reverse === target.content.reverse
         ? [{ ...target, packet: last.packet }] : [];
     });
     if (displayed.length === rows.length && displayed.every((row, index) =>

@@ -32,8 +32,17 @@ const playback = (cmd: string, args: Record<string, unknown>) =>
 const editCommands = ["audio_import", "audio_relink", "audio_cancel", "audio_cancel_ticket", "arrangement_edit",
   "arrangement_waveform", "arrangement_history", "channel_add", "project_save", "project_save_as", "project_open", "project_new"];
 
+// The UI picks a fresh random ticket per import or relink (#629); pin its range, then compare
+// every other argument exactly.
+function withoutTicket(cmd: string, args: Record<string, unknown>) {
+  if ((cmd !== "audio_import" && cmd !== "audio_relink") || !("ticket" in args)) return args;
+  const { ticket, ...rest } = args;
+  expect(Number.isSafeInteger(ticket) && (ticket as number) > 0).toBe(true);
+  return rest;
+}
+
 async function edits(mock: Mock) {
-  return (await mock.calls()).filter(({ cmd }) => editCommands.includes(cmd)).map(({ cmd, args }) => ({ cmd, args }));
+  return (await mock.calls()).filter(({ cmd }) => editCommands.includes(cmd)).map(({ cmd, args }) => ({ cmd, args: withoutTicket(cmd, args) }));
 }
 
 async function displayedFrames(app: Page) {
@@ -72,7 +81,7 @@ async function emitDrop(mock: Mock, paths: string[], position: { x: number; y: n
 }
 
 const dropMessages = (app: Page) => app.getByRole("status", { name: "Messages" });
-const importArgs = async (mock: Mock) => (await mock.calls("audio_import")).map(({ args }) => args);
+const importArgs = async (mock: Mock) => (await mock.calls("audio_import")).map(({ args }) => withoutTicket("audio_import", args));
 
 test("drops one snapped edit, renders a waveform, and saves and reopens it", async ({ app, mock }) => {
   const { playlist, canvas, point } = await openPlaylist(app, mock);
@@ -171,6 +180,25 @@ test("discarding into New retires a held import before the decode finishes", asy
   await displayedFrames(app);
   expect(await arrangement(app)).toMatchObject({ generation: generation + 1, clips: [], audioAssets: [], pendingRequests: [] });
   expect(await ipc<ProjectView>(app, "project_view")).toMatchObject({ dirty: false, projectCanUndo: false, projectCanRedo: false });
+  expect(await edits(mock)).toEqual([importCall({ generation, revision }), call("project_new")]);
+});
+
+test("a multi-file drop retired by New reports nothing about skipped files", async ({ app, mock }) => {
+  const { playlist, point } = await openPlaylist(app, mock);
+  const { generation, revision } = await arrangement(app);
+  const other = "/qa/audio/Other.wav";
+  await mock.registerAudio(audio, bytes);
+  await mock.registerAudio(other, bytes);
+  await mock.holdAudio(audio);
+  await emitDrop(mock, [audio, other], point);
+  await expect.poll(async () => (await arrangement(app)).pendingRequests.length).toBe(1);
+  await app.keyboard.press("ControlOrMeta+n");
+  await app.getByRole("dialog", { name: "Save changes?" }).getByRole("button", { name: "Don't save" }).click();
+  await expect.poll(async () => (await mock.view()).generation).toBe(generation + 1);
+  await mock.releaseAudio(audio);
+  await expect(playlist.getByRole("status")).toHaveText("0 clips");
+  await displayedFrames(app);
+  await expect(dropMessages(app)).toBeEmpty();
   expect(await edits(mock)).toEqual([importCall({ generation, revision }), call("project_new")]);
 });
 

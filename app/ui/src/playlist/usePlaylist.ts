@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import { arrangementEdit, arrangementSeek, arrangementView, audioImport, audioRelink } from "../api/arrangement";
+import { nextMediaTicket } from "./audio/mediaTicket";
 import { patternEdit, patternList } from "../api/patterns";
 import { projectView, type ProjectView } from "../api/project";
 import type { ProjectStamp } from "../project/context";
@@ -27,7 +28,8 @@ class SessionPlaylistBinding {
       current, blocked: isProjectReplacing, seekBlocked: modalIsOpen, beginTransition: beginProjectTransition,
       enqueueRead: command => this.session.enqueue(command),
       enqueueMutation: command => this.session.enqueueMutation(command),
-      seek: arrangementSeek, readPage: arrangementView, readPatterns: patternList, edit: arrangementEdit, importAudio: audioImport, relinkAudio: audioRelink, readProject: projectView,
+      seek: arrangementSeek, readPage: arrangementView, readPatterns: patternList, edit: arrangementEdit, importAudio: (stamp, input) => audioImport(stamp, { ...input, ticket: nextMediaTicket() }),
+      relinkAudio: (stamp, asset, path) => audioRelink(stamp, asset, path, nextMediaTicket()), readProject: projectView,
       selectPattern: (base, pattern) => patternEdit(base, { kind: "select", pattern }),
       publishProject: (view, at) => {
         if (!current(at) || view.generation !== at.generation) return false;
