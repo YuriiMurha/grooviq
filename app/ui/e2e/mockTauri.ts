@@ -1580,25 +1580,48 @@ export function installMockTauri(seed: MockSeed): void {
         }
         return value as Record<string, unknown>;
       };
-      const integerField = (value: unknown, width: "u32" | "u64"): number => {
-        const max = width === "u32" ? 0xffffffff : 2 ** 64;
-        if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= max) return value;
+      const integerMax = { u8: 255, u32: 0xffffffff, u64: 2 ** 64, usize: 2 ** 64 };
+      const integerField = (value: unknown, width: keyof typeof integerMax): number => {
+        if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= integerMax[width]) return value;
         const kind = typeof value === "number" && Number.isInteger(value) ? "value" : "type";
         throw `invalid ${kind}: ${serdeType(value)}, expected ${width}`;
       };
+      const u8 = (value: unknown) => integerField(value, "u8");
+      const u32 = (value: unknown) => integerField(value, "u32");
+      const u64 = (value: unknown) => integerField(value, "u64");
+      const usize = (value: unknown) => integerField(value, "usize");
       const stringField = (value: unknown): string => {
         if (typeof value === "string") return value;
         throw `invalid type: ${serdeType(value)}, expected a string`;
       };
+      const booleanField = (value: unknown): boolean => {
+        if (typeof value === "boolean") return value;
+        throw `invalid type: ${serdeType(value)}, expected a boolean`;
+      };
+      const floatField = (value: unknown): number => {
+        if (typeof value === "number") return Math.fround(value);
+        throw `invalid type: ${serdeType(value)}, expected f32`;
+      };
+      const namedFields = <Decoders extends Record<string, (value: unknown) => unknown>>(
+        fields: Record<string, unknown>, decoders: Decoders, nonNullable: readonly (keyof Decoders)[],
+      ) => {
+        const decoded: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(fields)) {
+          if (Object.hasOwn(decoders, key) && (value !== null || nonNullable.includes(key))) {
+            decoded[key] = decoders[key](value);
+          }
+        }
+        return decoded as { [Key in keyof Decoders]?: ReturnType<Decoders[Key]> };
+      };
       const automationTarget = (value: unknown): MockAutomationTarget => {
-        const target = record(value);
-        const type = stringField(required(target.type, "type"));
-        const channel = integerField(required(target.channel, "channel"), "u32");
-        const instrument = target.instrument == null ? undefined : stringField(target.instrument);
-        const param = target.param == null ? undefined : stringField(target.param);
+        const fields = namedFields(record(value), {
+          type: stringField, channel: u32, instrument: stringField, param: stringField,
+        }, ["type", "channel"]);
+        const type = required(fields.type, "type");
+        const channel = required(fields.channel, "channel");
         if (type === "channelVolume" || type === "channelPan") return { type, channel };
         if (type === "instrumentParam") {
-          return { type, channel, instrument: required(instrument, "instrument"), param: required(param, "param") };
+          return { type, channel, instrument: required(fields.instrument, "instrument"), param: required(fields.param, "param") };
         }
         throw `unknown variant \`${type}\`, expected one of \`channelVolume\`, \`channelPan\`, \`instrumentParam\``;
       };
@@ -1607,48 +1630,86 @@ export function installMockTauri(seed: MockSeed): void {
         return value.map((entry: unknown, index): CurvePoint => {
           if (index === maxCurvePoints) throw "arrangement list limit exceeded";
           const point = record(entry);
-          const tick = integerField(required(point.tick, "tick"), "u64");
-          const rawValue = required(point.value, "value");
-          if (typeof rawValue !== "number") throw `invalid type: ${serdeType(rawValue)}, expected f32`;
-          const mode = stringField(required(point.mode, "mode"));
-          if (mode !== "linear" && mode !== "hold") throw `unknown variant \`${mode}\`, expected \`linear\` or \`hold\``;
+          let tick: number | undefined, pointValue: number | undefined, mode: CurvePoint["mode"] | undefined;
+          for (const key of Object.keys(point)) {
+            if (key === "tick") tick = u64(point[key]);
+            else if (key === "value") pointValue = floatField(point[key]);
+            else if (key === "mode") {
+              const segment = stringField(point[key]);
+              if (segment !== "linear" && segment !== "hold") {
+                throw `unknown variant \`${segment}\`, expected \`linear\` or \`hold\``;
+              }
+              mode = segment;
+            }
+          }
+          const decoded = { tick: required(tick, "tick"), value: required(pointValue, "value"), mode: required(mode, "mode") };
           if (++requestedAutomationPoints > maxTotalPoints) throw "total automation point limit exceeded";
-          return { tick, value: Math.fround(rawValue), mode };
+          return decoded;
         });
       };
-      const automationContent = (fields: Record<string, unknown>): MockAutomationContent => ({
-        type: "automation",
-        target: automationTarget(required(fields.target ?? undefined, "target")),
-        priority: integerField(required(fields.priority ?? undefined, "priority"), "u32"),
-        offsetTick: integerField(required(fields.offsetTick ?? undefined, "offsetTick"), "u32"),
-        lengthTicks: integerField(required(fields.lengthTicks ?? undefined, "lengthTicks"), "u64"),
-        points: automationPoints(required(fields.points ?? undefined, "points")),
-      });
-      // Decode automation fields for the whole request before checking its stamp or applying
-      // any operation. Native also counts point fields on operations that don't use them.
+      const contentFields = {
+        type: stringField, pattern: u32, offsetTick: u32, lengthTicks: u64,
+        asset: u32, sourceStart: u64, sourceEnd: u64, gain: floatField, reverse: booleanField, fadeIn: u64, fadeOut: u64,
+        target: automationTarget, priority: u32, points: automationPoints,
+      };
+      const decodeContent = (value: unknown): MockAutomationContent | undefined => {
+        const fields = namedFields(record(value), contentFields, ["type"]);
+        const type = required(fields.type, "type");
+        if (type === "pattern") {
+          required(fields.pattern, "pattern");
+          required(fields.offsetTick, "offsetTick");
+          required(fields.lengthTicks, "lengthTicks");
+          return undefined;
+        }
+        if (type === "audio") {
+          for (const key of ["asset", "sourceStart", "sourceEnd", "gain", "reverse", "fadeIn", "fadeOut"] as const) {
+            required(fields[key], key);
+          }
+          return undefined;
+        }
+        if (type !== "automation") throw `unknown variant \`${type}\`, expected one of \`pattern\`, \`audio\`, \`automation\``;
+        return {
+          type, target: required(fields.target, "target"), priority: required(fields.priority, "priority"),
+          offsetTick: required(fields.offsetTick, "offsetTick"), lengthTicks: required(fields.lengthTicks, "lengthTicks"),
+          points: required(fields.points, "points"),
+        };
+      };
+      const regionFields = { startTick: u64, endTick: u64, enabled: booleanField };
+      const decodeRegion = (value: unknown) => {
+        // Native deserializes LoopRegion directly, so it also accepts the struct's tuple form.
+        if (Array.isArray(value)) {
+          if (value.length !== 3) throw `invalid length ${value.length}, expected struct LoopRegion with 3 elements`;
+          return { startTick: u64(value[0]), endTick: u64(value[1]), enabled: booleanField(value[2]) };
+        }
+        const fields = namedFields(record(value), regionFields, ["startTick", "endTick", "enabled"]);
+        return {
+          startTick: required(fields.startTick, "startTick"),
+          endTick: required(fields.endTick, "endTick"),
+          enabled: required(fields.enabled, "enabled"),
+        };
+      };
+      const editFields = {
+        kind: stringField, name: stringField, color: u8, track: u32, trackOperation: usize,
+        mute: booleanField, muted: booleanField, startTick: u64, content: decodeContent, clip: u32,
+        tick: u64, audioFirstFrames: u64, asset: u32, points: automationPoints, target: automationTarget,
+        priority: u32, region: decodeRegion,
+      };
+      // Native streams all supplied EditFields before selecting an operation or checking its stamp.
       const decoded = operations.map((rawOperation: unknown, index) => {
         if (index === 100_000) throw "Arrangement operation limit";
         const op = record(rawOperation);
-        const isAutomationEdit = op.kind === "setAutomationPoints" || op.kind === "setAutomationClip";
-        let clipId: number | undefined;
-        let content: MockAutomationContent | undefined;
-        let points: CurvePoint[] | undefined;
-        let target: MockAutomationTarget | undefined;
-        let priority: number | undefined;
-        for (const [key, value] of Object.entries(op)) {
-          if (value == null) continue;
-          if (key === "clip" && isAutomationEdit) clipId = integerField(value, "u32");
-          if (key === "content" && (value as { type?: unknown }).type === "automation") content = automationContent(record(value));
-          if (key === "points") points = automationPoints(value);
-          if (key === "target") target = automationTarget(value);
-          if (key === "priority") priority = integerField(value, "u32");
+        const fields = namedFields(op, editFields, ["kind"]);
+        const kind = required(fields.kind, "kind");
+        if (kind === "setAutomationPoints") {
+          required(fields.clip, "clip");
+          required(fields.points, "points");
+        } else if (kind === "setAutomationClip") {
+          required(fields.clip, "clip");
+          required(fields.target, "target");
+          required(fields.priority, "priority");
         }
-        if (isAutomationEdit) {
-          required(clipId, "clip");
-          if (op.kind === "setAutomationPoints") required(points, "points");
-          else { required(target, "target"); required(priority, "priority"); }
-        }
-        return { op, content, points, target, priority };
+        const { content, points, target, priority, region } = fields;
+        return { op, content, points, target, priority, region };
       });
       workspaceStamp(args); saveActivePattern();
       if (s.project.patternClips?.length) throw "Legacy clip records are outside the finite playlist fixture";
@@ -1692,14 +1753,14 @@ export function installMockTauri(seed: MockSeed): void {
         if (!result) throw `Unknown clip ${id}`;
         return result;
       };
-      decoded.forEach(({ op, content: decodedContent, points, target: decodedTarget, priority: decodedPriority }, index) => {
+      decoded.forEach(({ op, content: decodedContent, points, target: decodedTarget, priority: decodedPriority, region }, index) => {
         if (op.kind === "setLoop") {
           if (op.region === null) arrangement.loopRegion = null;
           else {
-            const region = op.region as Record<string, unknown>;
-            const startTick = int(region.startTick), endTick = int(region.endTick);
-            if (startTick >= endTick || typeof region.enabled !== "boolean") throw "Invalid loop region";
-            arrangement.loopRegion = { startTick, endTick, enabled: region.enabled };
+            const bounds = required(region, "region");
+            const startTick = int(bounds.startTick), endTick = int(bounds.endTick);
+            if (startTick >= endTick) throw "Invalid loop region";
+            arrangement.loopRegion = { startTick, endTick, enabled: bounds.enabled };
           }
         } else if (op.kind === "createTrack") {
           const id = allocate(); arrangement.tracks.push({ id, name: name(op.name), color: int(op.color, 5), mute: false }); ids.push(id); tracksByOperation.set(index, id);

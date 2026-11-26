@@ -759,6 +759,24 @@ fn automation_edit_steps() -> Vec<Value> {
             overflowing["content"]["lengthTicks"] = json!(u64::MAX);
             edit_at(8, 4, vec![overflowing])
         },
+        // EditFields validates supplied fields even when the selected operation ignores them.
+        {
+            let mut invalid_color = points(3, vec![point(100, 0.4, "linear")]);
+            invalid_color["color"] = json!(256);
+            edit_at(8, 4, vec![invalid_color])
+        },
+        // Keep the invalid mode first in the original JSON. Decoding precedes the stale stamp.
+        step(
+            "arrangement_edit",
+            json!({"generation":8,"revision":0,"editsJson":
+                r#"[{"kind":"setAutomationPoints","clip":3,"points":[{"mode":"step","tick":-1,"value":0.2}]}]"#}),
+        ),
+        // Optional loop data still uses its native decoder even when the operation ignores it.
+        {
+            let mut unused_region = points(3, vec![]);
+            unused_region["region"] = json!([0, 960, true]);
+            edit_at(8, 4, vec![unused_region])
+        },
     ]
 }
 

@@ -5995,6 +5995,45 @@
         "status": "refused",
         "warnings": []
       }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": "invalid value: integer `256`, expected u8 at line 1 column 22",
+        "reload": true,
+        "request": null,
+        "revision": 4,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": "unknown variant `step`, expected `linear` or `hold` at line 1 column 64",
+        "reload": true,
+        "request": null,
+        "revision": 4,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 4,
+        "status": "applied",
+        "warnings": []
+      }
     }
   ],
   "files": {
@@ -8182,6 +8221,30 @@
     {
       "args": {
         "editsJson": "[{\"content\":{\"lengthTicks\":18446744073709551615,\"offsetTick\":100,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.5}],\"priority\":0,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Large curve\",\"startTick\":8000,\"track\":2}]",
+        "generation": 8,
+        "revision": 4
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"color\":256,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"linear\",\"tick\":100,\"value\":0.4}]}]",
+        "generation": 8,
+        "revision": 4
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"kind\":\"setAutomationPoints\",\"clip\":3,\"points\":[{\"mode\":\"step\",\"tick\":-1,\"value\":0.2}]}]",
+        "generation": 8,
+        "revision": 0
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[],\"region\":[0,960,true]}]",
         "generation": 8,
         "revision": 4
       },
