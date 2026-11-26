@@ -425,7 +425,7 @@ input[type="checkbox"] {
   background: var(--well);
   border-right: 1px solid var(--line);
   color: var(--faint);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   text-align: right;
 }
@@ -481,7 +481,7 @@ input[type="checkbox"] {
   background: var(--roll-key-white);
   border-bottom: 1px solid rgba(14, 17, 39, 0.25);
   color: var(--bg);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1;
 }
