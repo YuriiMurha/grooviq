@@ -1,35 +1,60 @@
-/** Read a flat theme rule from source, before the CSS build rewrites values. */
+/** Read a theme file's single flat rule before the CSS build rewrites values. */
 export function parseThemeDeclarations(css: string, selector: string): Map<string, string> {
   const declarations = new Map<string, string>();
-  const source = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  let depth = 0;
+  const groups: string[] = [];
   let start = 0;
+  let statement = "";
   let inThemeRule = false;
-  // Strings can contain braces or semicolons without starting a rule or ending a declaration.
-  for (const { 1: delimiter, index } of source.matchAll(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|([{};])/gs)) {
-    if (!delimiter) continue;
-    const statement = source.slice(start, index).trim();
-    start = index + 1;
-    if (delimiter === "{") {
-      if (inThemeRule) throw new Error(`${selector} must not contain nested blocks`);
-      if (statement.replaceAll("'", '"').replace(/\s*=\s*/g, "=") === selector) {
-        if (depth !== 0) throw new Error(`${selector} must be a top-level rule`);
-        inThemeRule = true;
-      }
-      depth++;
+  let seenThemeRule = false;
+  // Match strings as units so punctuation inside them never starts a comment or splits a declaration.
+  const syntax = /(\/\*.*?\*\/)|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\\.|([{};()[\]])/gs;
+  for (const match of css.matchAll(syntax)) {
+    const [token, comment, delimiter] = match;
+    // Let the next structural token collect the whole quoted or escaped value.
+    if (!comment && !delimiter) continue;
+    if (delimiter === "(" || delimiter === "[") {
+      groups.push(delimiter === "(" ? ")" : "]");
       continue;
     }
-    if (inThemeRule) {
-      const declaration = /^(--[\w-]+)\s*:\s*(.*)$/s.exec(statement);
-      if (declaration) declarations.set(declaration[1], declaration[2]);
+    if (delimiter === ")" || delimiter === "]") {
+      if (groups.pop() !== delimiter) throw new Error(`Unbalanced delimiters while reading ${selector}`);
+      continue;
     }
-    if (delimiter === "}") {
-      inThemeRule = false;
-      depth--;
-      if (depth < 0) throw new Error(`Unbalanced braces while reading ${selector}`);
+    if (delimiter === ";" && groups.length) continue;
+    const { index } = match;
+    statement += css.slice(start, index);
+    start = index + token.length;
+    if (comment) statement += " ";
+    if (!delimiter) continue;
+    const text = statement.trim();
+    statement = "";
+    if (delimiter === "{") {
+      if (inThemeRule) throw new Error(`${selector} must not contain nested blocks`);
+      if (text.replaceAll("'", '"').replace(/\s*=\s*/g, "=") !== selector) {
+        throw new Error(`${selector} must be a top-level rule; unexpected selector ${JSON.stringify(text)}`);
+      }
+      if (seenThemeRule) throw new Error(`${selector} must be the only rule`);
+      seenThemeRule = true;
+      inThemeRule = true;
+      continue;
     }
+    if (!inThemeRule) {
+      if (delimiter === "}") throw new Error(`Unbalanced braces while reading ${selector}`);
+      throw new Error(`Unexpected top-level statement ${JSON.stringify(text)} while reading ${selector}`);
+    }
+    if (groups.length) throw new Error(`Unbalanced delimiters while reading ${selector}`);
+    const declaration = /^(--[\w-]+)\s*:\s*(.*)$/s.exec(text);
+    if (declaration) {
+      const [, name, value] = declaration;
+      if (/!\s*important$/i.test(value)) throw new Error(`${selector} ${name} must not use !important`);
+      declarations.set(name, value);
+    }
+    if (delimiter === "}") inThemeRule = false;
   }
-  if (depth !== 0) throw new Error(`Unbalanced braces while reading ${selector}`);
+  if (inThemeRule || groups.length) throw new Error(`Unclosed theme rule or group while reading ${selector}`);
+  const trailing = (statement + css.slice(start)).trim();
+  if (trailing) throw new Error(`Unexpected top-level statement ${JSON.stringify(trailing)} while reading ${selector}`);
+  if (!seenThemeRule) throw new Error(`Missing theme rule ${selector}`);
   return declarations;
 }
 

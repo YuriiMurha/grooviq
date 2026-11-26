@@ -4,26 +4,60 @@ import { REQUIRED_THEME_TOKENS, themeTokenProblems } from "./contract";
 import { DEFAULT_THEME, themes } from "./preference";
 import { parseThemeDeclarations, resolveThemeDeclarations } from "./themeSource";
 
-test("reads custom properties from the selected rule, including multiline values", () => {
+const testSelector = ':root[data-theme="test"]';
+
+test("reads custom properties from the theme rule, including multiline values", () => {
   const declarations = parseThemeDeclarations(`
     /* :root[data-theme="test"] { --ink: ignored; } */
-    :root { --other: ignored; }
     :root[data-theme='test'] {
       --ink: #123; --paper: #456; /* --ignored: #789; */
       --font: "Name {with; punctuation}", sans-serif;
+      --grouped: example([name; --ignored: #abc]);
       --shadow: 0 20px 40px rgba(0, 0, 0, 0.5),
         0 0 0 1px var(--ink)
     }
-  `, ':root[data-theme="test"]');
+  `, testSelector);
   expect(declarations).toEqual(new Map([
     ["--ink", "#123"],
     ["--paper", "#456"],
     ["--font", '"Name {with; punctuation}", sans-serif'],
+    ["--grouped", "example([name; --ignored: #abc])"],
     ["--shadow", "0 20px 40px rgba(0, 0, 0, 0.5),\n        0 0 0 1px var(--ink)"],
   ]));
 });
 
-const testSelector = ':root[data-theme="test"]';
+test("keeps comment markers and intervening declarations inside quoted values", () => {
+  const css = `${testSelector} { --font: "a/*b"; --ink: #123; --mark: '*/'; }`;
+  expect(parseThemeDeclarations(css, testSelector)).toEqual(new Map([
+    ["--font", '"a/*b"'],
+    ["--ink", "#123"],
+    ["--mark", "'*/'"],
+  ]));
+});
+
+test.each([
+  ":root[data-theme=test]",
+  'html[data-theme="test"]',
+  `${testSelector}, :root`,
+])("rejects an extra rule with selector %s", (extraSelector) => {
+  const css = `${testSelector} { --ink: #123; } ${extraSelector} { --ink: #456; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`unexpected selector ${JSON.stringify(extraSelector)}`);
+});
+
+test("rejects a second rule with the same selector", () => {
+  const css = `${testSelector} { --ink: #123; } ${testSelector} { --ink: #456; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`${testSelector} must be the only rule`);
+});
+
+test("rejects imports before the theme rule", () => {
+  const css = `@import "palette.css"; ${testSelector} { --ink: #123; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow("Unexpected top-level statement");
+});
+
+test("rejects an important value that would bypass a later override", () => {
+  const css = `${testSelector} { --ink: oklch(0.7 0.1 20) !important; --ink: #123; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow("--ink must not use !important");
+});
 
 test("rejects a theme selector inside a conditional rule", () => {
   const css = `@media (prefers-color-scheme: light) { ${testSelector} { --ink: #123; } }`;
