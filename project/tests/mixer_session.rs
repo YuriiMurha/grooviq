@@ -423,7 +423,7 @@ fn an_audio_track_move_keeps_its_bank_and_follows_the_new_route() {
     assert!(bank.shares_bank(&moved));
     assert_eq!(moved.tracks(), vec![(5, 3)]);
     let routed = sound(&session);
-    for (frame, samples) in routed.chunks_exact(2).enumerate() {
+    for (frame, samples) in routed.as_chunks::<2>().0.iter().enumerate() {
         let expected = f32::from(pcm_sample(frame)) / 32_768.0 * 0.708_785_8;
         assert!((samples[0] - expected).abs() < 1e-6, "frame {frame}");
         assert_eq!(samples[1], 0.0, "frame {frame}");
@@ -606,8 +606,14 @@ fn a_held_instrument_survives_routing_and_another_source_addition() {
     }
     let mut after = [0.0_f32; 1024];
     processor.process(&mut after, 2);
-    assert!(after.chunks_exact(2).any(|frame| frame[1].abs() > 0.001));
-    assert!(after.chunks_exact(2).all(|frame| frame[0] == 0.0));
+    assert!(
+        after
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|frame| frame[1].abs() > 0.001)
+    );
+    assert!(after.as_chunks::<2>().0.iter().all(|frame| frame[0] == 0.0));
     assert!(
         session.project().patterns[0].notes.is_empty(),
         "a live voice supplied the sound"
