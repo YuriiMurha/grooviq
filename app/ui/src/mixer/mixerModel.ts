@@ -142,8 +142,8 @@ export function unsupportedReason(unsupported: MixerProps["unsupported"], type: 
   }
 }
 
-/** A native select's placeholder value must not collide with a host's opaque id. */
-export function placeholderValue(options: readonly MixerOption[]): string {
+/** The detector's local None choice must not collide with a host's opaque id. */
+export function unusedOptionId(options: readonly MixerOption[]): string {
   const ids = new Set(options.map(({ id }) => id));
   let value = "";
   while (ids.has(value)) value += " ";
@@ -154,8 +154,7 @@ export function placeholderValue(options: readonly MixerOption[]): string {
 export function outputChoices(options: readonly MixerOption[], outputId: string | null, nodes: ReadonlyMap<string, { name: string }>) {
   const current = outputId === null ? undefined : options.find((option) => option.id === outputId);
   const label = current?.name ?? (outputId === null ? "Unassigned" : nodes.get(outputId)?.name ?? "Unavailable output");
-  const placeholder = current ? undefined : placeholderValue(options);
-  return { options, label, placeholder, value: current?.id ?? placeholder };
+  return { options, label };
 }
 
 /** The host supplies route choices. The picker also hides destinations already used in this strip. */

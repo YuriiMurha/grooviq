@@ -2,7 +2,6 @@
 
 const PATHS = {
   route: "M4 13V5H12M9 2L12 5L9 8M4 10H8",
-  chevron: "M3 6L8 11L13 6",
   arrow: "M2 8H13M9 4L13 8L9 12",
   up: "M8 13V3M4 7L8 3L12 7",
   down: "M8 3V13M4 9L8 13L12 9",
