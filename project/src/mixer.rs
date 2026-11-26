@@ -287,8 +287,11 @@ pub enum MixerError {
     IdentityRouted,
     /// An id counter is used up.
     IdsUsedUp(&'static str),
+    /// The runtime cannot apply this track's mute or solo state.
     UnsupportedTrackControls(u32),
+    /// The runtime cannot bypass this insert.
     UnsupportedBypass(u32),
+    /// The runtime cannot prepare this insert with a supported declaration.
     UnsupportedInsert(u32),
 }
 

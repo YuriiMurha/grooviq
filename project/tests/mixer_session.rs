@@ -3,7 +3,7 @@ use grooviq_project::{
     AudioAsset, Clip, ClipContent, Loaded, PlayMode, PlaylistTrack, Project, SampleFile, SampleRef,
     arrangement_edit::ArrangementEdit,
     engine_state,
-    mixer::{Assignment, Level, Mixer, Mode, SourceKey, Track},
+    mixer::{Assignment, Level, Mixer, Mode, Send, SourceKey, Tap, Track},
     mixer_edit::{CreatedId, IdRef, MixerEdit as Op},
     session::Session,
 };
@@ -52,7 +52,24 @@ fn routed_state_keeps_source_namespaces_and_expands_master_defaults() {
             source: SourceKey::Channel(7),
             destination: 1,
         }],
+        sends: vec![
+            Send {
+                id: 1,
+                from: 1,
+                to: 0,
+                tap: Tap::Pre,
+                gain: 0.5,
+            },
+            Send {
+                id: 2,
+                from: 1,
+                to: 0,
+                tap: Tap::Post,
+                gain: 0.25,
+            },
+        ],
         next_track_id: 2,
+        next_send_id: 3,
         ..Mixer::default()
     };
     let state = engine_state(&project, &HashMap::new()).unwrap();
@@ -72,15 +89,62 @@ fn routed_state_keeps_source_namespaces_and_expands_master_defaults() {
     let fader = mix.gains.iter().find(|g| g.track.0 == 1).unwrap();
     assert!((fader.left - 0.708_785_8).abs() < 1e-6);
     assert_eq!(fader.right, 0.0);
-    engine::render_offline_with(
-        engine::EngineConfig {
-            sample_rate: 48000.0,
-        },
-        engine_state(&project, &HashMap::new()).unwrap(),
-        &[],
-        64,
-        32,
+    assert_eq!(
+        mix.mixer.sends,
+        [
+            live::Send {
+                id: live::SendId(1),
+                from: live::MixerTrackId(1),
+                to: live::MASTER,
+                tap: live::Tap::PreFader,
+                gain: 0.5,
+            },
+            live::Send {
+                id: live::SendId(2),
+                from: live::MixerTrackId(1),
+                to: live::MASTER,
+                tap: live::Tap::PostFader,
+                gain: 0.25,
+            },
+        ]
     );
+
+    let note_id = engine::NoteId::live();
+    let render = |project: &Project| {
+        engine::render_offline_with(
+            engine::EngineConfig {
+                sample_rate: 48_000.0,
+            },
+            engine_state(project, &HashMap::new()).unwrap(),
+            &[(
+                0,
+                engine::Command::ChannelNote {
+                    channel: engine::ChannelId(7),
+                    key: 60,
+                    velocity: 0.5,
+                    on: true,
+                    id: note_id,
+                },
+            )],
+            512,
+            64,
+        )
+    };
+    let with_both = render(&project);
+    project.mixer.sends.pop();
+    let with_pre = render(&project);
+    project.mixer.sends.clear();
+    let dry = render(&project);
+    let pre = with_pre.as_chunks::<2>().0;
+    let both = with_both.as_chunks::<2>().0;
+    assert!(pre.iter().any(|f| f[1].abs() > 0.001));
+    assert!(dry.as_chunks::<2>().0.iter().all(|f| f[1] == 0.0));
+    assert!(
+        both.iter()
+            .zip(pre)
+            .any(|(both, pre)| (both[0] - pre[0]).abs() > 0.001)
+    );
+    assert!(both.iter().zip(pre).all(|(both, pre)| both[1] == pre[1]));
 }
 
 #[test]
@@ -373,6 +437,146 @@ fn history(session: &mut Session, undo: bool) -> grooviq_project::arrangement_ed
         .step_project_history(v.generation, v.revision, undo, Instant::now())
         .unwrap()
         .effect
+}
+
+#[test]
+fn mixer_history_budget_refuses_a_large_track_delta_before_engine_admission() {
+    let make = || {
+        let (c, p) = engine::engine(engine::EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        let c = Arc::new(Mutex::new(c));
+        (Session::new(c.clone()), c, p)
+    };
+    let tracks = |name: &str| {
+        (0..12)
+            .map(|_| Op::CreateTrack {
+                name: name.into(),
+                output: IdRef::Id(0),
+            })
+            .collect()
+    };
+
+    // Both gestures retain the same number of tracks and deltas. Only the nested names differ.
+    let (mut small, _, _small_processor) = make();
+    mixer(&mut small, tracks("Bus"));
+    let budget = small.history_usage().2;
+
+    let (mut session, ctl, _processor) = make();
+    session.set_history_limits(grooviq_project::HistoryLimits {
+        bytes: budget,
+        ..Default::default()
+    });
+    let stamp = session.mixer_view();
+    let before = (
+        session.project().clone(),
+        session.history_usage(),
+        session.view(),
+    );
+    let engine_before = {
+        let ctl = ctl.lock().unwrap();
+        (ctl.mix_revision(), ctl.state().clone())
+    };
+    let message = session
+        .edit_mixer(
+            stamp.generation,
+            stamp.revision,
+            tracks(&"x".repeat(256)),
+            Instant::now(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("history budget"), "{message}");
+    {
+        let ctl = ctl.lock().unwrap();
+        assert_eq!(ctl.mix_revision(), engine_before.0);
+        assert_eq!(ctl.state(), &engine_before.1);
+    }
+    assert_eq!(session.project(), &before.0);
+    assert_eq!(session.history_usage(), before.1);
+    assert_eq!(session.view(), before.2);
+    assert_eq!(session.mixer_view(), stamp);
+}
+
+#[test]
+fn routed_bus_mix_is_installed_from_save_and_recovery() {
+    let (c, _processor) = engine::engine(engine::EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let ctl = Arc::new(Mutex::new(c));
+    let mut session = Session::new(ctl.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("routed.grooviq");
+    session.add_synth_channel("Init", Instant::now()).unwrap();
+    let channel = session.project().channels[0].id;
+    mixer(
+        &mut session,
+        vec![
+            Op::CreateTrack {
+                name: "Voice".into(),
+                output: IdRef::Id(0),
+            },
+            Op::CreateTrack {
+                name: "Return".into(),
+                output: IdRef::Id(0),
+            },
+            Op::Assign {
+                source: SourceKey::Channel(channel),
+                destination: IdRef::Created(0),
+            },
+            Op::SetFader {
+                track: IdRef::Created(0),
+                level: Level::Db(-7.0),
+                pan: 0.4,
+            },
+            Op::CreateSend {
+                from: IdRef::Created(0),
+                to: IdRef::Created(1),
+                tap: Tap::Pre,
+                gain: 0.3,
+            },
+        ],
+    );
+    let stored_mix = session.project().mixer.clone();
+    let live_mix = ctl.lock().unwrap().state().mix.clone();
+    assert!(matches!(live_mix, live::MixSetup::Routed(_)));
+
+    let job = session.begin_save(Some(&path)).unwrap();
+    let result = job.write(&dir.path().join("backups"));
+    session.end_save(&job, result).unwrap();
+    let loaded = grooviq_project::load(&path).unwrap();
+    let decoded = grooviq_project::decode_samples(&loaded);
+    assert_eq!(loaded.project.mixer, stored_mix);
+    assert_eq!(
+        engine_state(&loaded.project, &decoded.samples).unwrap().mix,
+        live_mix
+    );
+    session.new_project().unwrap();
+    session.open(&path, loaded, decoded).unwrap();
+    assert_eq!(session.project().mixer, stored_mix);
+    assert_eq!(ctl.lock().unwrap().state().mix, live_mix);
+    assert_eq!(session.export_state().unwrap().mix, live_mix);
+
+    let root = dir.path().join("recovery");
+    let (recovery, _) = grooviq_project::recovery::RecoveryDir::start(&root).unwrap();
+    recovery
+        .write_autosave(session.project(), &job.samples, Some(&path))
+        .unwrap();
+    drop(recovery);
+    let (_recovery, entries) = grooviq_project::recovery::RecoveryDir::start(&root).unwrap();
+    let [entry] = entries.as_slice() else {
+        panic!("expected one autosave")
+    };
+    let loaded = grooviq_project::load(&entry.file).unwrap();
+    let decoded = grooviq_project::decode_samples(&loaded);
+    assert_eq!(loaded.project.mixer, stored_mix);
+    session.new_project().unwrap();
+    session
+        .open_recovered(entry.original.as_deref(), loaded, decoded, Instant::now())
+        .unwrap();
+    assert_eq!(session.project().mixer, stored_mix);
+    assert_eq!(ctl.lock().unwrap().state().mix, live_mix);
+    assert_eq!(session.export_state().unwrap().mix, live_mix);
 }
 
 #[test]
