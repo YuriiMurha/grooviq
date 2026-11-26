@@ -111,6 +111,24 @@ jobs:
           projectPath: app/src-tauri
           tauriScript: npm --prefix ../ui run tauri
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} -- --locked --profile dist
+      - name: Verify macOS app signature in DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(target/${{ matrix.target }}/dist/bundle/dmg/*.dmg)
+          if [[ ${#dmgs[@]} != 1 ]]; then
+            echo "Expected one DMG, found ${#dmgs[@]}." >&2
+            exit 1
+          fi
+
+          mount_dir=$(mktemp -d)
+          trap 'rmdir "$mount_dir"' EXIT
+          hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$mount_dir" "${dmgs[0]}"
+          trap 'hdiutil detach "$mount_dir"; if [[ -d "$mount_dir" ]]; then rmdir "$mount_dir"; fi' EXIT
+          codesign -dv "$mount_dir/Grooviq.app"
+          codesign --verify --deep --strict --verbose=2 "$mount_dir/Grooviq.app"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: installer-${{ matrix.bundle }}
