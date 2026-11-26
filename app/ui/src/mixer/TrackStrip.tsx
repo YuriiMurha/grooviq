@@ -4,6 +4,7 @@ import type { ParamControl } from "../devices/controls/gesture";
 import { Fader } from "./Fader";
 import { Icon } from "./icons";
 import { Options, OutputChoice } from "./OutputChoice";
+import { UnsupportedButton } from "./UnsupportedButton";
 import {
   availableSends, formatDb, formatPan, formatPercent, LEVEL, PAN, placeholderValue, SEND, unsupportedReason,
   type MixerCommand, type MixerGestures, type MixerProps, type MixerSend, type MixerTrack, type ParamTarget,
@@ -72,7 +73,6 @@ export function TrackStrip({ track, actions, nodes, unsupported, masterOutput, i
         className="mx-pick"
         aria-pressed={selected}
         aria-label={name}
-        aria-disabled={pending || undefined}
         tabIndex={tabStop ? 0 : -1}
         title={name}
         onClick={() => actions.command({ type: "select", nodeId: id })}
@@ -85,16 +85,16 @@ export function TrackStrip({ track, actions, nodes, unsupported, masterOutput, i
         <strong className="mx-name">{name}</strong>
       </button>
       <div className="mx-tools">
-        <button type="button" className="mx-tool" aria-pressed={track.mute} aria-label={`Mute ${name}`}
-          title={muteReason ?? `Mute ${name}`} aria-description={muteReason} disabled={pending || muteReason !== undefined}
+        <UnsupportedButton type="button" className="mx-tool" aria-pressed={track.mute} aria-label={`Mute ${name}`}
+          title={`Mute ${name}`} reason={muteReason} disabled={pending}
           onClick={() => actions.command({ type: "mute", nodeId: id, on: !track.mute })}>
           M
-        </button>
-        <button type="button" className="mx-tool solo" aria-pressed={track.solo} aria-label={`Solo ${name}`}
-          title={soloReason ?? `Solo ${name}`} aria-description={soloReason} disabled={pending || soloReason !== undefined}
+        </UnsupportedButton>
+        <UnsupportedButton type="button" className="mx-tool solo" aria-pressed={track.solo} aria-label={`Solo ${name}`}
+          title={`Solo ${name}`} reason={soloReason} disabled={pending}
           onClick={() => actions.command({ type: "solo", nodeId: id, on: !track.solo })}>
           S
-        </button>
+        </UnsupportedButton>
       </div>
       <div className="mx-bank">
         <Fader control={levelControl} param={LEVEL} value={level} name={`${name} level`} format={formatDb} disabled={pending} />
@@ -133,20 +133,23 @@ export function TrackStrip({ track, actions, nodes, unsupported, masterOutput, i
             ))}
             {track.sends.length === 0 && <p className="mx-mini">No sends</p>}
           </div>
-          <select
-            className="mx-add-send"
-            aria-label={`Add send from ${name}`}
-            title={destinations.length ? "Add send" : "No destinations available"}
-            value={addPlaceholder}
-            disabled={pending || destinations.length === 0}
-            onChange={(e) => {
-              const destination = destinations.find((option) => option.id === e.currentTarget.value);
-              if (destination) actions.command({ type: "addSend", nodeId: id, destinationId: destination.id, pre: false, amount: 0 });
-            }}
-          >
-            <option value={addPlaceholder} disabled>Add send</option>
-            <Options options={destinations} />
-          </select>
+          <div className="mx-add-send-picker">
+            <select
+              className="mx-add-send"
+              aria-label={`Add send from ${name}`}
+              title={destinations.length ? "Add send" : "No destinations available"}
+              value={addPlaceholder}
+              disabled={pending || destinations.length === 0}
+              onChange={(e) => {
+                const destination = destinations.find((option) => option.id === e.currentTarget.value);
+                if (destination) actions.command({ type: "addSend", nodeId: id, destinationId: destination.id, pre: false, amount: 0 });
+              }}
+            >
+              <option value={addPlaceholder} disabled>Add send</option>
+              <Options options={destinations} />
+            </select>
+            <Icon name="chevron" />
+          </div>
         </section>
       )}
     </section>

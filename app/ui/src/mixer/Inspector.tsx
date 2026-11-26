@@ -1,5 +1,6 @@
 import { Icon } from "./icons";
 import { Options, OutputChoice } from "./OutputChoice";
+import { UnsupportedButton } from "./UnsupportedButton";
 import { moveTarget, placeholderValue, unsupportedReason, type MixerError, type MixerInsert, type MixerOption, type MixerProps, type MixerTrack } from "./mixerModel";
 import type { StripActions } from "./TrackStrip";
 
@@ -18,6 +19,7 @@ interface InspectorProps {
 /** Main output and insert slots for the host's selected strip. */
 export function Inspector({ track, master, masterOutput, removed, effects, error, actions, nodes, unsupported }: InspectorProps) {
   const addPlaceholder = placeholderValue(effects);
+  const errorTrack = error?.nodeId != null && error.nodeId !== track?.id ? nodes.get(error.nodeId) : undefined;
   return (
     <aside className="mx-inspector" aria-label="Selected mixer track" aria-busy={track?.pending || undefined}>
       {track ? (
@@ -61,7 +63,7 @@ export function Inspector({ track, master, masterOutput, removed, effects, error
         <p className="mx-empty">{removed ? "The selected track is no longer in the mixer. Select another strip." : "Select a strip to see its insert rack."}</p>
       )}
       <p className="mx-notice" role="status">
-        {error?.message}
+        {errorTrack && `${errorTrack.name}: `}{error?.message}
       </p>
     </aside>
   );
@@ -89,13 +91,13 @@ function InsertRow({ track, slot, index, unsupported, command }: InsertRowProps)
     <li className="mx-insert" aria-label={slot.name}>
       <div className="mx-insert-row">
         <span className="mx-slot-index" aria-hidden="true">{index + 1}</span>
-        <button type="button" className="mx-open" title={slot.name} aria-label={`Open ${slot.name}`} disabled={pending}
+        <button type="button" className="mx-open" title={slot.name} aria-label={`Open ${slot.name}`}
           onClick={() => command({ type: "openInsert", nodeId, slotId })}>{slot.name}</button>
-        <button type="button" className="mx-tool mx-bypass" role="switch" aria-label="On" aria-checked={slot.active}
-          disabled={pending || bypassReason !== undefined} title={bypassReason ?? `Enable or bypass ${slot.name}`} aria-description={bypassReason}
+        <UnsupportedButton type="button" className="mx-tool mx-bypass" role="switch" aria-label="On" aria-checked={slot.active}
+          disabled={pending} title={`Enable or bypass ${slot.name}`} reason={bypassReason}
           onClick={() => command({ type: "setInsertActive", nodeId, slotId, active: !slot.active })}>
           {slot.active ? "On" : "Off"}
-        </button>
+        </UnsupportedButton>
         <button type="button" className="mx-icon-btn" aria-label={`Move ${slot.name} earlier`} title="Move earlier" disabled={pending || index === 0} onClick={() => move(-1)}>
           <Icon name="up" />
         </button>

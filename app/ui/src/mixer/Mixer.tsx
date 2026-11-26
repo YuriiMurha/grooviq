@@ -5,7 +5,7 @@ import { TrackStrip, type StripActions } from "./TrackStrip";
 import "./mixer.css";
 
 /** Strip width in CSS px, shared with the windowed row. */
-const PITCH = 76;
+const PITCH = 80;
 /** Strips drawn beyond each edge of the view. */
 const OVERSCAN = 2;
 /** The meter's floor: quieter reads as empty. */
@@ -125,7 +125,8 @@ export function Mixer(props: MixerProps) {
   const [actions] = useState<StripActions>(() => ({
     command: (c) => {
       const track = latestNodes.current.get(c.type === "param" ? c.target.nodeId : c.nodeId);
-      if (!track || track.pending || unsupportedReason(latest.current.unsupported, c.type) !== undefined) return;
+      const viewing = c.type === "select" || c.type === "openInsert";
+      if (!track || (track.pending && !viewing) || unsupportedReason(latest.current.unsupported, c.type) !== undefined) return;
       void latest.current.onCommand(c);
     },
     gestures,

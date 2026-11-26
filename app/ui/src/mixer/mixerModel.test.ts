@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { availableSends, MixerGestures, unsupportedReason, moveTarget, navTarget, placeholderValue, renderIndices, revealScroll, visibleWindow, type ParamCommand, type ParamTarget } from "./mixerModel";
+import { availableSends, MixerGestures, unsupportedReason, moveTarget, navTarget, outputChoices, placeholderValue, renderIndices, revealScroll, visibleWindow, type ParamCommand, type ParamTarget } from "./mixerModel";
 
 const level = (nodeId: string): ParamTarget => ({ kind: "level", nodeId });
 const send = (nodeId: string, sendId: string): ParamTarget => ({ kind: "send", nodeId, sendId });
@@ -362,6 +362,26 @@ describe("strip controls", () => {
     const offered = [{ id: "room", name: "Room" }, { id: "project:echo", name: "Echo" }, { id: "bus", name: "Bus" }];
     const sends = [{ id: "opaque", destinationId: "project:echo", pre: false, amount: 0 }];
     expect(availableSends(offered, sends)).toEqual([offered[0], offered[2]]);
+  });
+
+  it("keeps the host's output list and displays an excluded current output as a placeholder", () => {
+    const choices = [{ id: "", name: "Offered bus" }, { id: "project:master", name: "Master" }];
+    const nodes = new Map([
+      ["old", { name: "Previous bus" }],
+      ["unrelated", { name: "Unrelated bus" }],
+    ]);
+    expect(outputChoices(choices, "old", nodes)).toEqual({
+      options: choices,
+      label: "Previous bus",
+      placeholder: " ",
+      value: " ",
+    });
+    expect(outputChoices(choices, "", nodes)).toEqual({
+      options: choices,
+      label: "Offered bus",
+      placeholder: undefined,
+      value: "",
+    });
   });
 
   it("reserves a placeholder even if the host uses empty or whitespace ids", () => {

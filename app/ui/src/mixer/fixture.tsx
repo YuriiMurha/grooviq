@@ -8,8 +8,8 @@ import "@fontsource-variable/manrope";
 import "../theme/riso.css";
 import "../app.css";
 import "../devices/devices.css";
-import { StrictMode, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
+import { Profiler, StrictMode, useLayoutEffect, useRef, useState } from "react";
+import { createRoot } from "react-dom/profiling";
 import { Mixer } from "./Mixer";
 import type { MeterSource, MixerCommand, MixerError, MixerInsert, MixerMaster, MixerOption, MixerProps, MixerTrack } from "./mixerModel";
 
@@ -206,15 +206,16 @@ function apply(state: State, c: MixerCommand): State {
 }
 
 const measure = q.has("measure");
-let meterReads = 0;
-let mixerRenders = 0;
+let meterFrames = 0;
+let mixerCommits = 0;
 
 /** Synthetic stereo peaks sampled on demand. No signal or audio device is created. */
 function meterSource(get: () => State | null): MeterSource {
   return {
     read(id, out) {
-      if (measure) meterReads++;
       const state = get();
+      // Master is registered for every frame, regardless of the windowed strip count.
+      if (measure && state?.master.id === id) meterFrames++;
       const track = state && node(state, id);
       if (!track || track.mute) return false;
       const time = q.has("still") ? 0 : performance.now() / 450;
@@ -231,7 +232,7 @@ declare global {
     /** The fixture's host, for the Playwright spec. */
     mixerFixture: {
       log: MixerCommand[];
-      stats(): { meterReads: number; mixerRenders: number };
+      stats(): { meterFrames: number; mixerCommits: number };
       refuseNext(message: string): void;
       deferNextCommit(): void;
       settleCommit(accepted: boolean): void;
@@ -253,15 +254,6 @@ const METERS = meterSource(() => shownState);
 
 export function Fixture() {
   const [state, setState] = useState(initial);
-  // Mixer reads Master pan on every render, including its own repaints. The meter sees the
-  // original snapshot, so sampling it cannot increment this counter.
-  const master = useMemo(() => measure ? {
-    ...state.master,
-    get pan() {
-      mixerRenders++;
-      return state.master.pan;
-    },
-  } : state.master, [state.master]);
   const deferNext = useRef(false);
   const deferred = useRef<{ command: Extract<MixerCommand, { type: "param" }>; resolve: () => void } | null>(null);
   const afterRender = useRef<(() => void) | null>(null);
@@ -276,7 +268,7 @@ export function Fixture() {
   useLayoutEffect(() => {
     window.mixerFixture = {
       log: LOG,
-      stats: () => ({ meterReads, mixerRenders }),
+      stats: () => ({ meterFrames, mixerCommits }),
       refuseNext: (message) => setState((s) => ({ ...s, refuse: message })),
       deferNextCommit: () => { deferNext.current = true; },
       settleCommit: (accepted) => {
@@ -314,6 +306,7 @@ export function Fixture() {
     });
   };
 
+  const mixer = <Mixer tracks={state.tracks} master={state.master} effects={EFFECTS} selectedId={state.selectedId} error={state.error} meters={METERS} unsupported={UNSUPPORTED} onCommand={onCommand} />;
   return (
     <main className="fx">
       <header className="mx-fixture-head">
@@ -322,7 +315,7 @@ export function Fixture() {
         {state.opened && <span role="status">Opened {state.opened}</span>}
         <p>Silent fixture · simulated meters</p>
       </header>
-      <Mixer tracks={state.tracks} master={master} effects={EFFECTS} selectedId={state.selectedId} error={state.error} meters={METERS} unsupported={UNSUPPORTED} onCommand={onCommand} />
+      {measure ? <Profiler id="mixer" onRender={() => { mixerCommits++; }}>{mixer}</Profiler> : mixer}
     </main>
   );
 }

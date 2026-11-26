@@ -96,11 +96,11 @@
 
 .mx-kind {
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 
 .mx-index {
-  margin-right: 4px;
+  margin-right: 3px;
   color: var(--ink);
   font-weight: 700;
 }
@@ -132,10 +132,10 @@
   flex: 1;
   height: 25px;
   padding: 0 3px;
-  font-size: 10.5px;
+  font-size: 11px;
 }
 
-.mx-tool:hover:not(:disabled),
+.mx-tool:hover:not(:disabled, [aria-disabled="true"]),
 .mx-icon-btn:hover:not(:disabled),
 .mx select:hover:not(:disabled) {
   border-color: var(--muted);
@@ -153,23 +153,50 @@
 }
 
 .mx-tool:disabled,
+.mx-tool[aria-disabled="true"],
 .mx-icon-btn:disabled,
 .mx select:disabled {
   color: var(--faint);
   cursor: default;
 }
 
-.mx :focus-visible {
-  outline: 1px solid var(--select);
-  outline-offset: 1px;
+/* The tooltip follows focus or hover and leaves the control in the tab order. */
+.mx-tools,
+.mx-insert-row {
+  position: relative;
+}
+
+.mx-unsupported {
+  display: contents;
+}
+
+.mx-tooltip {
+  position: absolute;
+  z-index: 2;
+  inset: calc(100% + 3px) 0 auto;
+  visibility: hidden;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: var(--well);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+.mx-unsupported:hover .mx-tooltip,
+.mx-unsupported:focus-within .mx-tooltip {
+  visibility: visible;
 }
 
 /* Fader position and the tick scale share the same travel. */
 .mx-bank {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 18px 14px;
-  gap: 2px;
+  grid-template-columns: minmax(0, 1fr) 20px 14px;
+  gap: 1px;
   height: 168px; /* FADER_PX plus the 10 px inset at each end */
   flex: none;
 }
@@ -223,7 +250,7 @@
   position: relative;
   margin-block: 10px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1;
   text-align: right;
 }
@@ -286,13 +313,18 @@
   position: relative;
   display: flex;
   justify-content: center;
-  gap: 4px;
+  gap: 3px;
   min-height: 33px;
   padding: 13px 0 0;
   border: 0;
   background: transparent;
-  font-size: 10px;
+  font-size: 11px;
   box-shadow: none;
+}
+
+.mx-pan .dk-label,
+.mx-pan .dk-value {
+  font-size: 11px;
 }
 
 .mx-pan .dctl::before,
@@ -325,7 +357,7 @@
   gap: 3px;
   margin-bottom: 10px;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 
 .mx-out > .mx-icon,
@@ -352,8 +384,9 @@
   max-width: 100%;
 }
 
-.mx-route-picker:focus-within {
-  outline: 1px solid var(--select);
+.mx-route-picker:has(select:focus-visible) {
+  outline: 2px solid var(--select);
+  outline-offset: 2px;
 }
 
 .mx-route-picker:hover:has(select:not(:disabled)) .mx-icon {
@@ -367,11 +400,26 @@
   opacity: 0;
 }
 
+.mx-add-send-picker {
+  position: relative;
+}
+
 .mx select.mx-add-send {
+  appearance: none;
   width: 100%;
   min-height: 24px;
-  font-size: 10px;
+  padding-inline: 3px 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
+}
+
+.mx-add-send-picker .mx-icon {
+  position: absolute;
+  inset: 50% 3px auto auto;
+  width: 9px;
+  height: 9px;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
 
 .mx-icon {
@@ -431,12 +479,12 @@
 }
 
 .mx-send .dk-value {
-  font: 10px var(--font);
+  font: 11px var(--font);
 }
 
 .mx-send strong {
   max-width: 100%;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .mx-send-tools {
@@ -517,7 +565,7 @@
 .mx-slot-index {
   padding-inline: 3px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .mx-open {

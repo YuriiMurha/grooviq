@@ -150,6 +150,14 @@ export function placeholderValue(options: readonly MixerOption[]): string {
   return value;
 }
 
+/** A current destination may need a display label even when the host excludes it from the picker. */
+export function outputChoices(options: readonly MixerOption[], outputId: string | null, nodes: ReadonlyMap<string, { name: string }>) {
+  const current = outputId === null ? undefined : options.find((option) => option.id === outputId);
+  const label = current?.name ?? (outputId === null ? "Unassigned" : nodes.get(outputId)?.name ?? "Unavailable output");
+  const placeholder = current ? undefined : placeholderValue(options);
+  return { options, label, placeholder, value: current?.id ?? placeholder };
+}
+
 /** The host supplies route choices. The picker also hides destinations already used in this strip. */
 export function availableSends(options: readonly MixerOption[], sends: readonly MixerSend[]): MixerOption[] {
   const used = new Set(sends.map((send) => send.destinationId));

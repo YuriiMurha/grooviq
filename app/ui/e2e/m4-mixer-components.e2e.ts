@@ -223,21 +223,38 @@ test("visible sends use host options and send their own pre/post, amount and rem
   ]);
 });
 
-test("the strip output picker changes the single main output and the rack reflects it", async ({ fixture }) => {
+test("the strip and rack output pickers offer exactly the host's destinations", async ({ fixture }) => {
   const page = await fixture();
-  const snare = strip(page, "Snare");
-  const output = snare.getByRole("combobox", { name: "Main output for Snare" });
-  await expect(output).toHaveValue("n-drums");
-  await output.selectOption({ label: "Master" });
-  await expect(inspector(page).getByLabel("Main output")).toHaveValue("n-master");
+  const rackOutput = inspector(page).getByLabel("Main output");
+
+  const snareOutput = strip(page, "Snare").getByRole("combobox", { name: "Main output for Snare" });
+  await expect(snareOutput.getByRole("option")).toHaveText(["Kit bus", "Music bus", "Master"]);
+  await expect(rackOutput.getByRole("option")).toHaveText(["Kit bus", "Music bus", "Master"]);
+  await expect(snareOutput).toHaveValue("n-drums");
+  await snareOutput.selectOption({ label: "Master" });
+  await expect(rackOutput).toHaveValue("n-master");
   expect(await log(page)).toEqual([{ type: "setOutput", nodeId: "n-snare", outputId: "n-master" }]);
+
+  const room = strip(page, "Room");
+  await room.getByRole("button", { name: "Room", exact: true }).click();
+  await expect(room.getByRole("combobox", { name: "Main output for Room" }).getByRole("option")).toHaveText(["Master"]);
+  await expect(rackOutput.getByRole("option")).toHaveText(["Master"]);
 });
 
 test("unsupported controls explain why and emit no command", async ({ fixture }) => {
   const page = await fixture("?unsupported=1");
   const snare = strip(page, "Snare");
+  const mute = snare.getByRole("button", { name: "Mute Snare" });
+  await snare.getByRole("button", { name: "Snare", exact: true }).focus();
+  await page.keyboard.press("Tab");
+  await expect(mute).toBeFocused();
+  await expect(mute).toHaveAccessibleDescription(/Mute.*unavailable/);
+  await expect(snare.getByRole("tooltip")).toContainText(/Mute.*unavailable/);
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Space");
+
   const controls = [
-    [snare.getByRole("button", { name: "Mute Snare" }), /Mute.*unavailable/],
+    [mute, /Mute.*unavailable/],
     [snare.getByRole("button", { name: "Solo Snare" }), /Solo.*unavailable/],
     [inspector(page).getByRole("switch", { name: "On" }).first(), /Bypass.*unavailable/],
     [inspector(page).getByRole("combobox", { name: "Sidechain input" }), /Detector.*unavailable/],
@@ -253,6 +270,35 @@ test("unsupported controls explain why and emit no command", async ({ fixture })
     await expect(control).toBeDisabled();
     await expect(control).toHaveAccessibleDescription(reason);
   }
+});
+
+test("mixer text meets the 11 px floor in the bank and rack", async ({ fixture }) => {
+  const page = await fixture("?unsupported=1");
+  await page.getByRole("button", { name: "Mute Snare" }).focus();
+  const issues = await page.locator(".mx").evaluate((root) => {
+    return [...root.querySelectorAll("*")].flatMap((element) => {
+      const style = getComputedStyle(element);
+      if (style.visibility !== "visible" || style.opacity === "0" || !element.getClientRects().length) return [];
+      const size = Number.parseFloat(style.fontSize);
+      if (size >= 11) return [];
+      const text = (element instanceof HTMLSelectElement ? element.selectedOptions[0]?.textContent : [...element.childNodes]
+        .filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(" "))
+        ?.replace(/\s+/g, " ").trim();
+      return text ? [`${element.localName}.${[...element.classList].join(".")} "${text}": ${size}px`] : [];
+    });
+  });
+  expect(issues, "Mixer text below 11 CSS px").toEqual([]);
+});
+
+test("keyboard focus keeps the app's ring on a selected strip", async ({ fixture }) => {
+  const page = await fixture();
+  const selected = strip(page, "Snare").getByRole("button", { name: "Snare", exact: true });
+  await selected.focus();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowLeft");
+  await expect(selected).toBeFocused();
+  await expect(selected).toHaveCSS("outline-style", "solid");
+  await expect(selected).toHaveCSS("outline-width", "2px");
 });
 
 for (const finish of ["release", "Escape", "blur"] as const) {
@@ -279,18 +325,19 @@ for (const finish of ["release", "Escape", "blur"] as const) {
   });
 }
 
-test("meters change through MeterSource without rendering the mixer on each frame", async ({ fixture }) => {
+test("meters change through MeterSource without React subtree commits", async ({ fixture }) => {
   const page = await fixture("?measure=1");
   const stats = () => page.evaluate(() => window.mixerFixture.stats());
   const meter = strip(page, "Snare").getByRole("img", { name: "Snare meter" });
-  await expect.poll(async () => (await stats()).meterReads).toBeGreaterThan(20);
+  await expect.poll(async () => (await stats()).meterFrames).toBeGreaterThanOrEqual(5);
   const before = await stats();
   const bars = await meter.locator("span").evaluateAll((els) => els.map((el) => (el as HTMLElement).style.transform));
-  await expect.poll(async () => (await stats()).meterReads).toBeGreaterThan(before.meterReads + 50);
+  expect(before.mixerCommits).toBeGreaterThan(0);
+  await expect.poll(async () => (await stats()).meterFrames).toBeGreaterThanOrEqual(before.meterFrames + 60);
   await expect.poll(() => meter.locator("span").evaluateAll((els) => els.map((el) => (el as HTMLElement).style.transform))).not.toEqual(bars);
-  expect((await stats()).mixerRenders).toBe(before.mixerRenders);
+  expect((await stats()).mixerCommits).toBe(before.mixerCommits);
   await strip(page, "Kick").getByRole("button", { name: "Kick", exact: true }).click();
-  await expect.poll(async () => (await stats()).mixerRenders).toBeGreaterThan(before.mixerRenders);
+  await expect.poll(async () => (await stats()).mixerCommits).toBeGreaterThan(before.mixerCommits);
 });
 
 test("the master: pinned, output disabled, no sends", async ({ fixture }) => {
@@ -328,10 +375,25 @@ test("a refused change keeps the supplied state, shows the host's error and send
   ]);
 });
 
-test("a pending track shows the supplied state and takes no input", async ({ fixture }) => {
+test("an error for another strip identifies that track in the selected rack", async ({ fixture }) => {
+  const page = await fixture();
+  await page.evaluate(() => window.mixerFixture.refuseNext("The engine is busy."));
+  await strip(page, "Kick").getByRole("button", { name: "Mute Kick" }).click();
+  await expect(inspector(page).getByRole("heading", { name: "Snare" })).toBeVisible();
+  await expect(inspector(page).getByRole("status")).toHaveText("Kick: The engine is busy.");
+});
+
+test("a pending track allows selection and insert opening while blocking edits", async ({ fixture }) => {
   const page = await fixture();
   await page.evaluate(() => window.mixerFixture.setPending("n-kick", true));
-  await expect(strip(page, "Kick")).toHaveAttribute("aria-busy", "true");
+  const kick = strip(page, "Kick");
+  await expect(kick).toHaveAttribute("aria-busy", "true");
+  await kick.getByRole("button", { name: "Kick", exact: true }).click();
+  await expect(inspector(page).getByRole("heading", { name: "Kick" })).toBeVisible();
+  await inspector(page).getByRole("button", { name: "Open EQ" }).click();
+  await expect(page.getByText("Opened EQ on Kick")).toBeVisible();
+  await expect(inspector(page).getByLabel("Insert chain")).toBeDisabled();
+  await clearLog(page);
   await expect(page.getByRole("button", { name: "Mute Kick" })).toBeDisabled();
   await expect(strip(page, "Kick").getByRole("combobox", { name: "Main output for Kick" })).toBeDisabled();
   await expect(strip(page, "Kick").getByRole("combobox", { name: "Add send from Kick" })).toBeDisabled();

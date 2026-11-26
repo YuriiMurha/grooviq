@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Icon } from "./icons";
-import { placeholderValue, type MixerOption, type MixerTrack } from "./mixerModel";
+import { outputChoices, type MixerOption, type MixerTrack } from "./mixerModel";
 import type { StripActions } from "./TrackStrip";
 
 interface OutputChoiceProps {
@@ -12,24 +12,22 @@ interface OutputChoiceProps {
 
 /** Keep the current output visible even when the host omits it from the available choices. */
 export function OutputChoice({ track, nodes, command, compact }: OutputChoiceProps) {
-  const { id, name, outputId, outputs, pending } = track;
-  const current = outputId === null ? undefined : outputs.find((option) => option.id === outputId);
-  const label = current?.name ?? (outputId === null ? "Unassigned" : nodes.get(outputId)?.name ?? "Unavailable output");
-  const placeholder = current ? undefined : placeholderValue(outputs);
+  const { id, name, outputId, pending } = track;
+  const { options, label, placeholder, value } = outputChoices(track.outputs, outputId, nodes);
   const picker = (
     <select
       className={compact ? "mx-route-select" : undefined}
       aria-label={compact ? `Main output for ${name}` : "Main output"}
       title={label}
-      value={current?.id ?? placeholder}
-      disabled={pending || outputs.length === 0}
+      value={value}
+      disabled={pending || options.length === 0}
       onChange={(e) => {
-        const option = outputs.find((output) => output.id === e.currentTarget.value);
+        const option = options.find((output) => output.id === e.currentTarget.value);
         if (option && option.id !== outputId) command({ type: "setOutput", nodeId: id, outputId: option.id });
       }}
     >
-      {!current && <option value={placeholder} disabled>{label}</option>}
-      <Options options={outputs} />
+      {placeholder !== undefined && <option value={placeholder} disabled>{label}</option>}
+      <Options options={options} />
     </select>
   );
   return compact ? (
