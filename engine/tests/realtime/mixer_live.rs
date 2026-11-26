@@ -37,6 +37,20 @@ fn mix(variant: u32) -> MixSetup {
         device(10, "algorithmic_reverb", vec![]),
         device(20, "comp", vec![-20.0 - variant as f32, 4.0]),
         device(30, "delay", vec![]),
+        // Alternating 43 and 49 frames rebuilds histories at the detector and Master,
+        // even when the synth is quiet.
+        device(
+            31,
+            "drive",
+            vec![
+                1.0,
+                variant as f32 % 12.0,
+                0.0,
+                0.5,
+                0.0,
+                1.0 + (variant % 2) as f32,
+            ],
+        ),
     ];
     if variant % 2 == 1 {
         t2.push((40, 0));
@@ -48,7 +62,7 @@ fn mix(variant: u32) -> MixSetup {
                 track(0, None, &[]),
                 track(1, Some(0), &[(10, 0)]),
                 track(2, Some(0), &t2),
-                track(3, Some(0), &[(30, 0)]),
+                track(3, Some(0), &[(30, 0), (31, 49)]),
             ],
             sends: vec![Send {
                 id: SendId(1),
@@ -57,11 +71,14 @@ fn mix(variant: u32) -> MixSetup {
                 tap: Tap::PreFader,
                 gain: 0.3,
             }],
-            sidechains: vec![Sidechain {
-                from: MixerTrackId(1),
-                to: InsertId(20),
-                tap: Tap::PostFader,
-            }],
+            sidechains: [1, 3]
+                .into_iter()
+                .map(|from| Sidechain {
+                    from: MixerTrackId(from),
+                    to: InsertId(20),
+                    tap: Tap::PostFader,
+                })
+                .collect(),
             sources: vec![
                 Source {
                     id: SourceId::Channel(3),
