@@ -53,18 +53,19 @@ struct UnsupportedInsert {
 
 impl std::fmt::Display for UnsupportedInsertRate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let [insert] = self.inserts.as_slice() {
-            write!(f, "Mixer insert {}", insert.kind)?;
+        let prefix = if self.inserts.len() == 1 {
+            "Mixer insert "
         } else {
-            f.write_str("Mixer inserts ")?;
-            for (index, insert) in self.inserts.iter().enumerate() {
-                if index > 0 {
-                    f.write_str(", ")?;
-                }
-                f.write_str(&insert.kind)?;
-                if let Some((min, max)) = insert.range {
-                    write!(f, " ({min}–{max} Hz)")?;
-                }
+            "Mixer inserts "
+        };
+        f.write_str(prefix)?;
+        for (index, insert) in self.inserts.iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            f.write_str(&insert.kind)?;
+            if let Some((min, max)) = insert.range {
+                write!(f, " ({min}–{max} Hz)")?;
             }
         }
         write!(f, " cannot run at {} Hz", self.rate)
