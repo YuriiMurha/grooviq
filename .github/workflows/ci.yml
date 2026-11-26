@@ -9,10 +9,11 @@ permissions:
   contents: read
 
 concurrency:
-  # A concurrency group has one pending slot by default. Give each main push its own group.
+  # Main pushes share one group without cancel-in-progress: a started run always finishes (rust-cache
+  # saves only on main), and a newer push replaces only the pending one, so a train batch of N squash
+  # commits runs at most twice, the first and the tip (#693). PRs and merge-train/batch: per ref, cancel older.
   group: >-
     ci-${{ github.workflow }}-${{ github.event.pull_request.number ||
-    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
     github.ref }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' ||

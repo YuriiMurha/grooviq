@@ -30,8 +30,7 @@ permissions:
 
 concurrency:
   group: >-
-    perf-${{ (inputs.capture_only && github.run_id) || github.event.pull_request.number ||
-    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
+    perf-${{ (github.event_name == 'workflow_dispatch' && github.run_id) || github.event.pull_request.number ||
     github.ref }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' ||
