@@ -1,3 +1,4 @@
+import { choosePickerOption, pickerButton } from "./listPickerHelpers";
 import { expect, project, soundsFor, test } from "./fixture";
 
 const names = ["Kick", "Snare", "Hat"];
@@ -59,9 +60,9 @@ for (const [width, height] of [[900, 560], [1280, 800], [1440, 900], [1920, 1080
     await stop.click();
     await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(false);
 
-    const mode = app.getByRole("combobox", { name: "Playback mode" });
+    const mode = pickerButton(app, "Playback mode");
     await mock.eval("(m) => m.holdCommand('arrangement_mode')");
-    await mode.selectOption("song");
+    await choosePickerOption(app, "Playback mode", "Song");
     await expect(mode).toBeDisabled();
     await info.attach("toolbar-pending-mode", { body: await toolbar.screenshot({ scale: "css" }), contentType: "image/png" });
     await mock.eval("(m) => m.releaseCommand('arrangement_mode')");

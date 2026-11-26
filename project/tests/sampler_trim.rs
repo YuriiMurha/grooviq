@@ -1,7 +1,9 @@
 use grooviq_dsp::sampler::SampleBuf;
 use grooviq_engine::{AudioProcessor, Controller, EngineConfig, engine};
 use grooviq_project::{
-    SampleFile,
+    ClipContent, SampleFile,
+    arrangement_edit::{ArrangementEdit, HistoryEffect},
+    pattern_edit::PatternEdit,
     session::{Edit, Session},
 };
 use std::{
@@ -231,6 +233,112 @@ fn global_history_routes_trim_and_redo_without_manufacturing_noop_steps() {
         .unwrap();
     assert_eq!(s.project().channels[0].sampler["end"], 1.0);
 }
+
+fn assert_trim_survives_pattern_edit(s: &mut Session, id: u32, edit: PatternEdit) {
+    let assert_region = |s: &Session, expected: [f32; 2]| {
+        let sampler = &s.project().channels[0].sampler;
+        assert_eq!(
+            [sampler["start"], sampler["end"]].map(f32::to_bits),
+            expected.map(f32::to_bits),
+        );
+    };
+    assert_region(s, [0.2, 0.7]);
+    let trim = s.sampler_trim_view(id).unwrap();
+    let reset = s
+        .sampler_trim_reset(id, &trim.stamp, Instant::now())
+        .unwrap();
+    assert!(reset.changed);
+    assert_region(s, [0.0, 1.0]);
+
+    let patterns = s.patterns();
+    let edited = s
+        .edit_patterns(patterns.generation, patterns.revision, edit, Instant::now())
+        .unwrap();
+    assert!(
+        edited.revision > patterns.revision,
+        "pattern edit must apply"
+    );
+    assert_region(s, [0.0, 1.0]);
+
+    let trim = s.sampler_trim_view(id).unwrap();
+    let token = trim
+        .undo
+        .as_deref()
+        .expect("trim Undo must survive the pattern edit");
+    s.sampler_trim_undo(id, &trim.stamp, token, Instant::now())
+        .unwrap();
+    assert_region(s, [0.2, 0.7]);
+
+    let arrangement = s.arrangement_view();
+    let redo = s
+        .step_project_history(
+            arrangement.generation,
+            arrangement.revision,
+            false,
+            Instant::now(),
+        )
+        .unwrap();
+    assert!(matches!(redo.effect, HistoryEffect::SamplerTrim { channel } if channel == id));
+    assert_region(s, [0.0, 1.0]);
+}
+
+#[test]
+fn pattern_delete_preserves_trim_undo_and_redo() {
+    let (mut s, _, _, id) = rig(8, 0.2, 0.7);
+    let patterns = s.patterns();
+    let created = s
+        .edit_patterns(
+            patterns.generation,
+            patterns.revision,
+            PatternEdit::Create {
+                name: "Spare".into(),
+            },
+            Instant::now(),
+        )
+        .unwrap();
+    let pattern = created.patterns[1].id;
+    assert_trim_survives_pattern_edit(&mut s, id, PatternEdit::Delete { pattern });
+    assert!(s.project().patterns.iter().all(|p| p.id != pattern));
+}
+
+#[test]
+fn pattern_make_unique_preserves_trim_undo_and_redo() {
+    let (mut s, _, _, id) = rig(8, 0.2, 0.7);
+    let pattern = s.project().current_pattern;
+    let arrangement = s.arrangement_view();
+    let created = s
+        .edit_arrangement(
+            arrangement.generation,
+            arrangement.revision,
+            vec![
+                ArrangementEdit::CreateTrack {
+                    name: "Track".into(),
+                    color: 0,
+                },
+                ArrangementEdit::CreateClipOnCreatedTrack {
+                    track_operation: 0,
+                    name: "Pattern".into(),
+                    start_tick: 0,
+                    muted: false,
+                    content: ClipContent::Pattern {
+                        pattern,
+                        offset_tick: 0,
+                        length_ticks: 960,
+                    },
+                },
+            ],
+            Instant::now(),
+        )
+        .unwrap();
+    let clip = created.created_ids[1];
+    assert_trim_survives_pattern_edit(&mut s, id, PatternEdit::MakeUnique { clip });
+    assert!(matches!(
+        s.project().arrangement.clips[0].content,
+        ClipContent::Pattern { pattern: copy, .. }
+            if copy != pattern && s.project().patterns.iter().any(|p| p.id == copy)
+    ));
+}
+
 #[test]
 fn sample_relink_generation_and_shared_eviction_retire_real_capabilities() {
     let (mut s, _, mut p, id) = rig(2, 0.6, 0.4);

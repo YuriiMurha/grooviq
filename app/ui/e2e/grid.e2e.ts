@@ -60,14 +60,14 @@ test.describe("drawing (check 1)", () => {
       return snareRow.filter((_, i) => colourDistance(now[i], before[i]) > 20);
     };
     expect(await playheadColumns(), "no playhead while stopped").toEqual([]);
-    await app.getByRole("button", { name: "Play" }).click();
+    await app.getByRole("button", { name: "Play", exact: true }).click();
     await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(true);
     for (const step of [2, 9]) {
       await mock.eval(`(m) => m.hold(${step * 240 + 10})`);
       await expect.poll(playheadColumns, { message: `the playhead on step ${step + 1}` }).toEqual([step]);
     }
     await g.screenshot({ path: info.outputPath("grid-playing.png") });
-    await app.getByRole("button", { name: "Stop" }).click();
+    await app.getByRole("button", { name: "Stop", exact: true }).click();
     await expect.poll(playheadColumns, { message: "Stop clears the playhead" }).toEqual([]);
   });
 });

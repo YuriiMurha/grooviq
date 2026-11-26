@@ -136,7 +136,7 @@ test("Space chooses a time signature in the open list without toggling playback"
 
 test.describe("swing while playing (check 10)", () => {
   test("released outside the slider, the swing changes on release", async ({ app, mock }, info) => {
-    await app.getByRole("button", { name: "Play" }).click();
+    await app.getByRole("button", { name: "Play", exact: true }).click();
     const swing = app.getByRole("slider", { name: "Swing" });
     const box = await swing.boundingBox();
     if (!box) throw new Error("no slider");
@@ -162,7 +162,7 @@ test.describe("swing while playing (check 10)", () => {
 
 test.describe("pattern length while playing (check 12)", () => {
   test("16 → 32 → 15 steps keeps playing without a restart", async ({ app, mock }, info) => {
-    await app.getByRole("button", { name: "Play" }).click();
+    await app.getByRole("button", { name: "Play", exact: true }).click();
     await expect.poll(() => mock.eval<number>("(m) => m.ticks()")).toBeGreaterThan(6 * 240);
     const length = app.getByRole("spinbutton", { name: "Pattern length" });
     for (const steps of [32, 15]) {

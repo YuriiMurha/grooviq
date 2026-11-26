@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { ListPicker } from "../layout/ListPicker";
 import type { PatternPicker } from "./usePatterns";
 import "./rail.css";
 
@@ -58,15 +59,21 @@ export function PickerRail({ picker }: { picker: PatternPicker }) {
   </aside>;
 }
 
+const MODE_OPTIONS = [{ id: "pattern", name: "Pattern" }, { id: "song", name: "Song" }];
+
 export function PatternModeControls({ picker }: { picker: PatternPicker }) {
   const pattern = picker.state.canonical?.patterns.find((item) => item.id === picker.state.canonical?.selected);
+  let reason: string | undefined;
+  if (picker.modePending) reason = "Wait for the playback mode to finish changing.";
+  else if (picker.state.pending) reason = "Wait for the pattern edit to finish.";
+  else if (picker.mode === null) reason = "Playback mode is loading.";
   return <div className="pattern-mode-controls">
-    <label>Playback<select aria-label="Playback mode" value={picker.mode ?? ""}
-      disabled={picker.modePending || Boolean(picker.state.pending) || picker.mode === null}
-      onChange={(event) => { if (event.target.value === "pattern" || event.target.value === "song") void picker.changeMode(event.target.value); }}>
-      {picker.mode === null && <option value="">Loading…</option>}
-      <option value="pattern">Pattern</option><option value="song">Song</option>
-    </select></label>
+    <div className="pattern-mode-field">
+      <span>Playback</span>
+      <ListPicker label="Playback mode" options={MODE_OPTIONS} value={picker.mode} placeholder="Loading…"
+        disabled={reason !== undefined} reason={reason}
+        onCommit={(id) => { if (id === "pattern" || id === "song") void picker.changeMode(id); }} />
+    </div>
     <span className="pattern-current" title={pattern?.name} role={picker.modePending ? "status" : undefined}>
       {picker.modePending ? "Changing mode…" : pattern?.name ?? "Loading patterns…"}
     </span>

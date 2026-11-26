@@ -394,10 +394,131 @@
   display: none;
 }
 
-.mx .mx-add-send {
+.mx .mx-route-choice:not([aria-disabled="true"]):hover,
+.mx .mx-route-choice[aria-expanded="true"] {
+  background: var(--raised);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text);
+}
+
+.mx-route-handle {
+  position: relative;
+  color: var(--ok);
+}
+
+.mx-route-handle > .mx-icon {
+  position: absolute;
+  inset: 4px;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+}
+
+.mx .mx-route-trigger {
+  display: block;
+  width: 24px;
+  height: 24px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: var(--raised);
+  cursor: grab;
+  touch-action: none;
+}
+
+.mx .mx-route-trigger[aria-disabled="true"] {
+  cursor: default;
+}
+
+.mx .mx-route-trigger:not([aria-disabled="true"]):hover,
+.mx .mx-route-trigger[aria-expanded="true"] {
+  box-shadow: inset 0 0 0 1px var(--ok);
+}
+
+.mx .mx-route-trigger:active {
+  cursor: grabbing;
+}
+
+.mx-route-trigger .list-picker-value,
+.mx-route-trigger .list-picker-chevron {
+  display: none;
+}
+
+.mx-strip[data-route-target="ready"] {
+  box-shadow: inset 0 0 0 2px var(--ok);
+}
+
+.mx-strip[data-route-target="bad"] {
+  box-shadow: inset 0 0 0 2px var(--error);
+}
+
+.mx-strip[data-route-target="main"],
+.mx-strip[data-route-target="existing"] {
+  box-shadow: inset 0 0 0 2px var(--warn);
+}
+
+.mx-route-cable,
+.mx-route-note {
+  position: fixed;
+  z-index: var(--z-overlay);
+  color: var(--ok);
+  pointer-events: none;
+}
+
+.mx-route-cable[data-route="bad"],
+.mx-route-note[data-route="bad"] {
+  color: color-mix(in srgb, var(--error) 80%, var(--text));
+}
+
+.mx-route-cable:is([data-route="main"], [data-route="existing"]),
+.mx-route-note:is([data-route="main"], [data-route="existing"]) {
+  color: var(--warn);
+}
+
+.mx-route-cable {
+  inset: 0;
   width: 100%;
-  gap: 4px;
-  padding-inline: 3px;
+  height: 100%;
+}
+
+.mx-route-cable path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.mx-route-cable .mx-route-shadow {
+  stroke: var(--well);
+  stroke-width: 6;
+}
+
+.mx-route-cable[data-route="bad"] path:not(.mx-route-shadow) {
+  stroke-dasharray: 5 4;
+}
+
+.mx-route-cable circle {
+  fill: currentColor;
+  stroke: var(--well);
+  stroke-width: 2;
+}
+
+.mx-route-note {
+  max-width: min(310px, calc(100% - 16px));
+  padding: 5px 8px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-s);
+  background: var(--well);
+  font-weight: 730;
+  overflow-wrap: anywhere;
+}
+
+.mx-route-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .mx-icon {

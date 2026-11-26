@@ -69,7 +69,11 @@ for (const [width, height] of [[1280, 800], [900, 560]]) {
     const initialHeight = (await rackPane.boundingBox())!.height;
     const initialValue = Number(await separator.getAttribute("aria-valuenow"));
     await app.keyboard.press("ArrowUp");
-    await expect(separator).toHaveAttribute("aria-valuenow", String(initialValue - 5));
+    // Allow one pixel across the two rounded heights and a tenth of a point across the ARIA readings.
+    await expect.poll(async () => {
+      const value = Number(await separator.getAttribute("aria-valuenow"));
+      return Math.abs(initialValue - value - 5);
+    }).toBeLessThanOrEqual(100 / workspaceBox.height + 0.1);
     await expect.poll(async () => (await rackPane.boundingBox())!.height).toBeLessThan(initialHeight);
     await expect(separator).toBeFocused();
     expect((await focusIndicator(separator)).shadow).toBe(indicator.shadow);

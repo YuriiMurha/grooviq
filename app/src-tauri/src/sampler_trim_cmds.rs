@@ -45,13 +45,17 @@ pub fn sampler_trim_reset(audio: State<'_, Audio>, channel: u32, stamp: String) 
     reply(&s, channel, result)
 }
 #[tauri::command]
-pub fn sampler_trim_undo(
+pub async fn sampler_trim_undo(
     audio: State<'_, Audio>,
     channel: u32,
     stamp: String,
     token: String,
-) -> Reply {
-    let mut s = lock(&audio.session);
-    let result = s.sampler_trim_undo(channel, &stamp, &token, Instant::now());
-    reply(&s, channel, result)
+) -> Result<Reply, String> {
+    let ack = {
+        let mut s = lock(&audio.session);
+        let result = s.sampler_trim_undo(channel, &stamp, &token, Instant::now());
+        reply(&s, channel, result)
+    };
+    audio.clear_retired_autosaves().await;
+    Ok(ack)
 }

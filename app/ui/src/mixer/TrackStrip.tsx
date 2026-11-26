@@ -1,13 +1,15 @@
-import { useCallback, useMemo, type CSSProperties, type KeyboardEvent } from "react";
+import { memo, Profiler, useCallback, useContext, useMemo, useSyncExternalStore, type CSSProperties, type KeyboardEvent } from "react";
 import { Knob } from "../devices/controls/Knob";
 import type { ParamControl } from "../devices/controls/gesture";
-import { ListPicker } from "../layout/ListPicker";
 import { Fader } from "./Fader";
 import { Icon } from "./icons";
 import { OutputChoice } from "./OutputChoice";
+import { RouteHandle } from "./RouteHandle";
+import { StripProfiler } from "./stripProfiler";
+import type { useSendRouting } from "./useSendRouting";
 import { UnsupportedButton } from "./UnsupportedButton";
 import {
-  availableSends, formatDb, formatPan, formatPercent, LEVEL, PAN, SEND, unsupportedReason,
+  formatDb, formatPan, formatPercent, LEVEL, PAN, SEND, unsupportedReason,
   type MixerCommand, type MixerGestures, type MixerProps, type MixerSend, type MixerTrack, type ParamTarget,
 } from "./mixerModel";
 
@@ -15,6 +17,7 @@ import {
 export interface StripActions {
   command: (c: MixerCommand) => void;
   gestures: MixerGestures;
+  routing: ReturnType<typeof useSendRouting>["routing"];
   /** A navigation key on a strip's name (arrows, Home, End). */
   navigate: (fromId: string, key: string) => boolean;
   focused: (id: string) => void;
@@ -36,6 +39,7 @@ interface StripProps {
   tabStop: boolean;
   /** Absolute position in a windowed row; omitted for the pinned master. */
   left?: number;
+  routeTarget?: string;
 }
 
 function control(gestures: MixerGestures, target: ParamTarget): ParamControl {
@@ -45,7 +49,7 @@ function control(gestures: MixerGestures, target: ParamTarget): ParamControl {
 const TICKS = [0, -15, -30, -45, -60];
 
 /** One vertical channel strip. Values come from the host (or a gesture in flight). */
-export function TrackStrip({ track, actions, nodes, unsupported, masterOutput, index, level, pan, selected, tabStop, left }: StripProps) {
+export const TrackStrip = memo(function TrackStrip({ track, actions, nodes, unsupported, masterOutput, index, level, pan, selected, tabStop, left, routeTarget }: StripProps) {
   const { id, name, pending } = track;
   const master = masterOutput !== undefined;
   const levelControl = useMemo(() => control(actions.gestures, { kind: "level", nodeId: id }), [actions, id]);
@@ -53,19 +57,20 @@ export function TrackStrip({ track, actions, nodes, unsupported, masterOutput, i
   const meterRef = useCallback((el: HTMLElement | null) => actions.meter(id, el), [actions, id]);
   const muteReason = unsupportedReason(unsupported, "mute");
   const soloReason = unsupportedReason(unsupported, "solo");
-  const destinations = availableSends(track.sendDestinations, track.sends);
+  const profile = useContext(StripProfiler);
 
   const onNameKey = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (actions.navigate(id, e.key)) e.preventDefault();
   };
 
-  return (
+  const strip = (
     <section
       className={`mx-strip${selected ? " selected" : ""}${master ? " master" : ""}${pending ? " pending" : ""}`}
       style={{ "--ink": `var(--ink-${track.ink})`, left } as CSSProperties}
       aria-label={name}
       aria-busy={pending || undefined}
       data-node={id}
+      data-route-target={routeTarget}
       onFocus={() => actions.focused(id)}
     >
       <button
@@ -120,7 +125,10 @@ export function TrackStrip({ track, actions, nodes, unsupported, masterOutput, i
           format={formatPan} does="Places the track between left and right." variant="field" row />
       </div>
       <div className="mx-out">
-        {master ? <><Icon name="arrow" /><span title={masterOutput}>{masterOutput}</span></> : <OutputChoice track={track} nodes={nodes} command={actions.command} compact />}
+        {master ? <><Icon name="arrow" /><span title={masterOutput}>{masterOutput}</span></> : <>
+          <RouteHandle track={track} routing={actions.routing} />
+          <OutputChoice track={track} nodes={nodes} command={actions.command} compact />
+        </>}
       </div>
       {!master && (
         <section className="mx-sends" aria-label={`${name} sends`}>
@@ -133,29 +141,22 @@ export function TrackStrip({ track, actions, nodes, unsupported, masterOutput, i
             ))}
             {track.sends.length === 0 && <p className="mx-mini">No sends</p>}
           </div>
-          <ListPicker
-            className="mx-add-send"
-            label={`Add send from ${name}`}
-            options={destinations}
-            value={null}
-            placeholder="Add send"
-            disabled={pending || destinations.length === 0}
-            reason={destinations.length === 0 ? "No destinations available" : undefined}
-            onCommit={(destinationId) => actions.command({ type: "addSend", nodeId: id, destinationId, pre: false, amount: 0 })}
-          />
         </section>
       )}
     </section>
   );
-}
+  return profile ? <Profiler id={id} onRender={profile}>{strip}</Profiler> : strip;
+});
 
 function SendRow({ nodeId, send, name, pending, actions }: { nodeId: string; send: MixerSend; name: string; pending?: boolean; actions: StripActions }) {
   const { id: sendId } = send;
   const { gestures, command } = actions;
   const ctl = useMemo(() => control(gestures, { kind: "send", nodeId, sendId }), [gestures, nodeId, sendId]);
-  const amount = gestures.shown({ kind: "send", nodeId, sendId }) ?? send.amount;
+  const amount = useSyncExternalStore(gestures.subscribe,
+    () => gestures.shown({ kind: "send", nodeId, sendId }) ?? send.amount);
+
   return (
-    <div className="mx-send" role="group" aria-label={`Send to ${name}`}>
+    <div className="mx-send" data-mx-send={sendId} role="group" aria-label={`Send to ${name}`}>
       <div inert={pending || undefined}>
         <Knob control={ctl} id={sendId} param={SEND} value={amount} label="" name={`Send to ${name} amount`}
           format={formatPercent} does="Sets the level of this send." size={29} />

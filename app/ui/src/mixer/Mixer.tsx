@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type CSSProperties } from "react";
+import { RoutePreview } from "./RoutePreview";
+import { useSendRouting } from "./useSendRouting";
 import { Inspector } from "./Inspector";
 import { MixerGestures, navTarget, renderIndices, revealScroll, unsupportedReason, visibleWindow, type MixerProps, type MixerTrack, type ParamTarget, type Window } from "./mixerModel";
 import { TrackStrip, type StripActions } from "./TrackStrip";
@@ -89,6 +91,7 @@ export function Mixer(props: MixerProps) {
   const [focusId, setFocusId] = useState<string | null>(null);
   const focusNext = useRef<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
+  const { routing, preview, notice } = useSendRouting(props, byId, scroller, root);
   const indexOf = useMemo(() => new Map(tracks.map((t, i) => [t.id, i])), [tracks]);
 
   useLayoutEffect(() => {
@@ -130,6 +133,7 @@ export function Mixer(props: MixerProps) {
       void latest.current.onCommand(c);
     },
     gestures,
+    routing,
     focused: (id) => setFocusId(id),
     meter: (id, el) => {
       if (el) meterEls.current.set(id, el);
@@ -151,7 +155,7 @@ export function Mixer(props: MixerProps) {
     },
   }));
 
-  const pinned = [focusId, selectedId].map((id) => (id === null ? -1 : (indexOf.get(id) ?? -1)));
+  const pinned = [focusId, selectedId, preview?.sourceId ?? null].map((id) => (id === null ? -1 : (indexOf.get(id) ?? -1)));
   const drawn = renderIndices(win, pinned, tracks.length);
   const selected = selectedId === null ? null : (byId.get(selectedId) ?? null);
   const tabId = focusId !== null && byId.has(focusId) ? focusId : selected ? selected.id : (tracks[0]?.id ?? master.id);
@@ -178,6 +182,7 @@ export function Mixer(props: MixerProps) {
                     selected={t.id === selectedId}
                     tabStop={t.id === tabId}
                     left={i * PITCH}
+                    routeTarget={preview?.targetId === t.id ? preview.kind : undefined}
                   />
                 );
               })}
@@ -188,6 +193,7 @@ export function Mixer(props: MixerProps) {
           track={master}
           actions={actions}
           masterOutput={master.outputLabel}
+          routeTarget={preview?.targetId === master.id ? preview.kind : undefined}
           nodes={byId}
           unsupported={unsupported}
           level={gestures.shown({ kind: "level", nodeId: master.id }) ?? master.level}
@@ -208,6 +214,10 @@ export function Mixer(props: MixerProps) {
         nodes={byId}
         unsupported={unsupported}
       />
+      {preview && <RoutePreview preview={preview} />}
+      <div className="mx-route-status" role="status" aria-live="polite" aria-atomic="true">
+        <span key={notice.sequence}>{notice.message}</span>
+      </div>
     </div>
   );
 }

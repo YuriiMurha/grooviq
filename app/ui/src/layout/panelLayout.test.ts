@@ -20,18 +20,27 @@ describe("measured panel layout", () => {
     expect(layout.effectiveRatio).toBe(layout.rackHeight / layout.contentHeight);
   });
 
+  test("fractional measurements leave a whole-pixel roll at and above its minimum", () => {
+    const measured = { ...chrome, tools: 106.0625 };
+    const minimum = panelMinimums(measured);
+    const fit = (requestedRatio: number) => fitPanelLayout({ viewportHeight: 472, requestedRatio, chrome: measured });
+    expect.soft(minimum.roll).toBe(331);
+    expect.soft(fit(0.5).rollHeight).toBe(331);
+    expect(fit(0.253).rollHeight).toBe(347);
+  });
+
   test("short viewports expand contained content instead of erasing notes", () => {
     const layout = fitPanelLayout({ viewportHeight: 272, requestedRatio: 0.5, chrome });
-    expect(layout.contentHeight).toBe(419.625);
+    expect(layout.contentHeight).toBe(420);
     expect(layout.rackHeight).toBe(84);
-    expect(layout.rollHeight).toBe(329.625);
+    expect(layout.rollHeight).toBe(330);
     expect(layout.lowerRatio).toBe(layout.upperRatio);
-    expect(noteRoom(layout.rollHeight, chrome)).toBe(NOTE_MIN);
+    expect(noteRoom(layout.rollHeight, chrome)).toBeGreaterThanOrEqual(NOTE_MIN);
   });
 
   test("single-panel minima include measured chrome and visible velocity", () => {
-    expect(panelMinimums(chrome)).toEqual({ rack: 84, roll: 329.625, splitter: 6 });
-    expect(panelMinimums({ ...chrome, velocity: 0 }).roll).toBe(257.625);
+    expect(panelMinimums(chrome)).toEqual({ rack: 84, roll: 330, splitter: 6 });
+    expect(panelMinimums({ ...chrome, velocity: 0 }).roll).toBe(258);
     expect(panelMinimums({ ...chrome, firstRackRow: 0, rackHeader: 0, rackPadding: 0 }).rack).toBe(80);
   });
 
@@ -42,7 +51,7 @@ describe("measured panel layout", () => {
     const grown = fitPanelLayout(input);
     expect(compact.effectiveRatio).toBeLessThan(large.effectiveRatio);
     expect(grown).toEqual(large);
-    expect(grown.effectiveRatio).toBeCloseTo(0.65, 4);
+    expect(Math.abs(grown.rackHeight - grown.contentHeight * 0.65)).toBeLessThanOrEqual(0.5);
     expect(input.requestedRatio).toBe(0.65);
   });
 
@@ -74,9 +83,17 @@ describe("measured panel layout", () => {
     const measured = { rackHeader: 40.001, firstRackRow: 28.007, rackPadding: 16.002,
       rollHeader: 40.003, tools: 105.5859375, velocity: 72.006, splitter: 6.004 };
     const layout = fitPanelLayout({ viewportHeight: 300.001, requestedRatio: 0.85, chrome: measured });
+    expect(panelMinimums(measured).rack).toBe(85);
     expect(layout.rackHeight).toBeGreaterThanOrEqual(measured.rackHeader + measured.firstRackRow + measured.rackPadding);
     expect(noteRoom(layout.rollHeight, measured)).toBeGreaterThanOrEqual(112);
     expect(layout.contentHeight - layout.rackHeight - layout.rollHeight).toBeGreaterThanOrEqual(measured.splitter);
+    expect([layout.contentHeight, layout.rackHeight, layout.rollHeight].every(Number.isInteger)).toBe(true);
+    expect(layout.rackHeight + Math.ceil(measured.splitter) + layout.rollHeight).toBe(layout.contentHeight);
+  });
+
+  test("a fractional viewport with room for both panes rounds down", () => {
+    const layout = fitPanelLayout({ viewportHeight: 472.65625, requestedRatio: 0.5, chrome });
+    expect(layout.contentHeight).toBe(472);
   });
 
   test("accepted input uses feasible bounds rather than the remembered request", () => {

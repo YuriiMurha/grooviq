@@ -1,3 +1,4 @@
+import { choosePickerOption, pickerButton } from "./listPickerHelpers";
 import { cellPoint, colourDistance, expect, grid, pixelsAt, project, soundsFor, test, workspaceReady } from "./fixture";
 import { boxSelect, canvas, lane, local, openRoll, stats, twoChannels } from "./rollHelpers";
 import { parseColor } from "../src/rack/palette";
@@ -152,10 +153,7 @@ for (const { id } of themes) {
       const sectionInks = ["--dev-osc1", "--dev-osc2", "--dev-filter", "--dev-amp", "--dev-lfo", "--dev-mix", "--dev-voice"];
       const cardColor = rgb("--dev-card");
       for (const [index, ink] of sectionInks.entries()) {
-        // Slate System's existing cobalt Voice caption falls below 4.5:1. See #792.
-        if (id !== "slate-system" || ink !== "--dev-voice") {
-          expect(contrastRatio(rgb(ink), cardColor), `${ink} caption over --dev-card`).toBeGreaterThanOrEqual(4.5);
-        }
+        expect(contrastRatio(rgb(ink), cardColor), `${ink} caption over --dev-card`).toBeGreaterThanOrEqual(4.5);
         for (const other of sectionInks.slice(index + 1)) {
           const distance = colourDistance(bytes(ink), bytes(other));
           const deltaE = oklabDeltaE(rgb(ink), rgb(other));
@@ -168,8 +166,6 @@ for (const { id } of themes) {
       expect(colourDistance(playFill, bytes("--play")), "Play button fill").toBeLessThan(8);
       for (const text of ["--text", "--muted", "--faint", "--error", "--warn"]) {
         for (const surface of ["--bg", "--panel", "--raised"]) {
-          // Riso retains its existing Bright Red at 4.40:1 on raised controls. See #634.
-          if (id === "riso" && text === "--error" && surface === "--raised") continue;
           expect(contrastRatio(rgb(text), rgb(surface)), `${text} over ${surface}`).toBeGreaterThanOrEqual(4.5);
         }
       }
@@ -247,7 +243,7 @@ for (const { id } of themes) {
       await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(true);
       await mock.eval("(m) => m.hold(10)");
       await expect.poll(() => ringDistance("--grid-playhead"), { message: "playhead on the lit Kick step" }).toBeLessThan(8);
-      await app.getByRole("button", { name: "Stop" }).click();
+      await app.getByRole("button", { name: "Stop", exact: true }).click();
 
       await app.getByRole("button", { name: "Edit the Bass synth" }).click();
       const synth = app.getByRole("dialog", { name: "Bass synth" });
@@ -285,8 +281,8 @@ for (const { id } of themes) {
       expect(colourDistance(selectedBar, bytes("--roll-select")), "selected velocity bar").toBeLessThan(8);
       if (renderer === "webgl2") {
         await app.screenshot({ path: info.outputPath("roll.png"), scale: "css", animations: "disabled" });
-        await app.getByRole("combobox", { name: "Key", exact: true }).selectOption({ label: "C" });
-        await expect(app.getByRole("combobox", { name: "Scale", exact: true })).toHaveValue("major");
+        await choosePickerOption(app, "Key", "C");
+        await expect(pickerButton(app, "Scale")).toHaveAccessibleName("Scale: Major");
         const warning = app.getByText("Unsaved changes", { exact: true });
         await expect(warning).toHaveCSS("color", `rgb(${bytes("--warn").map(Math.round).join(", ")})`);
         await expect.poll(async () => (await stats(app)).scaleMask).toBe(0b101010110101);

@@ -1,3 +1,4 @@
+import { ListPicker } from "../layout/ListPicker";
 import { Knob } from "../devices/controls/Knob";
 import { useFeelPopover } from "./useFeelPopover";
 import "./feelPopover.css";
@@ -10,7 +11,12 @@ import { NOTE_NAMES, SCALES, scaleLabel } from "./scales";
 import { GRIDS } from "./snap";
 import { TOOL_BUTTONS, type Tool } from "./tools";
 
-const INVERSIONS = ["Root position", "1st inversion", "2nd inversion", "3rd inversion"];
+const GRID_OPTIONS = GRIDS.map(({ name }, index) => ({ id: String(index), name }));
+const KEY_OPTIONS = [{ id: "", name: "None" }, ...NOTE_NAMES.map((name, root) => ({ id: String(root), name }))];
+const SCALE_OPTIONS = Object.keys(SCALES).map((id) => ({ id, name: scaleLabel(id) }));
+const CHORD_OPTIONS = [{ id: "", name: "No chord" }, ...Object.keys(CHORDS).map((id) => ({ id, name: CHORD_LABELS[id] ?? id }))];
+const INVERSION_OPTIONS = ["Root position", "1st inversion", "2nd inversion", "3rd inversion"]
+  .map((name, index) => ({ id: String(index), name }));
 
 interface Props {
   amounts: ReturnType<typeof useTransformAmounts>;
@@ -42,6 +48,7 @@ interface Props {
 /** The piano roll's controls: tools, snap grid, key and scale, slide, ghosts, velocity lane,
  * chord stamps and the whole-selection operations. */
 export function RollToolbar(p: Props) {
+  const { projectKey } = p;
   const feel = useRef<HTMLDetailsElement>(null);
   const cancelAmounts = p.amounts.cancel;
   const feelPanel = useRef<HTMLDivElement>(null);
@@ -86,48 +93,22 @@ export function RollToolbar(p: Props) {
         ))}
       </div>
       <div className="roll-group">
-        <label className="roll-snap" data-hint="The grid notes snap to when they are drawn, moved, resized or sliced.">
-          Snap
-          <select value={p.gridIndex} onChange={(e) => p.onGrid(Number(e.target.value))}>
-            {GRIDS.map((g, i) => (
-              <option key={g.name} value={i}>
-                {g.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="roll-snap" data-hint="The grid notes snap to when they are drawn, moved, resized or sliced.">
+          <span>Snap</span>
+          <ListPicker label="Snap" options={GRID_OPTIONS} value={String(p.gridIndex)} placeholder="" onCommit={(id) => p.onGrid(Number(id))} />
+        </div>
       </div>
       <div className="roll-group">
-        <label className="roll-snap" data-hint="The project's key: rows outside its scale are dimmed.">
-          Key
-          <select
-            aria-label="Key"
-            value={p.projectKey ? p.projectKey.root : ""}
-            onChange={(e) => p.onKey(e.target.value === "" ? null : { root: Number(e.target.value), scale: p.projectKey?.scale ?? "major" })}
-          >
-            <option value="">None</option>
-            {NOTE_NAMES.map((n, i) => (
-              <option key={n} value={i}>
-                {n}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="roll-snap" data-hint="The scale of the project's key.">
-          <span className="visually-hidden">Scale</span>
-          <select
-            aria-label="Scale"
-            disabled={!p.projectKey}
-            value={p.projectKey?.scale ?? "major"}
-            onChange={(e) => p.projectKey && p.onKey({ root: p.projectKey.root, scale: e.target.value })}
-          >
-            {Object.keys(SCALES).map((id) => (
-              <option key={id} value={id}>
-                {scaleLabel(id)}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="roll-snap" data-hint="The project's key: rows outside its scale are dimmed.">
+          <span>Key</span>
+          <ListPicker label="Key" options={KEY_OPTIONS} value={projectKey ? String(projectKey.root) : ""} placeholder="None"
+            onCommit={(id) => p.onKey(id === "" ? null : { root: Number(id), scale: projectKey?.scale ?? "major" })} />
+        </div>
+        <div className="roll-snap" data-hint="The scale of the project's key.">
+          <ListPicker label="Scale" options={SCALE_OPTIONS} value={projectKey?.scale ?? "major"} placeholder="Major"
+            disabled={!projectKey} reason="Choose a key first."
+            onCommit={(scale) => { if (projectKey) p.onKey({ root: projectKey.root, scale }); }} />
+        </div>
         {toggle("Snap to scale", "Drawn, painted and moved notes jump to the nearest key of the scale.", p.snapScale, p.onSnapScale, !p.projectKey)}
       </div>
       <div className="roll-group">
@@ -136,27 +117,13 @@ export function RollToolbar(p: Props) {
         {toggle("Velocity", "Show the velocity lane: drag to set the velocity of the selected notes.", p.lane, p.onLane)}
       </div>
       <div className="roll-group">
-        <label className="roll-snap" data-hint="Stamp a chord instead of a single note when you draw.">
-          <span className="visually-hidden">Chord</span>
-          <select aria-label="Chord" value={p.chord} onChange={(e) => p.onChord(e.target.value)}>
-            <option value="">No chord</option>
-            {Object.keys(CHORDS).map((id) => (
-              <option key={id} value={id}>
-                {CHORD_LABELS[id] ?? id}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="roll-snap" data-hint="Which inversion of the chord is stamped.">
-          <span className="visually-hidden">Inversion</span>
-          <select aria-label="Inversion" disabled={!p.chord} value={p.inversion} onChange={(e) => p.onInversion(Number(e.target.value))}>
-            {INVERSIONS.map((n, i) => (
-              <option key={n} value={i}>
-                {n}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="roll-snap" data-hint="Stamp a chord instead of a single note when you draw.">
+          <ListPicker label="Chord" options={CHORD_OPTIONS} value={p.chord} placeholder="No chord" onCommit={p.onChord} />
+        </div>
+        <div className="roll-snap" data-hint="Which inversion of the chord is stamped.">
+          <ListPicker label="Inversion" options={INVERSION_OPTIONS} value={String(p.inversion)} placeholder="Root position"
+            disabled={!p.chord} reason="Choose a chord first." onCommit={(id) => p.onInversion(Number(id))} />
+        </div>
       </div>
       <div className="roll-group">
         {act("Quantize", "Move the starts of the selected notes (all notes with none selected) onto the snap grid (Alt+Q).", p.onQuantize)}

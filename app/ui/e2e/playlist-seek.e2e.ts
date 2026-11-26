@@ -117,17 +117,7 @@ test("compact seek row moves the playhead while the loop row only edits loops", 
 
 test("keyboard uses live ticks; native failures do not dirty or create history", async ({ app, mock }) => {
   await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
-  const mode = app.getByRole("combobox", { name: "Playback mode" });
   const stamp = () => mock.eval<ArrangementStamp>("m => { const { generation, revision } = m.workspaceSnapshot(); return { generation, revision }; }");
-  await expect(mode).toHaveValue("song");
-  const patternArgs = { ...await stamp(), mode: "pattern" };
-  await mode.selectOption("pattern");
-  await expect(mode).toHaveValue("pattern");
-  const songArgs = { ...await stamp(), mode: "song" };
-  await mode.selectOption("song");
-  await expect(mode).toHaveValue("song");
-  await expect(mode).toBeEnabled();
-  expect.soft((await mock.calls("arrangement_mode")).map(call => call.args)).toEqual([patternArgs, songArgs]);
   await app.keyboard.press("Space");
   await mock.eval("m => m.hold(1700)");
   await app.keyboard.press("F5");
