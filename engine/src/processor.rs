@@ -11,6 +11,8 @@ use crate::command::{Command, Msg, Trash};
 use crate::graph::Graph;
 use crate::live::LiveShared;
 use crate::metronome::Metronome;
+#[cfg(feature = "profiling")]
+use crate::profiling::Profile;
 use crate::record::{RecordEvent, Recorder};
 use crate::transport::TransportClock;
 use crate::{BLOCK, QUEUE_CAPACITY};
@@ -19,6 +21,8 @@ use rtrb::{Consumer, Producer, PushError};
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+#[cfg(feature = "profiling")]
+use std::time::Instant;
 
 thread_local! {
     /// On while this thread is inside [`AudioProcessor::process`]. Const-initialised and
@@ -105,6 +109,8 @@ pub struct AudioProcessor {
     meter: [f32; 2],
     meter_release: f32,
     completed_recovery_stop: Option<u32>,
+    #[cfg(feature = "profiling")]
+    pub(crate) profile: Option<Profile>,
 }
 
 impl AudioProcessor {
@@ -143,7 +149,31 @@ impl AudioProcessor {
             meter: [0.0; 2],
             meter_release: meter_release(sample_rate),
             completed_recovery_stop: None,
+            #[cfg(feature = "profiling")]
+            profile: None,
         }
+    }
+
+    /// Starts a local Tracy client and attaches a reporter before this processor enters a stream.
+    #[cfg(feature = "profiling")]
+    pub fn enable_profiling(&mut self) -> std::io::Result<()> {
+        if self.profile.is_none() {
+            self.profile = Some(Profile::start(tracy_client::Client::start())?);
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "profiling", feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn with_stalled_profiling_for_test(
+        &mut self,
+        capacity: usize,
+        run: impl FnOnce(&mut Self),
+    ) {
+        let (profile, _drain) = Profile::channel(capacity);
+        let previous = self.profile.replace(profile);
+        run(self);
+        self.profile = previous;
     }
 
     /// Fills `out`, interleaved with `channels` channels, of any length. Channels 0 and 1 get
@@ -151,8 +181,18 @@ impl AudioProcessor {
     /// partial frame get silence. Real-time safe.
     pub fn process(&mut self, out: &mut [f32], channels: usize) {
         let _rendering = Rendering::start();
+        #[cfg(feature = "profiling")]
+        if let Some(profile) = &mut self.profile {
+            let frames = out.len().checked_div(channels).unwrap_or(0);
+            let blocks = frames.saturating_sub(BLOCK - self.served).div_ceil(BLOCK);
+            profile.begin_callback(blocks);
+        }
         if channels == 0 {
             out.fill(0.0);
+            #[cfg(feature = "profiling")]
+            if let Some(profile) = &mut self.profile {
+                profile.end_callback();
+            }
             return;
         }
         let mut frames = out.chunks_exact_mut(channels);
@@ -173,6 +213,10 @@ impl AudioProcessor {
             }
         }
         frames.into_remainder().fill(0.0);
+        #[cfg(feature = "profiling")]
+        if let Some(profile) = &mut self.profile {
+            profile.end_callback();
+        }
     }
 
     /// Restarts with `graph`, built for `sample_rate` in a new generation. Only
@@ -221,6 +265,12 @@ impl AudioProcessor {
     }
 
     fn render_block(&mut self) {
+        #[cfg(feature = "profiling")]
+        let profile_start = self
+            .profile
+            .as_ref()
+            .filter(|profile| profile.recording())
+            .map(|_| Instant::now());
         let start = self.clock;
         let end = start + BLOCK as u64;
         self.retry_trash();
@@ -319,7 +369,10 @@ impl AudioProcessor {
         if self.clock.is_multiple_of(1024) {
             let instance = self.live.synth.selected(self.clock);
             let meter = if instance != 0 && !self.faulted {
-                self.graph.synth_meter(instance)
+                self.graph.synth_meter(instance).map(|mut meter| {
+                    meter.frames = self.clock;
+                    meter
+                })
             } else {
                 None
             };
@@ -329,6 +382,10 @@ impl AudioProcessor {
             self.transport.playing(),
             self.graph.position(self.transport.position_ticks(start)),
         );
+        #[cfg(feature = "profiling")]
+        if let (Some(profile), Some(start)) = (&mut self.profile, profile_start) {
+            profile.block(start, self.transport.sample_rate());
+        }
     }
 
     /// Applies, in queue order, the commands due before `end` (the block covers `start..end`).
@@ -451,16 +508,7 @@ impl AudioProcessor {
                 Msg::Timeline(mut update, mode_changed, loop_changed) => {
                     let mut removed = None;
                     if !self.faulted {
-                        let old_len = self.graph.pattern_length();
-                        let new_len = update.pattern.length;
-                        update.pattern = self.graph.set_pattern(update.pattern);
-                        // Graph setters preserve same-bank active audio progress.
-                        update.song = self.graph.set_song(update.song);
-                        if self.graph.playback_mode == crate::PlaybackMode::Pattern {
-                            self.transport.keep_position(start, old_len, new_len);
-                        } else {
-                            self.transport.keep_position(start, new_len, new_len);
-                        }
+                        update = self.swap_timeline(start, update);
                         if let Some(id) = update.remove_channel {
                             removed = self.graph.remove_channel(id);
                         }
@@ -487,6 +535,40 @@ impl AudioProcessor {
                         );
                     }
                     self.discard(Trash::Timeline(update, removed));
+                }
+                Msg::Sources(mut t) => {
+                    if !self.faulted && self.graph.sources_admissible(&t) {
+                        // One boundary: sources, timeline, then the mix that names them.
+                        self.graph.apply_sources(&mut t);
+                        if let Some((update, mode_changed, loop_changed)) = t.timeline.take() {
+                            let update = self.swap_timeline(start, update);
+                            self.timeline_transport(
+                                start,
+                                update.bpm,
+                                update.mode,
+                                update.region,
+                                mode_changed,
+                                loop_changed,
+                            );
+                            t.timeline = Some((update, mode_changed, loop_changed));
+                        }
+                        self.graph.apply_transaction_mix(&mut t);
+                        t.applied = true;
+                    } else if detached
+                        && let Some((update, mode_changed, loop_changed)) = &t.timeline
+                    {
+                        // As for a timeline: a faulted graph keeps accepted transport order.
+                        let (bpm, mode, region) = (update.bpm, update.mode, update.region);
+                        let (m, l) = (*mode_changed, *loop_changed);
+                        self.timeline_transport(start, bpm, mode, region, m, l);
+                    }
+                    self.discard(Trash::Sources(t));
+                }
+                Msg::SetMix(mut install) => {
+                    if !self.faulted {
+                        self.graph.install_mix(&mut install);
+                    }
+                    self.discard(Trash::Mix(install));
                 }
                 Msg::SetSong(song) => {
                     let old = if self.faulted {
@@ -725,6 +807,25 @@ impl AudioProcessor {
             self.graph.song_loop = region;
             self.with_graph(Graph::reset_audio);
         }
+    }
+
+    /// Swaps a timeline's pattern and song into the graph (the update then holds the old
+    /// ones), keeping the place in the loop. Graph setters preserve same-bank audio.
+    fn swap_timeline(
+        &mut self,
+        start: u64,
+        mut update: Box<crate::command::TimelineUpdate>,
+    ) -> Box<crate::command::TimelineUpdate> {
+        let old_len = self.graph.pattern_length();
+        let new_len = update.pattern.length;
+        update.pattern = self.graph.set_pattern(update.pattern);
+        update.song = self.graph.set_song(update.song);
+        if self.graph.playback_mode == crate::PlaybackMode::Pattern {
+            self.transport.keep_position(start, old_len, new_len);
+        } else {
+            self.transport.keep_position(start, new_len, new_len);
+        }
+        update
     }
 
     /// Runs `f` on the graph unless it is faulted, catching a panic like a render does.
@@ -1152,6 +1253,251 @@ mod tests {
             panic!("a graph handed back");
         };
         assert_eq!(stale.generation(), 0);
+    }
+    fn tone_mix() -> crate::mixer::MixSetup {
+        use crate::mixer::*;
+        MixSetup::Routed(RoutedMix {
+            mixer: Mixer {
+                tracks: vec![Track {
+                    id: MASTER,
+                    output: None,
+                    inserts: vec![Insert {
+                        id: InsertId(1),
+                        latency_frames: 0,
+                        memory_bytes: 0,
+                    }],
+                }],
+                sources: vec![Source {
+                    id: SourceId::System(SystemSource::Tone),
+                    destination: MASTER,
+                }],
+                ..Mixer::default()
+            },
+            gains: vec![],
+            devices: vec![InsertDevice {
+                insert: InsertId(1),
+                kind: "utility".into(),
+                seed: 0,
+                params: vec![],
+            }],
+        })
+    }
+
+    fn install(generation: u64, base: u64, revision: u64) -> Msg {
+        Msg::SetMix(Box::new(crate::mixer::live::MixInstall {
+            generation,
+            base,
+            revision,
+            live: crate::mixer::live::prepare(&tone_mix(), SR, &[]).unwrap(),
+            transfers: vec![],
+            params: vec![],
+            installed: false,
+        }))
+    }
+
+    /// The retired envelope: whether it installed, and whether it carries a mix.
+    fn retired(trash: &mut Consumer<Trash>) -> (bool, bool) {
+        match trash.pop() {
+            Ok(Trash::Mix(m)) => (m.installed, m.live.is_some()),
+            _ => panic!("a mix install always retires its envelope"),
+        }
+    }
+
+    #[test]
+    fn stale_or_foreign_mix_installs_are_refused_whole() {
+        let (mut p, mut commands, mut trash) = processor();
+        let mut buf = [0.0; BLOCK * 2];
+        // Prepared against a revision the graph does not run.
+        assert!(commands.push(install(0, 5, 6)).is_ok());
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.mix_revision(), 0);
+        assert_eq!(retired(&mut trash), (false, true));
+        // Prepared for another generation (rate).
+        assert!(commands.push(install(1, 0, 1)).is_ok());
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.mix_revision(), 0);
+        assert_eq!(retired(&mut trash), (false, true));
+        // A faulted graph takes nothing; its replacement carries the mirrored mix.
+        p.faulted = true;
+        assert!(commands.push(install(0, 0, 1)).is_ok());
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.mix_revision(), 0);
+        assert_eq!(retired(&mut trash), (false, true));
+        p.faulted = false;
+        // Current: installs, and the leaving LegacyDirect (no mix) retires.
+        assert!(commands.push(install(0, 0, 1)).is_ok());
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.mix_revision(), 1);
+        assert_eq!(retired(&mut trash), (true, false));
+        // The next one carries the displaced routed mix back, never dropping it here.
+        assert!(commands.push(install(0, 1, 2)).is_ok());
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.mix_revision(), 2);
+        assert_eq!(retired(&mut trash), (true, true));
+    }
+
+    fn synth_node(id: u32) -> Box<ChannelNode> {
+        let setup = ChannelSetup::synth(ChannelId(id), vec![], ChannelMix::default());
+        Box::new(ChannelNode::new(SR, ramp_len(SR), &setup, false))
+    }
+
+    fn sources(
+        generation: u64,
+        base: u64,
+        removes: Vec<ChannelId>,
+        adds: Vec<u32>,
+    ) -> Box<crate::command::SourceTransaction> {
+        let Msg::SetMix(mix) = install(generation, base, base + 1) else {
+            unreachable!()
+        };
+        Box::new(crate::command::SourceTransaction {
+            removed: Vec::with_capacity(removes.len()),
+            removes,
+            adds: adds.into_iter().map(|id| Some(synth_node(id))).collect(),
+            timeline: Some((
+                Box::new(crate::TimelineUpdate {
+                    pattern: Box::new(PatternData {
+                        length: 480,
+                        notes: vec![],
+                    }),
+                    song: Box::default(),
+                    bpm: 90.0,
+                    mode: crate::PlaybackMode::Pattern,
+                    region: None,
+                    remove_channel: None,
+                }),
+                false,
+                false,
+            )),
+            mix: *mix,
+            applied: false,
+        })
+    }
+
+    fn retired_sources(trash: &mut Consumer<Trash>) -> (bool, usize, usize) {
+        match trash.pop() {
+            Ok(Trash::Sources(t)) => (t.applied, t.adds.iter().flatten().count(), t.removed.len()),
+            _ => panic!("a source transaction always retires its envelope"),
+        }
+    }
+
+    #[test]
+    fn a_source_transaction_applies_whole_or_not_at_all() {
+        let (mut p, mut commands, mut trash) = processor();
+        let mut buf = [0.0; BLOCK * 2];
+        assert!(p.graph.add_channel(synth_node(1)).is_none());
+        assert!(p.graph.add_channel(synth_node(2)).is_none());
+        let state = |p: &AudioProcessor| {
+            (
+                p.graph.channel_ids(),
+                p.graph.pattern_length(),
+                p.graph.mix_revision(),
+            )
+        };
+        let before = state(&p);
+        // Stale base, foreign generation, an ID still taken, an absent removal, a faulted
+        // graph: each refused before any part (sources, timeline, mix) changes.
+        for (t, faulted, adds) in [
+            (sources(0, 4, vec![ChannelId(1)], vec![1]), false, 1),
+            (sources(3, 0, vec![ChannelId(1)], vec![1]), false, 1),
+            (sources(0, 0, vec![], vec![2]), false, 1),
+            (sources(0, 0, vec![ChannelId(9)], vec![]), false, 0),
+            (sources(0, 0, vec![ChannelId(1)], vec![1]), true, 1),
+        ] {
+            p.faulted = faulted;
+            assert!(commands.push(Msg::Sources(t)).is_ok());
+            p.process(&mut buf, 2);
+            p.faulted = false;
+            assert_eq!(state(&p), before);
+            let (applied, held, _) = retired_sources(&mut trash);
+            assert!(!applied);
+            assert_eq!(held, adds, "refused nodes come back");
+        }
+        // Replace 1 (it fades), add 3, new timeline and mix: one boundary.
+        assert!(
+            commands
+                .push(Msg::Sources(sources(0, 0, vec![ChannelId(1)], vec![1, 3])))
+                .is_ok()
+        );
+        p.process(&mut buf, 2);
+        assert_eq!(
+            p.graph.channel_ids(),
+            vec![ChannelId(2), ChannelId(1), ChannelId(3)]
+        );
+        assert_eq!((p.graph.pattern_length(), p.graph.mix_revision()), (480, 1));
+        assert_eq!(retired_sources(&mut trash), (true, 0, 0));
+    }
+
+    #[test]
+    fn a_removal_with_no_fading_room_returns_in_the_envelope() {
+        let (mut p, mut commands, mut trash) = processor();
+        let mut buf = [0.0; BLOCK * 2];
+        for id in 0..crate::state::MAX_CHANNELS as u32 {
+            assert!(p.graph.add_channel(synth_node(id)).is_none());
+            assert!(p.graph.remove_channel(ChannelId(id)).is_none());
+        }
+        assert!(p.graph.add_channel(synth_node(1000)).is_none());
+        assert!(
+            commands
+                .push(Msg::Sources(sources(0, 0, vec![ChannelId(1000)], vec![])))
+                .is_ok()
+        );
+        p.process(&mut buf, 2);
+        assert_eq!(retired_sources(&mut trash), (true, 0, 1));
+    }
+
+    #[test]
+    fn a_rebuild_keeps_only_a_source_transactions_transport_chronology() {
+        let t = sources(0, 0, vec![ChannelId(5)], vec![6]);
+        let note = |channel| Msg::Command {
+            due: 0,
+            cmd: Command::ChannelNote {
+                channel: ChannelId(channel),
+                key: 60,
+                velocity: 1.0,
+                on: true,
+                id: NoteId(1),
+            },
+            mode_changed: false,
+        };
+        let kept = crate::command::rebuilt_queue(vec![note(5), note(7), Msg::Sources(t)]);
+        assert_eq!(kept.len(), 2, "the removed channel's earlier note is cut");
+        assert!(matches!(
+            kept[0],
+            Msg::Command {
+                cmd: Command::ChannelNote {
+                    channel: ChannelId(7),
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(matches!(kept[1], Msg::TimelineRebuilt { bpm: 90.0, .. }));
+    }
+
+    #[test]
+    fn a_mix_install_waits_for_trash_room() {
+        let (mut p, mut commands, mut trash) = processor();
+        let mut buf = [0.0; BLOCK * 2];
+        for _ in 0..2 {
+            assert!(
+                commands
+                    .push(Msg::ReplaceGraph(Box::new(Graph::new(SR, 0))))
+                    .is_ok()
+            );
+        }
+        assert!(commands.push(install(0, 0, 1)).is_ok());
+        p.process(&mut buf, 2);
+        // One graph in the queue, one parked: the install waits, nothing changed.
+        assert!(p.unsent.is_some());
+        assert_eq!(p.graph.mix_revision(), 0);
+        assert_eq!(commands.slots(), QUEUE_CAPACITY - 1);
+        assert!(trash.pop().is_ok());
+        p.process(&mut buf, 2);
+        assert_eq!(p.graph.mix_revision(), 1);
+        assert!(matches!(trash.pop(), Ok(Trash::Graph(_))));
+        p.process(&mut buf, 2);
+        assert_eq!(retired(&mut trash), (true, false));
     }
 }
 

@@ -1,3 +1,4 @@
+import { audioDurationTicks } from "./audio/geometry";
 import type { ArrangementPage } from "../api/arrangement";
 import { integer, MAX_SONG_TICKS, type PlaylistView } from "./geometry";
 
@@ -25,7 +26,7 @@ export function projectClips(page: ArrangementPage, bpm: number): RenderClip[] {
     if (clip.content.type === "audio") {
       const asset = assets.get(clip.content.asset);
       if (!asset || !(asset.sourceRate > 0) || !(bpm > 0)) throw new Error("Audio clip timing is unavailable. Refresh the playlist.");
-      length = Math.ceil((clip.content.sourceEnd - clip.content.sourceStart) / asset.sourceRate * bpm * 16);
+      length = audioDurationTicks(clip.content.sourceEnd - clip.content.sourceStart, asset.sourceRate, bpm);
     } else length = clip.content.lengthTicks;
     integer(length, "visible clip length", 1); integer(clip.startTick, "visible clip onset");
     return { id: clip.id, name: clip.name, kind: clip.content.type, trackIndex: track.index, startTick: clip.startTick, lengthTicks: Math.min(length, MAX_SONG_TICKS - clip.startTick), ink: track.ink, muted: clip.muted || track.mute };

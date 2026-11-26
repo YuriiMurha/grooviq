@@ -60,8 +60,8 @@ fn multiband_presets_controls_and_reset_are_realtime_safe() {
             let mut matches = true;
             let mut changed = [false; 2];
             let mut band_has_signal = [false; 3];
-            let mut meter_min = [f32::INFINITY; 6];
-            let mut meter_max = [f32::NEG_INFINITY; 6];
+            let mut meter_min = [f32::INFINITY; 8];
+            let mut meter_max = [f32::NEG_INFINITY; 8];
             super::realtime(|| {
                 for &(index, value) in &params {
                     device.set_param(index, value);
@@ -99,7 +99,7 @@ fn multiband_presets_controls_and_reset_are_realtime_safe() {
                             let mut r = dry.1;
                             device.process(&mut l[..size], &mut r[..size], None, &[]);
                             finite &= l[..size].iter().chain(&r[..size]).all(|x| x.is_finite());
-                            for meter in 0..6 {
+                            for meter in 0..meter_min.len() as u32 {
                                 let v = device.meter(meter);
                                 finite &= v.is_finite();
                                 meter_min[meter as usize] = meter_min[meter as usize].min(v);
@@ -109,7 +109,7 @@ fn multiband_presets_controls_and_reset_are_realtime_safe() {
                     }
                 }
                 device.reset();
-                for meter in 0..6 {
+                for meter in 0..meter_min.len() as u32 {
                     finite &= device.meter(meter).is_finite();
                 }
                 let mut l = dry.0;
@@ -118,7 +118,7 @@ fn multiband_presets_controls_and_reset_are_realtime_safe() {
                 finite &= l.iter().chain(&r).all(|x| x.is_finite());
             });
             assert!(
-                (0..6).all(|i| meter_max[i] - meter_min[i] > 0.01),
+                (0..meter_min.len()).all(|i| meter_max[i] - meter_min[i] > 0.01),
                 "{name} at {rate}: one or more meters did not vary under stress"
             );
             assert!(finite, "{name} at {rate}: nonfinite output/meter");

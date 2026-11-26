@@ -12,6 +12,7 @@ pub fn compile_song(
     unchanged_audio: Option<&engine::AudioSchedule>,
     max_notes: usize,
 ) -> Result<SongData, String> {
+    crate::mixer::require_runtime_support(project).map_err(|e| e.to_string())?;
     project.validate_arrangement()?;
     if !project.bpm.is_finite() || !(20.0..=400.0).contains(&project.bpm) {
         return Err("Song tempo must be between 20 and 400 BPM".into());
@@ -111,6 +112,16 @@ pub fn compile_song(
             .map_err(|e| e.to_string())?
             .0
     };
+    // Routes live outside the (possibly reused) bank, so a track-only move refreshes them
+    // while every sounding clip keeps its place.
+    let routes: Vec<_> = project
+        .arrangement
+        .clips
+        .iter()
+        .filter(|c| matches!(c.content, ClipContent::Audio { .. }))
+        .map(|c| (c.id, u64::from(c.track)))
+        .collect();
+    let audio = audio.with_tracks(&routes).map_err(|e| e.to_string())?;
     let mut curves = Vec::new();
     for c in project.arrangement.clips.iter().filter(|c| audible(c)) {
         if let ClipContent::Automation {
@@ -169,7 +180,7 @@ pub fn compile_song(
             });
         }
     }
-    let channels = crate::compile::compile_channels(project, decoded);
+    let channels = crate::compile::channel_setups(project, decoded);
     let automation =
         engine::AutomationSchedule::build(curves, &channels).map_err(|e| e.to_string())?;
     let mut musical_end = arrangement.length;

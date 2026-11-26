@@ -172,6 +172,13 @@ impl HostTransport {
 }
 
 pub trait Device: Send {
+    /// Compensable processing latency in frames at the device's sample rate.
+    /// Excludes intentional musical delay, predelay and reflection timing. This query
+    /// must not allocate, lock or perform I/O; parameter changes may change its result.
+    fn latency_frames(&self) -> u32 {
+        0
+    }
+
     /// Facts for the immediately following actual process span; default preserves old kernels.
     fn set_transport(&mut self, _transport: &HostTransport) {}
 

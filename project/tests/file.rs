@@ -264,10 +264,10 @@ fn load_rejects_non_zip_truncated_missing_json_and_newer_versions() {
     ));
     match check(
         "v2.grooviq",
-        &json_zip(r#"{"format":"grooviq-project","version":4,"somethingNew":true}"#),
+        &json_zip(r#"{"format":"grooviq-project","version":5,"somethingNew":true}"#),
     ) {
         Err(LoadError::NewerVersion { found, supported }) => {
-            assert_eq!((found, supported), (4, 3));
+            assert_eq!((found, supported), (5, 4));
         }
         other => panic!("{other:?}"),
     }
@@ -1057,7 +1057,7 @@ fn a_v1_file_opens_and_sounds_the_same() {
         ..EngineState::default()
     };
     assert_eq!(p.time_signature, TimeSignature { beats: 4, unit: 4 });
-    assert_eq!(engine_state(p, &decoded.samples), m1);
+    assert_eq!(engine_state(p, &decoded.samples).unwrap(), m1);
 
     // Saving writes version 2, with the new fields.
     let again = dir.path().join("again.grooviq");
@@ -1296,26 +1296,27 @@ fn out_of_range_v2_values_are_clamped_with_warnings() {
 }
 
 #[test]
-fn a_v4_file_is_refused_as_newer() {
-    let json = serde_json::json!({"format": FORMAT, "version": 4, "channels": "whatever"});
-    match migrate(&mut Project::new(), 4) {
+fn a_v5_file_is_refused_as_newer() {
+    let json =
+        serde_json::json!({"format": FORMAT, "version": 5, "channels": "whatever", "mixer": 7});
+    match migrate(&mut Project::new(), 5) {
         Err(LoadError::NewerVersion { found, supported }) => {
-            assert_eq!((found, supported), (4, 3));
+            assert_eq!((found, supported), (5, 4));
         }
         other => panic!("{other:?}"),
     }
     let dir = tempfile::tempdir().unwrap();
     let path = write(
         dir.path(),
-        "v3.grooviq",
+        "v5.grooviq",
         &json_zip(&serde_json::to_string(&json).unwrap()),
     );
     let err = load(&path).unwrap_err();
     assert!(matches!(
         err,
         LoadError::NewerVersion {
-            found: 4,
-            supported: 3
+            found: 5,
+            supported: 4
         }
     ));
     assert!(

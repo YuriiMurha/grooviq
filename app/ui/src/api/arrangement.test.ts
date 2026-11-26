@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeArrangementBatch, validateStamp } from "./arrangement";
+import { encodeArrangementBatch, validateAudioTicket, validateStamp } from "./arrangement";
 
 describe("arrangement input bounds", () => {
   it("rejects unsafe and negative generation/revision values before IPC", () => {
@@ -13,5 +13,12 @@ describe("arrangement input bounds", () => {
     expect(encodeArrangementBatch([{ kind: "setLoop", region: null }])).toBe('[{"kind":"setLoop","region":null}]');
     const operations = Array.from({ length: 100_001 }, () => ({ kind: "setLoop" as const, region: null }));
     expect(() => encodeArrangementBatch(operations)).toThrow("operation limit");
+  });
+  it("requires a positive safe integer for a media ticket", () => {
+    for (const value of [0, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => validateAudioTicket(value)).toThrow("Invalid media ticket");
+    }
+    expect(() => validateAudioTicket(1)).not.toThrow();
+    expect(() => validateAudioTicket(Number.MAX_SAFE_INTEGER)).not.toThrow();
   });
 });

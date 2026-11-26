@@ -95,6 +95,184 @@ fn file(frames: u32) -> SampleFile {
         bytes: Arc::new(wav(frames)),
     }
 }
+
+#[test]
+fn media_ticket_cancel_after_admission_prevents_publication() {
+    let (mut s, assets, _, _) = rig(1 << 20);
+    let track = s.project().arrangement.tracks[0].id;
+    let before = s.project().clone();
+    let history = s.history_usage();
+    let (intent, prepared) = prepare(&mut s, &assets, import(track), file(128));
+    s.register_media_ticket(1, &intent).unwrap();
+    assert_eq!(s.pending_media_requests(), vec![intent.request()]);
+    assert!(s.cancel_media_ticket(1));
+    assert!(s.publish_media(&intent, prepared, Instant::now()).is_err());
+    assert_eq!(s.project(), &before);
+    assert_eq!(s.history_usage(), history);
+}
+
+#[test]
+fn media_ticket_rejects_out_of_range_and_duplicate_live_values() {
+    let (mut s, _, _, _) = rig(1 << 20);
+    let v = s.arrangement_view();
+    let target = import(s.project().arrangement.tracks[0].id);
+    let intent = s
+        .media_intent(v.generation, v.revision, target.clone())
+        .unwrap();
+    let duplicate = s.media_intent(v.generation, v.revision, target).unwrap();
+    assert!(s.register_media_ticket(0, &intent).is_err());
+    assert!(s.register_media_ticket(1 << 53, &intent).is_err());
+    let max = (1 << 53) - 1;
+    s.register_media_ticket(max, &intent).unwrap();
+    assert!(s.register_media_ticket(max, &duplicate).is_err());
+    assert!(s.cancel_media_ticket(max));
+    assert!(s.check_media_intent(&intent).is_err());
+    assert!(s.check_media_intent(&duplicate).is_ok());
+    s.release_media_ticket(max, &intent);
+    s.register_media_ticket(max, &duplicate).unwrap();
+}
+
+#[test]
+fn media_ticket_tombstones_evict_only_the_oldest_at_capacity() {
+    let (mut s, _, _, _) = rig(1 << 20);
+    let v = s.arrangement_view();
+    let intent = s
+        .media_intent(
+            v.generation,
+            v.revision,
+            import(s.project().arrangement.tracks[0].id),
+        )
+        .unwrap();
+    for ticket in 1..=65 {
+        assert!(!s.cancel_media_ticket(ticket));
+    }
+    s.register_media_ticket(1, &intent).unwrap();
+    for ticket in 2..=65 {
+        assert!(s.register_media_ticket(ticket, &intent).is_err());
+    }
+}
+
+#[test]
+fn media_ticket_invalid_or_repeated_cancels_keep_an_early_cancel() {
+    let (mut s, _, _, _) = rig(1 << 20);
+    let v = s.arrangement_view();
+    let intent = s
+        .media_intent(
+            v.generation,
+            v.revision,
+            import(s.project().arrangement.tracks[0].id),
+        )
+        .unwrap();
+    // Fill the ring exactly: the early cancel 9 is the oldest entry.
+    assert!(!s.cancel_media_ticket(9));
+    for ticket in 10..=72 {
+        assert!(!s.cancel_media_ticket(ticket));
+    }
+    assert!(!s.cancel_media_ticket(0));
+    assert!(!s.cancel_media_ticket(1 << 53));
+    assert!(!s.cancel_media_ticket(10));
+    assert!(s.register_media_ticket(9, &intent).is_err());
+}
+
+#[test]
+fn media_ticket_release_after_replacement_keeps_the_new_imports_ticket() {
+    let (mut s, _, _, _) = rig(1 << 20);
+    let v = s.arrangement_view();
+    let old = s
+        .media_intent(
+            v.generation,
+            v.revision,
+            import(s.project().arrangement.tracks[0].id),
+        )
+        .unwrap();
+    s.register_media_ticket(7, &old).unwrap();
+    s.new_project().unwrap();
+    let v = s.arrangement_view();
+    let track = s
+        .edit_arrangement(
+            v.generation,
+            v.revision,
+            vec![ArrangementEdit::CreateTrack {
+                name: "T".into(),
+                color: 0,
+            }],
+            Instant::now(),
+        )
+        .unwrap()
+        .created_ids[0];
+    let v = s.arrangement_view();
+    let new = s
+        .media_intent(v.generation, v.revision, import(track))
+        .unwrap();
+    s.register_media_ticket(7, &new).unwrap();
+    // The old import finishing late must not release the new project's ticket.
+    s.release_media_ticket(7, &old);
+    assert!(s.cancel_media_ticket(7));
+    assert!(s.check_media_intent(&new).is_err());
+    s.release_media_ticket(7, &new);
+    assert!(!s.cancel_media_ticket(7));
+}
+
+#[test]
+fn refused_replacement_preserves_live_media_ticket_and_tombstone() {
+    let (mut s, _, _, controller) = rig(1 << 20);
+    let v = s.arrangement_view();
+    let intent = s
+        .media_intent(
+            v.generation,
+            v.revision,
+            import(s.project().arrangement.tracks[0].id),
+        )
+        .unwrap();
+    s.register_media_ticket(1, &intent).unwrap();
+    assert!(!s.cancel_media_ticket(2));
+    while controller
+        .lock()
+        .unwrap()
+        .send(e::Command::SetTempo { bpm: 140.0 })
+        .is_ok()
+    {}
+    assert!(s.new_project().is_err());
+    assert_eq!(s.generation(), v.generation);
+    assert!(s.cancel_media_ticket(1), "refusal cleared a live ticket");
+    assert!(s.check_media_intent(&intent).is_err());
+    assert!(
+        s.register_media_ticket(2, &intent).is_err(),
+        "refusal cleared a tombstone"
+    );
+}
+
+#[test]
+fn successful_replacement_clears_live_media_ticket_and_tombstone() {
+    let (mut s, _, _, _) = rig(1 << 20);
+    let v = s.arrangement_view();
+    let target = import(s.project().arrangement.tracks[0].id);
+    let old = s.media_intent(v.generation, v.revision, target).unwrap();
+    s.register_media_ticket(1, &old).unwrap();
+    assert!(!s.cancel_media_ticket(2));
+    s.new_project().unwrap();
+
+    let v = s.arrangement_view();
+    let track = s
+        .edit_arrangement(
+            v.generation,
+            v.revision,
+            vec![ArrangementEdit::CreateTrack {
+                name: "New track".into(),
+                color: 0,
+            }],
+            Instant::now(),
+        )
+        .unwrap()
+        .created_ids[0];
+    let v = s.arrangement_view();
+    let current = s
+        .media_intent(v.generation, v.revision, import(track))
+        .unwrap();
+    s.register_media_ticket(1, &current).unwrap();
+    s.register_media_ticket(2, &current).unwrap();
+}
+
 fn sound(s: &Session) -> Vec<f32> {
     e::render_offline_with(
         e::EngineConfig {
@@ -468,7 +646,7 @@ fn combined_live_channel_and_asset_quota_cannot_be_evaded_by_new_project() {
     s.publish_media(&intent, prepared, Instant::now()).unwrap();
     let budget = s.media_budget();
     assert!(budget.used() > charged);
-    let snapshot = s.export_state();
+    let snapshot = s.export_state().unwrap();
     s.new_project().unwrap();
     assert!(budget.used() > 0);
     drop(snapshot);

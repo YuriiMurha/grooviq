@@ -4,6 +4,11 @@ use crate::api::{Device, NoteEvent, db_to_gain};
 use crate::oversampling::{Down, Up};
 use crate::util::*;
 
+pub(crate) const MAX_LATENCY_FRAMES: u32 = 49;
+const KA: usize = 22;
+const KB: usize = 6;
+const DRY_DELAY: usize = MAX_LATENCY_FRAMES as usize + 1;
+
 pub const PARAM_IDS: [&str; 9] = [
     "model",
     "drive",
@@ -81,12 +86,12 @@ struct Channel {
 impl Channel {
     fn new() -> Self {
         Self {
-            up_a: Up::new(22, 8.6),
-            up_b: Up::new(6, 9.),
-            down_a: Down::new(22, 8.6),
-            down_b: Down::new(6, 9.),
+            up_a: Up::new(KA, 8.6),
+            up_b: Up::new(KB, 9.),
+            down_a: Down::new(KA, 8.6),
+            down_b: Down::new(KB, 9.),
             z: 0.,
-            dry: DelayLine::new(50),
+            dry: DelayLine::new(DRY_DELAY),
             hp: OnePole::default(),
             lp: OnePole::default(),
             tilt: OnePole::default(),
@@ -135,9 +140,18 @@ pub struct Saturation {
     models: [Smooth; 4],
     ch: [Channel; 2],
     fresh: bool,
-    compensation_db: [f32; 49],
+    compensation_db: [f32; MAX_LATENCY_FRAMES as usize],
     compensation_at: usize,
 }
+pub(crate) fn memory_payload() -> crate::insert_memory::Payload {
+    let mut payload = crate::insert_memory::Payload::boxed::<Saturation>();
+    for k in [KA, KB] {
+        crate::oversampling::add_stereo_stage_payload(k, &mut payload);
+    }
+    payload.delay_lines(DRY_DELAY, 2);
+    payload
+}
+
 impl Saturation {
     pub fn new(sample_rate: f32) -> Self {
         let sr = if sample_rate.is_finite() {
@@ -151,7 +165,7 @@ impl Saturation {
             models: [Smooth::new(0., 10., sr); 4],
             ch: [Channel::new(), Channel::new()],
             fresh: true,
-            compensation_db: [0.; 49],
+            compensation_db: [0.; MAX_LATENCY_FRAMES as usize],
             compensation_at: 0,
         };
         for (i, s) in SPEC.iter().enumerate() {
@@ -160,7 +174,7 @@ impl Saturation {
         d
     }
     pub fn latency(&self) -> usize {
-        49
+        MAX_LATENCY_FRAMES as usize
     }
     fn snap(&mut self) {
         for s in self.controls.iter_mut().chain(self.models.iter_mut()) {
@@ -172,6 +186,10 @@ impl Saturation {
     }
 }
 impl Device for Saturation {
+    fn latency_frames(&self) -> u32 {
+        self.latency() as u32
+    }
+
     fn set_param(&mut self, index: u32, value: f32) {
         let Some(v) = clamp_param(&SPEC, index, value) else {
             return;

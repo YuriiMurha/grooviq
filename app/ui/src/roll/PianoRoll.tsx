@@ -1,6 +1,7 @@
 import { registerGestureCancellation } from "../project/pending";
 import type { PatternStamp } from "../api/patterns";
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent, type RefObject } from "react";
+import { subscribeThemeChange } from "../theme/changes";
 import { onNotesChanged, notesEdit, patternNotes, type WireNote } from "../api/notes";
 import type { ProjectKey } from "../api/project";
 import type { LiveFrame } from "../live/decode";
@@ -213,13 +214,16 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
     const el = canvas.current;
     if (!el) return;
     let wait: ReturnType<typeof setTimeout> | undefined;
+    const refreshPalette = () => {
+      palette.current = readRollPalette(document.documentElement);
+      dirty.current = true;
+    };
     const build = () => {
       clearTimeout(wait);
-      palette.current = readRollPalette(document.documentElement);
+      refreshPalette();
       const made = use2d ? createCanvasRoll(el) : createRollRenderer(el);
       renderer.current = made;
       built.current = { version: -1, channel: null, renderer: made, ghosts: "" };
-      dirty.current = true;
       if (made) {
         if (STATS) rollStats.renderer = made.kind;
       } else if (!use2d) {
@@ -234,9 +238,11 @@ export function PianoRoll({ channel, latest, sampleRate = 48000, keyboard = fals
       wait = setTimeout(() => setUse2d(true), RESTORE_WAIT_MS);
     };
     build();
+    const unsubscribeTheme = subscribeThemeChange(refreshPalette);
     el.addEventListener("webglcontextlost", onLost);
     el.addEventListener("webglcontextrestored", build);
     return () => {
+      unsubscribeTheme();
       clearTimeout(wait);
       el.removeEventListener("webglcontextlost", onLost);
       el.removeEventListener("webglcontextrestored", build);

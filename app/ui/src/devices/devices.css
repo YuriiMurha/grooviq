@@ -93,9 +93,9 @@
 
 .device-kind {
   color: var(--faint);
-  font-size: 9.5px;
-  font-weight: 800;
-  letter-spacing: 0.1em;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
@@ -154,9 +154,9 @@
 
 .dcard-title {
   color: var(--kc, var(--muted));
-  font-size: 10px;
+  font-size: 11.5px;
   font-weight: 800;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -219,13 +219,11 @@
 .dw-label,
 .dw-axis {
   fill: var(--muted);
-  font-size: 9.5px;
+  font-size: 11px;
   font-weight: 700;
 }
 
 .dw-axis {
-  fill: var(--faint);
-  font-size: 8.5px;
   font-weight: 600;
 }
 
@@ -256,8 +254,8 @@
   cursor: ns-resize;
 }
 
-.osc-display.off svg {
-  opacity: 0.42;
+.osc-display.off svg > :not(text) {
+  filter: opacity(42%);
 }
 
 .filter-display {
@@ -337,9 +335,9 @@
 .dk-label {
   grid-area: label;
   color: var(--faint);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -347,8 +345,8 @@
 .dk-value {
   grid-area: value;
   color: var(--muted);
-  font-size: 10.5px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 650;
   white-space: nowrap;
 }
 
@@ -369,12 +367,11 @@
 }
 
 .dfield .dk-label {
-  font-size: 8.5px;
+  font-size: 11px;
 }
 
 .dfield .dk-value {
   color: var(--text);
-  font-size: 11px;
   font-weight: 700;
 }
 
@@ -402,7 +399,7 @@
   border: 0;
   border-radius: var(--radius-s);
   color: var(--faint);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 700;
   white-space: nowrap;
   cursor: pointer;
@@ -473,7 +470,7 @@
 .preset[aria-pressed="true"] {
   background: var(--accent);
   box-shadow: none;
-  color: var(--bg);
+  color: var(--on-accent);
 }
 
 .synth-volume {
@@ -530,7 +527,7 @@
 .osc-body {
   flex: 1;
   display: grid;
-  grid-template-columns: 1fr 150px;
+  grid-template-columns: minmax(0, 1fr) 192px;
   gap: 8px;
   min-height: 0;
 }
@@ -554,7 +551,7 @@
 .filter-knobs {
   flex: none;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(3, 1fr) 1.12fr 1fr;
   padding-top: 1px;
 }
 
@@ -581,6 +578,10 @@
   align-items: center;
 }
 
+.synth .env {
+  padding-inline: 6px;
+}
+
 .env .env-graph {
   flex: 1;
 }
@@ -588,12 +589,12 @@
 .env-fields {
   flex: none;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 3px;
+  grid-template-columns: repeat(4, minmax(max-content, 1fr));
+  gap: 2px;
 }
 
 .env-fields .dfield {
-  padding: 4px 5px 0;
+  padding: 3px 1px 0 2px;
   gap: 3px;
 }
 
@@ -624,7 +625,7 @@
   border-radius: 999px;
   box-shadow: inset 0 0 0 1px var(--line-soft);
   color: var(--faint);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 700;
   white-space: nowrap;
   cursor: pointer;
@@ -702,7 +703,7 @@
 .sampler-r2 {
   flex: 1;
   display: grid;
-  grid-template-columns: 1fr 178px 1fr 186px;
+  grid-template-columns: 1fr 188px 1fr 186px;
   gap: 6px;
   min-height: 0;
 }
@@ -772,15 +773,17 @@
 
 .sample-missing > button { flex: none; }
 
-/* A marker's grip: start and end hang from the top like flags (start's to the right of its line,
-   end's to the left); the loop's sits at the bottom. The lines are drawn in the canvas. */
+/* Keep the whole grip inside the well. The canvas line stays at the actual trim position. */
 .wmark {
+  --grip-width: 18px;
+  --grip-offset: 4px;
+  --tab-row: 16px;
   position: absolute;
   top: 0;
   left: var(--x);
-  width: 18px;
+  margin-left: clamp(calc(0px - var(--x)), calc(0px - var(--grip-offset)), calc(100% - var(--grip-width) - var(--x)));
+  width: var(--grip-width);
   height: 56%;
-  margin-left: -4px;
   border-radius: var(--radius-s);
   cursor: ew-resize;
   touch-action: none;
@@ -788,15 +791,24 @@
 }
 
 .wmark[data-param="end"] {
-  margin-left: -14px;
+  --grip-offset: 14px;
+}
+
+.wmark.stacked:not(.inset) {
+  height: var(--tab-row);
+}
+
+.wmark.inset {
+  top: var(--tab-row);
+  height: calc(56% - var(--tab-row));
 }
 
 .wmark.loop {
+  --grip-width: 16px;
+  --grip-offset: 8px;
   top: auto;
   bottom: 0;
-  width: 16px;
   height: 40%;
-  margin-left: -8px;
 }
 
 .wmark-tab {
@@ -810,7 +822,7 @@
   background: var(--text);
   border-radius: 0 0 4px 0;
   color: var(--well);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 800;
 }
 
@@ -829,7 +841,8 @@
 }
 
 .wmark.off .wmark-tab {
-  opacity: 0.45;
+  background: var(--raised);
+  color: var(--muted);
 }
 
 .wmark:hover .wmark-tab,
@@ -838,7 +851,7 @@
 }
 
 .wmark:focus-visible {
-  outline-offset: 0;
+  outline-offset: -2px;
 }
 
 .pitch-body {
@@ -880,7 +893,6 @@
 .dseg.choke button {
   height: 19px;
   padding: 0;
-  font-size: 10px;
 }
 
 .vel-knobs {
@@ -892,13 +904,17 @@
   grid-template-columns: repeat(3, 1fr);
 }
 
-.filter-display.off svg {
+.sampler .env {
+  padding-inline: 3px;
+}
+
+.filter-display.off svg > :not(text) {
   opacity: 0.45;
 }
 
-.synth-output { flex: none; margin: 4px 8px; }
-.synth-output .dcard-head { padding: 4px 6px; gap: 4px; }
-.synth-output-status { color: var(--muted); font-size: 9px; }
+.synth-output { flex: none; margin: 4px 0; }
+.synth-output .dcard-head { height: 24px; padding: 0 6px; gap: 4px; }
+.synth-output-status { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .synth-output canvas { display: block; }
 
 .sample-file-details {

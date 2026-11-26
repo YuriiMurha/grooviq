@@ -16,6 +16,8 @@ mod commands;
 mod display;
 mod events;
 mod exit;
+#[cfg(target_os = "macos")]
+mod macos_quit;
 mod menu;
 pub mod midi;
 mod midi_cmds;
@@ -138,6 +140,17 @@ fn start_audio(app: &AppHandle) -> Audio {
     let (controller, processor) = engine(EngineConfig {
         sample_rate: START_RATE,
     });
+    #[cfg(feature = "profiling")]
+    let processor = {
+        let mut processor = processor;
+        if let Err(err) = processor.enable_profiling() {
+            lock(&log).push(
+                Level::Error,
+                format!("Tracy profiling could not start: {err}"),
+            );
+        }
+        processor
+    };
     let live = controller.live_shared();
     let controller = Arc::new(Mutex::new(controller));
     let session = Arc::new(Mutex::new(Session::new(Arc::clone(&controller))));
@@ -332,21 +345,21 @@ fn end_session(audio: &Audio) {
     let _ = exit::end_session(&audio.exit, &audio.session, &audio.recovery);
 }
 
-/// Whether closing must wait for the person; if so, asks the UI.
-fn hold_close(app: &AppHandle) -> bool {
+/// Whether closing must wait for the person. An error means the UI could not be asked.
+fn hold_close(app: &AppHandle) -> tauri::Result<bool> {
     #[cfg(all(feature = "qa-driver", target_os = "macos"))]
-    if qa_driver::forced_shutdown_requested() {
-        return false;
-    }
+    let forced = qa_driver::forced_shutdown_requested();
+    #[cfg(not(all(feature = "qa-driver", target_os = "macos")))]
+    let forced = false;
+
     let Some(audio) = app.try_state::<Audio>() else {
-        return false;
+        return Ok(false);
     };
-    let hold = audio.exit.hold(&audio.session);
+    let hold = audio.exit.hold(&audio.session, forced);
     if hold {
-        // Fails only while the app shuts down.
-        let _ = app.emit(CLOSE_REQUESTED_EVENT, ());
+        app.emit(CLOSE_REQUESTED_EVENT, ())?;
     }
-    hold
+    Ok(hold)
 }
 
 fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
@@ -462,6 +475,10 @@ pub fn run() {
             let audio = start_audio(app.handle());
             let high_refresh = lock(&audio.settings).high_refresh;
             app.manage(audio);
+            #[cfg(target_os = "macos")]
+            if let Err(reason) = macos_quit::install(app.handle()) {
+                lock(&app.state::<Audio>().log).push(Level::Warn, reason);
+            }
             if high_refresh {
                 menu::set_high_refresh_checked(app.handle(), true);
                 display::apply(app.handle(), true);
@@ -479,6 +496,7 @@ pub fn run() {
             arrangement_cmds::audio_import,
             arrangement_cmds::audio_relink,
             arrangement_cmds::audio_cancel,
+            arrangement_cmds::audio_cancel_ticket,
             arrangement_cmds::arrangement_waveform,
             arrangement_cmds::arrangement_mode,
             arrangement_cmds::arrangement_loop,
@@ -534,12 +552,12 @@ pub fn run() {
             event: WindowEvent::CloseRequested { api, .. },
             ..
         } => {
-            if hold_close(app) {
+            if hold_close(app).unwrap_or(true) {
                 api.prevent_close();
             }
         }
         RunEvent::ExitRequested { api, .. } => {
-            if hold_close(app) {
+            if hold_close(app).unwrap_or(true) {
                 api.prevent_exit();
             }
         }

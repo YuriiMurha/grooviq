@@ -1,6 +1,6 @@
 name: perf
 
-# Speed numbers for every change, in each job's summary and as artifacts. Timings on shared
+# Speed numbers for benchmark inputs, in each job's summary and as artifacts. Timings on shared
 # runners are noisy, so they never fail a job; the render benchmark fails only when a scene's
 # bits depend on the block size. Instruction counts are exact: that job fails when a benchmark
 # runs more than 1 % more instructions than on the pull request's base. None of these jobs is
@@ -29,8 +29,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: "perf-${{ inputs.capture_only && github.run_id || github.event.pull_request.number || github.ref }}"
-  cancel-in-progress: true
+  group: >-
+    perf-${{ (inputs.capture_only && github.run_id) || github.event.pull_request.number ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
+    github.ref }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/merge-train/batch') }}
 
 jobs:
   optional-inputs:
@@ -45,6 +50,8 @@ jobs:
       run: ${{ steps.select.outputs.result }}
     steps:
       - uses: actions/checkout@v5
+      - run: rustup toolchain install
+        timeout-minutes: 3
       - run: make optional-rust-policy-test
       - uses: actions/github-script@v8
         id: select
@@ -52,6 +59,7 @@ jobs:
           script: |
             const { shouldRun } = require('./scripts/optional-rust-checks.cjs');
             return await shouldRun({
+              workflow: 'perf',
               eventName: context.eventName,
               pullRequest: context.payload.pull_request,
               repo: context.repo,
@@ -70,15 +78,30 @@ jobs:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      CARGO_NET_OFFLINE: 'true'
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
+        timeout-minutes: 3
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+        timeout-minutes: 2
       - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 3
         with:
           key: bench
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Dependency fetch controls
+        timeout-minutes: 1
+        run: python -m unittest discover -s scripts -p test_perf_fetch.py -v
+      - name: Fetch locked benchmark dependencies (infrastructure)
+        timeout-minutes: 4
+        run: python scripts/perf-fetch.py
       - name: Machine
         run: |
           case "$RUNNER_OS" in
@@ -94,12 +117,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           mkdir -p perf
       - name: Render speed and block times
-        run: cargo bench -p grooviq-golden --bench render
+        run: cargo bench --locked --offline -p grooviq-golden --bench render
         env:
           GROOVIQ_PERF_JSON: ${{ github.workspace }}/perf/render.json
       - name: DSP kernels
         run: |
-          cargo bench -p grooviq-dsp --bench kernels | tee perf/kernels.txt
+          cargo bench --locked --offline -p grooviq-dsp --bench kernels | tee perf/kernels.txt
           {
             echo "### DSP kernels (divan): one 64-frame block"
             echo
@@ -114,7 +137,7 @@ jobs:
 
   # The same scene must render the same bits on every platform (the export rule).
   determinism:
-    if: ${{ !inputs.capture_only }}
+    if: ${{ !inputs.capture_only && !cancelled() && needs.bench.result == 'success' }}
     name: determinism (macOS vs Windows)
     needs: bench
     runs-on: ubuntu-latest
@@ -162,6 +185,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+      - name: Key the Rust cache on the root manifest
+        shell: bash
+        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
       - name: Valgrind and ALSA headers
         run: |
           sudo apt-get update -qq
@@ -170,6 +196,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: instructions
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Synth workload witnesses
         run: cargo test -p grooviq-golden --test synth_workload
       # The rust jobs never build this Linux-only code, so lint it here.
@@ -227,7 +254,7 @@ jobs:
           # (3 on a regression), not tee's.
           set -o pipefail
           status=0
-          cargo bench -p grooviq-golden --bench instructions -- $BASELINE 2>&1 | tee instructions.txt || status=$?
+          cargo bench -p grooviq-golden --bench instructions -- ${BASELINE:+"$BASELINE"} 2>&1 | tee instructions.txt || status=$?
           {
             echo "## Instruction counts (Callgrind)"
             echo

@@ -1887,3 +1887,343 @@ fn legacy_block_is_pinned_across_metadata_only_rename() {
     rig.hub.set_enabled("Keys", true);
     assert!(rig.ports.is_open("Keys"));
 }
+
+mod semantic_replay {
+    use super::{Fake, MidiHub};
+    use grooviq_app::midi::ControllerSink;
+    use grooviq_engine::{ChannelId, Command, EngineConfig, NoteId, RecordEvent, engine};
+    use grooviq_project::{
+        Loaded, SampleFiles,
+        session::{DecodedSamples, Edit, Session},
+    };
+    use serde::Serialize;
+    use serde_json::{Value, json};
+    use std::{
+        collections::BTreeMap,
+        path::Path,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU32, Ordering},
+        },
+        time::Instant,
+    };
+
+    #[derive(Serialize)]
+    #[serde(tag = "op", rename_all = "camelCase")]
+    enum Step {
+        Plug { port: &'static str },
+        Unplug { port: &'static str },
+        Enable { port: &'static str, enabled: bool },
+        Message { port: &'static str, bytes: [u8; 3] },
+        Select { channel: u32 },
+        Stall { stalled: bool },
+        Retry,
+        Remove { channel: u32 },
+        Add,
+        Open,
+        New,
+    }
+
+    fn replay_steps() -> Vec<Step> {
+        let plug = |port| Step::Plug { port };
+        let unplug = |port| Step::Unplug { port };
+        let enable = |port, enabled| Step::Enable { port, enabled };
+        let message = |port, bytes| Step::Message { port, bytes };
+        let stall = |stalled| Step::Stall { stalled };
+        vec![
+            plug("Keys"),
+            plug("Pads"),
+            Step::Select { channel: 1 },
+            message("Keys", [176, 64, 64]),
+            message("Keys", [144, 60, 127]),
+            message("Keys", [144, 60, 0]),
+            message("Pads", [145, 60, 96]),
+            message("Keys", [176, 64, 63]),
+            message("Pads", [129, 60, 0]),
+            message("Keys", [176, 64, 127]),
+            message("Keys", [144, 61, 80]),
+            message("Keys", [128, 61, 0]),
+            message("Keys", [144, 61, 100]),
+            message("Pads", [144, 61, 100]),
+            enable("Keys", false),
+            message("Keys", [144, 62, 100]),
+            enable("Keys", true),
+            message("Keys", [144, 62, 100]),
+            message("Keys", [128, 62, 0]),
+            message("Pads", [176, 64, 127]),
+            message("Pads", [128, 61, 0]),
+            unplug("Pads"),
+            message("Pads", [144, 63, 100]),
+            plug("Pads"),
+            message("Pads", [144, 63, 100]),
+            message("Pads", [128, 63, 0]),
+            message("Keys", [144, 64, 100]),
+            stall(true),
+            message("Keys", [128, 64, 0]),
+            Step::Retry,
+            message("Pads", [144, 65, 100]),
+            stall(false),
+            message("Keys", [144, 64, 100]),
+            message("Pads", [128, 65, 0]),
+            message("Keys", [128, 64, 0]),
+            message("Keys", [144, 66, 100]),
+            stall(true),
+            message("Keys", [128, 66, 0]),
+            stall(false),
+            message("Keys", [176, 1, 127]),
+            Step::Retry,
+            message("Keys", [176, 64, 127]),
+            message("Keys", [144, 66, 100]),
+            message("Keys", [128, 66, 0]),
+            message("Keys", [176, 123, 0]),
+            message("Keys", [144, 66, 100]),
+            Step::Select { channel: 2 },
+            message("Keys", [144, 67, 100]),
+            message("Keys", [128, 67, 0]),
+            message("Keys", [176, 64, 0]),
+            message("Keys", [144, 67, 100]),
+            Step::Remove { channel: 2 },
+            message("Keys", [144, 67, 100]),
+            message("Keys", [128, 67, 0]),
+            Step::Add,
+            Step::Select { channel: 1 },
+            message("Pads", [144, 68, 100]),
+            message("Keys", [144, 69, 100]),
+            stall(true),
+            message("Keys", [128, 69, 0]),
+            stall(false),
+            Step::Open,
+            stall(true),
+            Step::Retry,
+            stall(false),
+            message("Keys", [144, 68, 100]),
+            message("Keys", [128, 68, 0]),
+            message("Pads", [128, 68, 0]),
+            message("Keys", [144, 70, 100]),
+            message("Keys", [128, 70, 0]),
+            Step::New,
+            message("Pads", [144, 70, 100]),
+            Step::Add,
+            message("Pads", [144, 70, 100]),
+            message("Keys", [176, 64, 0]),
+            message("Pads", [128, 70, 0]),
+            message("Keys", [144, 71, 100]),
+            message("Keys", [176, 123, 0]),
+            message("Keys", [128, 71, 0]),
+            message("Keys", [144, 72, 100]),
+            message("Keys", [176, 120, 0]),
+            message("Keys", [128, 72, 0]),
+            message("Keys", [176, 64, 127]),
+            message("Keys", [144, 73, 100]),
+            message("Keys", [128, 73, 0]),
+            message("Keys", [144, 73, 110]),
+            message("Keys", [176, 64, 0]),
+            message("Keys", [128, 73, 0]),
+            message("Keys", [144, 74, 100]),
+            stall(true),
+            message("Keys", [128, 74, 0]),
+            stall(false),
+            message("Pads", [176, 64, 0]),
+            message("Keys", [144, 75, 100]),
+            stall(true),
+            message("Keys", [128, 75, 0]),
+            stall(false),
+            message("Pads", [176, 123, 0]),
+            // A refused re-press must leave the original key held until pedal-up.
+            message("Keys", [176, 64, 127]),
+            message("Keys", [144, 76, 100]),
+            message("Keys", [128, 76, 0]),
+            stall(true),
+            message("Keys", [144, 76, 110]),
+            stall(false),
+            message("Keys", [176, 64, 0]),
+            // Each input change must pay release debt owed by a different port.
+            enable("Pads", false),
+            message("Keys", [144, 77, 100]),
+            stall(true),
+            message("Keys", [128, 77, 0]),
+            stall(false),
+            enable("Pads", true),
+            message("Keys", [144, 78, 100]),
+            stall(true),
+            message("Keys", [128, 78, 0]),
+            stall(false),
+            plug("Knobs"),
+            message("Keys", [144, 79, 100]),
+            stall(true),
+            message("Keys", [128, 79, 0]),
+            stall(false),
+            unplug("Knobs"),
+        ]
+    }
+
+    #[test]
+    fn hub_matches_shared_midi_replay() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/midi-replay.json");
+        let steps = replay_steps();
+        let inputs = json!(steps);
+        let (controller, mut processor) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        let controller = Arc::new(Mutex::new(controller));
+        let mut session = Session::new(Arc::clone(&controller));
+        let now = Instant::now();
+        for _ in 0..2 {
+            session.add_synth_channel("Init", now).unwrap();
+        }
+        let replacement = session.project().clone();
+        let arm = || {
+            let mut controller = controller.lock().unwrap();
+            controller.send(Command::SetRecording { on: true }).unwrap();
+            controller.send(Command::Play).unwrap();
+        };
+        arm();
+        let mut render = || processor.process(&mut [0.0; 512], 2);
+        render();
+
+        let ports = Fake::default();
+        let sink = Arc::new(ControllerSink::new(Arc::clone(&controller)));
+        let selected = Arc::new(AtomicU32::new(grooviq_app::midi::NO_CHANNEL));
+        let mut hub = MidiHub::new(
+            Box::new(ports.clone()),
+            sink.clone(),
+            selected.clone(),
+            vec![],
+        );
+        let mut stalled = false;
+        let mut next_press = 1;
+        let mut active = BTreeMap::<NoteId, (u32, ChannelId, u8, u64)>::new();
+        let mut expected = Vec::new();
+
+        for (step, input) in steps.into_iter().zip(inputs.as_array().unwrap()) {
+            if stalled {
+                // Refill before each action. Rendering below observes what landed and drains the
+                // queue without invoking the hub's retry, so reads don't advance the MIDI script.
+                let mut controller = controller.lock().unwrap();
+                while controller.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+            }
+            match step {
+                Step::Plug { port } => {
+                    ports.plug(port);
+                    hub.poll();
+                }
+                Step::Unplug { port } => {
+                    ports.unplug(port);
+                    hub.poll();
+                }
+                Step::Enable { port, enabled } => {
+                    hub.set_enabled(port, enabled);
+                }
+                Step::Message { port, bytes } => {
+                    ports.send(port, &bytes);
+                }
+                Step::Select { channel } => {
+                    selected.store(channel, Ordering::Release);
+                    hub.release_stale();
+                }
+                Step::Stall { stalled: value } => stalled = value,
+                Step::Retry => hub.retry_owed(),
+                Step::Remove { channel } => {
+                    session.apply(Edit::RemoveChannel { channel }, now).unwrap();
+                }
+                Step::Add => {
+                    session.add_synth_channel("Init", now).unwrap();
+                }
+                Step::Open => {
+                    session
+                        .open(
+                            Path::new("replacement.grooviq"),
+                            Loaded {
+                                project: replacement.clone(),
+                                samples: SampleFiles::new(),
+                                warnings: vec![],
+                            },
+                            DecodedSamples::default(),
+                        )
+                        .unwrap();
+                    arm();
+                }
+                Step::New => {
+                    session.new_project().unwrap();
+                    arm();
+                }
+            }
+
+            render();
+            let mut controller = controller.lock().unwrap();
+            let mut events = Vec::new();
+            controller.take_recorded(&mut events);
+            // Graph removal cuts the notes directly; there is no MIDI off command for them.
+            active.retain(|_, (_, channel, _, instance)| {
+                controller.channel_instance(*channel) == Some(*instance)
+            });
+            let mut delivered = Vec::new();
+            for event in events {
+                if let RecordEvent::Note {
+                    id,
+                    channel,
+                    key,
+                    on,
+                    ..
+                } = event
+                {
+                    let press = if on {
+                        let press = next_press;
+                        next_press += 1;
+                        let instance = controller.channel_instance(channel).unwrap();
+                        assert!(active.insert(id, (press, channel, key, instance)).is_none());
+                        press
+                    } else {
+                        let Some((press, owner, note, _)) = active.remove(&id) else {
+                            panic!("release without a current press at {input}: {event:?}");
+                        };
+                        assert_eq!((channel, key), (owner, note));
+                        press
+                    };
+                    delivered.push((press, channel.0, key, on));
+                }
+            }
+            // Key release order across different ports is immaterial; each press ID is observable.
+            delivered.sort_unstable();
+            let presses: Vec<_> = active
+                .values()
+                .map(|&(press, channel, key, _)| (press, channel.0, key))
+                .collect();
+            expected.push(json!({ "presses": presses, "delivered": delivered, "owed": sink.owed(), "inputs": hub.inputs() }));
+        }
+
+        let expected = json!(expected);
+        if std::env::var("GROOVIQ_UPDATE_REPLAY").as_deref() == Ok("1") {
+            let transcript = json!({ "steps": inputs, "expected": expected });
+            // One line per transition keeps changes reviewable.
+            let lines = |key: &str| {
+                transcript[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| format!("    {row}"))
+                    .collect::<Vec<_>>()
+                    .join(",\n")
+            };
+            std::fs::write(
+                path,
+                format!(
+                    "{{\n  \"steps\": [\n{}\n  ],\n  \"expected\": [\n{}\n  ]\n}}\n",
+                    lines("steps"),
+                    lines("expected")
+                ),
+            )
+            .unwrap();
+        } else {
+            let transcript: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(transcript["steps"], inputs, "run make replay-update");
+            let snapshots = transcript["expected"].as_array().unwrap();
+            let actual = expected.as_array().unwrap();
+            assert_eq!(snapshots.len(), actual.len());
+            for (index, (saved, fresh)) in snapshots.iter().zip(actual).enumerate() {
+                assert_eq!(saved, fresh, "step {index}: {}", transcript["steps"][index]);
+            }
+        }
+    }
+}

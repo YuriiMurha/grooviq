@@ -303,8 +303,12 @@ pub struct DelayLine {
 }
 
 impl DelayLine {
+    pub(crate) fn capacity_for(max_delay: usize) -> Option<usize> {
+        max_delay.checked_add(4)?.checked_next_power_of_two()
+    }
+
     pub fn new(max_delay: usize) -> Self {
-        let n = (max_delay + 4).next_power_of_two();
+        let n = Self::capacity_for(max_delay).expect("delay line capacity overflow");
         Self {
             buf: vec![0.0; n],
             mask: n - 1,

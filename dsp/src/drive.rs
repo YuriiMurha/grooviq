@@ -23,10 +23,14 @@ pub const SPEC: [(f32, f32, f32); 6] = [
     (0.0, 2.0, 1.0),   // 5 oversampling
 ];
 
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 6] = ["mode", "drive", "tone", "mix", "output", "oversampling"];
+
 const KA: usize = 22; // stage A: 4K-1 = 87 taps
 const KB: usize = 6; // stage B: 23 taps
 const LAT_2X: usize = 2 * KA - 1; // 43
 const LAT_4X: usize = 2 * KA - 1 + KB; // 43 + 5.5 + 0.5 (one 2x-rate sample) = 49
+pub(crate) const MAX_LATENCY_FRAMES: u32 = LAT_4X as u32;
 
 use crate::oversampling::{Down, Up};
 
@@ -137,6 +141,15 @@ pub struct Drive {
     out_m: PeakMeter,
 }
 
+pub(crate) fn memory_payload() -> crate::insert_memory::Payload {
+    let mut payload = crate::insert_memory::Payload::boxed::<Drive>();
+    for k in [KA, KB] {
+        crate::oversampling::add_stereo_stage_payload(k, &mut payload);
+    }
+    payload.delay_lines(LAT_4X + 1, 2);
+    payload
+}
+
 impl Drive {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.clamp(8000.0, 384_000.0);
@@ -187,6 +200,10 @@ impl Drive {
 }
 
 impl Device for Drive {
+    fn latency_frames(&self) -> u32 {
+        self.latency() as u32
+    }
+
     fn set_param(&mut self, index: u32, value: f32) {
         let Some(v) = clamp_param(&SPEC, index, value) else {
             return;

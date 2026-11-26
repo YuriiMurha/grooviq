@@ -8,15 +8,20 @@ name: rtsan
 
 on:
   push:
-    branches: [main]
+    branches: [main, merge-train/batch]
   pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: "rtsan-${{ github.event.pull_request.number || github.ref }}"
-  cancel-in-progress: true
+  group: >-
+    rtsan-${{ github.event.pull_request.number ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
+    github.ref }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' ||
+    (github.event_name == 'push' && github.ref == 'refs/heads/merge-train/batch') }}
 
 jobs:
   optional-inputs:
@@ -30,6 +35,8 @@ jobs:
       run: ${{ steps.select.outputs.result }}
     steps:
       - uses: actions/checkout@v5
+      - run: rustup toolchain install
+        timeout-minutes: 3
       - run: make optional-rust-policy-test
       - uses: actions/github-script@v8
         id: select
@@ -37,7 +44,10 @@ jobs:
           script: |
             const { shouldRun } = require('./scripts/optional-rust-checks.cjs');
             return await shouldRun({
+              workflow: 'rtsan',
               eventName: context.eventName,
+              ref: context.ref,
+              after: context.payload.after,
               pullRequest: context.payload.pull_request,
               repo: context.repo,
               rest: github.rest,
@@ -53,10 +63,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+      # rust-cache keys on Cargo.toml dependency sections only, so a [profile] change would reuse
+      # dependencies built with the old profile and rebuild them on every PR. Key it on the root manifest.
+      - name: Key the Rust cache on the root manifest
+        shell: bash
+        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           key: rtsan
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The build downloads LLVM's prebuilt RTSan runtime (rtsan-standalone-sys, with curl).
       # Cargo is on PATH here, not in ~/.cargo/bin where the Makefile looks by default.
       - run: make rtsan CARGO=cargo

@@ -3,10 +3,11 @@ use crate::{Audio, lock};
 use grooviq_project::{
     ClipContent,
     arrangement_edit::{self, ArrangementAck},
+    audio_assets::AudioAssets,
     session::{MediaTarget, Session},
 };
 use serde::Serialize;
-use std::{path::PathBuf, time::Instant};
+use std::{path::PathBuf, sync::Mutex, time::Instant};
 use tauri::{State, ipc::Response};
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,46 +168,67 @@ async fn prepare(
     revision: u64,
     target: MediaTarget,
     path: String,
+    ticket: u64,
 ) -> Reply {
-    let captured = { lock(&audio.session).media_intent(generation, revision, target) };
-    let intent = match captured {
-        Ok(t) => t,
-        Err(e) => return reply(&lock(&audio.session), Err(e), None),
-    };
-    let budget = lock(&audio.session).media_budget();
-    let path = PathBuf::from(path);
-    let file = tauri::async_runtime::spawn_blocking(move || {
-        grooviq_project::read_sample_file_budgeted(&path, &budget).map_err(|e| e.to_string())
-    })
-    .await;
-    let file = match file {
-        Ok(Ok(file)) => file,
-        Ok(Err(e)) => return reply(&lock(&audio.session), Err(e), Some(intent.request())),
-        Err(e) => {
-            return reply(
-                &lock(&audio.session),
-                Err(e.to_string()),
-                Some(intent.request()),
-            );
+    prepare_media(
+        &audio.session,
+        &audio.assets,
+        generation,
+        revision,
+        target,
+        path,
+        ticket,
+    )
+    .await
+}
+async fn prepare_media(
+    session: &Mutex<Session>,
+    assets: &AudioAssets,
+    generation: u64,
+    revision: u64,
+    target: MediaTarget,
+    path: String,
+    ticket: u64,
+) -> Reply {
+    let (intent, budget) = {
+        let mut s = lock(session);
+        let intent = match s.media_intent(generation, revision, target) {
+            Ok(intent) => intent,
+            Err(e) => return reply(&s, Err(e), None),
+        };
+        if let Err(e) = s.register_media_ticket(ticket, &intent) {
+            return reply(&s, Err(e), None);
         }
+        (intent, s.media_budget())
     };
-    let request = match submit_media(&audio.session, &audio.assets, &intent, file) {
-        Ok(r) => r,
-        Err(e) => return reply(&lock(&audio.session), Err(e), Some(intent.request())),
-    };
-    let result = tauri::async_runtime::spawn_blocking(move || request.receive()).await;
-    let mut s = lock(&audio.session);
-    let result = match result {
-        Ok(Ok(prepared)) => publish_received(&mut s, &intent, prepared),
-        Ok(Err(e)) => Err(format!("Media preparation failed: {e:?}")),
-        Err(e) => Err(e.to_string()),
-    };
+    let prepared = async {
+        let path = PathBuf::from(path);
+        let file = tauri::async_runtime::spawn_blocking(move || {
+            grooviq_project::read_sample_file_budgeted(&path, &budget).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let request = submit_media(session, assets, &intent, file)?;
+        tauri::async_runtime::spawn_blocking(move || request.receive())
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("Media preparation failed: {e:?}"))
+    }
+    .await;
+    let mut s = lock(session);
+    let result = prepared.and_then(|prepared| publish_received(&mut s, &intent, prepared));
     if result.is_err() {
         s.cancel_media_request(intent.request());
     }
+    // Identity-checked: a replacement may have cleared this ticket and a new import reused it.
+    s.release_media_ticket(ticket, &intent);
     reply(&s, result, Some(intent.request()))
 }
 #[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tauri passes flat import arguments"
+)]
 pub async fn audio_import(
     audio: State<'_, Audio>,
     generation: u64,
@@ -215,6 +237,7 @@ pub async fn audio_import(
     start_tick: u64,
     name: String,
     path: String,
+    ticket: u64,
 ) -> Result<Reply, String> {
     Ok(prepare(
         &audio,
@@ -226,6 +249,7 @@ pub async fn audio_import(
             name,
         },
         path,
+        ticket,
     )
     .await)
 }
@@ -236,6 +260,7 @@ pub async fn audio_relink(
     revision: u64,
     asset: u32,
     path: String,
+    ticket: u64,
 ) -> Result<Reply, String> {
     Ok(prepare(
         &audio,
@@ -243,12 +268,17 @@ pub async fn audio_relink(
         revision,
         MediaTarget::Relink { asset },
         path,
+        ticket,
     )
     .await)
 }
 #[tauri::command]
 pub fn audio_cancel(audio: State<'_, Audio>, request: u64) -> bool {
     lock(&audio.session).cancel_media_request(request)
+}
+#[tauri::command]
+pub fn audio_cancel_ticket(audio: State<'_, Audio>, ticket: u64) -> bool {
+    lock(&audio.session).cancel_media_ticket(ticket)
 }
 #[tauri::command]
 pub async fn arrangement_waveform(
@@ -344,7 +374,9 @@ pub fn arrangement_seek(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grooviq_project::{SampleFile, arrangement_edit::ArrangementEdit};
+    use grooviq_project::{
+        SampleFile, arrangement_edit::ArrangementEdit, audio_assets::AudioAssets,
+    };
     use std::sync::{Arc, Mutex};
     fn wav() -> Vec<u8> {
         let n = 128u32;
@@ -366,8 +398,7 @@ mod tests {
         }
         b
     }
-    #[test]
-    fn native_media_producer_rechecks_final_generation_and_emits_canonical_reply() {
+    fn media_rig() -> (Mutex<Session>, AudioAssets, u32) {
         let (c, _processor) = grooviq_engine::engine(grooviq_engine::EngineConfig {
             sample_rate: 48000.0,
         });
@@ -386,8 +417,155 @@ mod tests {
             .unwrap();
         let track = ack.created_ids[0];
         let session = Mutex::new(s);
-        let assets =
-            grooviq_project::audio_assets::AudioAssets::with_budget(lock(&session).media_budget());
+        let assets = AudioAssets::with_budget(lock(&session).media_budget());
+        (session, assets, track)
+    }
+    fn import(track: u32) -> MediaTarget {
+        MediaTarget::Import {
+            track,
+            start_tick: 0,
+            name: "Imported".into(),
+        }
+    }
+    fn generated_file() -> SampleFile {
+        SampleFile {
+            name: "native.wav".into(),
+            bytes: Arc::new(wav()),
+        }
+    }
+    fn prepare_import(
+        session: &Mutex<Session>,
+        assets: &AudioAssets,
+        track: u32,
+        path: &std::path::Path,
+        ticket: u64,
+    ) -> Reply {
+        let v = lock(session).arrangement_view();
+        tauri::async_runtime::block_on(prepare_media(
+            session,
+            assets,
+            v.generation,
+            v.revision,
+            import(track),
+            path.to_str().unwrap().to_owned(),
+            ticket,
+        ))
+    }
+    fn assert_ticket_released(session: &Mutex<Session>, track: u32, ticket: u64) {
+        let mut s = lock(session);
+        let v = s.arrangement_view();
+        let intent = s
+            .media_intent(v.generation, v.revision, import(track))
+            .unwrap();
+        s.register_media_ticket(ticket, &intent)
+            .expect("finished command left its ticket live");
+        s.release_media_ticket(ticket, &intent);
+        assert!(s.pending_media_requests().is_empty());
+    }
+    #[test]
+    fn native_cancel_before_submit_leaves_the_worker_and_project_unchanged() {
+        let (session, assets, track) = media_rig();
+        let mut s = lock(&session);
+        let v = s.arrangement_view();
+        let before = s.project().clone();
+        let history = s.history_usage();
+        let previous = s
+            .media_intent(v.generation, v.revision, import(track))
+            .unwrap();
+        let intent = s
+            .media_intent(v.generation, v.revision, import(track))
+            .unwrap();
+        s.register_media_ticket(1, &intent).unwrap();
+        drop(s);
+
+        // A cancelled import must never reach the worker, which would supersede this job.
+        let previous_request =
+            submit_media(&session, &assets, &previous, generated_file()).unwrap();
+        assert!(lock(&session).cancel_media_ticket(1));
+        assert!(submit_media(&session, &assets, &intent, generated_file()).is_err());
+        assert!(previous_request.receive().is_ok());
+
+        let mut s = lock(&session);
+        assert_eq!(s.pending_media_requests(), vec![previous.request()]);
+        assert!(s.cancel_media_request(previous.request()));
+        s.release_media_ticket(1, &intent);
+        assert!(s.pending_media_requests().is_empty());
+        assert_eq!(s.project(), &before);
+        assert_eq!(s.history_usage(), history);
+    }
+    #[test]
+    fn native_tombstoned_import_is_refused_before_reading_file() {
+        let (session, assets, track) = media_rig();
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.wav");
+        assert!(!lock(&session).cancel_media_ticket(1));
+        let response = prepare_import(&session, &assets, track, &missing, 1);
+        assert_eq!(response.status, "refused");
+        assert_eq!(response.message.as_deref(), Some("Media ticket cancelled"));
+        assert!(response.request.is_none());
+    }
+    #[test]
+    fn native_import_releases_its_ticket_after_each_error() {
+        let (session, mut assets, track) = media_rig();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("generated.wav");
+        let before = lock(&session).project().clone();
+        let history = lock(&session).history_usage();
+        let response = prepare_import(&session, &assets, track, &path, 1);
+        assert_eq!(response.status, "refused");
+        assert!(response.request.is_some());
+        assert_ticket_released(&session, track, 1);
+
+        std::fs::write(&path, b"invalid WAV").unwrap();
+        let response = prepare_import(&session, &assets, track, &path, 1);
+        assert!(
+            response
+                .message
+                .unwrap()
+                .starts_with("Media preparation failed: Decode")
+        );
+        assert_ticket_released(&session, track, 1);
+
+        std::fs::write(&path, wav()).unwrap();
+        lock(&session)
+            .set_precommit_validator(Some(Arc::new(|_| Err("refused publication".into()))));
+        let response = prepare_import(&session, &assets, track, &path, 1);
+        assert!(response.message.unwrap().contains("refused publication"));
+        assert_ticket_released(&session, track, 1);
+
+        assets.replace_project();
+        let response = prepare_import(&session, &assets, track, &path, 1);
+        assert_eq!(
+            response.message.as_deref(),
+            Some("Media preparation refused: Cancelled")
+        );
+        assert_ticket_released(&session, track, 1);
+        assert_eq!(lock(&session).project(), &before);
+        assert_eq!(lock(&session).history_usage(), history);
+    }
+    #[test]
+    fn native_cancel_after_publish_has_no_effect_and_import_is_undoable() {
+        let (session, assets, track) = media_rig();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("generated.wav");
+        std::fs::write(&path, wav()).unwrap();
+        let response = prepare_import(&session, &assets, track, &path, 1);
+        assert_eq!(response.status, "applied");
+        let mut s = lock(&session);
+        let published = s.project().clone();
+        let history = s.history_usage();
+        assert!(!s.cancel_media_ticket(1));
+        assert_eq!(s.project(), &published);
+        assert_eq!(s.history_usage(), history);
+        assert!(s.pending_media_requests().is_empty());
+        s.step_project_history(response.generation, response.revision, true, Instant::now())
+            .unwrap();
+        assert!(s.project().arrangement.clips.is_empty());
+        assert!(s.project().arrangement.audio_assets.is_empty());
+    }
+    #[test]
+    fn native_media_producer_rechecks_final_generation_and_emits_canonical_reply() {
+        let (session, assets, track) = media_rig();
         let v = lock(&session).arrangement_view();
         let intent = lock(&session)
             .media_intent(

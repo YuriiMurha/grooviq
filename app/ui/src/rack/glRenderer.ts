@@ -205,18 +205,21 @@ export function createGlRenderer(canvas: HTMLCanvasElement): GridRenderer | null
       gl.uniform2f(uniforms.u_size, canvas.width / layout.dpr, canvas.height / layout.dpr);
       gl.uniform1f(uniforms.u_dpr, layout.dpr);
       gl.uniform4fv(uniforms.u_inks, flatten(palette.inks));
-      gl.uniform4fv(uniforms.u_inksB, flatten(palette.inksB));
       gl.uniform4fv(uniforms.u_stepA, palette.stepA);
       gl.uniform4fv(uniforms.u_stepB, palette.stepB);
       gl.uniform4fv(uniforms.u_stepLit, palette.stepLit);
       gl.uniform4fv(uniforms.u_focus, palette.focus);
       gl.uniform4fv(uniforms.u_playhead, palette.playhead);
 
-      // Pass 1: the second ink, offset, under lit cells.
-      gl.uniform1f(uniforms.u_shadow, 1);
-      gl.uniform2f(uniforms.u_offset, palette.offset[0], palette.offset[1]);
-      gl.uniform1f(uniforms.u_margin, 0);
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+      // A coincident shadow would show through the antialiased corners of the fill.
+      const [ox, oy] = palette.offset;
+      if (ox !== 0 || oy !== 0) {
+        gl.uniform4fv(uniforms.u_inksB, flatten(palette.inksB));
+        gl.uniform1f(uniforms.u_shadow, 1);
+        gl.uniform2f(uniforms.u_offset, ox, oy);
+        gl.uniform1f(uniforms.u_margin, 0);
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+      }
 
       // Pass 2: the cells, with room around each for its ring.
       gl.uniform1f(uniforms.u_shadow, 0);

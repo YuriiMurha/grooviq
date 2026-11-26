@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useState } from "react";
-import { arrangementEdit, arrangementView } from "../api/arrangement";
+import { arrangementEdit, arrangementSeek, arrangementView } from "../api/arrangement";
 import { patternEdit, patternList } from "../api/patterns";
 import { projectView, type ProjectView } from "../api/project";
 import type { ProjectStamp } from "../project/context";
 import { beginProjectTransition, registerSettlement } from "../project/pending";
 import { isProjectReplacing, isProjectReplacementPending, onProjectReplacing, onProjectReplaceFailed, projectGeneration } from "../project/replacement";
+import { modalIsOpen } from "../project/shortcuts";
 import { EMPTY_PLAYLIST, PlaylistController, type PlaylistState } from "./store";
 
 type SessionAdapter = Readonly<{
@@ -23,10 +24,10 @@ class SessionPlaylistBinding {
     const current = (at: ProjectStamp) => this.mounted && !isProjectReplacementPending() && projectGeneration() === at.replacements && this.session.latest.current.view?.generation === at.generation;
     this.controller = new PlaylistController({
       origin: () => ({ generation: this.session.latest.current.view?.generation ?? 0, replacements: projectGeneration() }),
-      current, blocked: isProjectReplacing, beginTransition: beginProjectTransition,
+      current, blocked: isProjectReplacing, seekBlocked: modalIsOpen, beginTransition: beginProjectTransition,
       enqueueRead: command => this.session.enqueue(command),
       enqueueMutation: command => this.session.enqueueMutation(command),
-      readPage: arrangementView, readPatterns: patternList, edit: arrangementEdit, readProject: projectView,
+      seek: arrangementSeek, readPage: arrangementView, readPatterns: patternList, edit: arrangementEdit, readProject: projectView,
       selectPattern: (base, pattern) => patternEdit(base, { kind: "select", pattern }),
       publishProject: (view, at) => {
         if (!current(at) || view.generation !== at.generation) return false;
@@ -60,6 +61,6 @@ export function usePlaylist(session: SessionAdapter) {
   useEffect(() => {
     if (session.view !== null) void controller.reload();
   }, [controller, session.view]);
-  return { state, reload: controller.reload, mutate: controller.mutate, unsettled: controller.unsettled };
+  return { state, reload: controller.reload, mutate: controller.mutate, seek: controller.seek, unsettled: controller.unsettled };
 }
 export type PlaylistModel = ReturnType<typeof usePlaylist>;

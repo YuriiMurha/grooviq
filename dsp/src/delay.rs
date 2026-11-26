@@ -1,8 +1,9 @@
 //! Stereo delay with tempo sync, ping-pong and filtered feedback.
 //!
 //! Time changes never click or pitch-bend: when the target time moves, a second read head is
-//! started at the new time and the two are equal-power crossfaded over 50 ms (further changes
-//! queue behind the current fade). Reads use Hermite interpolation, so synced times land on
+//! started at the new time and further changes queue behind the 50 ms crossfade.
+//! The fade uses constant-sum gains so correlated reads cannot boost feedback.
+//! Reads use Hermite interpolation, so synced times land on
 //! fractional samples exactly. The feedback path (and the wet output) runs through 12 dB/oct
 //! low/high cuts and a soft safety limiter. Ping-pong feeds the mono input into the left line
 //! and crosses the feedback, so echoes alternate L, R, L...
@@ -20,7 +21,20 @@ pub const SPEC: [(f32, f32, f32); 9] = [
     (20.0, 2000.0, 200.0),     // 5 low cut Hz
     (1000.0, 20000.0, 7000.0), // 6 high cut Hz
     (0.0, 1.0, 0.25),          // 7 mix
-    (40.0, 300.0, 140.0),      // 8 bpm
+    (20.0, 400.0, 140.0),      // 8 bpm
+];
+
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 9] = [
+    "sync",
+    "division",
+    "time_ms",
+    "feedback",
+    "ping_pong",
+    "low_cut",
+    "high_cut",
+    "mix",
+    "bpm",
 ];
 
 /// Division lengths in quarter-note beats, `SPEC` index order.
@@ -37,8 +51,8 @@ pub const DIVISION_BEATS: [f32; 9] = [
 ];
 const CTRL: u32 = 16;
 const XFADE_MS: f32 = 50.0;
-/// Longest delay: a half note at 40 BPM.
-const MAX_MS: f32 = 3000.0;
+/// Longest delay: a half note at 20 BPM. The constructor adds the interpolation margin.
+const MAX_MS: f32 = 6000.0;
 
 pub struct Delay {
     sr: f32,
@@ -69,10 +83,21 @@ pub struct Delay {
     out_m: PeakMeter,
 }
 
+/// Ring length at the (clamped) rate `sr`: the longest delay plus the read margin.
+fn buffer_delay(sr: f32) -> usize {
+    (MAX_MS * 0.001 * sr) as usize + 8
+}
+
+pub(crate) fn memory_payload(sr: f32) -> crate::insert_memory::Payload {
+    let mut payload = crate::insert_memory::Payload::boxed::<Delay>();
+    payload.delay_lines(buffer_delay(sr.clamp(8000.0, 384_000.0)), 2);
+    payload
+}
+
 impl Delay {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.clamp(8000.0, 384_000.0);
-        let max = (MAX_MS * 0.001 * sr) as usize + 8;
+        let max = buffer_delay(sr);
         let ctrl_rate = sr / CTRL as f32;
         let mut d = Self {
             sr,
@@ -208,8 +233,7 @@ impl Device for Delay {
             );
             if self.xfading {
                 self.x = (self.x + self.xf_step).min(1.0);
-                let a = self.x * std::f32::consts::FRAC_PI_2;
-                let (ga, gb) = (libm::cosf(a), libm::sinf(a));
+                let (ga, gb) = (1.0 - self.x, self.x);
                 let bl = self.buf[0].read_frac(self.tb - 1.0);
                 let br = self.buf[1].read_frac(self.tb - 1.0);
                 dl = dl * ga + bl * gb;

@@ -22,6 +22,7 @@ export const EMPTY_RACK = "Drop a sound here to make a channel";
 
 interface Props {
   latest: RefObject<LiveFrame | null>;
+  subscribePlaybackStart: (wake: () => void) => () => void;
   /** The output's rate, for the latency shift of the playhead. */
   sampleRate: number;
   /** Shows a failure that is not a project edit (a preview, a file dialog). */
@@ -75,7 +76,7 @@ function usePatternNotes(revision: number | undefined, onError: (message: string
 
 /** The channel rack: a row per channel beside one step grid, then adding channels (button or
  * files dropped on the window), the pattern length and swing. */
-export function ChannelRack({ latest, sampleRate, onError = () => {}, onOpenRoll = () => {}, createRenderer }: Props) {
+export function ChannelRack({ latest, subscribePlaybackStart, sampleRate, onError = () => {}, onOpenRoll = () => {}, createRenderer }: Props) {
   const project = useProject();
   const { view, apply, runFor, stamp } = project;
   const { channel: selected, select } = useSelection();
@@ -169,6 +170,7 @@ export function ChannelRack({ latest, sampleRate, onError = () => {}, onOpenRoll
               pattern={pattern}
               bpm={view.bpm}
               latest={latest}
+              subscribePlaybackStart={subscribePlaybackStart}
               sampleRate={sampleRate}
               notes={notes}
               onOpenRoll={onOpenRoll}

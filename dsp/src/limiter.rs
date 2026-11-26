@@ -18,6 +18,17 @@ pub const SPEC: [(f32, f32, f32); 3] = [
     (1.0, 1000.0, 60.0), // 2 release ms
 ];
 
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 3] = ["input_gain", "ceiling", "release"];
+
+fn lookahead_frames(sr: f32) -> usize {
+    (libm::roundf(0.0015 * sr) as usize).max(2)
+}
+
+pub(crate) fn max_latency_frames(sample_rate: f32) -> u32 {
+    (lookahead_frames(sample_rate.clamp(8000.0, 384_000.0)) - 1) as u32
+}
+
 struct BoxFilter {
     buf: Vec<f32>,
     pos: usize,
@@ -76,12 +87,29 @@ pub struct Limiter {
     gr_m: f32,
 }
 
+fn filter_lengths(look: usize) -> (usize, usize) {
+    let l1 = (look + 2) / 2;
+    (l1, look + 1 - l1)
+}
+
+pub(crate) fn memory_payload(sr: f32) -> crate::insert_memory::Payload {
+    let mut payload = crate::insert_memory::Payload::boxed::<Limiter>();
+    let look = lookahead_frames(sr);
+    let (l1, l2) = filter_lengths(look);
+    payload.array::<f32>(look - 1, 2); // Stereo lookahead.
+    payload.array::<f32>(look + 1, 1); // Sliding minimum values.
+    payload.array::<u64>(look + 1, 1); // Sliding minimum indices.
+    for filter in [l1, l2] {
+        payload.array::<f32>(filter.max(1), 1);
+    }
+    payload
+}
+
 impl Limiter {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.clamp(8000.0, 384_000.0);
-        let look = ((0.0015 * sr).round() as usize).max(2);
-        let l1 = (look + 2) / 2;
-        let l2 = look + 1 - l1;
+        let look = lookahead_frames(sr);
+        let (l1, l2) = filter_lengths(look);
         let mut s = Self {
             sr,
             look,
@@ -140,6 +168,10 @@ impl Limiter {
 }
 
 impl Device for Limiter {
+    fn latency_frames(&self) -> u32 {
+        self.latency() as u32
+    }
+
     fn set_param(&mut self, index: u32, value: f32) {
         let Some(v) = clamp_param(&SPEC, index, value) else {
             return;

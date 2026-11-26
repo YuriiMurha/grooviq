@@ -452,10 +452,17 @@ fn synth_observation_captures_output_clears_silence_and_rejects_reused_channel()
     let mut output = [0.0; 4096];
     p.process(&mut output, 2);
     let meter = live.synth_meter(first).expect("a captured frame");
+    assert_eq!(meter.frames, 2048);
+    assert!(meter.motion[0] > 0.0);
+    assert!((0.0..=1.0).contains(&meter.motion[2]));
     assert!(meter.levels[2] >= 1.0);
     assert!(meter.scope.iter().any(|v| v.abs() > 0.001));
     assert!(meter.scope.iter().all(|v| v.is_finite()));
     p.process(&mut output, 2);
+    assert_eq!(live.synth_meter(first).unwrap().frames, 4096);
+    let mut short = [0.0; 128];
+    p.process(&mut short, 2);
+    assert_eq!(live.synth_meter(first).unwrap().frames, 4096);
     assert_ne!(live.synth_meter(first).unwrap().scope, meter.scope);
     c.send(Command::AllSoundOff).unwrap();
     for _ in 0..50 {

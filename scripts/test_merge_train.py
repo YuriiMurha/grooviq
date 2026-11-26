@@ -1,7 +1,9 @@
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 import io
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -214,6 +216,44 @@ class MergeTrainTests(unittest.TestCase):
                 self.assertEqual((number, head), (10, sha(10)))
                 self.assertIn(f"ui ({conclusion})", reason)
 
+    def test_ui_only_pr_with_successful_selector_can_skip_both_rust_checks(self):
+        self.repo.states[sha(10)] = {**GREEN, **{n: ("skipped", "") for n in REQUIRED[:2]},
+                                    "changes": ("success", "")}
+        self.run_tick((10,))
+        self.written([10])
+        self.assertFalse(self.repo.rejected)
+
+    def test_skipped_pr_rust_requires_a_successful_selector(self):
+        for selector in (None, "cancelled", "in_progress", "failure"):
+            with self.subTest(selector=selector):
+                self.setUp()
+                states = {**GREEN, **{n: ("skipped", "https://run/10") for n in REQUIRED[:2]}}
+                if selector is not None:
+                    states["changes"] = (selector, "")
+                self.repo.states[sha(10)] = states
+                self.assertIn("re-run", self.run_tick((10, 20)))
+                self.written([20])
+                self.assertFalse(self.repo.rejected)
+                self.assertTrue(self.repo.prs[10]["labels"])
+
+    def test_successful_selector_does_not_excuse_skipped_pr_ui(self):
+        self.repo.states[sha(10)] = {**GREEN, "ui": ("skipped", ""),
+                                    "changes": ("success", "")}
+        self.run_tick((10, 20))
+        self.written([20])
+        self.assertEqual(self.repo.rejected, [(10, sha(10), "ui (skipped)")])
+
+    def test_own_head_failure_keeps_enrollment_while_main_is_red_or_pending(self):
+        for status, message in (("failure", "main is red"), ("queued", "main is pending")):
+            with self.subTest(status=status):
+                self.setUp()
+                self.repo.states[BASE] = {"ui": (status, "")}
+                self.repo.states[sha(10)] = {"ui": ("failure", "")}
+                self.assertIn(message, self.run_tick((10, 20)))
+                self.assertFalse(self.repo.rejected or self.repo.merged)
+                self.assertTrue(self.repo.prs[10]["labels"])
+                self.written([20])
+
     def test_fetched_pr_head_must_match_the_approved_sha(self):
         self.git.ref_moved.add(10)
         self.run_tick((10, 20))
@@ -228,6 +268,13 @@ class MergeTrainTests(unittest.TestCase):
         [(number, head, reason)] = self.repo.rejected
         self.assertEqual((number, head), (20, sha(20)))
         self.assertIn("refresh and re-enrol", reason)
+
+    def test_pr_trailer_after_a_suspect_is_rejected(self):
+        self.git.batch([10], [20])
+        self.git.description += f"\nTrain-PR: 30 {sha(30)}"
+        with self.assertRaisesRegex(RuntimeError, "trailers"):
+            self.run_tick((10, 20, 30))
+        self.assertFalse(self.repo.merged or self.git.writes)
 
     def test_incomplete_or_malformed_trailers_stop_before_writes(self):
         for trailers in ("", f"Train-Base: {BASE}", "Train-PR: 10 invalid",
@@ -324,11 +371,28 @@ class MergeTrainTests(unittest.TestCase):
             self.run_tick(())
         self.assertFalse(self.repo.merged or self.git.writes)
 
+    def test_unrecognized_required_check_state_stops_without_writes(self):
+        self.git.batch([10])
+        self.repo.states[ACTIVE] = {**GREEN, "ui": ("future_state", "")}
+        with self.assertRaisesRegex(RuntimeError, "Unexpected required check state.*future_state"):
+            self.run_tick((10,))
+        self.assertFalse(self.repo.merged or self.repo.rejected or self.git.writes)
+
     def test_missing_batch_check_waits(self):
         self.git.batch([10, 20])
         self.repo.states[ACTIVE] = {}
         self.assertIn(f"Waiting for batch {ACTIVE} (#10 #20)", self.run_tick())
         self.assertFalse(self.repo.merged or self.git.writes)
+
+    def test_any_skipped_required_batch_check_holds_even_with_successful_selector(self):
+        for name in REQUIRED:
+            with self.subTest(name=name):
+                self.setUp()
+                self.git.batch([10, 20])
+                self.repo.states[ACTIVE] = {**GREEN, name: ("skipped", "https://run/batch"),
+                                            "changes": ("success", "")}
+                self.assertIn("re-run https://run/batch", self.run_tick((10, 20)))
+                self.assertFalse(self.repo.merged or self.repo.rejected or self.git.writes)
 
     def test_cancelled_batch_gives_run_url_without_bisection(self):
         self.git.batch([10, 20])
@@ -433,6 +497,22 @@ class MergeTrainTests(unittest.TestCase):
                 self.assertIn(f"Merged #20 at {sha(320)}", output)
                 self.assertEqual(self.repo.merged, [(10, sha(10)), (20, sha(20))])
 
+    def test_ambiguous_merge_stops_if_readback_has_a_different_pr_head(self):
+        self.git.batch([10, 20])
+        merge = self.repo.merge
+
+        def accepted_different_head(number, head):
+            landed = merge(number, head)
+            self.repo.prs[number]["head"]["sha"] = sha(99)
+            self.git.history[BASE, landed] = [landed]
+            raise subprocess.TimeoutExpired("gh", 45)
+
+        self.repo.merge = accepted_different_head
+        with self.assertRaisesRegex(RuntimeError, "approved head.*Merged so far: #10"):
+            self.run_tick((10, 20))
+        self.assertEqual(self.repo.merged, [(10, sha(10))])
+        self.assertFalse(self.git.writes)
+
     def test_ambiguous_merge_stops_when_github_squash_has_unexpected_parent(self):
         self.git.batch([10, 20])
         merge = self.repo.merge
@@ -525,6 +605,90 @@ class MergeTrainTests(unittest.TestCase):
                 self.assertEqual(self.repo.merged, [(10, sha(10))] if during else [])
                 self.assertFalse(self.git.writes)
 
+    def test_non_green_batch_with_matching_squash_is_a_bypass(self):
+        for states in ({}, {"ui": ("cancelled", "https://run")}, {"ui": ("failure", "")}):
+            with self.subTest(states=states), TemporaryDirectory() as tmp:
+                self.setUp()
+                self.git.batch([10, 20])
+                landed = self.repo.merge(10, sha(10))
+                self.repo.states[ACTIVE] = states
+                self.git.history[BASE, landed] = [landed]
+                self.git.history[BASE, ACTIVE] = [sha(490), ACTIVE]
+                self.git.trees[sha(490)] = sha(901)
+                latch = Path(tmp) / "mismatch"
+                output = self.run_tick((10, 20), mismatch_file=latch)
+                self.assertIn("#10 BYPASS", output)
+                self.assertNotIn("Recovered landed prefix", output)
+                self.assertFalse(latch.exists())
+                self.written([20], expected=ACTIVE, base=landed)
+
+    def test_main_advance_after_a_recovered_squash_still_checks_its_tree(self):
+        self.git.batch([10, 20])
+        first = self.repo.merge(10, sha(10))
+        outside = sha(499)
+        self.git.refs = lambda: (outside, ACTIVE)
+        self.git.history[BASE, outside] = [first, outside]
+        self.git.history[BASE, ACTIVE] = [sha(490), ACTIVE]
+        self.git.trees[outside] = self.git.trees[sha(490)] = sha(901)
+        self.git.trees[first] = sha(902)
+        with TemporaryDirectory() as tmp:
+            latch = Path(tmp) / "mismatch"
+            with self.assertRaisesRegex(RuntimeError, "tested tree"):
+                self.run_tick((10, 20), mismatch_file=latch)
+            self.assertEqual(latch.read_text().strip(), ACTIVE)
+            self.assertFalse(self.git.writes)
+
+    def test_main_advance_retests_after_verified_prefix_and_reports_outside_member(self):
+        self.git.batch([10, 20, 30])
+        first = self.repo.merge(10, sha(10))
+        second = self.repo.merge(20, sha(20))
+        outside = sha(499)
+        self.git.refs = lambda: (second, ACTIVE)
+        self.git.history[BASE, second] = [first, outside, second]
+        self.git.history[BASE, ACTIVE] = [sha(490), sha(491), ACTIVE]
+        self.git.trees[first] = self.git.trees[sha(490)] = sha(901)
+        self.git.trees[second] = sha(902)
+        output = self.run_tick((10, 20, 30))
+        self.assertIn(f"Merged #10 at {first}", output)
+        self.assertIn("main moved", output)
+        self.assertIn("#20 BYPASS", output)
+        self.assertNotIn("#10 BYPASS", output)
+        self.written([30], expected=ACTIVE, base=second)
+
+    def test_foreign_commit_cannot_recover_a_reported_member_squash(self):
+        self.git.batch([10, 20])
+        self.repo.merge(10, sha(10))
+        outside = sha(499)
+        self.git.refs = lambda: (outside, ACTIVE)
+        self.git.history[BASE, outside] = [outside]
+        self.git.history[BASE, ACTIVE] = [sha(490), ACTIVE]
+        self.git.trees[sha(490)] = self.git.landed_tree
+        output = self.run_tick((10, 20))
+        self.assertIn("#10 BYPASS", output)
+        self.assertNotIn("Recovered landed prefix", output)
+        self.written([20], expected=ACTIVE, base=outside)
+
+    def test_member_squashed_at_a_different_head_is_a_bypass(self):
+        self.git.batch([10, 20])
+        self.repo.prs[10]["head"]["sha"] = sha(99)
+        landed = self.repo.merge(10, sha(99))
+        self.git.history[BASE, landed] = [landed]
+        self.git.history[BASE, ACTIVE] = [sha(490), ACTIVE]
+        self.git.trees[sha(490)] = self.git.landed_tree
+        output = self.run_tick((10, 20))
+        self.assertIn("#10 BYPASS", output)
+        self.assertNotIn("Recovered landed prefix", output)
+        self.written([20], expected=ACTIVE, base=landed)
+
+    def test_recovery_rejects_a_tested_chain_shorter_than_its_trailers(self):
+        self.git.batch([10, 20])
+        landed = self.repo.merge(10, sha(10))
+        self.git.history[BASE, landed] = [landed]
+        self.git.history[BASE, ACTIVE] = [ACTIVE]
+        with self.assertRaisesRegex(RuntimeError, "trailers"):
+            self.run_tick((10, 20))
+        self.assertFalse(self.git.writes)
+
     def test_next_tick_recovers_own_squash_prefix_and_retests_the_suffix(self):
         self.git.batch([10, 20], [30])
         landed = self.repo.merge(10, sha(10))
@@ -575,6 +739,31 @@ class MergeTrainTests(unittest.TestCase):
                                                         ack_mismatch=ACTIVE))
             self.assertFalse(latch.exists())
             self.written([20], expected=ACTIVE, base=landed)
+
+    def test_acknowledgement_for_an_unrelated_batch_stops_before_writes(self):
+        self.git.batch([10])
+        unrelated = sha(201)
+        with self.assertRaisesRegex(RuntimeError, "must name the blocked or active batch SHA"):
+            self.run_tick((10, 20), ack_mismatch=unrelated)
+        self.assertFalse(self.git.writes or self.repo.merged)
+
+    def test_acknowledgement_targets_the_latched_batch_not_the_current_batch(self):
+        self.git.batch([10, 20])
+        landed = self.repo.merge(10, sha(10))
+        self.git.history[BASE, landed] = [landed]
+        self.git.history[BASE, ACTIVE] = [sha(490), ACTIVE]
+        self.git.trees[sha(490)] = sha(901)
+        older_batch = sha(201)
+        with TemporaryDirectory() as tmp:
+            latch = Path(tmp) / "mismatch"
+            latch.write_text(f"{older_batch}\n")
+            with self.assertRaisesRegex(RuntimeError, older_batch):
+                self.run_tick((10, 20), mismatch_file=latch, ack_mismatch=ACTIVE)
+            self.assertEqual(latch.read_text().strip(), older_batch)
+            with self.assertRaisesRegex(RuntimeError, "tested tree"):
+                self.run_tick((10, 20), mismatch_file=latch, ack_mismatch=older_batch)
+            self.assertEqual(latch.read_text().strip(), ACTIVE)
+            self.assertFalse(self.git.writes)
 
     def test_malformed_merge_response_reports_the_committed_prefix(self):
         self.git.batch([20, 10])
@@ -633,6 +822,63 @@ class MergeTrainTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_make_treats_a_busy_lock_as_success_and_keeps_real_stops_fatal(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            shutil.copyfile(train.__file__, scripts / "merge_train.py")
+            gh = root / "gh"
+            gh.write_text("#!/bin/sh\ntouch gh-called\nexit 99\n")
+            gh.chmod(0o755)
+            env = {**os.environ, "PATH": f"{root}{os.pathsep}{os.environ['PATH']}"}
+            makefile = Path(__file__).resolve().parents[1] / "Makefile"
+            make = ["make", "-f", str(makefile), "merge-train", "BATCH=4", "ACK_MISMATCH="]
+
+            with (root / ".git" / "merge-train.lock").open("a") as held:
+                train.fcntl.flock(held, train.fcntl.LOCK_EX | train.fcntl.LOCK_NB)
+                busy = subprocess.run([*make, f"ORDER=10={sha(10)}"], cwd=root, env=env,
+                                      capture_output=True, text=True)
+                stopped = subprocess.run([*make, "ORDER="], cwd=root, env=env,
+                                         capture_output=True, text=True)
+
+            self.assertIn("another tick holds the lock", busy.stdout)
+            self.assertEqual(busy.returncode, 0, busy.stderr)
+            self.assertEqual(stopped.returncode, 2)
+            self.assertIn("ORDER requires", stopped.stderr)
+            self.assertFalse((root / "gh-called").exists())
+
+    def test_busy_flock_returns_tempfail_before_creating_clients(self):
+        with TemporaryDirectory() as tmp:
+            with (Path(tmp) / "merge-train.lock").open("a") as held:
+                train.fcntl.flock(held, train.fcntl.LOCK_EX | train.fcntl.LOCK_NB)
+                with (patch.object(sys, "argv", ["merge_train.py", "--order", f"10={sha(10)}"]),
+                      patch.object(train.subprocess, "check_output", return_value=tmp) as discover,
+                      patch.object(train.subprocess, "run") as command,
+                      patch.object(train, "GitHub") as github,
+                      patch.object(train, "Git") as git,
+                      redirect_stdout(io.StringIO()) as stdout,
+                      redirect_stderr(io.StringIO()) as stderr):
+                    self.assertEqual(train.main(), 75)
+                discover.assert_called_once_with(
+                    ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True,
+                )
+                command.assert_not_called()
+                github.assert_not_called()
+                git.assert_not_called()
+                self.assertEqual(stdout.getvalue(), "Merge train busy: another tick holds the lock.\n")
+                self.assertEqual(stderr.getvalue(), "")
+
+    def test_blocking_io_error_after_acquiring_lock_is_a_failure(self):
+        with (TemporaryDirectory() as tmp,
+              patch.object(sys, "argv", ["merge_train.py", "--order", f"10={sha(10)}"]),
+              patch.object(train.subprocess, "check_output", return_value=tmp),
+              patch.object(train, "tick", side_effect=BlockingIOError("tick failed")),
+              redirect_stderr(io.StringIO()) as stderr):
+            self.assertEqual(train.main(), 1)
+        self.assertIn("Merge train stopped: tick failed", stderr.getvalue())
+
     def test_invalid_cli_arguments_exit_one(self):
         script = Path(__file__).with_name("merge_train.py")
         result = subprocess.run([sys.executable, "-B", str(script), "--batch", "many"],
@@ -693,6 +939,30 @@ class GitHubTests(unittest.TestCase):
         self.assertEqual(repo.checks(head), {
             "ui": ("cancelled", "https://github.com/owner/repo/actions/runs/10"),
         })
+
+    def test_selector_uses_the_same_latest_check_response_and_verified_app_and_head(self):
+        repo = GitHub()
+        head = sha(10)
+        rust = {"name": REQUIRED[0], "head_sha": head, "status": "completed",
+                "conclusion": "skipped", "app": {"id": ACTIONS_APP}}
+        selector = {**rust, "name": "changes", "conclusion": "success"}
+        pages = [{"check_runs": [rust, {**selector, "head_sha": sha(20)},
+                                  {**selector, "app": {"id": 9}}, selector]}]
+        with patch.object(repo, "api", return_value=pages) as api:
+            self.assertEqual(repo.checks(head), {REQUIRED[0]: ("skipped", ""),
+                                                "changes": ("success", "")})
+        api.assert_called_once_with(f"commits/{head}/check-runs?filter=latest&per_page=100",
+                                    paginate=True)
+
+    def test_ambiguous_optional_selector_never_authorizes_skips(self):
+        repo = GitHub()
+        head = sha(10)
+        selector = {"name": "changes", "head_sha": head, "status": "completed",
+                    "conclusion": "success", "app": {"id": ACTIONS_APP}}
+        repo.api = lambda *args, **kwargs: [{"check_runs": [
+            {**selector, "conclusion": "cancelled"}, selector,
+        ]}]
+        self.assertEqual(repo.checks(head), {"changes": (None, "")})
 
     def test_duplicate_or_incomplete_required_check_is_ambiguous(self):
         repo = GitHub()
@@ -829,7 +1099,7 @@ class GitIntegrationTest(unittest.TestCase):
             for n, head in zip((10, 20), heads):
                 self.assertTrue(git_layer.fetch_pull(n, head))
             batch = train.Batch(base, list(zip((10, 20), heads)), [(30, sha(30))])
-            first = git_layer.commit(git_layer.merge_tree(base, heads[0]), base, "PR 10")
+            first = git_layer.commit(git_layer.merge_tree(base, heads[0]), base, "Train squash of #10")
             active = git_layer.commit(git_layer.merge_tree(first, heads[1]), first, batch.message())
             self.assertEqual(train.Batch.parse(git_layer.message(active)), batch)
             self.assertEqual(git_layer.first_parent_chain(base, active), [first, active])

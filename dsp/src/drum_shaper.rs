@@ -12,6 +12,17 @@ pub const SPEC: [(f32, f32, f32); 7] = [
     (0.0, 1.0, 1.0),    // mix
     (-24.0, 12.0, 0.0), // output dB
 ];
+
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 7] = [
+    "attack",
+    "sustain",
+    "mode",
+    "shape",
+    "saturation",
+    "mix",
+    "output",
+];
 pub const PRESETS: &[&str] = &["Kick Punch", "Snare Body", "Bus Softening"];
 pub fn preset(name: &str) -> Option<Vec<(u32, f32)>> {
     let values = match name {
@@ -90,7 +101,9 @@ impl Device for DrumShaper {
     ) {
         self.fresh = false;
         for (l, r) in l.iter_mut().zip(r) {
-            let x = [sane(*l), sane(*r)];
+            // Match detector headroom and the ±16 input policy of other devices;
+            // finite hostile samples must not overflow shaping or saturation gains.
+            let x = [sane(*l).clamp(-16.0, 16.0), sane(*r).clamp(-16.0, 16.0)];
             let level = x[0].abs().max(x[1].abs()).min(16.0);
             let mut weights = [0.0; 3];
             for (m, weight) in weights.iter_mut().enumerate() {

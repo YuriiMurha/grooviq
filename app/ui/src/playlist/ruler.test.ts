@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { keyboardLoop, LoopGesture, rulerTick } from "./ruler";
+import { keyboardSeek, seekTarget, keyboardLoop, LoopGesture, rulerTick } from "./ruler";
 const guard = { pointerId: 1, stamp: { generation: 2, revision: 3 }, replacements: 0 };
 describe("loop ruler", () => {
   it("maps scaled and scrolled input", () => {
@@ -35,4 +35,24 @@ describe("loop ruler", () => {
     }
     const gesture = new LoopGesture(guard, 0, 960, 0); gesture.update(3840, 10); gesture.cancel(); expect(gesture.take(guard)).toBeNull();
   });
+});
+
+it("keeps four-pixel drag intent after returning to the origin", () => {
+  const gesture = new LoopGesture(guard, 960, 960, 100);
+  expect(gesture.update(960, 103.99)).toBeNull();
+  expect(gesture.update(960, 104)).not.toBeNull();
+  expect(gesture.update(960, 100)).not.toBeNull();
+  expect(gesture.take(guard)).toEqual([{ kind: "setLoop", region: { startTick: 960, endTick: 1920, enabled: true } }]);
+});
+
+it("calculates snapped clicks and keyboard targets from the actual position", () => {
+  expect(seekTarget(1500, 960)).toBe(1920);
+  expect(keyboardSeek("Home", 1700, 960)).toBe(0);
+  expect(keyboardSeek("Home", null, 960)).toBe(0);
+  expect(keyboardSeek("ArrowRight", 1700, 960)).toBe(2660);
+  expect(keyboardSeek("ArrowLeft", 1700, 960)).toBe(740);
+  expect(keyboardSeek("ArrowDown", 0, 960)).toBe(0);
+  expect(keyboardSeek("a", 1700, 960)).toBeNull();
+  expect(keyboardSeek("ArrowRight", NaN, 960)).toBeNull();
+  expect(keyboardSeek("ArrowRight", null, 960)).toBeNull();
 });

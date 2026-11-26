@@ -83,6 +83,7 @@ interface Props {
   picker?: ReactNode;
   playlist?: ReactNode;
   latest: RefObject<LiveFrame | null>;
+  subscribePlaybackStart: (wake: () => void) => () => void;
   sampleRate: number;
   onError: (message: string) => void;
   /** The typing keyboard is on. */
@@ -93,7 +94,7 @@ interface Props {
 
 /** The channel rack and the piano roll, stacked, each toggled by its key (F6, F7), with a
  * splitter between them; the selected channel they and the typing keyboard share. */
-export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys, picker, playlist }: Props) {
+export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError, keyboard, releaseKeys, picker, playlist }: Props) {
   const { view, runFor, stamp } = useProject();
   const [panels, setPanels] = useState<Panels>(DEFAULT_PANELS);
   const [playlistVisible, setPlaylistVisible] = useState(false);
@@ -218,7 +219,7 @@ export function Workspace({ latest, sampleRate, onError, keyboard, releaseKeys, 
         "--rack-height": layout ? `${layout.rackHeight}px` : undefined } as CSSProperties}>
         {panels.rack && (
           <div ref={rackPane} className={`panel panel-rack${both ? " split" : ""}`}>
-            <ChannelRack latest={latest} sampleRate={sampleRate} onError={onError} onOpenRoll={openRoll} />
+            <ChannelRack latest={latest} subscribePlaybackStart={subscribePlaybackStart} sampleRate={sampleRate} onError={onError} onOpenRoll={openRoll} />
           </div>
         )}
         {both && (

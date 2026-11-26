@@ -194,7 +194,7 @@ fn engine_state_carries_bpm_mix_samples_and_the_current_pattern() {
     let mut samples = HashMap::new();
     samples.insert(5, buf.clone());
 
-    let state = engine_state(&p, &samples);
+    let state = engine_state(&p, &samples).unwrap();
     assert_eq!(state.bpm, 128.0);
     assert_eq!(state.pattern.length, 32 * STEP_TICKS);
     assert_eq!(state.pattern.notes.len(), 2);
@@ -227,7 +227,7 @@ fn engine_state_survives_a_project_that_was_never_validated() {
     c.pan = f32::NAN;
     p.channels = vec![c.clone(), c]; // a duplicate id
     p.patterns.clear();
-    let state = engine_state(&p, &HashMap::new());
+    let state = engine_state(&p, &HashMap::new()).unwrap();
     assert_eq!(state.bpm, 140.0);
     assert_eq!(state.channels.len(), 1);
     assert_eq!(state.channels[0].mix.volume, 2.0);
@@ -267,7 +267,7 @@ fn synth_channels_compile_to_synth_instruments() {
         r: vec![0.1; 10],
     });
     let samples = HashMap::from([(1, buf.clone()), (2, buf.clone())]);
-    let state = engine_state(&p, &samples);
+    let state = engine_state(&p, &samples).unwrap();
     assert_eq!(state.channels.len(), 2);
     assert_eq!(state.channels[0].instrument.kind(), InstrumentKind::Sampler);
     assert_eq!(state.channels[1].id, ChannelId(2));
@@ -294,7 +294,7 @@ fn slide_and_choke_reach_the_engine_state() {
     let mut p = project_with(&[], pattern(16, 0.0, vec![slide, note(1, 0), note(2, 480)]));
     p.channels = vec![open_hat, closed_hat, channel(3)];
 
-    let state = engine_state(&p, &HashMap::new());
+    let state = engine_state(&p, &HashMap::new()).unwrap();
     let chokes: Vec<u8> = state.channels.iter().map(|c| c.choke).collect();
     assert_eq!(chokes, vec![3, 16, 0]);
     let notes: Vec<(u32, u32, u8, bool)> = state
