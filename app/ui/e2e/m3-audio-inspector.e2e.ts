@@ -41,7 +41,11 @@ async function openInspector(app: Page) {
   const playlist = app.getByRole("region", { name: "Playlist", exact: true });
   const canvas = playlist.getByRole("application", { name: "Playlist clips" });
   await expect(canvas).toHaveAttribute("aria-disabled", "false");
-  const select = () => playlist.getByRole("combobox", { name: "Selected playlist clip" }).selectOption("5");
+  const select = async () => {
+    await playlist.getByRole("button", { name: /^Selected playlist clip:/ }).click();
+    await playlist.getByRole("listbox", { name: "Selected playlist clip" })
+      .getByRole("option", { name: "Break · Track 1 · 960 ticks", exact: true }).click();
+  };
   await select();
   const inspector = playlist.getByRole("group", { name: "Audio clip inspector" });
   return { canvas, select, inspector };
