@@ -19,7 +19,7 @@ test("announces a slow initial project load until the rack mounts", async ({ sta
   await expect(status).toBeEmpty();
   await page.clock.resume();
   await expect(status.filter({ hasText: loading })).toBeVisible();
-  expect(await status.evaluate(element => parseFloat(getComputedStyle(element).fontSize))).toBeGreaterThanOrEqual(11);
+  await expect(status).toHaveCSS("font-size", "14px");
   await expect(page.getByRole("region", { name: "Channel rack" })).toHaveCount(0);
 
   await page.evaluate("window.__grooviqMock.releaseCommand('project_view')");

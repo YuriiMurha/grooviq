@@ -1,25 +1,67 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { scheduleInitialLoading } from "./initialLoading";
+import { trackInitialLoad } from "./initialLoading";
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
-test("shows a notice only after a noticeable wait", () => {
-  const show = vi.fn();
-  scheduleInitialLoading(show);
+function deferredLoad() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+test("shows the notice after the delay and clears it on success", async () => {
+  const load = deferredLoad();
+  const onState = vi.fn();
+  trackInitialLoad(load.promise, onState);
 
   vi.advanceTimersByTime(199);
-  expect(show).not.toHaveBeenCalled();
+  expect(onState).not.toHaveBeenCalled();
   vi.advanceTimersByTime(1);
-  expect(show).toHaveBeenCalledOnce();
+  expect(onState.mock.calls).toEqual([["slow"]]);
+
+  load.resolve();
+  await load.promise;
+  expect(onState.mock.calls).toEqual([["slow"], ["settled"]]);
 });
 
-test("finishing before the delay cancels the notice", () => {
-  const show = vi.fn();
-  const cancel = scheduleInitialLoading(show);
+test("finishing before the delay never shows the notice", async () => {
+  const load = Promise.resolve();
+  const onState = vi.fn();
+  trackInitialLoad(load, onState);
 
-  vi.advanceTimersByTime(50);
-  cancel();
+  await load;
   vi.runAllTimers();
-  expect(show).not.toHaveBeenCalled();
+  expect(onState.mock.calls).toEqual([["settled"]]);
+});
+
+test("clears the visible notice when the load rejects", async () => {
+  const load = deferredLoad();
+  const onState = vi.fn();
+  trackInitialLoad(load.promise, onState);
+  vi.advanceTimersByTime(200);
+  expect(onState.mock.calls).toEqual([["slow"]]);
+
+  const error = new Error("Initial view failed");
+  load.reject(error);
+  await expect(load.promise).rejects.toBe(error);
+  expect(onState.mock.calls).toEqual([["slow"], ["settled"]]);
+});
+
+test.each([50, 200])("cleanup at %i ms prevents later updates", async (elapsed) => {
+  const load = deferredLoad();
+  const onState = vi.fn();
+  const cancel = trackInitialLoad(load.promise, onState);
+  vi.advanceTimersByTime(elapsed);
+  cancel();
+  onState.mockClear();
+
+  vi.runAllTimers();
+  load.resolve();
+  await load.promise;
+  expect(onState).not.toHaveBeenCalled();
 });

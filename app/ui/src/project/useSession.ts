@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { errorText, projectEdit, projectView, type Edit, type ProjectView } from "../api/project";
 import type { ProjectContextValue, ProjectStamp } from "./context";
 import { isProjectReplacing, isProjectReplacementPending, projectGeneration } from "./replacement";
-import { scheduleInitialLoading } from "./initialLoading";
+import { trackInitialLoad, type InitialLoadState } from "./initialLoading";
 
 /** An edit whose project was replaced before its turn came: dropped without a toast. */
 const STALE = new Error("stale edit");
@@ -21,7 +21,7 @@ interface Session {
 /** The current project and the one queue every command that returns a view goes through. */
 export function useSession(onError: (message: string) => void) {
   const [state, setState] = useState<Session>(() => ({ view: null, cleanSince: Date.now() }));
-  const [initialLoad, setInitialLoad] = useState<"pending" | "slow" | "settled">("pending");
+  const [initialLoad, setInitialLoad] = useState<InitialLoadState>("pending");
   const latest = useRef(state);
   const queue = useRef(new ProjectCommandQueue());
   const revisions = useRef(new PatternRevisionChain());
@@ -94,21 +94,10 @@ export function useSession(onError: (message: string) => void) {
 
   // The project the engine holds at start.
   useEffect(() => {
-    let active = true;
-    const cancelNotice = scheduleInitialLoading(() => setInitialLoad("slow"));
-    const finish = () => {
-      if (!active) return;
-      cancelNotice();
-      setInitialLoad("settled");
-    };
-    enqueue(projectView).then(
-      (view) => { adopt(view); finish(); },
-      (e: unknown) => { finish(); onError(errorText(e)); },
-    );
-    return () => {
-      active = false;
-      cancelNotice();
-    };
+    const request = enqueue(projectView);
+    const cancelNotice = trackInitialLoad(request, setInitialLoad);
+    request.then(adopt, (e: unknown) => onError(errorText(e)));
+    return cancelNotice;
   }, [adopt, enqueue, onError]);
 
   const trim = useCallback(async (channel: number, action: TrimAction, still: () => boolean) => {

@@ -1,6 +1,19 @@
 const NOTICE_DELAY_MS = 200;
 
-export function scheduleInitialLoading(show: () => void): () => void {
-  const timer = setTimeout(show, NOTICE_DELAY_MS);
-  return () => clearTimeout(timer);
+export type InitialLoadState = "pending" | "slow" | "settled";
+
+export function trackInitialLoad(request: Promise<unknown>, onState: (state: InitialLoadState) => void): () => void {
+  let active = true;
+  const timer = setTimeout(() => onState("slow"), NOTICE_DELAY_MS);
+  const finish = () => {
+    if (!active) return;
+    clearTimeout(timer);
+    onState("settled");
+  };
+  void request.then(finish, finish);
+
+  return () => {
+    active = false;
+    clearTimeout(timer);
+  };
 }
