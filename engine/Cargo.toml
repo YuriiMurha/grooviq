@@ -11,7 +11,7 @@ description = "Real-time audio engine: lock-free commands, fixed 64-frame blocks
 name = "grooviq_engine"
 
 [features]
-# Commands that make the synth output NaN or panic, for the audio-health tests. Never on in the app.
+# Audio-health fault injection and worker scheduling hooks. Never on in the app.
 test-hooks = []
 profiling = ["dep:tracy-client"]
 
@@ -20,6 +20,7 @@ profiling = ["dep:tracy-client"]
 # CoreAudio already runs its I/O thread real-time: on macOS the feature adds no code or crate.
 cpal = { version = "0.18.2", features = ["realtime"] }
 grooviq-dsp = { path = "../dsp" }
+audio_thread_priority = { version = "0.35.1", default-features = false }
 rtrb = "0.3"
 tracy-client = { version = "0.19", optional = true, default-features = false, features = ["enable", "manual-lifetime", "only-localhost"] }
 # Pure-Rust maths: the same bits on every platform (clippy.toml bans the std methods).
@@ -48,9 +49,14 @@ rtsan-standalone = "0.3.0"
 tempfile = "3"
 # Micro-benchmarks (MIT OR Apache-2.0): `make bench-mixer`.
 divan = "0.1.21"
+loom = "0.7.3"
 
 [[bench]]
 name = "mixer_kernels"
+harness = false
+
+[[bench]]
+name = "rt_workers"
 harness = false
 
 [[test]]

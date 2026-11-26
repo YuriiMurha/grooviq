@@ -39,6 +39,9 @@ mod fattener;
 mod mixer_live;
 #[path = "realtime/mixer_runtime.rs"]
 mod mixer_runtime;
+#[cfg(feature = "test-hooks")]
+#[path = "realtime/rt_workers.rs"]
+mod rt_workers;
 #[path = "realtime/saturation.rs"]
 mod saturation;
 
