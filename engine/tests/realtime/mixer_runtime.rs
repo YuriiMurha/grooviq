@@ -1,15 +1,12 @@
-#[cfg(feature = "test-hooks")]
-use grooviq_dsp::NoteEvent;
 use grooviq_dsp::{
-    Device, HostDomain, HostTransport, comp::Comp, saturation::Saturation, utility::Utility,
+    Device, HostDomain, HostTransport, NoteEvent, comp::Comp, saturation::Saturation,
+    utility::Utility,
 };
 use grooviq_engine::mixer::*;
 
 /// Writes NaN into its next block once armed through parameter 0.
-#[cfg(feature = "test-hooks")]
 #[derive(Default)]
 struct Fault(bool);
-#[cfg(feature = "test-hooks")]
 impl Device for Fault {
     fn set_param(&mut self, _: u32, value: f32) {
         self.0 = value > 0.5;
@@ -285,55 +282,52 @@ fn mixer_runtime_realtime() {
         assert!(ol.iter().any(|x| x.abs() > 0.05));
 
         // Fault path: a NaN block on track 1 is zeroed and its chain reset, inside the guard.
-        #[cfg(feature = "test-hooks")]
-        {
-            let m = Mixer {
-                tracks: vec![track(0, None, &[]), track(1, Some(0), &[1, 2])],
-                sources: vec![source(1, 1)],
-                ..Mixer::default()
-            };
-            let devices = vec![
-                PreparedInsert::new(InsertId(1), Box::new(sat(sr))),
-                PreparedInsert::new(InsertId(2), Box::new(Fault::default())),
-            ];
-            let mut k =
-                PreparedMixer::prepare(compile(&m, Budget::default()).unwrap(), devices, &[], cfg)
-                    .unwrap();
-            let mut silenced = [0; 3];
-            let (mut fl, mut fr) = ([1.0f32; 128], [1.0f32; 128]);
-            let mut after = [0.0f32; 128];
-            super::realtime(|| {
-                for (b, slot) in silenced.iter_mut().enumerate() {
-                    if b == 1 {
-                        k.set_param(InsertId(2), 0, 1.0).unwrap();
-                    }
-                    let blocks = [SourceBlock {
-                        id: SourceId::Channel(1),
-                        left: &s1l[..128],
-                        right: &s1r[..128],
-                    }];
-                    *slot = k
-                        .render(
-                            &transport(sr, b as u64 * 128, 128),
-                            &blocks,
-                            &mut fl,
-                            &mut fr,
-                        )
-                        .unwrap()
-                        .silenced;
-                    if b == 1 {
-                        after = fl;
-                    }
+        let m = Mixer {
+            tracks: vec![track(0, None, &[]), track(1, Some(0), &[1, 2])],
+            sources: vec![source(1, 1)],
+            ..Mixer::default()
+        };
+        let devices = vec![
+            PreparedInsert::new(InsertId(1), Box::new(sat(sr))),
+            PreparedInsert::new(InsertId(2), Box::new(Fault::default())),
+        ];
+        let mut k =
+            PreparedMixer::prepare(compile(&m, Budget::default()).unwrap(), devices, &[], cfg)
+                .unwrap();
+        let mut silenced = [0; 3];
+        let (mut fl, mut fr) = ([1.0f32; 128], [1.0f32; 128]);
+        let mut after = [0.0f32; 128];
+        super::realtime(|| {
+            for (b, slot) in silenced.iter_mut().enumerate() {
+                if b == 1 {
+                    k.set_param(InsertId(2), 0, 1.0).unwrap();
                 }
-            });
-            assert_eq!(silenced, [0, 1, 0]);
-            assert_eq!(after, [0.0; 128]);
-            // The block after the fault is a fresh saturation of the same input.
-            let mut fresh = sat(sr);
-            let (mut l, mut r) = (s1l[..128].to_vec(), s1r[..128].to_vec());
-            fresh.process(&mut l, &mut r, None, &[]);
-            assert_eq!(fl.to_vec(), l);
-            assert_ne!(fl.to_vec(), s1l[..128].to_vec());
-        }
+                let blocks = [SourceBlock {
+                    id: SourceId::Channel(1),
+                    left: &s1l[..128],
+                    right: &s1r[..128],
+                }];
+                *slot = k
+                    .render(
+                        &transport(sr, b as u64 * 128, 128),
+                        &blocks,
+                        &mut fl,
+                        &mut fr,
+                    )
+                    .unwrap()
+                    .silenced;
+                if b == 1 {
+                    after = fl;
+                }
+            }
+        });
+        assert_eq!(silenced, [0, 1, 0]);
+        assert_eq!(after, [0.0; 128]);
+        // The block after the fault is a fresh saturation of the same input.
+        let mut fresh = sat(sr);
+        let (mut l, mut r) = (s1l[..128].to_vec(), s1r[..128].to_vec());
+        fresh.process(&mut l, &mut r, None, &[]);
+        assert_eq!(fl.to_vec(), l);
+        assert_ne!(fl.to_vec(), s1l[..128].to_vec());
     }
 }
