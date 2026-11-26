@@ -115,7 +115,9 @@ pub(crate) fn is_stepped(index: u32) -> bool {
 /// Clamps a frequency in Hz to the EQ coefficient range at the device sample rate.
 /// Use the rate accepted by [`Eq::new`] after its 8–384 kHz clamp.
 /// Pass the smoothed frequency after conversion from log2 Hz to reproduce the active value.
-/// A requested frequency estimates the settled value because the device stores it in f32 log2 Hz.
+/// A requested frequency estimates the settled value only within `SPEC`'s 20–20,000 Hz: the
+/// device clamps requests to that range first and stores them in f32 log2 Hz, so editors
+/// showing a running device should read meters 2–9 instead.
 pub fn effective_band_hz(freq_hz: f64, sample_rate: f64) -> f64 {
     freq_hz.clamp(10.0, 0.49 * sample_rate)
 }
