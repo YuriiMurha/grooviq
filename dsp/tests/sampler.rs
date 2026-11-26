@@ -95,26 +95,31 @@ fn large_pitch_ups_keep_the_upper_passband() {
 #[test]
 fn faster_reads_reject_folded_tones() {
     let mut levels = Vec::new();
-    for (rate, key, source_hz, alias_hz, pass_source_hz, pass_output_hz) in [
-        (192_000.0, 60, 89_000.0, 7_000.0, 1_000.0, 1_000.0),
-        (48_000.0, 72, 21_000.0, 6_000.0, 1_000.0, 2_000.0),
-        (48_000.0, 84, 21_000.0, 12_000.0, 1_000.0, 4_000.0),
-        (48_000.0, 84, 7_250.0, 19_000.0, 1_000.0, 4_000.0),
-        (72_000.0, 60, 31_500.0, 16_500.0, 1_000.0, 1_000.0),
-        (98_400.0, 60, 43_000.0, 5_000.0, 16_000.0, 16_000.0),
+    for (rate, key, source_hz, alias_hz, pass_source_hz, pass_output_hz, max_alias_dbfs) in [
+        (192_000.0, 60, 89_000.0, 7_000.0, 1_000.0, 1_000.0, -60.0),
+        (48_000.0, 72, 21_000.0, 6_000.0, 1_000.0, 2_000.0, -60.0),
+        (48_000.0, 84, 21_000.0, 12_000.0, 1_000.0, 4_000.0, -60.0),
+        (48_000.0, 84, 7_250.0, 19_000.0, 1_000.0, 4_000.0, -60.0),
+        // Closer to Nyquist, enough of a cutoff increase will lift this fold first.
+        (48_000.0, 84, 6_750.0, 21_000.0, 1_000.0, 4_000.0, -50.0),
+        // Step 3 interpolates partly widened rows, where taps outside the window must be zero.
+        (144_000.0, 60, 31_000.0, 17_000.0, 1_000.0, 1_000.0, -60.0),
+        (72_000.0, 60, 31_500.0, 16_500.0, 1_000.0, 1_000.0, -60.0),
+        (98_400.0, 60, 43_000.0, 5_000.0, 16_000.0, 16_000.0, -60.0),
     ] {
         let alias = measure_tone(rate, key, source_hz, alias_hz);
         let pass = measure_tone(rate, key, pass_source_hz, pass_output_hz);
-        eprintln!("{rate} Hz, key {key}: alias {alias:.2?} dBFS, passband {pass:.2?} dBFS");
-        levels.push((rate, key, alias, pass));
-    }
-    for (rate, key, alias, pass) in levels {
-        // A full-scale sinusoid should fold to at most 0.1% amplitude. The passband
-        // control must stay within 0.25 dB of full scale, so silence cannot pass.
-        assert!(
-            alias.into_iter().all(|db| db <= -60.0),
-            "{rate} Hz key {key}: {alias:?} dBFS"
+        eprintln!(
+            "{rate} Hz, key {key}: {alias_hz} Hz alias {alias:.2?} dBFS, passband {pass:.2?} dBFS"
         );
+        levels.push((rate, key, alias_hz, alias, pass, max_alias_dbfs));
+    }
+    for (rate, key, alias_hz, alias, pass, max_alias_dbfs) in levels {
+        assert!(
+            alias.into_iter().all(|db| db <= max_alias_dbfs),
+            "{rate} Hz key {key}, {alias_hz} Hz fold: {alias:?} dBFS exceeds {max_alias_dbfs} dBFS"
+        );
+        // The passband control keeps silence from passing the fold check.
         assert!(
             pass.into_iter().all(|db| db.abs() < 0.25),
             "{rate} Hz key {key}: {pass:?} dBFS"
