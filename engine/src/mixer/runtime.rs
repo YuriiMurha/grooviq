@@ -14,8 +14,12 @@
 //!
 //! Dropping a `PreparedMixer` frees its devices and buffers: do it off the audio thread.
 
+use super::delay::{DelayBank, DelayIndex};
 use super::insert::{InsertSlot, ParamError, PreparedInsert, find};
-use super::{CompiledMixer, InputId, InsertId, MASTER, MixerTrackId, SourceId, Tap};
+use super::{
+    ActualLatency, CompiledMixer, InputId, InsertId, LatencyError, MASTER, MixerTrackId, PdcBudget,
+    PdcDelay, PdcPoint, SourceId, Tap, TrackArrival, plan_latency,
+};
 use grooviq_dsp::{HostTransport, MAX_BLOCK};
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem::size_of;
@@ -83,6 +87,7 @@ pub enum PrepareError {
     InvalidSampleRate,
     InvalidMaxFrames,
     Plan(PlanError),
+    Latency(LatencyError),
     MissingInsert(InsertId),
     UnknownInsert(InsertId),
     DuplicateBinding(InsertId),
@@ -106,7 +111,13 @@ pub enum RenderError {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Feed {
+struct Feed {
+    input: FeedInput,
+    delay: DelayIndex,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FeedInput {
     /// Offset of a tap's left block in the node buffers; right is `max_frames` later.
     Tap {
         at: u32,
@@ -138,16 +149,19 @@ pub struct PreparedMixer {
     /// Per node: pre L, pre R, post L, post R; then work L/R and detector L/R.
     buffers: Vec<f32>,
     resources: KernelResources,
+    delays: DelayBank,
+    /// None for the original uncompensated static renderer.
+    master_latency: Option<u64>,
 }
 
-fn reserved<T>(n: usize) -> Result<Vec<T>, PrepareError> {
+pub(super) fn reserved<T>(n: usize) -> Result<Vec<T>, PrepareError> {
     let mut v = Vec::new();
     v.try_reserve_exact(n)
         .map_err(|_| PrepareError::Allocation)?;
     Ok(v)
 }
 
-fn bytes<T>(v: &Vec<T>) -> Result<u64, PrepareError> {
+pub(super) fn bytes<T>(v: &Vec<T>) -> Result<u64, PrepareError> {
     (v.capacity() as u64)
         .checked_mul(size_of::<T>() as u64)
         .ok_or(PrepareError::Overflow)
@@ -157,13 +171,94 @@ fn plan(e: PlanError) -> PrepareError {
     PrepareError::Plan(e)
 }
 
+#[derive(Default)]
+struct PrepareDelays {
+    points: std::vec::IntoIter<PdcDelay>,
+    tracks: std::vec::IntoIter<TrackArrival>,
+    bank: DelayBank,
+    ring_bytes: u64,
+    master_latency: Option<u64>,
+}
+
+impl PrepareDelays {
+    fn new(
+        compiled: &CompiledMixer,
+        snapshot: &[ActualLatency],
+        limit: u64,
+    ) -> Result<Self, PrepareError> {
+        let timing = plan_latency(
+            compiled,
+            snapshot,
+            PdcBudget {
+                descriptors: u64::MAX,
+                ring_samples: u64::MAX,
+                memory_bytes: limit,
+            },
+        )
+        .map_err(|error| match error {
+            LatencyError::Plan(e) => plan(e),
+            LatencyError::Budget { required, .. } => PrepareError::Budget { required, limit },
+            LatencyError::Allocation => PrepareError::Allocation,
+            LatencyError::Overflow => PrepareError::Overflow,
+            e => PrepareError::Latency(e),
+        })?;
+        Ok(Self {
+            bank: DelayBank::reserve(&timing)?,
+            points: timing.delays.into_iter(),
+            tracks: timing.tracks.into_iter(),
+            ring_bytes: timing.resources.ring_bytes,
+            master_latency: Some(timing.master_frames),
+        })
+    }
+
+    fn gather(&mut self, track: MixerTrackId) -> u64 {
+        if self.master_latency.is_none() {
+            return 0;
+        }
+        let arrival = self.tracks.next().expect("planned track arrival");
+        assert_eq!(arrival.track, track);
+        arrival.gather
+    }
+
+    fn take(&mut self, at: PdcPoint) -> PdcDelay {
+        if self.master_latency.is_none() {
+            return PdcDelay { at, frames: 0 };
+        }
+        let delay = self.points.next().expect("planned compensation point");
+        assert_eq!(delay.at, at);
+        delay
+    }
+}
+
 impl PreparedMixer {
-    /// Resolves every identity, tap and slot and reserves all buffers. Off-thread only.
+    /// Prepares the original static renderer without delay compensation. Existing
+    /// static kernel callers can replay their uncompensated mix through this constructor.
     pub fn prepare(
         compiled: CompiledMixer,
         bindings: Vec<PreparedInsert>,
         gains: &[TrackGain],
         config: PrepareConfig,
+    ) -> Result<Self, PrepareError> {
+        Self::prepare_inner(compiled, bindings, gains, config, false)
+    }
+
+    /// Queries the prepared devices' actual latency and reserves compensation histories.
+    /// Prepare devices with their final parameter banks before calling. Off-thread only.
+    pub fn prepare_compensated(
+        compiled: CompiledMixer,
+        bindings: Vec<PreparedInsert>,
+        gains: &[TrackGain],
+        config: PrepareConfig,
+    ) -> Result<Self, PrepareError> {
+        Self::prepare_inner(compiled, bindings, gains, config, true)
+    }
+
+    fn prepare_inner(
+        compiled: CompiledMixer,
+        bindings: Vec<PreparedInsert>,
+        gains: &[TrackGain],
+        config: PrepareConfig,
+        compensate: bool,
     ) -> Result<Self, PrepareError> {
         if !config.sample_rate.is_finite() || config.sample_rate <= 0.0 {
             return Err(PrepareError::InvalidSampleRate);
@@ -227,7 +322,15 @@ impl PreparedMixer {
                 return Err(PrepareError::UnknownInsert(b.id));
             }
             let id = b.id;
-            if devices.insert(id, (b.device, b.identity)).is_some() {
+            let latency = if compensate {
+                b.device.latency_frames()
+            } else {
+                0
+            };
+            if devices
+                .insert(id, (b.device, b.identity, latency))
+                .is_some()
+            {
                 return Err(PrepareError::DuplicateBinding(id));
             }
         }
@@ -265,6 +368,20 @@ impl PreparedMixer {
             .map(|(i, id)| (*id, i))
             .collect();
 
+        let mut timing = PrepareDelays::default();
+        if compensate {
+            let mut snapshot = reserved(devices.len())?;
+            snapshot.extend(
+                devices
+                    .iter()
+                    .map(|(&insert, (_, _, frames))| ActualLatency {
+                        insert,
+                        frames: *frames,
+                    }),
+            );
+            timing = PrepareDelays::new(&compiled, &snapshot, config.max_bytes)?;
+        }
+
         let stride = mf.checked_mul(4).ok_or(PrepareError::Overflow)?;
         let tap_at = |node: usize, tap: Tap| -> Result<u32, PrepareError> {
             let base = node.checked_mul(stride).ok_or(PrepareError::Overflow)?;
@@ -296,6 +413,7 @@ impl PreparedMixer {
                 }
             }
             let start = to_u32(audible.len())?;
+            let gather = timing.gather(id);
             for input in &t.inputs {
                 if !input.gain.is_finite() {
                     return Err(plan(PlanError::MalformedInput(id)));
@@ -305,9 +423,16 @@ impl PreparedMixer {
                         if input.from.is_some() {
                             return Err(plan(PlanError::MalformedInput(id)));
                         }
-                        audible.push(Feed::Source {
-                            index: to_u32(source_index[&source])?,
-                            gain: input.gain,
+                        let point = timing.take(PdcPoint::Audible {
+                            track: id,
+                            input: input.id,
+                        });
+                        audible.push(Feed {
+                            input: FeedInput::Source {
+                                index: to_u32(source_index[&source])?,
+                                gain: input.gain,
+                            },
+                            delay: timing.bank.register(point, gather, None, None)?,
                         });
                         continue;
                     }
@@ -330,14 +455,31 @@ impl PreparedMixer {
                     }
                     continue;
                 }
-                audible.push(Feed::Tap {
-                    at: tap_at(node_of[&from], input.tap)?,
-                    gain: input.gain,
+                let point = timing.take(PdcPoint::Audible {
+                    track: id,
+                    input: input.id,
+                });
+                audible.push(Feed {
+                    input: FeedInput::Tap {
+                        at: tap_at(node_of[&from], input.tap)?,
+                        gain: input.gain,
+                    },
+                    delay: timing
+                        .bank
+                        .register(point, gather, Some((from, input.tap)), None)?,
                 });
             }
             let audible_range = (start, to_u32(audible.len())?);
             let first_insert = to_u32(inserts.len())?;
+            let mut arrival = gather;
+            let mut predecessor = None;
             for insert in &t.track.inserts {
+                let point = timing.take(PdcPoint::Stage {
+                    track: id,
+                    insert: insert.id,
+                });
+                arrival += point.frames;
+                let delay = timing.bank.register(point, arrival, None, predecessor)?;
                 let d0 = to_u32(detector.len())?;
                 // Sidechains to this insert, in the compiled (canonical) input order.
                 for input in &t.inputs {
@@ -348,14 +490,27 @@ impl PreparedMixer {
                     } = input.id
                         && target == insert.id
                     {
-                        detector.push(Feed::Tap {
-                            at: tap_at(node_of[&from], tap)?,
-                            gain: input.gain,
+                        let point = timing.take(PdcPoint::Detector {
+                            track: id,
+                            insert: insert.id,
+                            input: input.id,
+                        });
+                        detector.push(Feed {
+                            input: FeedInput::Tap {
+                                at: tap_at(node_of[&from], tap)?,
+                                gain: input.gain,
+                            },
+                            delay: timing.bank.register(
+                                point,
+                                arrival,
+                                Some((from, tap)),
+                                predecessor,
+                            )?,
                         });
                     }
                 }
                 keys.push((insert.id, to_u32(inserts.len())?));
-                let (device, identity) = devices
+                let (device, identity, latency) = devices
                     .remove(&insert.id)
                     .ok_or(PrepareError::MissingInsert(insert.id))?;
                 inserts.push(InsertSlot {
@@ -363,7 +518,11 @@ impl PreparedMixer {
                     device,
                     identity,
                     detector: (d0, to_u32(detector.len())?),
+                    delay,
+                    latency,
                 });
+                arrival += u64::from(latency);
+                predecessor = Some(insert.id);
             }
             let (left, right) = fixed.get(&id).copied().unwrap_or((1.0, 1.0));
             nodes.push(Node {
@@ -373,6 +532,7 @@ impl PreparedMixer {
                 right,
             });
         }
+        assert!(timing.points.len() == 0 && timing.tracks.len() == 0);
         keys.sort_unstable_by_key(|(id, _)| *id);
 
         let samples = order
@@ -383,6 +543,7 @@ impl PreparedMixer {
         // Charge the budget before the large audio reservation.
         let audio_estimate = (samples as u64)
             .checked_mul(size_of::<f32>() as u64)
+            .and_then(|bytes| bytes.checked_add(timing.ring_bytes))
             .ok_or(PrepareError::Overflow)?;
         let table_bytes = [
             bytes(&nodes)?,
@@ -391,6 +552,7 @@ impl PreparedMixer {
             bytes(&inserts)?,
             bytes(&keys)?,
             bytes(&sources)?,
+            timing.bank.table_bytes()?,
         ]
         .into_iter()
         .try_fold(0u64, |a, b| a.checked_add(b))
@@ -406,7 +568,9 @@ impl PreparedMixer {
         }
         let mut buffers = reserved(samples)?;
         buffers.resize(samples, 0.0);
-        let audio_bytes = bytes(&buffers)?;
+        let audio_bytes = bytes(&buffers)?
+            .checked_add(timing.bank.allocate()?)
+            .ok_or(PrepareError::Overflow)?;
         let total = audio_bytes
             .checked_add(table_bytes)
             .ok_or(PrepareError::Overflow)?;
@@ -426,6 +590,8 @@ impl PreparedMixer {
             keys,
             sources,
             buffers,
+            delays: timing.bank,
+            master_latency: timing.master_latency,
             resources: KernelResources {
                 audio_bytes,
                 table_bytes,
@@ -440,6 +606,11 @@ impl PreparedMixer {
 
     pub fn resources(&self) -> KernelResources {
         self.resources
+    }
+
+    /// Actual processing latency from mixer sources to the master output, when compensated.
+    pub fn master_latency_frames(&self) -> Option<u64> {
+        self.master_latency
     }
 
     pub fn max_frames(&self) -> usize {
@@ -575,20 +746,25 @@ impl PreparedMixer {
             wr.fill(0.0);
             let feeds = &self.audible[node.audible.0 as usize..node.audible.1 as usize];
             for feed in feeds {
-                let (l, r, gain) = match *feed {
-                    Feed::Tap { at, gain } => {
+                let (l, r, gain) = match feed.input {
+                    FeedInput::Tap { at, gain } => {
                         let at = at as usize;
                         (&taps[at..at + n], &taps[at + mf..at + mf + n], gain)
                     }
-                    Feed::Source { index, gain } => {
+                    FeedInput::Source { index, gain } => {
                         let (l, r) = sources.block(index as usize);
                         (l, r, gain)
                     }
                 };
-                accumulate(wl, wr, l, r, gain);
+                if let Some(delay) = feed.delay {
+                    self.delays.accumulate(delay, wl, wr, l, r, gain);
+                } else {
+                    accumulate(wl, wr, l, r, gain);
+                }
             }
             let chain = node.inserts.0 as usize..node.inserts.1 as usize;
             for slot in &mut self.inserts[chain.clone()] {
+                self.delays.apply(slot.delay, wl, wr);
                 let (d0, d1) = (slot.detector.0 as usize, slot.detector.1 as usize);
                 let sidechain = if d0 == d1 {
                     None
@@ -596,15 +772,14 @@ impl PreparedMixer {
                     dl.fill(0.0);
                     dr.fill(0.0);
                     for feed in &self.detector[d0..d1] {
-                        if let Feed::Tap { at, gain } = *feed {
+                        if let FeedInput::Tap { at, gain } = feed.input {
                             let at = at as usize;
-                            accumulate(
-                                dl,
-                                dr,
-                                &taps[at..at + n],
-                                &taps[at + mf..at + mf + n],
-                                gain,
-                            );
+                            let (l, r) = (&taps[at..at + n], &taps[at + mf..at + mf + n]);
+                            if let Some(delay) = feed.delay {
+                                self.delays.accumulate(delay, dl, dr, l, r, gain);
+                            } else {
+                                accumulate(dl, dr, l, r, gain);
+                            }
                         }
                     }
                     Some((&dl[..], &dr[..]))
@@ -638,8 +813,16 @@ impl PreparedMixer {
                 pre_r.fill(0.0);
                 post_l.fill(0.0);
                 post_r.fill(0.0);
+                for feed in feeds {
+                    self.delays.clear(feed.delay);
+                }
                 for slot in &mut self.inserts[chain] {
                     slot.device.reset();
+                    self.delays.clear(slot.delay);
+                    let (d0, d1) = (slot.detector.0 as usize, slot.detector.1 as usize);
+                    for feed in &self.detector[d0..d1] {
+                        self.delays.clear(feed.delay);
+                    }
                 }
                 silenced += 1;
             }
@@ -654,18 +837,44 @@ impl PreparedMixer {
         }
     }
 
-    /// Moves each surviving insert's live device out of `old` into this kernel, and this
-    /// kernel's unused fresh device into `old` (which then retires off-thread): a swap, so
-    /// nothing is allocated or freed here. `inserts` is strictly increasing. The whole plan
-    /// is checked first (same sample rate; each insert present in both kernels with the same
-    /// [`InsertIdentity`]); on any mismatch nothing moves. Real-time safe.
+    /// Swaps matching devices and compatible compensation histories with the previous
+    /// kernel. The device list must be strictly increasing and agree on identity and
+    /// actual latency. On refusal nothing moves. Real-time safe.
     pub fn transfer_from(
         &mut self,
         old: &mut PreparedMixer,
         inserts: &[InsertId],
     ) -> Result<(), TransferError> {
+        self.validate_transfer(old, inserts, true)?;
+        self.swap_survivors(old, inserts, &[]);
+        Ok(())
+    }
+
+    /// Both kernels were prepared from their canonical parameter banks. A survivor whose
+    /// latency changes keeps the candidate's freshly prepared device and parameters.
+    /// Only equal-latency survivors receive deltas. Nothing renders between these writes.
+    pub(super) fn adopt_prepared(
+        &mut self,
+        old: &mut PreparedMixer,
+        inserts: &[InsertId],
+        params: &[(InsertId, u32, f32)],
+    ) {
+        if self.validate_transfer(old, inserts, false).is_ok() {
+            self.swap_survivors(old, inserts, params);
+        }
+    }
+
+    fn validate_transfer(
+        &self,
+        old: &PreparedMixer,
+        inserts: &[InsertId],
+        require_same_latency: bool,
+    ) -> Result<(), TransferError> {
         if old.sample_rate.to_bits() != self.sample_rate.to_bits() {
             return Err(TransferError::SampleRate);
+        }
+        if old.master_latency.is_some() != self.master_latency.is_some() {
+            return Err(TransferError::CompensationMode);
         }
         for (i, &id) in inserts.iter().enumerate() {
             if i > 0 && inserts[i - 1] >= id {
@@ -677,28 +886,58 @@ impl PreparedMixer {
             if self.inserts[a].identity != old.inserts[b].identity {
                 return Err(TransferError::Identity(id));
             }
-        }
-        for &id in inserts {
-            if let (Ok(a), Ok(b)) = (find(&self.keys, id), find(&old.keys, id)) {
-                std::mem::swap(&mut self.inserts[a].device, &mut old.inserts[b].device);
+            if require_same_latency && self.inserts[a].latency != old.inserts[b].latency {
+                return Err(TransferError::Latency(id));
             }
         }
         Ok(())
+    }
+
+    fn compatible_slots(&self, old: &PreparedMixer, id: InsertId) -> Option<(usize, usize)> {
+        let a = find(&self.keys, id).ok()?;
+        let b = find(&old.keys, id).ok()?;
+        (self.inserts[a].latency == old.inserts[b].latency).then_some((a, b))
+    }
+
+    fn swap_survivors(
+        &mut self,
+        old: &mut PreparedMixer,
+        inserts: &[InsertId],
+        params: &[(InsertId, u32, f32)],
+    ) {
+        let mut params = params.iter().copied().peekable();
+        for &id in inserts {
+            let slots = self.compatible_slots(old, id);
+            if let Some((a, b)) = slots {
+                std::mem::swap(&mut self.inserts[a].device, &mut old.inserts[b].device);
+            }
+            // Deltas and survivors are both ordered by insert ID.
+            while let Some((target, index, value)) = params.next_if(|(target, ..)| *target <= id) {
+                if let Some((a, _)) = slots
+                    && id == target
+                {
+                    self.inserts[a].device.set_param(index, value);
+                }
+            }
+        }
+        self.delays.transfer_from(&mut old.delays);
     }
 
     pub fn sample_rate(&self) -> f32 {
         self.sample_rate
     }
 
-    /// Clears every device and tap without resizing or freeing anything.
+    /// Clears all devices, taps and compensation histories without resizing or freeing.
     pub fn reset(&mut self) {
         for slot in &mut self.inserts {
             slot.device.reset();
         }
         self.buffers.fill(0.0);
+        self.delays.reset();
     }
 
-    /// Forwards a parameter to one insert; call between renders at the caller's boundary.
+    /// Forwards a parameter to an insert in the original uncompensated static renderer.
+    /// Compensated kernels require a prepared install with the final parameter bank.
     pub fn set_param(
         &mut self,
         insert: InsertId,
@@ -707,6 +946,9 @@ impl PreparedMixer {
     ) -> Result<(), ParamError> {
         let slot = find(&self.keys, insert)?;
         debug_assert_eq!(self.inserts[slot].id, insert);
+        if self.master_latency.is_some() {
+            return Err(ParamError::RequiresPreparedInstall);
+        }
         self.inserts[slot].device.set_param(index, value);
         Ok(())
     }
@@ -715,9 +957,11 @@ impl PreparedMixer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferError {
     SampleRate,
+    CompensationMode,
     Unordered,
     Missing(InsertId),
     Identity(InsertId),
+    Latency(InsertId),
 }
 
 /// Caller-owned stereo blocks in [`PreparedMixer::source_order`], reserved off-thread by

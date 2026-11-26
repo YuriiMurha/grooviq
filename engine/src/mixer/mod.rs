@@ -5,6 +5,7 @@
 //! on the audio thread. LegacyDirect stays a separate graph path: a routed canonical sum is
 //! not claimed to reproduce the legacy addition order.
 mod compile;
+mod delay;
 mod insert;
 mod latency;
 pub(crate) mod live;
