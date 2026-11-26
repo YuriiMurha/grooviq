@@ -315,6 +315,26 @@ impl Device for Delay {
 mod tests {
     use super::*;
 
+    #[test]
+    fn longest_synced_delay_fits_at_native_rate_limits() {
+        for sr in [8_000.0, 384_000.0] {
+            let mut delay = Delay::new(sr);
+            delay.set_param(0, SPEC[0].0);
+            delay.set_param(2, SPEC[2].1);
+            delay.process(&mut [0.25], &mut [-0.25], None, &[]);
+
+            // Switching to sync exercises the longer tap on the crossfade's second head.
+            delay.set_param(0, SPEC[0].1);
+            delay.set_param(1, SPEC[1].1);
+            delay.set_tempo(SPEC[8].0);
+            // The ring must hold the whole target: any clamp, even a sub-frame one, changes
+            // the sound, so the target must equal the unclamped synced delay exactly.
+            let unclamped = delay.effective_ms() * 0.001 * delay.sr;
+            assert_eq!(delay.target, unclamped, "synced target clamped at {sr} Hz");
+            delay.process(&mut [0.25], &mut [-0.25], None, &[]);
+        }
+    }
+
     // The pre-flush static sample path. Fixed parameters remove smoothing and crossfades.
     fn static_reference(delay: &mut Delay, xl: f32, xr: f32) -> (f32, f32) {
         let dl = delay.buf[0].read_frac(delay.ta - 1.0);
