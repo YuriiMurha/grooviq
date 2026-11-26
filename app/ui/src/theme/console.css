@@ -34,6 +34,7 @@
   --paper: #ebe7db;
   --well: #090e0c;
   --rec: #ff5440;
+  --on-rec: var(--bg);
   --hair: rgba(235, 231, 219, 0.06);
   --step-a: #2e3c36; /* midpoint of the rubber step cap */
   --step-b: #283530;

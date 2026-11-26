@@ -29,6 +29,7 @@
   --paper: #f3f4f8;
   --well: #0a0b0d; /* 26% black over the graphite stage, baked for the canvases */
   --rec: #ff6b61;
+  --on-rec: var(--bg);
   --hair: rgba(255, 255, 255, 0.07);
   --step-a: #14151b;
   --step-b: #0f1015;
