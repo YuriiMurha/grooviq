@@ -19,7 +19,7 @@ export function OutputChip({ output, latencyMs, open, onToggle }: Props) {
       aria-haspopup="dialog"
       aria-expanded={open}
       onClick={onToggle}
-      title={warn ? "Playing on speakers: the room can hear it" : undefined}
+      title={warn ? "Playing on speakers: the room can hear it" : output?.name}
     >
       <span className="chip-icon" aria-hidden>
         <OutputIcon kind={output?.kind ?? "none"} />

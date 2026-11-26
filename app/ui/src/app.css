@@ -110,9 +110,9 @@ input {
 }
 
 .tone[aria-pressed="true"] {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
+  background: var(--play);
+  border-color: var(--play);
+  color: var(--on-play);
   font-weight: 700;
 }
 
@@ -281,6 +281,12 @@ input[type="checkbox"] {
   overflow: hidden;
 }
 
+.stage-loading {
+  margin: auto;
+  color: var(--text);
+  font-size: 14px;
+}
+
 .workspace {
   flex: 1;
   min-height: 0;
@@ -425,7 +431,7 @@ input[type="checkbox"] {
   background: var(--well);
   border-right: 1px solid var(--line);
   color: var(--faint);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   text-align: right;
 }
@@ -481,7 +487,7 @@ input[type="checkbox"] {
   background: var(--roll-key-white);
   border-bottom: 1px solid rgba(14, 17, 39, 0.25);
   color: var(--bg);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1;
 }
@@ -795,8 +801,8 @@ input[type="checkbox"] {
 }
 
 .solo[aria-pressed="true"] {
-  background: var(--ink-3);
-  border-color: var(--ink-3);
+  background: var(--solo);
+  border-color: var(--solo);
   color: var(--bg);
 }
 
@@ -1044,14 +1050,14 @@ input[type="checkbox"] {
 }
 
 .transport-btn.play {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
+  background: var(--play);
+  border-color: var(--play);
+  color: var(--on-play);
   box-shadow: var(--reg-x) var(--reg-y) 0 var(--ink-1b);
 }
 
 .transport-btn.play[aria-pressed="true"] {
-  box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--accent);
+  box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--play);
 }
 
 .transport-btn.record {
@@ -1345,6 +1351,15 @@ label.field {
 
   .toolbar-audio {
     gap: 8px;
+  }
+
+  /* Leave room for the project and its save state even with a long output name. */
+  .toolbar-audio .chip-name {
+    max-width: 110px;
+  }
+
+  .toolbar-audio .meter {
+    width: 56px;
   }
 
   .tone {

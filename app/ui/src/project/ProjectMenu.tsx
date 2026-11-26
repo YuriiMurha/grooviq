@@ -63,6 +63,7 @@ export function ProjectMenu({ name, platform, onAction }: Props) {
         ref={trigger}
         type="button"
         className="project-name"
+        title={name}
         aria-haspopup="menu"
         aria-expanded={open}
         data-hint="The project menu: new, open, save and export."

@@ -51,8 +51,11 @@ export function validatePattern(clip: PatternPreview): void {
 }
 export function clipRect(clip: PatternPreview, view: PlaylistView): Rect {
   validateView(view); validatePattern(clip);
+  return projectClipRect({ ...clip, lengthTicks: clip.content.lengthTicks }, view);
+}
+export function projectClipRect(clip: { startTick: number; trackIndex: number; lengthTicks: number }, view: PlaylistView): Rect {
   return { x: (clip.startTick - view.scrollTick) * view.tickWidth, y: (clip.trackIndex - view.scrollTrack) * view.rowHeight + 18,
-    width: Math.max(1, clip.content.lengthTicks * view.tickWidth), height: Math.min(42, Math.max(1, view.rowHeight - 22)) };
+    width: Math.max(1, clip.lengthTicks * view.tickWidth), height: Math.min(42, Math.max(1, view.rowHeight - 22)) };
 }
 export function hitPattern(clips: readonly PatternPreview[], point: Point, view: PlaylistView): { id: number; edge: "start" | "end" | null } | null {
   validateView(view); finite(point.x); finite(point.y);

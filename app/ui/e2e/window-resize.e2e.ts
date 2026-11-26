@@ -1,5 +1,5 @@
 import type { Locator } from "@playwright/test";
-import { DESIGN_W, fitScale } from "../src/devices/windowPlacement";
+import { DESIGN_W } from "../src/devices/windowPlacement";
 import { expect, presetValues, project, soundsFor, test } from "./fixture";
 
 const seed = project(["Kick"]);
@@ -24,7 +24,7 @@ async function stable(dialog: Locator) {
   });
 }
 
-// Before shrinking again, observe a rendered frame at the larger layout's scale.
+// Before shrinking again, observe a rendered frame at full design width.
 async function waitForExpandedLayout(dialog: Locator, width: number, height: number) {
   await dialog.evaluate(async (el, { width, height, renderedWidth }) => {
     for (let frame = 0; frame < 120; frame++) {
@@ -34,7 +34,7 @@ async function waitForExpandedLayout(dialog: Locator, width: number, height: num
           r.x >= 0 && r.y >= 0 && r.right <= innerWidth && r.bottom <= innerHeight) return;
     }
     throw new Error(`Device did not render within the ${width}×${height} viewport at width ${renderedWidth}`);
-  }, { width, height, renderedWidth: DESIGN_W * fitScale(width, height) });
+  }, { width, height, renderedWidth: DESIGN_W });
 }
 
 async function contained(dialog: Locator) {

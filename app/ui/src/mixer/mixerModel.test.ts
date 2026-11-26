@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { availableSends, MixerGestures, unsupportedReason, moveTarget, navTarget, outputChoices, placeholderValue, renderIndices, revealScroll, visibleWindow, type ParamCommand, type ParamTarget } from "./mixerModel";
+import { availableSends, MixerGestures, unsupportedReason, moveTarget, navTarget, outputChoices, unusedOptionId, renderIndices, revealScroll, visibleWindow, type ParamCommand, type ParamTarget } from "./mixerModel";
 
 const level = (nodeId: string): ParamTarget => ({ kind: "level", nodeId });
 const send = (nodeId: string, sendId: string): ParamTarget => ({ kind: "send", nodeId, sendId });
@@ -373,20 +373,16 @@ describe("strip controls", () => {
     expect(outputChoices(choices, "old", nodes)).toEqual({
       options: choices,
       label: "Previous bus",
-      placeholder: " ",
-      value: " ",
     });
     expect(outputChoices(choices, "", nodes)).toEqual({
       options: choices,
       label: "Offered bus",
-      placeholder: undefined,
-      value: "",
     });
   });
 
-  it("reserves a placeholder even if the host uses empty or whitespace ids", () => {
+  it("reserves a detector None id even if the host uses empty or whitespace ids", () => {
     const choices = [{ id: "", name: "Empty" }, { id: " ", name: "Space" }];
-    expect(choices.some((choice) => choice.id === placeholderValue(choices))).toBe(false);
+    expect(choices.some((choice) => choice.id === unusedOptionId(choices))).toBe(false);
   });
 
   it("looks up the unsupported reason for each command that controls those features", () => {

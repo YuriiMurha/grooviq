@@ -1,6 +1,7 @@
 import type { ArrangementOperation } from "../api/arrangement";
 import type { GestureGuard, GestureInput } from "./gesture";
-import { clipRect, integer, MAX_SONG_TICKS, snapTick, validatePattern, type PatternPreview, type PlaylistView, type Point, type Rect } from "./geometry";
+import { integer, MAX_SONG_TICKS, projectClipRect, snapTick, type PlaylistView, type Point, type Rect } from "./geometry";
+import type { RenderClip } from "./viewport";
 
 export const togglesSelection = (event: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }): boolean => event.shiftKey || event.ctrlKey || event.metaKey;
 export const crossedThreshold = (start: Point, end: Point): boolean => Math.hypot(end.x - start.x, end.y - start.y) >= 4;
@@ -10,17 +11,21 @@ export function toggleSelection(ids: readonly number[], id: number): number[] {
 export function marqueeRect(start: Point, end: Point): Rect {
   return { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), width: Math.abs(start.x - end.x), height: Math.abs(start.y - end.y) };
 }
-export function marqueeSelection(clips: readonly PatternPreview[], rect: Rect, view: PlaylistView): number[] {
+export function marqueeSelection(clips: readonly RenderClip[], rect: Rect, view: PlaylistView): number[] {
   if (rect.width === 0 || rect.height === 0) return [];
   return clips.flatMap(clip => {
-    const bounds = clipRect(clip, view);
-    return clip.id !== null && bounds.x < rect.x + rect.width && bounds.x + bounds.width > rect.x && bounds.y < rect.y + rect.height && bounds.y + bounds.height > rect.y ? [clip.id] : [];
+    if (clip.kind === "automation" || clip.id === null) return [];
+    const bounds = projectClipRect(clip, view);
+    return bounds.x < rect.x + rect.width && bounds.x + bounds.width > rect.x && bounds.y < rect.y + rect.height && bounds.y + bounds.height > rect.y ? [clip.id] : [];
   });
 }
 export type GroupPreview = Readonly<{ kind: "move" | "copy"; deltaTicks: number; deltaTracks: number }>;
 
+export type ClipGroupInput = GestureGuard & Pick<GestureInput, "originTick" | "originTrack" | "quantum" | "tracks"> &
+  Readonly<{ kind: GroupPreview["kind"] }>;
+
 /** One shared constrained delta: independently clamping each clip would deform the group. */
-export class PatternGroupGesture {
+export class ClipGroupGesture {
   readonly memberIds: ReadonlySet<number>;
   private readonly input: GestureGuard & Pick<GestureInput, "originTick" | "originTrack" | "quantum">;
   private readonly clips: readonly { id: number; startTick: number; trackIndex: number }[];
@@ -29,23 +34,24 @@ export class PatternGroupGesture {
   private value: GroupPreview;
   private closed = false;
 
-  constructor(input: GestureInput, clips: readonly PatternPreview[]) {
+  constructor(input: ClipGroupInput, clips: readonly RenderClip[]) {
     const kind = input.kind;
-    if (!clips.length || (kind !== "move" && kind !== "copy")) {
-      throw new RangeError("Invalid pattern group");
-    }
+    const members = clips.filter(clip => clip.kind !== "automation");
+    if (!members.length) throw new RangeError("Invalid clip group");
     this.tracks = input.tracks.map(track => track.id);
     this.input = { pointerId: input.pointerId, stamp: { ...input.stamp }, replacements: input.replacements,
       originTick: input.originTick, originTrack: input.originTrack, quantum: input.quantum };
     let firstTick = MAX_SONG_TICKS, lastTick = 0, firstTrack = this.tracks.length, lastTrack = 0;
     const ids = new Set<number>();
-    this.clips = clips.map(clip => {
-      validatePattern(clip);
-      const { id, startTick, trackIndex } = clip;
-      if (id === null || ids.has(id) || trackIndex >= this.tracks.length) throw new RangeError("Invalid pattern group member");
+    this.clips = members.map(({ id, startTick, trackIndex, lengthTicks }) => {
+      integer(startTick, "clip start");
+      integer(lengthTicks, "clip length", 1, MAX_SONG_TICKS - startTick);
+      integer(trackIndex, "track index", 0, this.tracks.length - 1);
+      if (id === null || ids.has(id)) throw new RangeError("Invalid clip group member");
+      integer(id, "clip identity", 0, 0xffffffff);
       ids.add(id);
       firstTick = Math.min(firstTick, startTick);
-      lastTick = Math.max(lastTick, startTick + clip.content.lengthTicks);
+      lastTick = Math.max(lastTick, startTick + lengthTicks);
       firstTrack = Math.min(firstTrack, trackIndex);
       lastTrack = Math.max(lastTrack, trackIndex);
       return { id, startTick, trackIndex };

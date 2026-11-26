@@ -1,7 +1,8 @@
+import { ListPicker } from "../layout/ListPicker";
 import { Icon } from "./icons";
-import { Options, OutputChoice } from "./OutputChoice";
+import { OutputChoice } from "./OutputChoice";
 import { UnsupportedButton } from "./UnsupportedButton";
-import { moveTarget, placeholderValue, unsupportedReason, type MixerError, type MixerInsert, type MixerOption, type MixerProps, type MixerTrack } from "./mixerModel";
+import { moveTarget, unusedOptionId, unsupportedReason, type MixerError, type MixerInsert, type MixerOption, type MixerProps, type MixerTrack } from "./mixerModel";
 import type { StripActions } from "./TrackStrip";
 
 interface InspectorProps {
@@ -18,7 +19,6 @@ interface InspectorProps {
 
 /** Main output and insert slots for the host's selected strip. */
 export function Inspector({ track, master, masterOutput, removed, effects, error, actions, nodes, unsupported }: InspectorProps) {
-  const addPlaceholder = placeholderValue(effects);
   const errorTrack = error?.nodeId != null && error.nodeId !== track?.id ? nodes.get(error.nodeId) : undefined;
   return (
     <aside className="mx-inspector" aria-label="Selected mixer track" aria-busy={track?.pending || undefined}>
@@ -29,24 +29,21 @@ export function Inspector({ track, master, masterOutput, removed, effects, error
             <span className="mx-kind">{track.kind}</span>
           </header>
           <div className="mx-rack-fields">
-            <label className="mx-field">
-              Main output
-              {master ? <select disabled><option>{masterOutput}</option></select> : <OutputChoice track={track} nodes={nodes} command={actions.command} />}
-            </label>
-            <label className="mx-field">
-              Insert chain
-              <select
-                value={addPlaceholder}
+            <div className="mx-field">
+              <span>Main output</span>
+              {master ? <select aria-label="Main output" disabled><option>{masterOutput}</option></select> : <OutputChoice track={track} nodes={nodes} command={actions.command} />}
+            </div>
+            <div className="mx-field">
+              <span>Insert chain</span>
+              <ListPicker
+                label="Insert chain"
+                options={effects}
+                value={null}
+                placeholder={effects.length ? "Add an effect…" : "No effects available"}
                 disabled={track.pending || effects.length === 0}
-                onChange={(e) => {
-                  const effect = effects.find((option) => option.id === e.currentTarget.value);
-                  if (effect) actions.command({ type: "addInsert", nodeId: track.id, effectId: effect.id });
-                }}
-              >
-                <option value={addPlaceholder} disabled>{effects.length ? "Add an effect…" : "No effects available"}</option>
-                <Options options={effects} />
-              </select>
-            </label>
+                onCommit={(effectId) => actions.command({ type: "addInsert", nodeId: track.id, effectId })}
+              />
+            </div>
           </div>
           <div className="mx-rack-slots">
             <h3>Slots</h3>
@@ -82,7 +79,7 @@ function InsertRow({ track, slot, index, unsupported, command }: InsertRowProps)
   const { id: slotId, detector } = slot;
   const bypassReason = unsupportedReason(unsupported, "setInsertActive");
   const detectorReason = unsupportedReason(unsupported, "setDetector");
-  const noSource = placeholderValue(detector?.options ?? []);
+  const noSource = unusedOptionId(detector?.options ?? []);
   const move = (dir: -1 | 1) => {
     const to = moveTarget(inserts, slotId, dir);
     if (to) command({ type: "moveInsert", nodeId, slotId, ...to });
@@ -109,21 +106,19 @@ function InsertRow({ track, slot, index, unsupported, command }: InsertRowProps)
         </button>
       </div>
       {detector && (
-        <label className="mx-field mx-detector">
-          Sidechain input
-          <select
-            aria-label="Sidechain input"
-            aria-description={detectorReason}
-            title={detectorReason}
-            value={detector.sourceId ?? noSource}
+        <div className="mx-field mx-detector">
+          <span>Sidechain input</span>
+          <ListPicker
+            label="Sidechain input"
+            options={[{ id: noSource, name: "None" }, ...detector.options]}
+            value={detector.options.some(({ id }) => id === detector.sourceId) ? detector.sourceId : noSource}
+            placeholder="None"
             disabled={pending || detectorReason !== undefined}
-            onChange={(e) => command({ type: "setDetector", nodeId, slotId, sourceId: e.currentTarget.value === noSource ? null : e.currentTarget.value })}
-          >
-            <option value={noSource}>None</option>
-            <Options options={detector.options} />
-          </select>
+            reason={detectorReason}
+            onCommit={(id) => command({ type: "setDetector", nodeId, slotId, sourceId: id === noSource ? null : id })}
+          />
           {detectorReason && <span className="mx-mini">{detectorReason}</span>}
-        </label>
+        </div>
       )}
     </li>
   );

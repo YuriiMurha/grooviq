@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { encodeArrangementBatch, validateAudioTicket, validateStamp } from "./arrangement";
+import { describe, expect, it, vi } from "vitest";
+import { arrangementCurve, arrangementLoop, audioImport, audioRelink, encodeArrangementBatch, validateAudioTicket, validateStamp } from "./arrangement";
+
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 describe("arrangement input bounds", () => {
   it("rejects unsafe and negative generation/revision values before IPC", () => {
@@ -20,5 +23,22 @@ describe("arrangement input bounds", () => {
     }
     expect(() => validateAudioTicket(1)).not.toThrow();
     expect(() => validateAudioTicket(Number.MAX_SAFE_INTEGER)).not.toThrow();
+  });
+});
+
+describe("arrangement IPC arguments", () => {
+  const identity = { generation: 2, revision: 9 };
+  const stamp = { ...identity, clips: [], audioAssets: [{ sample: { path: "/qa/audio/Extra.wav" } }] };
+  const media = { track: 3, startTick: 960, name: "Break", path: "/qa/audio/Break.wav", ticket: 7 };
+
+  it.each([
+    { command: "arrangement_curve", send: () => arrangementCurve(stamp, 4), args: { clip: 4 } },
+    { command: "arrangement_loop", send: () => arrangementLoop(stamp, null), args: { region: null } },
+    { command: "audio_import", send: () => audioImport(stamp, media), args: media },
+    { command: "audio_relink", send: () => audioRelink(stamp, 5, media.path, 7), args: { asset: 5, path: media.path, ticket: 7 } },
+  ])("sends only stamp identity and command arguments for $command", ({ command, send, args }) => {
+    invoke.mockClear();
+    send();
+    expect(invoke.mock.calls).toEqual([[command, { ...identity, ...args }]]);
   });
 });

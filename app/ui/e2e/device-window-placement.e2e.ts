@@ -1,3 +1,4 @@
+import type { Locator, Page } from "@playwright/test";
 import { expect, presetValues, project, soundsFor, test, workspaceReady } from "./fixture";
 
 const demo = project(["Kick"]);
@@ -9,11 +10,22 @@ demo.channels.push({
 demo.nextId = 3;
 test.use({ seed: { project: demo, files: soundsFor(["Kick"]) }, viewport: { width: 900, height: 560 }, reducedMotion: "reduce" });
 
+async function expectAboveHintBar(app: Page, dialog: Locator) {
+  const hintBar = app.locator(".hintbar");
+  await expect(hintBar).toBeVisible();
+  await expect.poll(async () => {
+    const [editor, hint] = await Promise.all([dialog.boundingBox(), hintBar.boundingBox()]);
+    if (!editor || !hint) throw new Error("Both editor and hint bar must have visible bounds");
+    return editor.y + editor.height - hint.y;
+  }, { message: "The editor ends above the hint bar" }).toBeLessThanOrEqual(0);
+}
+
 test("a_second_device_opens_fully_inside_the_compact_viewport", async ({ app }, info) => {
   await workspaceReady(app);
   await app.getByRole("button", { name: "Edit the Bass synth", exact: true }).click();
   const synth = app.getByRole("dialog", { name: "Bass synth", exact: true });
   await expect(synth).toBeVisible();
+  await expectAboveHintBar(app, synth);
   const title = synth.locator(".device-title");
   const titleBounds = await title.boundingBox();
   if (!titleBounds) throw new Error("The real synth title is required for window dragging");
@@ -27,7 +39,7 @@ test("a_second_device_opens_fully_inside_the_compact_viewport", async ({ app }, 
   // Manual dragging may park a window offscreen while its title stays reachable.
   const parkedTitle = await title.boundingBox();
   if (!parkedTitle) throw new Error("The parked synth must remain reachable");
-  expect(parkedTitle.x).toBeGreaterThanOrEqual(0);
+  expect(parkedTitle.x).toBeGreaterThan(titleBounds.x);
   expect(parkedTitle.x + parkedTitle.width).toBeLessThanOrEqual(900);
 
   await app.getByRole("button", { name: "Edit the Kick sampler", exact: true }).click();
@@ -42,5 +54,14 @@ test("a_second_device_opens_fully_inside_the_compact_viewport", async ({ app }, 
   expect(bounds.x).toBeGreaterThanOrEqual(0);
   expect(bounds.y).toBeGreaterThanOrEqual(0);
   expect(bounds.x + bounds.width).toBeLessThanOrEqual(900);
-  expect(bounds.y + bounds.height).toBeLessThanOrEqual(560);
+  await expectAboveHintBar(app, sampler);
+});
+
+test("an editor stays above the hint bar when resized to the minimum", async ({ app }) => {
+  await app.setViewportSize({ width: 1280, height: 800 });
+  await app.getByRole("button", { name: "Edit the Bass synth", exact: true }).click();
+  const synth = app.getByRole("dialog", { name: "Bass synth", exact: true });
+  await expect(synth).toBeVisible();
+  await app.setViewportSize({ width: 900, height: 560 });
+  await expectAboveHintBar(app, synth);
 });
