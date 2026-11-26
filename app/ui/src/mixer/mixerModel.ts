@@ -81,7 +81,11 @@ export interface MixerError {
 /** Linear peaks per channel, 0..1+ (1 is full scale), for the meters that are on screen. */
 export interface MeterSource {
   /** Writes the latest peaks of `nodeId` into `out` (left, right); false while there are none. */
-  read(nodeId: string, out: Float32Array): boolean;
+  read(nodeId: string, out: Float32Array, time?: number): boolean;
+  /** Mounted non-Master strips in observation priority order. */
+  setVisible?(nodeIds: readonly string[]): void;
+  isClipped?(nodeId: string): boolean;
+  subscribeClips?(listener: () => void): () => void;
 }
 
 export type ParamTarget = { kind: "level" | "pan"; nodeId: string } | { kind: "send"; nodeId: string; sendId: string };

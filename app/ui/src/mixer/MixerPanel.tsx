@@ -1,6 +1,7 @@
-import { useState, type ReactNode, type Ref } from "react";
+import { useState, type ReactNode, type Ref, type RefObject } from "react";
 import type { MixerInsertDetail } from "../api/mixer";
 import { ListPicker } from "../layout/ListPicker";
+import type { LiveFrame } from "../live/decode";
 import { Mixer } from "./Mixer";
 import type { MeterSource } from "./mixerModel";
 import { useMixerHost } from "./useMixerHost";
@@ -17,6 +18,7 @@ export type MixerPanelInsertEditor = Readonly<{
 export type MixerPanelProps = Readonly<{
   /** Programmatic focus entry for the Workspace. */
   focusRef?: Ref<HTMLElement>;
+  latestLive?: RefObject<LiveFrame | null>;
   meters?: MeterSource;
   clearClip?: (nodeId: string) => void;
   renderInsertEditor?: (editor: MixerPanelInsertEditor) => ReactNode;
@@ -70,8 +72,8 @@ function SourceAssignments({ routing, pending }: { routing: SourceRouting; pendi
 }
 
 /** Production mixer surface. Mount under ProjectContext. */
-export function MixerPanel({ focusRef, meters, clearClip, renderInsertEditor }: MixerPanelProps) {
-  const { props, routing, error, pending, insert, refresh } = useMixerHost({ meters, clearClip });
+export function MixerPanel({ focusRef, latestLive, meters, clearClip, renderInsertEditor }: MixerPanelProps) {
+  const { props, routing, error, pending, insert, refresh } = useMixerHost({ latestLive, meters, clearClip });
   const editor = insert?.detail && renderInsertEditor?.({
     detail: insert.detail,
     pending: insert.pending,

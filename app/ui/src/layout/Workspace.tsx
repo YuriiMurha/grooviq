@@ -327,7 +327,7 @@ export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError,
       </div>
       </div>
           <div id={mixerId} className="mx-workspace-mixer" hidden={!mixerVisible}>
-            {mixerVisible && <MixerPanel focusRef={mixerFocus} />}
+            {mixerVisible && <MixerPanel focusRef={mixerFocus} latestLive={latest} />}
           </div>
         </div>
       </div>

@@ -10,7 +10,7 @@ import type { useSendRouting } from "./useSendRouting";
 import { UnsupportedButton } from "./UnsupportedButton";
 import {
   formatDb, formatPan, formatPercent, LEVEL, PAN, SEND, unsupportedReason,
-  type MixerCommand, type MixerGestures, type MixerProps, type MixerSend, type MixerTrack, type ParamTarget,
+  type MeterSource, type MixerCommand, type MixerGestures, type MixerProps, type MixerSend, type MixerTrack, type ParamTarget,
 } from "./mixerModel";
 
 /** What every strip shares; one stable object for the mixer's lifetime. */
@@ -29,6 +29,7 @@ interface StripProps {
   track: MixerTrack;
   actions: StripActions;
   nodes: ReadonlyMap<string, MixerTrack>;
+  meters?: MeterSource;
   unsupported: MixerProps["unsupported"];
   masterOutput?: string;
   index?: number;
@@ -47,14 +48,17 @@ function control(gestures: MixerGestures, target: ParamTarget): ParamControl {
 }
 
 const TICKS = [0, -15, -30, -45, -60];
+const NO_CLIP_SUBSCRIPTION = () => () => {};
 
 /** One vertical channel strip. Values come from the host (or a gesture in flight). */
-export const TrackStrip = memo(function TrackStrip({ track, actions, nodes, unsupported, masterOutput, index, level, pan, selected, tabStop, left, routeTarget }: StripProps) {
+export const TrackStrip = memo(function TrackStrip({ track, actions, nodes, meters, unsupported, masterOutput, index, level, pan, selected, tabStop, left, routeTarget }: StripProps) {
   const { id, name, pending } = track;
   const master = masterOutput !== undefined;
   const levelControl = useMemo(() => control(actions.gestures, { kind: "level", nodeId: id }), [actions, id]);
   const panControl = useMemo(() => control(actions.gestures, { kind: "pan", nodeId: id }), [actions, id]);
   const meterRef = useCallback((el: HTMLElement | null) => actions.meter(id, el), [actions, id]);
+  const readClip = useCallback(() => track.clipped || meters?.isClipped?.(id) === true, [track.clipped, meters, id]);
+  const clipped = useSyncExternalStore(meters?.subscribeClips ?? NO_CLIP_SUBSCRIPTION, readClip);
   const muteReason = unsupportedReason(unsupported, "mute");
   const soloReason = unsupportedReason(unsupported, "solo");
   const profile = useContext(StripProfiler);
@@ -112,10 +116,10 @@ export const TrackStrip = memo(function TrackStrip({ track, actions, nodes, unsu
         </div>
         <button
           type="button"
-          className={`mx-clip${track.clipped ? " on" : ""}`}
-          aria-label={track.clipped ? `Clear ${name} clip` : `${name} has not clipped`}
-          title={track.clipped ? `Clear ${name} clip` : undefined}
-          disabled={pending || !track.clipped}
+          className={`mx-clip${clipped ? " on" : ""}`}
+          aria-label={clipped ? `Clear ${name} clip` : `${name} has not clipped`}
+          title={clipped ? `Clear ${name} clip` : undefined}
+          disabled={pending || !clipped}
           onClick={() => actions.command({ type: "clearClip", nodeId: id })}
         />
       </div>
