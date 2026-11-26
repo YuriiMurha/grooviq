@@ -42,10 +42,12 @@ async function contained(child: Locator, parent: Locator) {
 test.describe("compact project identity", () => {
   const longName = "East Warehouse Live Sessions — Percussion and Synth Instrumentals";
   const longPath = `/qa/projects/${longName}.grooviq`;
+  const outputName = "Warehouse Studio Monitor Output";
   const kick = project(["Kick"], { 1: [0, 8] });
   test.use({
     viewport: { width: 900, height: 560 },
     seed: {
+      outputName,
       project: kick,
       files: { ...soundsFor(["Kick"]), [longPath]: { kind: "project", project: kick } },
     },
@@ -56,9 +58,12 @@ test.describe("compact project identity", () => {
     const projectColumn = toolbar.locator(".toolbar-project");
     const shortName = toolbar.getByRole("button", { name: "QA beat", exact: true });
     const mute = app.getByRole("region", { name: "Channel rack" }).getByRole("button", { name: "Mute Kick" });
+    const output = toolbar.getByRole("button", { name: outputName });
+    const outputLabel = output.getByText(outputName, { exact: true });
     const controls = [
-      ...["Play", "Stop", "Record", "Metronome", "Typing keyboard", /Silent \(QA mode\)/, "Test tone"]
+      ...["Play", "Stop", "Record", "Metronome", "Typing keyboard", "Test tone"]
         .map((name) => toolbar.getByRole("button", { name })),
+      output,
       ...["Playback", "Beats per bar", "Beat note value"]
         .map((name) => toolbar.getByRole("combobox", { name })),
       toolbar.getByRole("textbox", { name: "BPM" }),
@@ -96,9 +101,22 @@ test.describe("compact project identity", () => {
       });
     }
 
-    await app.setViewportSize({ width: 900, height: 560 });
-    await mute.click();
-    await fits(projectColumn.getByText("Unsaved changes", { exact: true }));
+    const wideOutputWidth = await outputLabel.evaluate((el) => el.clientWidth);
+    await test.step("900×560 long output leaves room for the project and save state", async () => {
+      await app.setViewportSize({ width: 900, height: 560 });
+      await expect(output).toHaveAttribute("title", outputName);
+      const { scrollWidth, clientWidth, textOverflow } = await outputLabel.evaluate((el) => ({
+        scrollWidth: el.scrollWidth,
+        clientWidth: el.clientWidth,
+        textOverflow: getComputedStyle(el).textOverflow,
+      }));
+      expect(textOverflow).toBe("ellipsis");
+      expect(scrollWidth).toBeGreaterThan(clientWidth);
+      expect(clientWidth).toBeLessThan(wideOutputWidth);
+      await fits(shortName.getByText("QA beat", { exact: true }));
+      await mute.click();
+      await fits(projectColumn.getByText("Unsaved changes", { exact: true }));
+    });
 
     await mock.eval(`(m) => m.queueDialog(${JSON.stringify(longPath)})`);
     await shortName.click();
