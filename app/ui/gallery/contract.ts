@@ -1,3 +1,4 @@
+import { themes as shippedThemes } from "../src/theme/preference";
 import type { FamilyId } from "./catalog";
 
 type Reference = Readonly<{
@@ -11,7 +12,7 @@ type Reference = Readonly<{
   behavior: string;
 }>;
 
-/** Reuse roles and state meaning across styles; only Riso currently has app tokens. */
+/** Reuse roles and state meaning across styles. */
 export const references: readonly Reference[] = [
   { id: "device.parameter.knob", family: "device.parameter", title: "Rotary parameter", source: "src/devices/controls/Knob.tsx",
     role: "slider", name: "Gallery level", behavior: "Arrow keys, Home/End, fine drag, wheel and reset; local preview values." },
@@ -45,10 +46,6 @@ export const stateContract = {
 } as const;
 
 export const themes = [
-  { id: "riso", name: "Riso Ink", status: "implemented", tokens: "src/theme/riso.css" },
-  { id: "taste", name: "Taste", status: "proposed", tokens: null },
-  { id: "luminous", name: "Luminous", status: "proposed", tokens: null },
+  ...shippedThemes.map((theme) => ({ ...theme, status: "implemented" as const, tokens: `src/theme/${theme.id}.css` })),
   { id: "industrial", name: "Industrial", status: "proposed", tokens: null },
-  { id: "slate-system", name: "Slate System", status: "proposed", tokens: null },
-  { id: "console", name: "Console", status: "proposed", tokens: null },
 ] as const;

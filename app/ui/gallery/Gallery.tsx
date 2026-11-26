@@ -10,6 +10,7 @@ import { BpmField } from '../src/transport/BpmField';
 import { OutputChip } from '../src/output/OutputChip';
 import type { Output } from '../src/audio';
 import { useLatest, type ParamControl } from '../src/devices/controls/gesture';
+import { DEFAULT_THEME, resolveThemeId, themes as shippedThemes } from '../src/theme/preference';
 import { references, stateContract, themes } from './contract';
 import { catalog, referencePolicy } from './catalog';
 import { gallerySeed } from './seed';
@@ -85,15 +86,26 @@ function OutputStatus() {
 }
 
 export function Gallery() {
+  const [themeId, setThemeId] = useState(DEFAULT_THEME);
   const [enabled, setEnabled] = useState<boolean>(gallerySeed.switches);
   const [wave, setWave] = useState<number>(gallerySeed.waveIndex);
   const [volume, setVolume] = useState<number>(gallerySeed.numeric);
   const [recording, setRecording] = useState<boolean>(gallerySeed.switches);
   const [typing, setTyping] = useState<boolean>(gallerySeed.switches);
   const [metronome, setMetronome] = useState<boolean>(gallerySeed.switches);
-  return <main className="gallery" data-reference-status="candidate" data-theme="riso">
-    <header><h1>Grooviq control reference</h1><p>Riso Ink · Manrope · generated local values</p>
-      <p>Live production controls. Captures are reference candidates until reviewed.</p></header>
+  return <main className="gallery" data-reference-status="candidate">
+    <header><h1>Grooviq control reference</h1>
+      <p>Live production controls with generated values. Captures are reference candidates until reviewed.</p>
+      <label className="gallery-theme">Theme
+        <select value={themeId} onChange={(event) => {
+          const next = resolveThemeId(event.currentTarget.value);
+          document.documentElement.dataset.theme = next;
+          setThemeId(next);
+        }}>
+          {shippedThemes.map((theme) => <option key={theme.id} value={theme.id}>{theme.name}</option>)}
+        </select>
+      </label>
+    </header>
     <section aria-labelledby="numeric-heading" data-case="device-numeric" style={{ '--kc': 'var(--dev-amp)' } as CSSProperties}>
       <h2 id="numeric-heading">Device parameters</h2>
       <p>Actual rotary and field variants. Tab for focus; hover or edit with the existing gestures.</p>
