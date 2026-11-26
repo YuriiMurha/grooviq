@@ -26,6 +26,7 @@ impl TrimHistory {
     }
 }
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ipc-contract", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct TrimView {
     pub stamp: String,
