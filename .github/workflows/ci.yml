@@ -72,7 +72,7 @@ jobs:
         with:
           drive-size: 32GB
           drive-path: ${{ runner.temp }}/grooviq-dev-drive.vhdx
-      # Keep Cargo and rust-cache on the workspace-relative target path.
+      # Git's tar archives a junction as a link. Cache the real Cargo directory beneath it.
       - name: Link the Cargo target to the Windows Dev Drive
         if: runner.os == 'Windows'
         shell: pwsh
@@ -82,26 +82,51 @@ jobs:
             throw "Expected a Dev Drive letter, got '$env:DEV_DRIVE'"
           }
           $driveTarget = "$env:DEV_DRIVE\target"
-          New-Item -ItemType Directory -Path $driveTarget | Out-Null
+          New-Item -ItemType Directory -Path "$driveTarget\cargo" | Out-Null
           New-Item -ItemType Junction -Path target -Target $driveTarget | Out-Null
+          "CARGO_TARGET_DIR=$env:GITHUB_WORKSPACE\target\cargo" >> $env:GITHUB_ENV
           node -e 'const fs = require("node:fs");
-            const resolved = fs.realpathSync("target");
-            if (resolved !== fs.realpathSync(process.env.DEV_DRIVE + "/target")) throw new Error(resolved);
-            const entries = fs.readdirSync("target");
+            const resolved = fs.realpathSync("target/cargo");
+            if (resolved !== fs.realpathSync(process.env.DEV_DRIVE + "/target/cargo")) throw new Error(resolved);
+            const entries = fs.readdirSync("target/cargo");
             console.log("Node read target via junction:", resolved, "entries:", entries.length);'
+      - name: Check which Dev Drive paths Git tar archives
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tar = 'C:\Program Files\Git\usr\bin\tar.exe'
+          $marker = 'cache-layout-probe.txt'
+          $archive = ($env:RUNNER_TEMP + '/dev-drive-layout-probe.tar').Replace('\', '/')
+          $manifest = ($env:RUNNER_TEMP + '/dev-drive-layout-probe.txt').Replace('\', '/')
+          $workspace = $env:GITHUB_WORKSPACE.Replace('\', '/')
+          Set-Content -LiteralPath "target/cargo/$marker" -Value 'Dev Drive archive probe'
+          foreach ($source in 'target', 'target/cargo') {
+            Set-Content -LiteralPath $manifest -Value $source -NoNewline
+            & $tar --posix -cf $archive -P -C $workspace --files-from $manifest --force-local
+            $entries = & $tar -tf $archive --force-local
+            Write-Host "GNU tar entries for ${source}: $entries"
+            Remove-Item -LiteralPath $archive, $manifest
+            if ($source -eq 'target/cargo' -and "target/cargo/$marker" -notin $entries) {
+              throw 'GNU tar omitted the Cargo directory contents'
+            }
+          }
+          Remove-Item -LiteralPath "target/cargo/$marker"
       # The Actions cache is over its 10 GB limit, and PR copies evict main's caches.
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
         with:
-          shared-key: ${{ runner.os == 'Windows' && 'rust-dev-drive' || 'rust' }}
+          shared-key: ${{ runner.os == 'Windows' && 'rust-dev-drive-child' || 'rust' }}
           save-if: ${{ github.ref == 'refs/heads/main' || (runner.os == 'Windows' && github.head_ref == 'ci/694-dev-drive-retry') }}
+          workspaces: ${{ runner.os == 'Windows' && '. -> target/cargo' || '.' }}
       - name: Verify restored Rust artifacts on the Windows Dev Drive
         if: runner.os == 'Windows' && steps.rust-cache.outputs.cache-hit == 'true'
         shell: pwsh
         run: >-
           node -e 'const fs = require("node:fs");
-            const resolved = fs.realpathSync("target/debug/deps");
-            if (resolved !== fs.realpathSync(process.env.DEV_DRIVE + "/target/debug/deps")) throw new Error(resolved);
+            const resolved = fs.realpathSync("target/cargo/debug/deps");
+            if (resolved !== fs.realpathSync(process.env.DEV_DRIVE + "/target/cargo/debug/deps")) throw new Error(resolved);
             const libraries = fs.readdirSync(resolved).filter((file) => file.endsWith(".rlib"));
             if (!libraries.length) throw new Error("Cache restored no Rust dependency libraries");
             console.log("Restored Rust dependency libraries on Dev Drive:", libraries.length);'
@@ -129,7 +154,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rust-junit-${{ runner.os }}-${{ github.run_attempt }}
-          path: target/nextest/ci/junit.xml
+          path: ${{ runner.os == 'Windows' && 'target/cargo' || 'target' }}/nextest/ci/junit.xml
           retention-days: 7
       - name: Run workspace doctests
         run: cargo test --workspace --all-features --doc
