@@ -393,7 +393,7 @@ test.describe("record and metronome", () => {
     // What is played while it loops lands in the pattern where it was heard, and the rack shows
     // the channel's notes as a preview (the note is not a plain step).
     const revision = (await mock.view()).notesRevision;
-    await app.getByRole("button", { name: "Play" }).click();
+    await app.getByRole("button", { name: "Play", exact: true }).click();
     await mock.eval("(m) => m.hold(4 * 3840 + 480)"); // the second loop, step 3
     await nameButton(app, "Hat").focus();
     await app.keyboard.down("z");
@@ -635,11 +635,11 @@ test.describe("stuck notes at the edges (fix round 1)", () => {
   test.use({ seed: kitSeed });
 
   test("stop_and_record_off_release_held_keys", async ({ app, mock }) => {
-    await app.getByRole("button", { name: "Play" }).click();
+    await app.getByRole("button", { name: "Play", exact: true }).click();
     await nameButton(app, "Kick").focus();
     await app.keyboard.down("z");
     await expect.poll(() => live(mock)).toEqual(["1:48"]);
-    await app.getByRole("button", { name: "Stop" }).click();
+    await app.getByRole("button", { name: "Stop", exact: true }).click();
     await expect.poll(() => live(mock)).toEqual([]);
     // Record off while a key is held.
     const record = app.getByRole("button", { name: "Record" });
@@ -653,7 +653,7 @@ test.describe("stuck notes at the edges (fix round 1)", () => {
     await expect(record).toHaveAttribute("aria-pressed", "false");
     await expect.poll(() => live(mock)).toEqual([]);
     // A stop the UI did not ask for (the speaker guard, another window): seen in the live frames.
-    await app.getByRole("button", { name: "Play" }).click();
+    await app.getByRole("button", { name: "Play", exact: true }).click();
     await nameButton(app, "Kick").focus();
     await app.keyboard.down("c");
     await expect.poll(() => live(mock)).toEqual(["1:52"]);
@@ -791,7 +791,7 @@ test.describe("stuck notes at the edges (fix round 2)", () => {
     await nameButton(app, "Kick").focus();
     await app.keyboard.down("z");
     await expect.poll(() => live(mock)).toEqual(["1:48"]);
-    await app.getByRole("button", { name: "Stop" }).click();
+    await app.getByRole("button", { name: "Stop", exact: true }).click();
     await expect.poll(() => live(mock)).toEqual([]);
     await app.keyboard.up("z");
     expect(await noteCalls(mock)).toEqual([
@@ -801,7 +801,7 @@ test.describe("stuck notes at the edges (fix round 2)", () => {
   });
 
   test("an_external_stop_between_live_frames_releases_held_keys", async ({ app, mock }) => {
-    const play = app.getByRole("button", { name: "Play" });
+    const play = app.getByRole("button", { name: "Play", exact: true });
     // The stream stalls after an idle frame; Play is pressed and a key held; the engine stops on
     // its own; the stream resumes with a stopped frame, the same as the last one it sent.
     await app.waitForTimeout(100);
@@ -846,7 +846,7 @@ test.describe("stale and genuine stops after Play (fix round 3)", () => {
   test.use({ seed: kitSeed });
 
   test("a_stale_stopped_frame_after_play_is_ignored", async ({ app, mock }) => {
-    const play = app.getByRole("button", { name: "Play" });
+    const play = app.getByRole("button", { name: "Play", exact: true });
     // Freeze only performance.now: real timers, rAF and React work must keep running.
     const originalClock = await app.evaluate(() => {
       const now = performance.now();
@@ -886,7 +886,7 @@ test.describe("stale and genuine stops after Play (fix round 3)", () => {
   });
 
   test("a_genuine_stop_before_any_playing_frame_is_adopted", async ({ app, mock }) => {
-    const play = app.getByRole("button", { name: "Play" });
+    const play = app.getByRole("button", { name: "Play", exact: true });
     await nameButton(app, "Kick").focus();
     await app.keyboard.down("z");
     await expect.poll(() => live(mock)).toEqual(["1:48"]);

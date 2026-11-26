@@ -166,7 +166,7 @@ export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; startupPa
   },
   app: async ({ startupPage }, use) => {
     await startupPage.goto("/");
-    await expect(startupPage.getByRole("button", { name: "Stop" })).toBeVisible();
+    await expect(startupPage.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
     await workspaceReady(startupPage);
     await use(startupPage);
   },

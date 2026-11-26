@@ -1,5 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import { expect, project, soundsFor, test, workspaceReady } from "./fixture";
+import { pickerButton } from "./listPickerHelpers";
 import { at, sessionNotes, settled, stats, twoChannels } from "./rollHelpers";
 
 async function bothPanes(page: Page) {
@@ -62,9 +63,10 @@ test.describe("compact project identity", () => {
     const outputLabel = output.getByText(outputName, { exact: true });
     const controls = [
       ...["Play", "Stop", "Record", "Metronome", "Typing keyboard", "Test tone"]
-        .map((name) => toolbar.getByRole("button", { name })),
+        .map((name) => toolbar.getByRole("button", { name, exact: true })),
       output,
-      ...["Playback", "Beats per bar", "Beat note value"]
+      pickerButton(app, "Playback mode"),
+      ...["Beats per bar", "Beat note value"]
         .map((name) => toolbar.getByRole("combobox", { name })),
       toolbar.getByRole("textbox", { name: "BPM" }),
       toolbar.getByRole("timer", { name: "Position" }),

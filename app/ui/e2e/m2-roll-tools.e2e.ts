@@ -375,7 +375,7 @@ for (const renderer of ["webgl2", "canvas2d"] as const) {
           } as typeof get;
         });
         await app.reload();
-        await expect(app.getByRole("button", { name: "Stop" })).toBeVisible();
+        await expect(app.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
       }
       await openRoll(app);
       expect((await stats(app)).renderer).toBe(renderer);

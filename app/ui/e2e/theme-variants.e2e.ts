@@ -196,7 +196,7 @@ for (const { id } of themes) {
       await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(true);
       await mock.eval("(m) => m.hold(10)");
       await expect.poll(() => ringDistance("--grid-playhead"), { message: "playhead on the lit Kick step" }).toBeLessThan(8);
-      await app.getByRole("button", { name: "Stop" }).click();
+      await app.getByRole("button", { name: "Stop", exact: true }).click();
 
       await app.getByRole("button", { name: "Edit the Bass synth" }).click();
       const synth = app.getByRole("dialog", { name: "Bass synth" });
