@@ -4,6 +4,15 @@ import { DESIGN_H, DESIGN_W, clampPlacement, containPlacement, fitScale, initial
 
 const FOCUSABLE = "button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
+function readViewport() {
+  const hintBarHeight = getComputedStyle(document.documentElement).getPropertyValue("--hintbar-h");
+  return {
+    w: window.innerWidth,
+    h: window.innerHeight,
+    reserveBottom: Number.parseFloat(hintBarHeight) || 0,
+  };
+}
+
 interface Props {
   /** The channel's name. */
   title: string;
@@ -29,21 +38,21 @@ interface Props {
  * inside it, and focus goes back to the opener when it closes. */
 export function DeviceWindow({ title, device, color, index, z, toolbar, opener, onClose, onRaise, children }: Props) {
   const box = useRef<HTMLDivElement>(null);
-  const [view, setView] = useState(() => ({ w: window.innerWidth, h: window.innerHeight }));
-  const scale = fitScale(view.w, view.h);
-  const [place, setPlace] = useState<Placement>(() => initialPlacement(view.w, view.h, scale, index));
+  const [view, setView] = useState(readViewport);
+  const scale = fitScale(view.w, view.h, view.reserveBottom);
+  const [place, setPlace] = useState<Placement>(() => initialPlacement(view.w, view.h, scale, index, view.reserveBottom));
   const drag = useRef<{ x: number; y: number; start: Placement } | null>(null);
   const shown = clampPlacement(place, view.w, view.h, scale);
 
   useEffect(() => {
     const onResize = () => {
-      const w = window.innerWidth;
-      const h = window.innerHeight;
+      const nextView = readViewport();
+      const { w, h, reserveBottom } = nextView;
       // A captured drag's origin belongs to the old viewport. Cancel before moving the
       // window so subsequent pointer moves cannot restore that stale placement.
       drag.current = null;
-      setPlace((previous) => containPlacement(previous, w, h, fitScale(w, h)));
-      setView({ w, h });
+      setPlace((previous) => containPlacement(previous, w, h, fitScale(w, h, reserveBottom), reserveBottom));
+      setView(nextView);
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
