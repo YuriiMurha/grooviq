@@ -61,8 +61,10 @@ test.describe("compact project identity", () => {
     const mute = app.getByRole("region", { name: "Channel rack" }).getByRole("button", { name: "Mute Kick" });
     const output = toolbar.getByRole("button", { name: outputName });
     const outputLabel = output.getByText(outputName, { exact: true });
+    const play = toolbar.getByRole("button", { name: "Play", exact: true });
     const controls = [
-      ...["Play", "Stop", "Record", "Metronome", "Typing keyboard", "Test tone"]
+      play,
+      ...["Stop", "Record", "Metronome", "Typing keyboard", "Test tone"]
         .map((name) => toolbar.getByRole("button", { name, exact: true })),
       output,
       pickerButton(app, "Playback mode"),
@@ -94,11 +96,18 @@ test.describe("compact project identity", () => {
     }
 
     await app.evaluate(() => document.fonts.ready.then(() => true));
-    for (const [width, height] of [[900, 560], [1280, 800], [1440, 900], [1920, 1080]]) {
+    for (const [width, height] of [
+      [900, 560], [1010, 560], [1075, 560], [1120, 560], [1121, 560],
+      [1280, 800], [1440, 900], [1920, 1080],
+    ]) {
       await app.setViewportSize({ width, height });
       await test.step(`${width}×${height} toolbar fits`, async () => {
         await fits(shortName.getByText("QA beat", { exact: true }));
         await fits(projectColumn.getByText("Not saved yet", { exact: true }));
+        const projectBox = await projectColumn.boundingBox();
+        const playBox = await play.boundingBox();
+        if (!projectBox || !playBox) throw new Error("visible project and Play button required");
+        expect(projectBox.x + projectBox.width, "project column ends before Play").toBeLessThanOrEqual(playBox.x);
         await controlsFit();
       });
     }
@@ -120,6 +129,12 @@ test.describe("compact project identity", () => {
       await fits(projectColumn.getByText("Unsaved changes", { exact: true }));
     });
 
+    await test.step("1121×560 keeps the dirty save state readable in the wider toolbar", async () => {
+      await app.setViewportSize({ width: 1121, height: 560 });
+      await fits(projectColumn.getByText("Unsaved changes", { exact: true }));
+    });
+
+    await app.setViewportSize({ width: 900, height: 560 });
     await mock.eval(`(m) => m.queueDialog(${JSON.stringify(longPath)})`);
     await shortName.click();
     await app.getByRole("menuitem", { name: "Open…" }).click();
@@ -137,6 +152,13 @@ test.describe("compact project identity", () => {
     await mute.click();
     await fits(projectColumn.getByText("Unsaved changes", { exact: true }));
     await controlsFit();
+
+    const menu = toolbar.getByRole("menu", { name: "Project" });
+    await longProject.press("Enter");
+    await expect(menu.getByRole("menuitem", { name: "New", exact: true })).toBeFocused();
+    await app.keyboard.press("Escape");
+    await expect(menu).toBeHidden();
+    await expect(longProject).toBeFocused();
   });
 });
 
