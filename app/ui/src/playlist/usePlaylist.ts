@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useState } from "react";
-import { arrangementEdit, arrangementSeek, arrangementView, audioImport, audioRelink } from "../api/arrangement";
-import { nextMediaTicket } from "./audio/mediaTicket";
+import { arrangementEdit, arrangementSeek, arrangementView, audioCancelTicket, audioImport, audioRelink } from "../api/arrangement";
 import { patternEdit, patternList } from "../api/patterns";
 import { projectView, type ProjectView } from "../api/project";
 import type { ProjectStamp } from "../project/context";
@@ -28,8 +27,9 @@ class SessionPlaylistBinding {
       current, blocked: isProjectReplacing, seekBlocked: modalIsOpen, beginTransition: beginProjectTransition,
       enqueueRead: command => this.session.enqueue(command),
       enqueueMutation: command => this.session.enqueueMutation(command),
-      seek: arrangementSeek, readPage: arrangementView, readPatterns: patternList, edit: arrangementEdit, importAudio: (stamp, input) => audioImport(stamp, { ...input, ticket: nextMediaTicket() }),
-      relinkAudio: (stamp, asset, path) => audioRelink(stamp, asset, path, nextMediaTicket()), readProject: projectView,
+      seek: arrangementSeek, readPage: arrangementView, readPatterns: patternList, edit: arrangementEdit,
+      importAudio: (stamp, input, ticket) => audioImport(stamp, { ...input, ticket }),
+      relinkAudio: audioRelink, cancelAudio: audioCancelTicket, readProject: projectView,
       selectPattern: (base, pattern) => patternEdit(base, { kind: "select", pattern }),
       publishProject: (view, at) => {
         if (!current(at) || view.generation !== at.generation) return false;
@@ -67,7 +67,7 @@ export function usePlaylist(session: SessionAdapter) {
     if (session.view !== null) void controller.reload();
   }, [controller, session.view]);
   return { state, reload: controller.reload, mutate: controller.mutate, seek: controller.seek, unsettled: controller.unsettled,
-    importAudio: controller.importAudio, relinkAudio: controller.relinkAudio, settleMedia: controller.settleMedia,
+    importAudio: controller.importAudio, relinkAudio: controller.relinkAudio, cancelMedia: controller.cancelMedia, settleMedia: controller.settleMedia,
     invalidateWaveforms: controller.invalidateWaveforms };
 }
 export type PlaylistModel = ReturnType<typeof usePlaylist>;

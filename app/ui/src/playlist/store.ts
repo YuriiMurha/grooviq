@@ -4,18 +4,22 @@ import type { PatternReply, PatternsView } from "../api/patterns";
 import type { ProjectStamp } from "../project/context";
 import type { AudioImportInput } from "./audio/media";
 import { settleProjectEdits, TransitionWork } from "../project/pending";
+import { nextMediaTicket } from "./audio/mediaTicket";
 
+type MediaKind = "import" | "relink";
 export type PlaylistSnapshot = ArrangementPage & Readonly<{ complete: true; sourcePeriods: Readonly<Record<number, number>> }>;
 export type PlaylistState = Readonly<{
   snapshot: PlaylistSnapshot | null;
   busy: boolean;
   requiresRefresh: boolean;
   message: string | null;
-  media: "import" | "relink" | null;
+  media: MediaKind | null;
+  cancelRequested: boolean;
+  cancelledMedia: MediaKind | null;
   waveformVersions: ReadonlyMap<number, number>;
 }>;
 export type PlaylistResult =
-  | Readonly<{ status: "applied" | "refused"; reply: ArrangementReply }>
+  | Readonly<{ status: "applied" | "refused" | "cancelled"; reply: ArrangementReply }>
   | Readonly<{ status: "stale" | "blocked" | "unsettled" }>
   | Readonly<{ status: "unpublished"; native: "applied" | "unknown"; message: string }>;
 export type PlaylistAdapter = Readonly<{
@@ -32,14 +36,32 @@ export type PlaylistAdapter = Readonly<{
   readPatterns: () => Promise<PatternsView>;
   selectPattern: (base: PatternsView, pattern: number) => Promise<PatternReply>;
   edit: (stamp: ArrangementStamp, operations: readonly ArrangementOperation[]) => Promise<ArrangementReply>;
-  importAudio: (stamp: ArrangementStamp, input: AudioImportInput) => Promise<ArrangementReply>;
-  relinkAudio: (stamp: ArrangementStamp, asset: number, path: string) => Promise<ArrangementReply>;
+  importAudio: (stamp: ArrangementStamp, input: AudioImportInput, ticket: number) => Promise<ArrangementReply>;
+  relinkAudio: (stamp: ArrangementStamp, asset: number, path: string, ticket: number) => Promise<ArrangementReply>;
+  cancelAudio: (ticket: number) => Promise<boolean>;
   seek: (stamp: ArrangementStamp, tick: number) => Promise<ArrangementReply>;
   readProject: () => Promise<ProjectView>;
   publishProject: (view: ProjectView, origin: ProjectStamp) => boolean;
   changed: (state: PlaylistState) => void;
 }>;
-export const EMPTY_PLAYLIST: PlaylistState = { snapshot: null, busy: false, requiresRefresh: false, message: null, media: null, waveformVersions: new Map() };
+type MediaFlight = {
+  readonly ticket: number;
+  readonly kind: MediaKind;
+  readonly origin: ProjectStamp;
+  readonly result: Promise<PlaylistResult>;
+  cancelRequested: boolean;
+};
+
+export const EMPTY_PLAYLIST: PlaylistState = { snapshot: null, busy: false, requiresRefresh: false, message: null,
+  media: null, cancelRequested: false, cancelledMedia: null, waveformVersions: new Map() };
+// Native sends cancellation as a refused acknowledgement with one of these reasons.
+const mediaCancellationReasons = new Set([
+  "Media ticket cancelled",
+  "Older or cancelled media request",
+  "Media preparation refused: Cancelled",
+  "Media preparation failed: Cancelled",
+  "Media request cancelled or superseded",
+]);
 const stampEquals = (a: ArrangementStamp, b: ArrangementStamp) => a.generation === b.generation && a.revision === b.revision;
 const integer = (n: number, maximum = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(n) && n >= 0 && n <= maximum;
 const messageOf = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -91,8 +113,7 @@ export class PlaylistController {
   private value: PlaylistState = EMPTY_PLAYLIST;
   private epoch = 0;
   private waveformVersions: ReadonlyMap<number, number> = new Map();
-  private mediaFlight: Promise<PlaylistResult> | null = null;
-  private mediaKind: PlaylistState["media"] = null;
+  private mediaFlight: MediaFlight | null = null;
   constructor(private readonly adapter: PlaylistAdapter) {}
   get state(): PlaylistState { return this.value; }
   unsettled = (): boolean => this.work.unsettled() || this.mediaFlight !== null || this.value.requiresRefresh;
@@ -106,14 +127,13 @@ export class PlaylistController {
 
   retireMedia = (): void => {
     this.mediaFlight = null;
-    this.mediaKind = null;
   };
   replaceMedia = (): void => {
     this.retireMedia();
     this.waveformVersions = new Map();
   };
   settleMedia = async (): Promise<boolean> => {
-    await this.mediaFlight;
+    await this.mediaFlight?.result;
     return !this.value.requiresRefresh;
   };
   invalidateWaveforms = (): void => {
@@ -122,13 +142,28 @@ export class PlaylistController {
   };
 
   importAudio = (expected: ArrangementStamp, input: AudioImportInput): Promise<PlaylistResult> =>
-    this.mediaEdit(expected, "import", stamp => this.adapter.importAudio(stamp, input));
+    this.mediaEdit(expected, "import", (stamp, ticket) => this.adapter.importAudio(stamp, input, ticket));
 
   relinkAudio = (expected: ArrangementStamp, asset: number, path: string): Promise<PlaylistResult> =>
-    this.mediaEdit(expected, "relink", stamp => this.adapter.relinkAudio(stamp, asset, path), asset);
+    this.mediaEdit(expected, "relink", (stamp, ticket) => this.adapter.relinkAudio(stamp, asset, path, ticket), asset);
+
+  cancelMedia = async (): Promise<void> => {
+    const flight = this.mediaFlight;
+    if (!flight || flight.cancelRequested || !this.adapter.current(flight.origin)) return;
+    flight.cancelRequested = true;
+    this.set({ ...this.value, cancelRequested: true });
+    try {
+      // False can mean an early tombstone or a published edit. Only the media reply settles it.
+      await this.adapter.cancelAudio(flight.ticket);
+    } catch {
+      if (this.mediaFlight !== flight) return;
+      flight.cancelRequested = false;
+      this.set({ ...this.value, cancelRequested: false });
+    }
+  };
 
   private mediaEdit(
-    expected: ArrangementStamp, kind: "import" | "relink", invoke: (stamp: ArrangementStamp) => Promise<ArrangementReply>,
+    expected: ArrangementStamp, kind: MediaKind, invoke: (stamp: ArrangementStamp, ticket: number) => Promise<ArrangementReply>,
     relinkedAsset?: number,
   ): Promise<PlaylistResult> {
     if (this.value.busy || this.mediaFlight || this.value.requiresRefresh || this.adapter.blocked() || this.adapter.seekBlocked()) {
@@ -151,7 +186,7 @@ export class PlaylistController {
           if (!await settleProjectEdits(this.settleMedia)) return { status: "unsettled" };
           if (!current() || !this.value.snapshot || !stampEquals(stamp, this.value.snapshot)) return { status: "stale" };
           invoked = true;
-          decoding = invoke(stamp);
+          decoding = invoke(stamp, flight.ticket);
         } finally {
           finish();
         }
@@ -162,9 +197,11 @@ export class PlaylistController {
           requireStamp(reply);
           if (reply.generation !== stamp.generation || reply.revision < stamp.revision) throw new Error("Invalid native audio acknowledgement");
           if (reply.status === "refused") {
+            const cancelled = flight.cancelRequested && mediaCancellationReasons.has(reply.message ?? "");
             this.set({ ...this.value, requiresRefresh: reply.reload && reply.revision !== stamp.revision,
-              message: reply.message ?? (kind === "import" ? "The audio import was refused" : "The audio relink was refused") });
-            return { status: "refused", reply };
+              cancelledMedia: cancelled ? kind : null,
+              message: cancelled ? null : reply.message ?? (kind === "import" ? "The audio import was refused" : "The audio relink was refused") });
+            return { status: cancelled ? "cancelled" : "refused", reply };
           }
           if (reply.status !== "applied" || !reply.changed || reply.revision <= stamp.revision) throw new Error("Invalid native audio outcome");
           applied = true;
@@ -188,16 +225,16 @@ export class PlaylistController {
       } finally {
         if (this.mediaFlight === flight) {
           this.retireMedia();
-          this.set({ ...this.value, media: null });
+          this.set({ ...this.value, media: null, cancelRequested: false });
         }
       }
     };
 
-    const flight = Promise.resolve().then(run);
+    const flight: MediaFlight = { kind, origin, ticket: nextMediaTicket(),
+      result: Promise.resolve().then(run), cancelRequested: false };
     this.mediaFlight = flight;
-    this.mediaKind = kind;
-    this.set({ ...this.value, media: kind, message: null });
-    return flight;
+    this.set({ ...this.value, media: kind, cancelRequested: false, cancelledMedia: null, message: null });
+    return flight.result;
   }
 
   private async observe(current: () => boolean): Promise<{ snapshot: PlaylistSnapshot; patterns: PatternsView }> {
@@ -251,7 +288,8 @@ export class PlaylistController {
           requireProject(current);
           if (view.generation !== origin.generation || !this.adapter.publishProject(view, origin)) throw new Error("The playlist view could not be published");
         }
-        this.set({ ...this.value, snapshot, busy: true, requiresRefresh: false, message: null, media: this.mediaKind, waveformVersions: this.waveformVersions });
+        this.set({ ...this.value, snapshot, busy: true, requiresRefresh: false, message: null, cancelledMedia: null,
+          media: this.mediaFlight?.kind ?? null, cancelRequested: this.mediaFlight?.cancelRequested ?? false, waveformVersions: this.waveformVersions });
         return true;
       });
     } catch (error) {
@@ -303,7 +341,7 @@ export class PlaylistController {
     const unique = batch.length === 1 && batch[0].kind === "makeUnique" ? batch[0] : null;
     // run() registers this unsaved intent synchronously before the first await or native I/O.
     return this.work.run(async (): Promise<PlaylistResult> => {
-      this.set({ ...this.value, busy: true, message: null });
+      this.set({ ...this.value, busy: true, message: null, cancelledMedia: null });
       let finish: (() => void) | null = null;
       let invoked = false;
       let applied = false;
@@ -336,7 +374,7 @@ export class PlaylistController {
               throw new Error("The unique pattern changed before publication. Refresh the playlist.");
             }
             if (view.generation !== origin.generation || !this.adapter.publishProject(view, origin)) throw new Error("The accepted playlist edit could not be published");
-            this.set({ ...this.value, snapshot, busy: true, requiresRefresh: false, message: null, media: this.mediaKind, waveformVersions: this.waveformVersions });
+            this.set({ ...this.value, snapshot, busy: true, requiresRefresh: false, message: null, waveformVersions: this.waveformVersions });
             return { status: "applied", reply };
           } catch (error) {
             if (!unique || !current()) throw error;

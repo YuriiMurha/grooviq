@@ -489,6 +489,12 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
   }, [clips, preview, previewIndex, view, groupPreview, previewMembers]);
   const visibleIds = useMemo(() => new Set(visibleLabels.map(clip => clip.id)), [visibleLabels]);
   const message = state.message ?? (relinkError?.generation === snapshot?.generation ? relinkError?.message : null) ?? displayError ?? projection.error;
+  let status = `${snapshot?.total ?? 0} clips`;
+  if (state.media === "import") status = "Importing audio…";
+  else if (state.media === "relink") status = "Relinking audio…";
+  else if (state.busy) status = "Updating playlist…";
+  else if (state.cancelledMedia === "import") status = "Audio import cancelled";
+  else if (state.cancelledMedia === "relink") status = "Audio relink cancelled";
   return <section className="playlist" aria-label="Playlist" aria-busy={state.busy || state.media !== null}>
     <header className="playlist-tools"><h2>Playlist</h2>
       <div role="group" aria-label="Playlist tool"><button type="button" aria-pressed={tool === "draw"} onClick={() => { cancel(); setTool("draw"); }}>Draw</button><button type="button" aria-pressed={tool === "select"} onClick={() => { cancel(); setTool("select"); }}>Select</button><button type="button" aria-pressed={tool === "slice"} onClick={() => { cancel(); setTool("slice"); }}>Slice</button></div>
@@ -526,7 +532,12 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
           maxWidth: Math.max(0, Math.min(clip.lengthTicks * view.tickWidth - 12, view.width)) }}>{clip.name}{clip.kind !== "pattern" ? ` · ${clip.kind}` : ""}</span>)}{sliceGuide && <div className="playlist-slice-guide" style={{ left: (sliceGuide.tick - view.scrollTick) * view.tickWidth, top: (sliceGuide.trackIndex - view.scrollTrack) * view.rowHeight + 18, height: Math.min(42, Math.max(1, view.rowHeight - 22)) }} />}</div>
       </div>
     </div></div>
-    <div className="playlist-status"><span id="playlist-help">In Select, modifier-click toggles clips and a drag from empty space selects a box. Drag a group to move it or Alt-drag to copy it. Escape cancels.</span><span aria-live="polite">{selectedIds.length} selected</span><span role="status">{state.media === "import" ? "Importing audio…" : state.media === "relink" ? "Relinking audio…" : state.busy ? "Updating playlist…" : `${snapshot?.total ?? 0} clips`}</span></div>
+    <div className="playlist-status">
+      <span id="playlist-help">In Select, modifier-click toggles clips and a drag from empty space selects a box. Drag a group to move it or Alt-drag to copy it. Escape cancels.</span>
+      <span aria-live="polite">{selectedIds.length} selected</span>
+      <span role="status">{status}</span>
+      {state.media && <button type="button" disabled={state.cancelRequested} onClick={() => { void model.cancelMedia(); }}>Cancel</button>}
+    </div>
     <div className="playlist-selection"><label htmlFor="selected-playlist-clip">Selected clip</label><select id="selected-playlist-clip" aria-label="Selected playlist clip" value={selected ?? ""} disabled={state.busy || state.media !== null} onChange={event => { cancel(); setSelected(event.target.value ? { generation: snapshot?.generation ?? 0, ids: [Number(event.target.value)] } : null); }}><option value="">None</option>{clips.filter(clip => clip.id === selected || visibleIds.has(clip.id)).map(clip => <option key={clip.id} value={clip.id ?? ""}>{clip.name} · Track {clip.trackIndex + 1} · {clip.startTick} ticks</option>)}</select>
       <button type="button" aria-label={`${unmuteSelection ? "Unmute" : "Mute"} selected ${clipLabel}`} disabled={busy || !actionClips.length} onClick={() => { void selectedAction("mute"); }}>{unmuteSelection ? "Unmute" : "Mute"}</button>
       <button type="button" aria-label="Make selected clip unique" disabled={busy || !selectedClip} onClick={() => { void selectedAction("makeUnique"); }}>Make unique</button>
