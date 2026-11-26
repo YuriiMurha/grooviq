@@ -4,6 +4,14 @@ export type RouteSource = Pick<MixerTrack, "id" | "name" | "pending" | "outputId
 export type Point = { x: number; y: number };
 type AddSend = Extract<MixerCommand, { type: "addSend" }>;
 
+const SCROLL_PX_PER_MS = 0.54;
+const MAX_SCROLL_FRAME_MS = 100;
+
+/** Preserve the old 60 Hz pace and limit the jump after a stalled frame. */
+export function routeScrollDistance(elapsedMs: number): number {
+  return SCROLL_PX_PER_MS * Math.max(0, Math.min(elapsedMs, MAX_SCROLL_FRAME_MS));
+}
+
 type Route =
   | { kind: "idle"; message: string }
   | { kind: "bad"; message: string }

@@ -377,7 +377,14 @@ test("route drag auto-scrolls to an off-screen destination and keeps the source 
   const bank = (await page.getByRole("group", { name: "Mixer tracks (35)" }).boundingBox())!;
   await startRoute(page, "Track 1");
   await page.mouse.move(bank.x + bank.width - 3, from.y);
-  await expect(routeNote(page)).toContainText("Track 1 → Track 35", { timeout: 9000 });
+  // Overscan mounts the strip before the bank has scrolled far enough to drop on it.
+  await expect.poll(() => destination.evaluateAll((matches, bounds) => matches.some((el) => {
+    const { left, right } = el.getBoundingClientRect();
+    return left >= bounds.x && right <= bounds.x + bounds.width;
+  }), bank), { message: "Track 35 scrolls fully into the mixer bank", timeout: 20_000 }).toBe(true);
+  const to = await center(destination);
+  await page.mouse.move(to.x, from.y);
+  await expect(destination).toHaveAttribute("data-route-target", "ready");
   await expect(routeHandle(page, "Track 1")).toBeAttached();
   expect(await log(page)).toEqual([]);
   await page.mouse.up();

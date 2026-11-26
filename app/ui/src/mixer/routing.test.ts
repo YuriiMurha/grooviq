@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MixerTrack } from "./mixerModel";
-import { classifyRoute, finishRoute, moveRoute } from "./routing";
+import { classifyRoute, finishRoute, moveRoute, routeScrollDistance } from "./routing";
 
 const target = (id: string) => ({ id, name: id });
 const source: Pick<MixerTrack, "id" | "name" | "pending" | "outputId" | "sendDestinations" | "sends"> = {
@@ -51,5 +51,17 @@ describe("mixer send routing", () => {
     expect(finishRoute(moving, "drop", { ...source, sendDestinations: [] }, target("Room"))).toMatchObject({ kind: "bad" });
     expect(finishRoute(moving, "drop", source, target("Echo"))).toMatchObject({ kind: "existing", sendId: "send" });
     expect(finishRoute(moving, "drop", source, target("Kit"))).toMatchObject({ kind: "main" });
+  });
+});
+
+describe("mixer route auto-scroll", () => {
+  it("covers the same distance at fast and slow frame rates", () => {
+    expect(routeScrollDistance(16) * 4).toBeCloseTo(routeScrollDistance(64));
+    expect(routeScrollDistance(64)).toBeGreaterThan(0);
+  });
+
+  it("caps the distance after a long frame stall", () => {
+    expect(routeScrollDistance(1000)).toBeCloseTo(routeScrollDistance(100));
+    expect(routeScrollDistance(1000)).toBeLessThan(80);
   });
 });

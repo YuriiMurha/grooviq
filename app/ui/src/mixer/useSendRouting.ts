@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { availableSends, type MixerError, type MixerProps, type MixerTrack } from "./mixerModel";
-import { classifyRoute, finishRoute, moveRoute, sendCommand, type Point, type RouteEnd, type RouteGesture } from "./routing";
+import { classifyRoute, finishRoute, moveRoute, routeScrollDistance, sendCommand, type Point, type RouteEnd, type RouteGesture } from "./routing";
 
 type Drag = {
   nodeId: string;
@@ -30,7 +30,6 @@ type SendFocus = {
 };
 
 const EDGE = 24;
-const SCROLL_STEP = 9;
 const pointOf = (event: PointerEvent): Point => ({ x: event.clientX, y: event.clientY });
 
 function revealControl(control: HTMLElement | null | undefined) {
@@ -130,17 +129,18 @@ export function useSendRouting(
         : { sourceId: drag.nodeId, targetId: target?.id, kind, message, start, end });
     }
 
-    function scroll(drag: Drag) {
+    function scroll(drag: Drag, previousFrame: number, now: number) {
       const scroller = bank.current;
       if (active.current !== drag || !scroller) return;
       const { x, y } = drag.point;
       const bounds = scroller.getBoundingClientRect();
       if (y >= bounds.top && y < bounds.bottom && x >= bounds.left && x < bounds.right) {
-        if (x < bounds.left + EDGE) scroller.scrollLeft -= SCROLL_STEP;
-        else if (x > bounds.right - EDGE) scroller.scrollLeft += SCROLL_STEP;
+        const distance = routeScrollDistance(now - previousFrame);
+        if (x < bounds.left + EDGE) scroller.scrollLeft -= distance;
+        else if (x > bounds.right - EDGE) scroller.scrollLeft += distance;
       }
       draw(drag);
-      if (active.current === drag) drag.frame = requestAnimationFrame(() => scroll(drag));
+      if (active.current === drag) drag.frame = requestAnimationFrame((next) => scroll(drag, now, next));
     }
 
     function begin(nodeId: string, anchor: HTMLButtonElement, event: PointerEvent, suppressClick: () => void) {
@@ -167,7 +167,8 @@ export function useSendRouting(
         if (!drag.gesture.moving) return;
         if (!wasMoving) {
           suppressClick();
-          drag.frame = requestAnimationFrame(() => scroll(drag));
+          const startedAt = performance.now();
+          drag.frame = requestAnimationFrame((now) => scroll(drag, startedAt, now));
         }
         draw(drag);
       }, options);
