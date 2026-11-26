@@ -28,6 +28,7 @@ use crate::api::{Device, MAX_BLOCK, NoteEvent, db_to_gain};
 use crate::util::*;
 use crate::wavetable::{self, LEVELS, TABLE_LEN, Wavetables};
 
+mod pitch_cache;
 #[cfg(feature = "scalar-reference")]
 mod scalar_reference;
 mod simd;
@@ -841,10 +842,16 @@ impl Morph {
 }
 
 /// Phase increment and mip level for an oscillator at pitch `p` (semitones).
+#[cfg(feature = "scalar-reference")]
 #[inline(always)]
 fn tune(p: f32, max_semi: f32, cx: &Ctx) -> (f64, (usize, f32)) {
+    tune_from_hz(p, max_semi, cx, pitch_hz(p))
+}
+
+#[inline(always)]
+fn tune_from_hz(p: f32, max_semi: f32, cx: &Ctx, hz: f32) -> (f64, (usize, f32)) {
     (
-        (pitch_hz(p) as f64 * cx.inv_sr).min(0.45),
+        (hz as f64 * cx.inv_sr).min(0.45),
         level_for(p + max_semi, cx.lam_const),
     )
 }

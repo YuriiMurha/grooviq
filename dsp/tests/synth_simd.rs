@@ -217,6 +217,53 @@ fn simd_matches_the_scalar_reference_bit_for_bit() {
     }
 }
 
+#[test]
+fn shared_pitch_matches_the_scalar_reference() {
+    let note = |key, id, slide| NoteEvent {
+        offset: 0,
+        key,
+        velocity: 0.8,
+        on: true,
+        slide,
+        id,
+    };
+    for mode in [0, 2] {
+        for unison in 1..=7 {
+            for block in [1, 17, 64, 127] {
+                let mut patch = preset("Trap Lead").unwrap();
+                patch.extend([
+                    (5, unison as f32),
+                    (6, 0.47),
+                    (9, 0.0),
+                    (11, 0.0),
+                    (13, unison as f32),
+                    (16, 0.25),
+                    (34, 13.0),
+                    (35, 0.6),
+                    (37, 12.0),
+                    (38, mode as f32),
+                ]);
+                let case = Case {
+                    sr: 48_000.0,
+                    patch,
+                    events: vec![
+                        (0, note(63, 1, false)),
+                        (0, note(75, 2, false)),
+                        (0, note(64, 3, false)),
+                        (21, note(63, 4, false)),
+                        (113, note(62, 5, true)),
+                        (479, note(63, 6, false)),
+                    ],
+                    steps: (0..1_024 / block + 1).map(|_| Step::Block(block)).collect(),
+                };
+                if let Some(difference) = first_difference(&case) {
+                    panic!("mode {mode}, unison {unison}, block {block}: {difference}");
+                }
+            }
+        }
+    }
+}
+
 /// The patches most likely to break a lane: every unison count on both oscillators, every filter
 /// type, every voice mode, with the layout changing under sounding voices (the crossfades).
 #[test]

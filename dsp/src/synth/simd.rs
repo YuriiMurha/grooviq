@@ -33,6 +33,7 @@ fn splat64(x: f64) -> f64x4 {
 /// Four voices' per-sample values between `Voice::prepare` and the filter stage: lane `j` of
 /// sample `i` is voice `j` of the group.
 pub(super) struct Group {
+    pitch_cache: pitch_cache::Cache,
     /// Filter input (before the drive), left and right.
     xl: [[f32; LANES]; MAX_BLOCK],
     xr: [[f32; LANES]; MAX_BLOCK],
@@ -48,6 +49,7 @@ impl Group {
     pub(super) fn new() -> Self {
         let z = [[0.0; LANES]; MAX_BLOCK];
         Self {
+            pitch_cache: pitch_cache::Cache::new(),
             xl: z,
             xr: z,
             g: z,
@@ -74,13 +76,15 @@ pub(super) fn render(
     out_l: &mut [f32],
     out_r: &mut [f32],
 ) {
+    let plan = pitch_cache::Plan::new(voices, b, start);
+    grp.pitch_cache.clear(plan.rows, end - start);
     let mut slots = [0usize; LANES];
     let mut lanes = 0;
     for slot in 0..SLOTS {
         if !voices[slot].active {
             continue;
         }
-        voices[slot].prepare(cx, b, t, start, end, grp, lanes);
+        voices[slot].prepare(cx, b, t, start, end, grp, lanes, plan.tracks[slot]);
         slots[lanes] = slot;
         lanes += 1;
         if lanes == LANES {
@@ -117,6 +121,7 @@ impl Voice {
         end: usize,
         grp: &mut Group,
         lane: usize,
+        pitch_rows: [u8; 3],
     ) {
         let n = end - start;
         let mut done = n;
@@ -167,16 +172,20 @@ impl Voice {
             let p1 = pm + b.off1[i];
             if p1 != self.last_p1 {
                 self.last_p1 = p1;
-                (self.inc1, self.lv1) = tune(p1, cx.uni1.to.max_semi, cx);
+                let hz = grp.pitch_cache.hz(pitch_rows[0], rel, p1);
+                (self.inc1, self.lv1) = tune_from_hz(p1, cx.uni1.to.max_semi, cx, hz);
             }
             let p2 = pm + b.off2[i];
             if p2 != self.last_p2 {
                 self.last_p2 = p2;
-                (self.inc2, self.lv2) = tune(p2, cx.uni2.to.max_semi, cx);
+                let hz = grp.pitch_cache.hz(pitch_rows[1], rel, p2);
+                (self.inc2, self.lv2) = tune_from_hz(p2, cx.uni2.to.max_semi, cx, hz);
             }
             if pm != self.last_pm {
                 self.last_pm = pm;
-                (self.inc_sub, self.lv_sub) = tune(pm - 12.0, 0.0, cx);
+                let p = pm - 12.0;
+                let hz = grp.pitch_cache.hz(pitch_rows[2], rel, p);
+                (self.inc_sub, self.lv_sub) = tune_from_hz(p, 0.0, cx, hz);
             }
 
             let (mut sl, mut sr) = (0.0f32, 0.0f32);

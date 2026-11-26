@@ -95,6 +95,16 @@ mod counts {
         settle(s, &chord(48, voices))
     }
 
+    fn trap_lead_uni7() -> Synth {
+        let mut s = Synth::new(SR);
+        for (index, value) in preset("Trap Lead").expect("a factory preset") {
+            s.set_param(index, value);
+        }
+        s.set_param(5, 7.0); // OSC1_UNI
+        s.set_param(38, 0.0); // VOICE_MODE: poly
+        settle(s, &chord(48, 16))
+    }
+
     // 100 blocks of 64 frames. (Plain comments: the macro rejects doc attributes.)
     #[library_benchmark]
     #[bench::voices_16(sampler(16))]
@@ -109,6 +119,7 @@ mod counts {
     #[library_benchmark]
     #[bench::init_4(synth("Init", 4))]
     #[bench::dark_pad_4(synth("Dark Pad", 4))]
+    #[bench::trap_lead_uni7_16(trap_lead_uni7())]
     fn synth_blocks(mut s: Synth) -> f32 {
         render(&mut s)
     }
