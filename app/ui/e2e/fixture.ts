@@ -148,7 +148,7 @@ export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; app: Page
     page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
     if (keepFrames) await page.addInitScript(keepWebglFrames);
     // Match the CI browser stand-ins, independently of the host running Playwright.
-    const platform = browserName === "chromium" ? "windows" : "macos";
+    const platform: MockSeed["platform"] = browserName === "chromium" ? "windows" : "macos";
     await page.addInitScript(installMockTauri, { platform, samplerParams: SAMPLER_PARAMS, synthParams: SYNTH_PARAMS, synthPresets: SYNTH_PRESETS, ...seed });
     await page.goto("/");
     await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
