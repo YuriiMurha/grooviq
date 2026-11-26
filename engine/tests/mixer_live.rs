@@ -1599,3 +1599,150 @@ fn legacy_fades_refuse_routed_installs_until_retired_across_all_removal_apis() {
         assert!(changed[40 * N * 2..].iter().all(|v| v.abs() < 1e-10));
     }
 }
+
+fn latency_mix(kind: &str, declared: u32, params: Vec<f32>) -> MixSetup {
+    let insert = InsertId(1);
+    MixSetup::Routed(RoutedMix {
+        mixer: Mixer {
+            tracks: vec![
+                Track {
+                    id: MASTER,
+                    output: None,
+                    inserts: vec![],
+                },
+                Track {
+                    id: MixerTrackId(1),
+                    output: Some(MASTER),
+                    inserts: vec![],
+                },
+                Track {
+                    id: MixerTrackId(2),
+                    output: Some(MASTER),
+                    inserts: vec![Insert {
+                        id: insert,
+                        latency_frames: declared,
+                        memory_bytes: 0,
+                    }],
+                },
+            ],
+            sources: vec![Source {
+                id: SourceId::System(SystemSource::Tone),
+                destination: MixerTrackId(1),
+            }],
+            sends: vec![Send {
+                id: SendId(1),
+                from: MixerTrackId(1),
+                to: MixerTrackId(2),
+                tap: Tap::PreFader,
+                gain: if kind == "drive" { 1.0 } else { 0.0 },
+            }],
+            ..Mixer::default()
+        },
+        gains: vec![],
+        devices: vec![InsertDevice {
+            insert,
+            kind: kind.into(),
+            seed: 0,
+            params,
+        }],
+    })
+}
+
+fn engine_tone(mix: MixSetup) -> (Controller, AudioProcessor) {
+    let (mut controller, processor) = engine_with(
+        EngineConfig { sample_rate: SR },
+        EngineState {
+            mix,
+            ..EngineState::default()
+        },
+    );
+    controller
+        .send(Command::TestTone {
+            on: true,
+            hz: 437.0,
+            gain_db: -20.0,
+        })
+        .unwrap();
+    (controller, processor)
+}
+
+#[test]
+fn pdc_installs_final_drive_modes_and_refuses_an_underdeclared_update() {
+    let mix = |mode, bound| latency_mix("drive", bound, vec![1.0, 0.0, 0.0, 0.0, 0.0, mode]);
+    let (mut c, mut p) = engine_tone(mix(0.0, 49));
+    let (_dry, mut reference) = engine_tone(MixSetup::LegacyDirect);
+    let mut expected_revision = c.mix_revision();
+    for (mode, latency) in [(0.0, 0), (1.0, 43), (2.0, 49)] {
+        expected_revision += 1;
+        let update = mix(mode, 49);
+        let revision = if mode == 2.0 {
+            c.set_sources_and_mix(SourceEdit {
+                remove: vec![],
+                add: vec![],
+                timeline: None,
+                mix: update,
+            })
+        } else {
+            c.set_mix(update)
+        };
+        assert_eq!(revision, Ok(expected_revision));
+        let mut dry = [0.0; 4 * N];
+        let mut actual = [0.0; 4 * N];
+        reference.process(&mut dry, 2);
+        p.process(&mut actual, 2);
+        assert!(dry.iter().any(|sample| sample.abs() > 0.01));
+        for (i, &sample) in actual.iter().enumerate() {
+            let wanted = i.checked_sub(latency * 2).map_or(0.0, |at| dry[at] * 2.0);
+            assert_eq!(
+                sample,
+                wanted,
+                "mode {mode}, frame {}, channel {}",
+                i / 2,
+                i % 2
+            );
+        }
+    }
+
+    assert_eq!(c.set_mix(mix(2.0, 48)), Err(ControlError::Rejected));
+    assert_eq!(c.mix_revision(), expected_revision);
+    assert_eq!(c.state().mix, mix(2.0, 49));
+    // A continuing tone has no fresh silence at the refused install boundary.
+    let mut out = [0.0; 2 * N];
+    p.process(&mut out, 2);
+    assert!(out[..49 * 2].iter().any(|sample| sample.abs() > 0.01));
+}
+
+#[test]
+fn pdc_rate_rebuild_remeasures_limiter_and_refusal_keeps_the_old_graph() {
+    let config = EngineConfig {
+        sample_rate: 96_000.0,
+    };
+    let (mut refused, mut old) = engine_tone(latency_mix("limiter", 80, vec![]));
+    let (_unchanged, mut control) = engine_tone(latency_mix("limiter", 80, vec![]));
+    let (mut c, mut p) = engine_tone(latency_mix("limiter", 575, vec![]));
+    let (mut dry_controller, mut dry) = engine_tone(MixSetup::LegacyDirect);
+    let mut actual = [0.0; 12 * N];
+    let mut expected = [0.0; 12 * N];
+    for processor in [&mut old, &mut control, &mut p, &mut dry] {
+        processor.process(&mut actual, 2);
+    }
+    assert!(!refused.reconfigure(&mut old, config));
+    assert_eq!(refused.sample_rate(), SR);
+    old.process(&mut actual, 2);
+    control.process(&mut expected, 2);
+    assert_eq!(actual, expected);
+    assert!(actual.iter().any(|sample| sample.abs() > 0.01));
+
+    assert!(c.reconfigure(&mut p, config));
+    assert!(dry_controller.reconfigure(&mut dry, config));
+    p.process(&mut actual, 2);
+    dry.process(&mut expected, 2);
+    assert!(
+        expected[..actual.len() - 143 * 2]
+            .iter()
+            .any(|sample| sample.abs() > 0.01)
+    );
+    // Limiter is round(1.5 ms * 96 kHz) - 1 frames. The blank branch still participates.
+    assert_eq!(actual[..143 * 2], [0.0; 143 * 2]);
+    assert_eq!(actual[143 * 2..], expected[..actual.len() - 143 * 2]);
+}

@@ -81,6 +81,7 @@ impl std::error::Error for ControlError {}
 #[derive(Debug)]
 pub(crate) enum ReconfigureError {
     InsertRate(crate::mixer::UnsupportedInsertRate),
+    MixRefused(ControlError),
     BuildFailed,
 }
 
@@ -88,6 +89,10 @@ impl std::fmt::Display for ReconfigureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InsertRate(error) => error.fmt(f),
+            Self::MixRefused(error) => write!(
+                f,
+                "mixer preparation at the new output rate failed: {error}"
+            ),
             Self::BuildFailed => {
                 f.write_str("the sound engine could not rebuild for the output rate")
             }
@@ -522,8 +527,8 @@ impl Controller {
     /// Replaces how sources reach the output, without rebuilding the graph: instruments,
     /// held notes, song audio voices and the transport carry on. The new mix is prepared
     /// here (devices constructed and set, buffers reserved) and installed at the next block
-    /// boundary as one queue message; an insert that keeps its ID, kind and seed keeps its
-    /// live device (tails, envelopes) and only receives the parameters that changed.
+    /// boundary as one queue message. An insert that keeps its ID, kind, seed and latency
+    /// keeps its live device and only receives the parameters that changed.
     /// Refused as a whole (`Rejected` for an invalid mix, `BuildFailed` if a device panics,
     /// `Full` with no queue room): then nothing changes. Returns the new revision.
     pub fn set_mix(&mut self, mix: crate::mixer::MixSetup) -> Result<u64, ControlError> {
@@ -1022,8 +1027,8 @@ impl Controller {
     /// state (which also recovers a graph that panicked; the next `check_health` still reports
     /// the panic). Call it with the audio callback stopped (it needs the processor itself),
     /// never on the audio thread. Returns false without changing the engine if an insert
-    /// cannot run at the new rate. If construction fails, the processor stays silent and
-    /// the previous rate, state and queued commands are retained.
+    /// or compensation plan cannot run at the new rate. If the rest of the graph fails to
+    /// build, the processor stays silent and the previous rate, state and queue are retained.
     pub fn reconfigure(&mut self, processor: &mut AudioProcessor, config: EngineConfig) -> bool {
         self.try_reconfigure(processor, config).is_ok()
     }
@@ -1038,6 +1043,11 @@ impl Controller {
             .mix
             .check_sample_rate(rate)
             .map_err(ReconfigureError::InsertRate)?;
+        // A refusal to prepare the mixer at the new rate leaves the running graph and its
+        // histories alone, including queued updates. Build the rest only after admission.
+        let mix = catch_unwind(AssertUnwindSafe(|| self.prepare_replay_mix(rate)))
+            .map_err(|_| ReconfigureError::BuildFailed)?
+            .map_err(ReconfigureError::MixRefused)?;
         self.settle_recovery_stop(processor);
         // The fresh graph is built from the state every queued message already updated, so a
         // message that only changes the graph would land in it a second time: a channel built
@@ -1050,7 +1060,8 @@ impl Controller {
         let old_rate = self.sample_rate;
         self.sample_rate = rate;
         self.generation += 1;
-        let Some(graph) = self.try_build_graph() else {
+        self.graph_epoch += 1;
+        let Ok(graph) = catch_unwind(AssertUnwindSafe(|| self.replay_with_mix(mix))) else {
             self.sample_rate = old_rate;
             self.generation -= 1;
             processor.stop_after_failed_rebuild();
@@ -1089,7 +1100,23 @@ impl Controller {
         self.replay()
     }
 
+    fn prepare_replay_mix(
+        &self,
+        rate: f32,
+    ) -> Result<Option<Box<crate::mixer::live::LiveMix>>, ControlError> {
+        // A fresh graph has no fading channels, only the current channel instances.
+        let aliases = aliases(&self.state.mix, &self.instances, &[])?;
+        crate::mixer::live::prepare(&self.state.mix, rate, &aliases)
+    }
+
     fn replay(&self) -> Box<Graph> {
+        let mix = self
+            .prepare_replay_mix(self.sample_rate)
+            .expect("the mirrored mix prepares");
+        self.replay_with_mix(mix)
+    }
+
+    fn replay_with_mix(&self, mix: Option<Box<crate::mixer::live::LiveMix>>) -> Box<Graph> {
         #[cfg(test)]
         if self.replay_panics.get() > 0 {
             self.replay_panics.set(self.replay_panics.get() - 1);
@@ -1119,11 +1146,6 @@ impl Controller {
         graph.set_song(Box::new(self.state.song.clone()));
         graph.playback_mode = self.state.playback_mode;
         graph.song_loop = self.state.song_loop;
-        // A fresh graph gets fresh insert devices and no fading channels; the state was
-        // validated on admission.
-        let aliases = aliases(&self.state.mix, &self.instances, &[]).expect("no fades");
-        let mix = crate::mixer::live::prepare(&self.state.mix, self.sample_rate, &aliases)
-            .expect("the mirrored mix prepares");
         graph.set_initial_mix(mix, self.mix_revision);
         graph.set_epoch(self.graph_epoch);
         // Every channel starts at its mix: nothing ramps in a fresh graph.

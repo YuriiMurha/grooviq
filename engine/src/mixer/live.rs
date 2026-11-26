@@ -3,10 +3,9 @@
 //! construction, buffer reservation, survivor planning) runs on the control thread; the
 //! audio thread only swaps boxes and devices at a block boundary.
 //!
-//! Stage limits, on purpose: no plugin delay compensation (#478) — each path is heard with
-//! its own uncompensated device latency, which preparation only checks against the declared
-//! bound. Device memory is opaque: only the kernel's own buffers are measured. No pan law,
-//! mute or solo beyond the fixed track coefficients.
+//! The kernel prepares compensation from the devices' actual latency after preset setup.
+//! Declared bounds still govern admission. No pan law, mute or solo beyond the fixed
+//! track coefficients.
 
 use super::{
     Budget, InsertId, InsertIdentity, Mixer, MixerTrackId, PrepareConfig, PreparedInsert,
@@ -15,7 +14,6 @@ use super::{
 use crate::BLOCK;
 use crate::controller::ControlError;
 use grooviq_dsp::Device;
-use std::collections::BTreeMap;
 
 /// Built-in effect ids, in the registry's order.
 pub fn insert_kinds() -> &'static [&'static str] {
@@ -296,27 +294,16 @@ pub(crate) fn prepare(
             destination,
         }));
     let compiled = compile(&mixer, budget()).map_err(|_| ControlError::Rejected)?;
-    let declared: BTreeMap<_, _> = mix
-        .mixer
-        .tracks
-        .iter()
-        .flat_map(|t| &t.inserts)
-        .map(|i| (i.id, i.latency_frames))
-        .collect();
     let mut bindings = Vec::with_capacity(devices.len());
     for (d, kind) in devices.iter().zip(kinds) {
         let device = construct(d, rate)?;
-        // Uncompensated stage: the device's actual latency must stay within its declaration.
-        if device.latency_frames() > declared[&d.insert] {
-            return Err(ControlError::Rejected);
-        }
         bindings.push(PreparedInsert::with_identity(
             d.insert,
             device,
             InsertIdentity { kind, seed: d.seed },
         ));
     }
-    let kernel = PreparedMixer::prepare(
+    let kernel = PreparedMixer::prepare_compensated(
         compiled,
         bindings,
         &mix.gains,
@@ -370,24 +357,17 @@ pub(crate) fn plan(
 }
 
 impl LiveMix {
-    /// Takes the planned survivors out of `old`, then applies their parameter deltas. If the
-    /// plan does not match the actual kernels nothing moves and the fresh devices (already
-    /// at the new parameters) play. Real-time safe.
+    /// Takes compatible device and delay histories out of `old`, applying parameter deltas
+    /// only to transferred devices. The other inserts use their prepared parameter banks.
+    /// Real-time safe.
     pub(crate) fn adopt(
         &mut self,
         old: &mut LiveMix,
         transfers: &[InsertId],
         params: &[ParamDelta],
     ) {
-        if self
-            .kernel
-            .transfer_from(&mut old.kernel, transfers)
-            .is_ok()
-        {
-            for &(insert, index, value) in params {
-                let _ = self.kernel.set_param(insert, index, value);
-            }
-        }
+        self.kernel
+            .adopt_prepared(&mut old.kernel, transfers, params);
     }
 }
 
