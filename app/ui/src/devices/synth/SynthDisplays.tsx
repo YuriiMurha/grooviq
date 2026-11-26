@@ -2,6 +2,7 @@ import { useRef, useState, type PointerEvent } from "react";
 import { drawnScale, useBoxSize, useVerticalDrag, type ParamControl } from "../controls/gesture";
 import type { GestureGroup } from "../paramGestures";
 import { quantize, type ParamRange } from "../controls/paramDrag";
+import { zeroDbLabel } from "./filterLabels";
 import { filterDb, lfoWave, randomSteps } from "./waveShapes";
 
 const path = (pts: [number, number][]) => pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`).join("");
@@ -90,8 +91,6 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, group }: Fi
   const nx = fx(cutoff.value);
   const ny = Math.min(bottom, Math.max(top, yd(db(cutoff.value))));
   const y0 = Math.round(yd(0)) + 0.5;
-  // Allow for the 0 dB text, its inset, and the cutoff handle's radius and stroke.
-  const zeroDbAtRight = nx < 36;
   const sweep = Math.abs(envAmount) > 0.02 ? fx(Math.min(20000, Math.max(20, cutoff.value * Math.pow(2, envAmount * ENV_OCTAVES)))) : null;
   const ya = Math.min(bottom - 4, Math.max(top + 3, ny - 14));
   const dir = sweep === null ? 1 : Math.sign(sweep - nx) || 1;
@@ -135,16 +134,7 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, group }: Fi
             <path className="dw-sweep" d={`M${nx} ${ya}L${sweep - dir * 3} ${ya}M${sweep - dir * 6} ${ya - 3.5}L${sweep} ${ya}L${sweep - dir * 6} ${ya + 3.5}`} />
           )}
           <circle className="dw-node" cx={nx} cy={ny} r={5} />
-          <text
-            className="dw-axis"
-            x={zeroDbAtRight ? w - 4 : 4}
-            y={y0 - 3}
-            textAnchor={zeroDbAtRight ? "end" : "start"}
-            paintOrder="stroke"
-            stroke="var(--well)"
-            strokeWidth={2}
-            strokeLinejoin="round"
-          >
+          <text className="dw-axis" {...zeroDbLabel(w, h, nx, y0)}>
             0 dB
           </text>
         </svg>
