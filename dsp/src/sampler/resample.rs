@@ -241,28 +241,54 @@ fn gather_wrapped_loop<const N: usize>(
     let max_end = ((1_i64 << 53) - N as i64) as f64;
     if !(0.0 <= start && start <= lo && lo < hi && hi <= end && end <= max_end)
         || !(lo..hi).contains(&pos)
-        || [start, end, lo, hi].iter().any(|x| x.fract() != 0.0)
         || end > sample.l.len().min(sample.r.len()) as f64
         || len != hi - lo
     {
         return false;
     }
-    let lo = lo as usize;
-    let hi = hi as usize;
+    let fraction = lo.fract();
+    if fraction != hi.fract() {
+        return false;
+    }
+    if fraction != 0.0 {
+        // Equal fractional endpoints give an integral period and a tap window
+        // [ceil(lo), ceil(hi)). For a 256-tap read below 2^24, the magnitude of
+        // k-lo and of the quotient scaled back by len is less than 2^25.
+        // Subtraction and division together then shift a period boundary by
+        // less than 2^-27 frames. Leave a larger margin on either side.
+        const MIN_FRACTION: f64 = 1.0 / 1_048_576.0;
+        if hi > (1_u32 << 24) as f64 || !(MIN_FRACTION..=1.0 - MIN_FRACTION).contains(&fraction) {
+            return false;
+        }
+    }
+    let lo = lo.ceil() as usize;
+    let hi = hi.ceil() as usize;
     let (Some(left), Some(right)) = (sample.l.get(lo..hi), sample.r.get(lo..hi)) else {
         return false;
     };
 
     // After the first wrap, both ends map into the same loop period in either direction.
     // Keep the taps in ascending source-index order and restart each run at the loop start.
-    let mut offset = (first - lo as i64).rem_euclid(left.len() as i64) as usize;
+    let period = left.len();
+    let mut offset = (first - lo as i64).rem_euclid(period as i64) as usize;
+    // Seed one rotated period for short loops, then double the filled prefix
+    // instead of copying each tiny run. Every copy still preserves tap order.
+    let seed = if period <= N / 8 { period } else { N };
     let mut written = 0;
-    while written < N {
-        let count = (left.len() - offset).min(N - written);
+    while written < seed {
+        let count = (period - offset).min(seed - written);
         edge_l[written..written + count].copy_from_slice(&left[offset..offset + count]);
         edge_r[written..written + count].copy_from_slice(&right[offset..offset + count]);
         written += count;
         offset = 0;
+    }
+    while written < N {
+        let count = written.min(N - written);
+        let (prefix_l, tail_l) = edge_l.split_at_mut(written);
+        let (prefix_r, tail_r) = edge_r.split_at_mut(written);
+        tail_l[..count].copy_from_slice(&prefix_l[..count]);
+        tail_r[..count].copy_from_slice(&prefix_r[..count]);
+        written += count;
     }
     true
 }
@@ -292,14 +318,21 @@ mod tests {
             r: (0..512).map(|i| -(i as f32 + 0.5)).collect(),
         };
         for len in [1.0, 3.0, 32.0, 63.0, 127.0, 256.0] {
-            for lo in [0.0, 137.0] {
+            for lo in [
+                0.0,
+                137.0,
+                0.25,
+                137.75,
+                137.0 + 1.0 / 1_048_576.0,
+                138.0 - 1.0 / 1_048_576.0,
+            ] {
                 for step in [-32.0, 32.0] {
                     for pos in [lo, lo + len - 0.25] {
                         let voice = Voice {
                             pos,
                             step,
                             start: 0.0,
-                            end: 512.0,
+                            end: 511.75,
                             looping: true,
                             wrapped: true,
                             lo,
@@ -312,7 +345,10 @@ mod tests {
                         let mut r = l;
                         assert!(gather_wrapped_loop(&sample, &voice, first, &mut l, &mut r));
                         for i in 0..EXTREME_TAPS {
-                            let k = voice.loop_index(first + i as i64) as usize;
+                            let k = voice
+                                .loop_index(first + i as i64)
+                                .clamp(voice.start.ceil() as i64, voice.end.ceil() as i64 - 1)
+                                as usize;
                             assert_eq!(
                                 (l[i], r[i]),
                                 (sample.l[k], sample.r[k]),
@@ -326,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_extreme_gather_rejects_intro_fractional_and_invalid_bounds() {
+    fn wrapped_extreme_gather_rejects_intro_ambiguous_and_invalid_bounds() {
         let sample = alternating_sample();
         let voice = Voice {
             pos: 64.0,
@@ -340,7 +376,17 @@ mod tests {
             len: 63.0,
             ..Voice::OFF
         };
+        let rounded = Voice {
+            lo: f64::EPSILON,
+            hi: 1.0 + f64::EPSILON,
+            len: 1.0,
+            pos: 0.5,
+            ..voice
+        };
+        // At tap 3, subtraction loses EPSILON and maps to 0, outside [ceil(lo), ceil(hi)).
+        assert_eq!(rounded.loop_index(3), 0);
         for rejected in [
+            rounded,
             Voice {
                 wrapped: false,
                 ..voice
@@ -355,16 +401,19 @@ mod tests {
                 ..voice
             },
             Voice {
-                lo: 33.25,
-                hi: 96.25,
+                lo: f64::EPSILON,
+                hi: 63.0,
+                pos: 32.0,
                 ..voice
             },
             Voice {
-                start: 0.25,
+                lo: 33.0 + 1.0e-10,
+                hi: 96.0 + 1.0e-10,
                 ..voice
             },
             Voice {
-                end: 127.75,
+                lo: 33.0 - 1.0e-10,
+                hi: 96.0 - 1.0e-10,
                 ..voice
             },
             Voice {
