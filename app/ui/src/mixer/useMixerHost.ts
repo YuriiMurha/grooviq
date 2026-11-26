@@ -68,8 +68,16 @@ export function useMixerHost(options: MixerHostOptions = {}) {
     applyPreset: (preset: string) => host.applyInsert(owner, { kind: "applyPreset", preset }),
     close: () => host.closeInsert(owner),
   };
+  const binding = state.binding;
+  const routing = binding && {
+    sources: binding.routing.sources,
+    destinations: binding.routing.destinations,
+    assign: (sourceId: string, destinationId: string) => host.assignSource(binding, sourceId, destinationId),
+    addTrack: () => host.addTrack(binding),
+  };
   return {
     props,
+    routing,
     loading: state.binding === null && state.error === null,
     pending: state.pending,
     error: state.error,

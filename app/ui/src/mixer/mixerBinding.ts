@@ -1,5 +1,5 @@
 import type { ArrangementStamp } from "../api/arrangement";
-import type { MixerEdit, MixerInsertTarget, MixerSend as WireSend, MixerSnapshot, MixerTrack as WireTrack } from "../api/mixer";
+import type { MixerEdit, MixerInsertTarget, MixerSend as WireSend, MixerSnapshot, MixerSourceKey, MixerTrack as WireTrack } from "../api/mixer";
 import { LEVEL, unsupportedReason, type MixerCommand, type MixerMaster, type MixerOption, type MixerProps, type MixerTrack, type ParamTarget } from "./mixerModel";
 
 export type MixerIntent =
@@ -11,12 +11,20 @@ export type MixerIntent =
   | { kind: "unsupported"; nodeId: string; message: string }
   | { kind: "ignore" };
 
+type SourceOption = Readonly<MixerOption & { destinationId: string }>;
+
 export type MixerBinding = Readonly<{
   props: Pick<MixerProps, "tracks" | "master" | "effects" | "unsupported">;
   stamp: ArrangementStamp;
   resolveTrack: (nodeId: string) => number | undefined;
   ownsParamTarget: (target: ParamTarget) => boolean;
   translate: (command: MixerCommand) => MixerIntent;
+  routing: Readonly<{
+    sources: readonly SourceOption[];
+    destinations: readonly MixerOption[];
+    nextTrackName: string;
+    assignmentEdit: (sourceId: string, destinationId: string) => Extract<MixerEdit, { kind: "assignSource" }> | undefined;
+  }>;
 }>;
 
 type RouteChoices = Pick<MixerTrack, "outputs" | "sendDestinations">;
@@ -43,6 +51,9 @@ export function bindMixerSnapshot(snapshot: MixerSnapshot): MixerBinding {
   const trackKey = (id: number) => `${generation}:track:${id}`;
   const slotKey = (id: number) => `${generation}:insert:${id}`;
   const sendKey = (id: number) => `${generation}:send:${id}`;
+  const sourceKey = (source: MixerSourceKey) => source.channel === undefined
+    ? `${generation}:audio-source:${source.audioTrack}`
+    : `${generation}:instrument-source:${source.channel}`;
 
   const tracksByNode = new Map<string, WireTrack>();
   const trackChoices = new Map<number, MixerOption>();
@@ -64,11 +75,24 @@ export function bindMixerSnapshot(snapshot: MixerSnapshot): MixerBinding {
   }
 
   const trackKinds = new Map<number, "Instrument" | "Audio" | "Track">();
+  const assignments = new Map<string, number>();
   for (const { source, destination } of snapshot.mixer.sources) {
+    assignments.set(sourceKey(source), destination);
     const kind = source.channel === undefined ? "Audio" : "Instrument";
     const current = trackKinds.get(destination);
     trackKinds.set(destination, current === undefined || current === kind ? kind : "Track");
   }
+  const sourceKeys = new Map<string, MixerSourceKey>();
+  const sources = snapshot.sources.map(({ source, name }): SourceOption => {
+    const id = sourceKey(source);
+    sourceKeys.set(id, source);
+    const kind = source.channel === undefined ? "Audio track" : "Instrument channel";
+    return {
+      id,
+      name: name ? `${name} · ${kind.toLowerCase()}` : `${kind} ${source.channel ?? source.audioTrack}`,
+      destinationId: trackKey(assignments.get(id) ?? MASTER_ID),
+    };
+  });
 
   const effects = snapshot.effects.map((id) => ({ id, name: effectLabel(id) }));
   const effectNames = new Map(effects.map(({ id, name }) => [id, name]));
@@ -235,5 +259,15 @@ export function bindMixerSnapshot(snapshot: MixerSnapshot): MixerBinding {
       return track !== undefined && (target.kind !== "send" || sendsById.get(target.sendId)?.from === track.id);
     },
     translate,
+    routing: {
+      sources,
+      destinations: [...trackChoices.values()],
+      nextTrackName: `Track ${snapshot.mixer.nextTrackId}`,
+      assignmentEdit(sourceId, destinationId) {
+        const source = sourceKeys.get(sourceId);
+        const destination = tracksByNode.get(destinationId);
+        if (source && destination) return { kind: "assignSource", source, destination: destination.id };
+      },
+    },
   };
 }

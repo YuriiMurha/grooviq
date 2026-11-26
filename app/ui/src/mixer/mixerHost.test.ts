@@ -90,7 +90,7 @@ function setup() {
   host.start();
   host.observe(shown);
   const strip = () => host.current().binding?.props.tracks[0];
-  const seed = async () => { reads[0].resolve(mixer()); await tick(); };
+  const seed = async (snapshot = mixer()) => { reads[0].resolve(snapshot); await tick(); };
   const replace = () => { host.retire(); replacements++; shown = project(2); host.observe(shown); };
   const transition = () => {
     host.invalidateGestures();
@@ -114,6 +114,75 @@ async function tick() {
 }
 
 describe("mixer host ordering", () => {
+  it("assigns one namespaced source through the project lane and uses authoritative routes", async () => {
+    const { host, edits, reads, seed, replace } = setup();
+    const snapshot: MixerSnapshot = {
+      ...mixer(),
+      sources: [
+        { source: { channel: 5 }, name: "Keys", instrument: "synth" },
+        { source: { audioTrack: 5 }, name: "Keys", instrument: null },
+      ],
+    };
+    await seed(snapshot);
+    const binding = host.current().binding;
+    if (!binding) throw new Error("Missing mixer");
+    const [channel, audio] = binding.routing.sources;
+    const [master, track] = binding.routing.destinations;
+    expect(channel.id).not.toBe(audio.id);
+    expect(channel.destinationId).toBe(master.id);
+    expect(audio.destinationId).toBe(master.id);
+
+    const assigned = host.assignSource(binding, audio.id, track.id);
+    await tick();
+    expect(edits[0]).toMatchObject({ stamp: { generation: 1, revision: 1 }, edit: {
+      kind: "assignSource", source: { audioTrack: 5 }, destination: 1,
+    } });
+    edits[0].reply.resolve(applied({
+      ...snapshot, revision: 2, mixer: { ...snapshot.mixer, sources: [{ source: { audioTrack: 5 }, destination: 1 }] },
+    }));
+    expect(await assigned).toBe(true);
+    expect(host.current().binding?.routing.sources.map(({ destinationId }) => destinationId)).toEqual([master.id, track.id]);
+    expect(await host.assignSource(binding, channel.id, track.id)).toBe(false);
+
+    replace();
+    reads[1].resolve({ ...snapshot, generation: 2 });
+    await tick();
+    const current = host.current().binding;
+    if (!current) throw new Error("Missing replacement mixer");
+    expect(await host.assignSource(current, channel.id, current.routing.destinations[1].id)).toBe(false);
+    expect(await host.assignSource(current, current.routing.sources[0].id, track.id)).toBe(false);
+    expect(edits).toHaveLength(1);
+  });
+
+  it("creates a track from a Master-only snapshot after the shared lane is free", async () => {
+    const { host, edits, queue, seed, shown } = setup();
+    const snapshot = mixer();
+    await seed({ ...snapshot, mixer: {
+      ...snapshot.mixer, mode: "legacyDirect", tracks: [snapshot.mixer.tracks[0]], nextTrackId: 1,
+    }, routeInputs: [{ track: 0, from: [] }] });
+    const binding = host.current().binding;
+    if (!binding) throw new Error("Missing mixer");
+    expect(binding.routing.sources).toEqual([]);
+    expect(binding.routing.destinations).toEqual([{ id: binding.props.master.id, name: "Master" }]);
+
+    const hold = deferred<void>();
+    void queue.enqueue(() => hold.promise, false);
+    const created = host.addTrack(binding);
+    expect(host.current().pending).toBe(true);
+    await tick();
+    expect(edits).toHaveLength(0);
+    hold.resolve();
+    await tick();
+    await tick();
+    expect(edits[0]).toMatchObject({ stamp: { generation: 1, revision: 1 }, edit: {
+      kind: "createTrack", name: "Track 1", output: 0,
+    } });
+    edits[0].reply.resolve(applied({ ...snapshot, revision: 2 }));
+    expect(await created).toBe(true);
+    expect(shown()).toMatchObject({ dirty: true, projectCanUndo: true });
+    expect(host.current().binding?.routing.destinations).toHaveLength(2);
+  });
+
   it("rejects a held read after a newer edit and skips its own ProjectView notification", async () => {
     const { host, seed, reads, edits, commit, projectReads, shown } = setup();
     await seed();

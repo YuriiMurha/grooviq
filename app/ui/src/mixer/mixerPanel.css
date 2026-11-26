@@ -1,0 +1,80 @@
+.mx-panel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  font: 12px var(--font);
+  color: var(--text);
+}
+
+.mx-panel:focus-visible {
+  outline: 1px solid var(--select);
+  outline-offset: 2px;
+}
+
+.mx-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.mx-panel .mx-panel-button {
+  height: 28px;
+  color: var(--text);
+  font: inherit;
+}
+
+.mx-panel .mx-panel-button:disabled {
+  border-color: var(--line);
+  color: var(--muted);
+  cursor: default;
+}
+
+.mx-panel-sources,
+.mx-panel-insert,
+.mx-panel-status {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+}
+
+.mx-panel-sources summary {
+  width: fit-content;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mx-panel-sources > p,
+.mx-panel-source-fields {
+  margin-top: 8px;
+}
+
+.mx-panel-source-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+}
+
+.mx-panel-source-fields > div {
+  display: grid;
+  flex: 0 1 230px;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mx-panel-source-fields .list-picker {
+  width: 100%;
+}
+
+.mx-panel-status {
+  justify-items: start;
+}
+
+.mx-panel-status .mx-notice {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

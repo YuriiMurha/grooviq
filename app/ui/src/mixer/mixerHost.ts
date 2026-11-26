@@ -140,6 +140,7 @@ export function createMixerHost(initialAdapter: MixerHostAdapter) {
     const origin = adapter.stamp();
     const atEpoch = epoch;
     const before = state.binding;
+    if (!before && state.error) update({ error: null });
     try {
       const snapshot = await adapter.readMixer();
       if (read === identity && !readAgain && still(origin, atEpoch)) {
@@ -258,13 +259,26 @@ export function createMixerHost(initialAdapter: MixerHostAdapter) {
     return submit(owner.nodeId, { generation, revision }, edit, owner);
   }
 
+  function assignSource(binding: MixerBinding, sourceId: string, destinationId: string): Promise<boolean> {
+    if (state.binding !== binding) return Promise.resolve(false);
+    const edit = binding.routing.assignmentEdit(sourceId, destinationId);
+    return edit ? submit(destinationId, binding.stamp, edit) : Promise.resolve(false);
+  }
+
+  function addTrack(binding: MixerBinding): Promise<boolean> {
+    if (state.binding !== binding) return Promise.resolve(false);
+    return submit(binding.props.master.id, binding.stamp, {
+      kind: "createTrack", name: binding.routing.nextTrackName, output: 0,
+    });
+  }
+
   return {
     connect(next: Pick<MixerHostAdapter, "stamp" | "runFor" | "clearClip">) { adapter = { ...adapter, ...next }; },
     start() { active = true; },
     stop() { active = false; reset(); gestures.clear(); state = EMPTY; },
     current: () => state,
     subscribe(notify: () => void) { subscribers.add(notify); return () => { subscribers.delete(notify); }; },
-    observe, refresh, retire, invalidateGestures, command, applyInsert,
+    observe, refresh, retire, invalidateGestures, command, applyInsert, assignSource, addTrack,
     closeInsert(owner?: OpenInsert) {
       if (state.insert && (!owner || state.insert === owner)) update({ insert: null });
     },
