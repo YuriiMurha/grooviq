@@ -48,6 +48,13 @@ fn steps() -> Vec<Value> {
             json!({"generation": generation, "asset": 2, "request": 777, "start": start, "end": end, "bins": 2}),
         )
     };
+    let audio_resize = |asset, source_start, source_end, gain, fade_in, fade_out| {
+        json!({"kind":"resize", "clip":3, "startTick":480, "content":{
+            "type":"audio", "asset":asset, "sourceStart":source_start, "sourceEnd":source_end,
+            "gain":gain, "reverse":true, "fadeIn":fade_in, "fadeOut":fade_out
+        }})
+    };
+    let edit_audio = |revision, ops: Vec<Value>| edit(0, revision, &json!(ops).to_string());
     vec![
         edit(0, 0, r#"[{"kind":"createTrack","name":"Audio","color":0}]"#),
         import(0, 1, "/qa/generated.wav", 11),
@@ -95,6 +102,115 @@ fn steps() -> Vec<Value> {
         history(0, 8, false),
         view(),
         waveform(0, 0, 3),
+        // Relink has three decoded frames, but resizing and slicing use the saved eight.
+        edit_audio(9, vec![audio_resize(2, 1, 9, 1.0, 0, 0)]),
+        edit_audio(9, vec![audio_resize(2, 2, 2, 1.0, 0, 0)]),
+        edit_audio(9, vec![audio_resize(2, 1, 7, 1.0, 7, 0)]),
+        edit_audio(9, vec![audio_resize(2, 1, 7, 1.0, 0, 7)]),
+        edit_audio(9, vec![audio_resize(2, 1, 7, 2.1, 0, 0)]),
+        edit_audio(9, vec![audio_resize(2, 1, 7, -0.1, 0, 0)]),
+        edit_audio(9, vec![audio_resize(99, 1, 7, 1.0, 0, 0)]),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"move","clip":3,"track":99,"startTick":480}]"#,
+        ),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"move","clip":99,"track":98,"startTick":0}]"#,
+        ),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"copy","clip":99,"track":98,"startTick":0}]"#,
+        ),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"copy","clip":99,"track":4,"startTick":0}]"#,
+        ),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"move","clip":5,"track":98,"startTick":0}]"#,
+        ),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"copy","clip":3,"track":4,"startTick":38400000}]"#,
+        ),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"slice","clip":3,"tick":240,"audioFirstFrames":3}]"#,
+        ),
+        edit(0, 9, r#"[{"kind":"slice","clip":3,"tick":241}]"#),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"slice","clip":3,"tick":241,"audioFirstFrames":0}]"#,
+        ),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"slice","clip":3,"tick":241,"audioFirstFrames":8}]"#,
+        ),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"slice","clip":3,"tick":242,"audioFirstFrames":3}]"#,
+        ),
+        edit_audio(
+            9,
+            vec![
+                audio_resize(2, 7, 1, 1.0, 0, 0),
+                json!({"kind":"slice","clip":3,"tick":481,"audioFirstFrames":3}),
+            ],
+        ),
+        edit_audio(
+            9,
+            vec![
+                json!({"kind":"copy","clip":3,"track":1,"startTick":720}),
+                audio_resize(2, 1, 9, 1.0, 0, 0),
+            ],
+        ),
+        view(),
+        edit_audio(
+            9,
+            vec![
+                json!({"kind":"move","clip":3,"track":4,"startTick":360}),
+                audio_resize(2, 1, 7, 2.0, 5, 5),
+                json!({"kind":"setClip","clip":3,"name":"Reverse take","muted":true}),
+                json!({"kind":"copy","clip":3,"track":1,"startTick":720}),
+            ],
+        ),
+        view(),
+        edit(
+            0,
+            10,
+            r#"[{"kind":"slice","clip":3,"tick":481,"audioFirstFrames":2},{"kind":"deleteClip","clip":6}]"#,
+        ),
+        view(),
+        history(0, 11, true),
+        view(),
+        history(0, 12, false),
+        view(),
+        // Even with no visible clip delta, the batch issued an ID and owns one undo step.
+        edit(
+            0,
+            13,
+            r#"[{"kind":"copy","clip":3,"track":1,"startTick":720},{"kind":"deleteClip","clip":8}]"#,
+        ),
+        history(0, 14, true),
+        view(),
+        edit(
+            0,
+            15,
+            r#"[{"kind":"copy","clip":5,"track":4,"startTick":960},{"kind":"deleteClip","clip":9}]"#,
+        ),
+        history(0, 16, true),
+        view(),
         step("project_save_as", json!({"path": "/qa/media.grooviq"})),
         step("project_new", json!({})),
         step("project_open", json!({"path": "/qa/media.grooviq"})),
