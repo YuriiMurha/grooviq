@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { expect, test } from "vitest";
-import { THEME_COLOR_TOKENS, themeTokenProblems } from "./contract";
+import { REQUIRED_THEME_TOKENS, themeTokenProblems } from "./contract";
 import { DEFAULT_THEME, themes } from "./preference";
 import { parseThemeDeclarations, resolveThemeDeclarations } from "./themeSource";
 
@@ -10,6 +10,7 @@ test("reads custom properties from the selected rule, including multiline values
     :root { --other: ignored; }
     :root[data-theme='test'] {
       --ink: #123; --paper: #456; /* --ignored: #789; */
+      --font: "Name {with; punctuation}", sans-serif;
       --shadow: 0 20px 40px rgba(0, 0, 0, 0.5),
         0 0 0 1px var(--ink)
     }
@@ -17,8 +18,21 @@ test("reads custom properties from the selected rule, including multiline values
   expect(declarations).toEqual(new Map([
     ["--ink", "#123"],
     ["--paper", "#456"],
+    ["--font", '"Name {with; punctuation}", sans-serif'],
     ["--shadow", "0 20px 40px rgba(0, 0, 0, 0.5),\n        0 0 0 1px var(--ink)"],
   ]));
+});
+
+const testSelector = ':root[data-theme="test"]';
+
+test("rejects a theme selector inside a conditional rule", () => {
+  const css = `@media (prefers-color-scheme: light) { ${testSelector} { --ink: #123; } }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`${testSelector} must be a top-level rule`);
+});
+
+test("rejects a nested block in a theme rule", () => {
+  const css = `${testSelector} { --ink: #123; @supports (display: grid) { --ink: #456; } }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`${testSelector} must not contain nested blocks`);
 });
 
 test("resolves alias chains and multi-value properties against the overlaid palette", () => {
@@ -42,8 +56,7 @@ test.each(themes)("$id source satisfies the renderer token contract", ({ id }) =
   expect(own.size, `${id} declares its palette`).toBeGreaterThan(0);
 
   // Shared Riso aliases resolve against this palette. A missing literal override would silently use Riso.
-  const tokens = [...THEME_COLOR_TOKENS, "--reg-x", "--reg-y", "--radius-s", "--radius-m", "--radius-l"];
-  const missing = tokens.filter((name) => !own.get(name) && !/^var\(\s*--[\w-]+\s*\)$/.test(base.get(name) ?? ""));
+  const missing = REQUIRED_THEME_TOKENS.filter((name) => !own.get(name) && !/^var\(\s*--[\w-]+\s*\)$/.test(base.get(name) ?? ""));
   expect(missing, `${id} declares every required token except shared aliases`).toEqual([]);
 
   const incompatible = [...own].filter(([, value]) => /\b(?:color-mix|oklch)\(/i.test(value)).map(([name]) => name);

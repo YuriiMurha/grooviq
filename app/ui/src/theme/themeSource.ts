@@ -2,12 +2,34 @@
 export function parseThemeDeclarations(css: string, selector: string): Map<string, string> {
   const declarations = new Map<string, string>();
   const source = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  for (const [, ruleSelector, body] of source.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    if (ruleSelector.trim().replaceAll("'", '"').replace(/\s*=\s*/g, "=") !== selector) continue;
-    for (const [, name, value] of body.matchAll(/(?:^|;)\s*(--[\w-]+)\s*:\s*([^;]*)/g)) {
-      declarations.set(name, value.trim());
+  let depth = 0;
+  let start = 0;
+  let inThemeRule = false;
+  // Strings can contain braces or semicolons without starting a rule or ending a declaration.
+  for (const { 1: delimiter, index } of source.matchAll(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|([{};])/gs)) {
+    if (!delimiter) continue;
+    const statement = source.slice(start, index).trim();
+    start = index + 1;
+    if (delimiter === "{") {
+      if (inThemeRule) throw new Error(`${selector} must not contain nested blocks`);
+      if (statement.replaceAll("'", '"').replace(/\s*=\s*/g, "=") === selector) {
+        if (depth !== 0) throw new Error(`${selector} must be a top-level rule`);
+        inThemeRule = true;
+      }
+      depth++;
+      continue;
+    }
+    if (inThemeRule) {
+      const declaration = /^(--[\w-]+)\s*:\s*(.*)$/s.exec(statement);
+      if (declaration) declarations.set(declaration[1], declaration[2]);
+    }
+    if (delimiter === "}") {
+      inThemeRule = false;
+      depth--;
+      if (depth < 0) throw new Error(`Unbalanced braces while reading ${selector}`);
     }
   }
+  if (depth !== 0) throw new Error(`Unbalanced braces while reading ${selector}`);
   return declarations;
 }
 

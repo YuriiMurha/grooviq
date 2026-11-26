@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { cellPoint, clickCell, colourDistance, expect, grid, pixelsAt, project, soundsFor, test, workspaceReady } from "./fixture";
-import { THEME_COLOR_TOKENS, themeTokenProblems } from "../src/theme/contract";
+import { REQUIRED_THEME_TOKENS, THEME_COLOR_TOKENS, themeTokenProblems } from "../src/theme/contract";
 import { THEME_PREFERENCE_KEY } from "../src/theme/preference";
 import { parseThemeDeclarations, resolveThemeDeclarations } from "../src/theme/themeSource";
 import { parseColor } from "../src/rack/palette";
@@ -35,12 +35,14 @@ for (const [id, name, tokens] of [["riso", "Riso", risoTokens], ["taste", "Taste
     const rootStyle = await app.evaluate((names) => {
       const style = getComputedStyle(document.documentElement);
       return Object.fromEntries(names.map((name) => [name, style.getPropertyValue(name)]));
-    }, [...THEME_COLOR_TOKENS, "--reg-x", "--reg-y", "--radius-s", "--radius-m", "--radius-l"]);
+    }, REQUIRED_THEME_TOKENS);
     expect(themeTokenProblems((name) => rootStyle[name] ?? "")).toEqual([]);
     for (const color of THEME_COLOR_TOKENS) {
-      const actual = rgbaBytes(rootStyle[color]);
-      expect(actual, `${name} supplies ${color}`).toEqual(rgbaBytes(tokens.get(color)));
-      if (id === "taste") expect(actual, `${color} differs from Riso`).not.toEqual(rgbaBytes(risoTokens.get(color)));
+      expect(rgbaBytes(rootStyle[color]), `${name} supplies ${color}`).toEqual(rgbaBytes(tokens.get(color)));
+    }
+    if (id === "taste") {
+      expect(THEME_COLOR_TOKENS.map((color) => rgbaBytes(rootStyle[color])), "the Taste palette differs from Riso")
+        .not.toEqual(THEME_COLOR_TOKENS.map((color) => rgbaBytes(risoTokens.get(color))));
     }
 
     await clickCell(app, 0, 1);
