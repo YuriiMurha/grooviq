@@ -110,9 +110,9 @@ input {
 }
 
 .tone[aria-pressed="true"] {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
+  background: var(--play);
+  border-color: var(--play);
+  color: var(--on-play);
   font-weight: 700;
 }
 
@@ -1050,14 +1050,14 @@ input[type="checkbox"] {
 }
 
 .transport-btn.play {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
+  background: var(--play);
+  border-color: var(--play);
+  color: var(--on-play);
   box-shadow: var(--reg-x) var(--reg-y) 0 var(--ink-1b);
 }
 
 .transport-btn.play[aria-pressed="true"] {
-  box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--accent);
+  box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--play);
 }
 
 .transport-btn.record {

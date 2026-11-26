@@ -94,6 +94,26 @@ for (const { id } of themes) {
         }
       }
       expect(contrastRatio(rgb("--on-accent"), rgb("--accent")), "accent foreground").toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(rgb("--on-play"), rgb("--play")), "Play foreground").toBeGreaterThanOrEqual(4.5);
+      expect(colourDistance(bytes("--play"), bytes("--rec")), "Play versus Record").toBeGreaterThanOrEqual(48);
+      if (id === "console") {
+        expect(colourDistance(bytes("--play"), bytes("--accent")), "Console Play versus primary accent").toBeGreaterThanOrEqual(48);
+      }
+      const sectionInks = ["--dev-osc1", "--dev-osc2", "--dev-filter", "--dev-amp", "--dev-lfo", "--dev-mix", "--dev-voice"];
+      for (const [index, ink] of sectionInks.entries()) {
+        for (const other of sectionInks.slice(index + 1)) {
+          // These two shipped pairs fail both thresholds. See #767.
+          if (ink === "--dev-amp" && ((id === "riso" && other === "--dev-voice") ||
+            (id === "slate-system" && other === "--dev-lfo"))) continue;
+          const distance = colourDistance(bytes(ink), bytes(other));
+          const deltaE = oklabDeltaE(rgb(ink), rgb(other));
+          expect(distance >= 48 || deltaE >= 0.10,
+            `${ink} versus ${other}: ${distance.toFixed(2)} RGB, ${deltaE.toFixed(4)} OKLab`).toBe(true);
+        }
+      }
+      const play = app.getByRole("button", { name: "Play", exact: true });
+      const [playFill] = await pixelsAt(app, play, [{ x: 8, y: 18 }]);
+      expect(colourDistance(playFill, bytes("--play")), "Play button fill").toBeLessThan(8);
       for (const text of ["--text", "--muted", "--faint", "--error", "--warn"]) {
         for (const surface of ["--bg", "--panel", "--raised"]) {
           // Riso retains its existing Bright Red at 4.40:1 on raised controls. See #634.
@@ -171,7 +191,7 @@ for (const { id } of themes) {
       await app.keyboard.press("ArrowDown");
       await app.keyboard.press("ArrowDown");
       await expect.poll(() => ringDistance("--grid-focus"), { message: "focused Kick step" }).toBeLessThan(8);
-      await app.getByRole("button", { name: "Play" }).click();
+      await play.click();
       await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(true);
       await mock.eval("(m) => m.hold(10)");
       await expect.poll(() => ringDistance("--grid-playhead"), { message: "playhead on the lit Kick step" }).toBeLessThan(8);
