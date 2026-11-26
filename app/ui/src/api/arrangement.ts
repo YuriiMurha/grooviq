@@ -64,17 +64,22 @@ export function arrangementHistory(stamp: ArrangementStamp, undo: boolean) {
   return invoke<ProjectHistoryReply>("arrangement_history", { generation, revision, undo });
 }
 export function arrangementCurve(stamp: ArrangementStamp, clip: number) {
-  validateStamp(stamp); return invoke<ArrangementStamp & { clip: number; points: readonly CurvePoint[] }>("arrangement_curve", { ...stamp, clip });
+  validateStamp(stamp);
+  const { generation, revision } = stamp;
+  return invoke<ArrangementStamp & { clip: number; points: readonly CurvePoint[] }>("arrangement_curve", { generation, revision, clip });
 }
 export function audioImport(stamp: ArrangementStamp, input: { track: number; startTick: number; name: string; path: string; ticket: number }) {
   validateStamp(stamp);
-  validateAudioTicket(input.ticket);
-  return invoke<ArrangementReply>("audio_import", { ...stamp, ...input });
+  const { generation, revision } = stamp;
+  const { track, startTick, name, path, ticket } = input;
+  validateAudioTicket(ticket);
+  return invoke<ArrangementReply>("audio_import", { generation, revision, track, startTick, name, path, ticket });
 }
 export function audioRelink(stamp: ArrangementStamp, asset: number, path: string, ticket: number) {
   validateStamp(stamp);
   validateAudioTicket(ticket);
-  return invoke<ArrangementReply>("audio_relink", { ...stamp, asset, path, ticket });
+  const { generation, revision } = stamp;
+  return invoke<ArrangementReply>("audio_relink", { generation, revision, asset, path, ticket });
 }
 /** Pending server request identities are available in arrangementView while preparation awaits. */
 export const audioCancel = (request: number) => invoke<boolean>("audio_cancel", { request });
@@ -89,11 +94,17 @@ export async function arrangementWaveform(input: { generation: number; asset: nu
   return decoded;
 }
 export function arrangementMode(stamp: ArrangementStamp, mode: "pattern" | "song") {
-  validateStamp(stamp); return invoke<ArrangementReply>("arrangement_mode", { ...stamp, mode });
+  validateStamp(stamp);
+  const { generation, revision } = stamp;
+  return invoke<ArrangementReply>("arrangement_mode", { generation, revision, mode });
 }
 export function arrangementLoop(stamp: ArrangementStamp, region: LoopRegion | null) {
-  validateStamp(stamp); return invoke<ArrangementReply>("arrangement_loop", { ...stamp, region });
+  validateStamp(stamp);
+  const { generation, revision } = stamp;
+  return invoke<ArrangementReply>("arrangement_loop", { generation, revision, region });
 }
 export function arrangementSeek(stamp: ArrangementStamp, tick: number) {
-  validateStamp(stamp); return invoke<ArrangementReply>("arrangement_seek", { ...stamp, tick });
+  validateStamp(stamp);
+  const { generation, revision } = stamp;
+  return invoke<ArrangementReply>("arrangement_seek", { generation, revision, tick });
 }
