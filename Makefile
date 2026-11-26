@@ -100,6 +100,17 @@ notes-edit-budget: ## Optimized 10,000-note edit budget, including undo bookkeep
 check-changed: ## Only the checks the changes against origin/main need (ARGS=--plan prints the plan)
 	node scripts/check-changed.mjs $(ARGS)
 
+.PHONY: ipc-contract-update ipc-contract-check ipc-contract-ui
+ipc-contract-ui:
+	@test -f $(UI)/dist/index.html || $(MAKE) ui-install
+	@test -f $(UI)/dist/index.html || npm --prefix $(UI) run build
+
+ipc-contract-update: ipc-contract-ui ## Regenerate the TypeScript IPC contract
+	$(CARGO) run -p grooviq-app --features ipc-contract --example ipc-contract -- update
+
+ipc-contract-check: ipc-contract-ui ## Verify the generated TypeScript IPC contract
+	$(CARGO) run -p grooviq-app --features ipc-contract --example ipc-contract -- check
+
 .PHONY: replay replay-update
 replay: ## Compare the real offline Session and MIDI hub against both browser mocks
 replay-update: ## Regenerate the real Session and MIDI transcripts intentionally, then verify both browser mocks
@@ -141,6 +152,10 @@ rtsan: ## The no_alloc tests under RealtimeSanitizer (macOS/Linux; downloads LLV
 bench: ## Render speed, block times and determinism of the reference scenes, then DSP kernel timings
 	$(CARGO) bench -p grooviq-golden --bench render
 	$(CARGO) bench -p grooviq-dsp --bench kernels
+
+.PHONY: bench-song
+bench-song: ## Five warmed production exports of the M3 golden song (run on a quiet host)
+	$(CARGO) bench -p grooviq-golden --bench song_export
 
 bench-roll-operations: ## The six piano-roll timing budgets, without work counters (run on a quiet host)
 	@set --; \

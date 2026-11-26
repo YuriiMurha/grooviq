@@ -34,6 +34,7 @@
   --paper: #ebe7db;
   --well: #090e0c;
   --rec: #ff5440;
+  --on-rec: var(--bg);
   --hair: rgba(235, 231, 219, 0.06);
   --step-a: #2e3c36; /* midpoint of the rubber step cap */
   --step-b: #283530;
@@ -56,6 +57,7 @@
   --roll-key-held: #a56800;
   --roll-key-scale: var(--roll-key-held);
 
+  --dev-amp: var(--ink-1);
   --dev-voice: var(--play);
   --dev-card: #25312d; /* the midpoint of the style-lab device cap */
   --dev-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 0 0 1px #060a08,

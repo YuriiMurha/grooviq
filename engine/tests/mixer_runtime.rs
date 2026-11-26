@@ -236,7 +236,8 @@ fn signal(k: u32, frames: usize) -> (Vec<f32>, Vec<f32>) {
         .collect();
     (l, r)
 }
-type Bank = Vec<(SourceId, Vec<f32>, Vec<f32>)>;
+type StereoSource = (SourceId, Vec<f32>, Vec<f32>);
+type Bank = Vec<StereoSource>;
 fn bank(m: &PreparedMixer, frames: usize) -> Bank {
     m.source_order()
         .iter()
@@ -247,7 +248,7 @@ fn bank(m: &PreparedMixer, frames: usize) -> Bank {
         })
         .collect()
 }
-fn blocks<'a>(bank: &'a Bank, at: usize, n: usize) -> Vec<SourceBlock<'a>> {
+fn blocks<'a>(bank: &'a [StereoSource], at: usize, n: usize) -> Vec<SourceBlock<'a>> {
     bank.iter()
         .map(|(id, l, r)| SourceBlock {
             id: *id,
@@ -264,7 +265,7 @@ fn blocks<'a>(bank: &'a Bank, at: usize, n: usize) -> Vec<SourceBlock<'a>> {
 )]
 fn run(
     m: &mut PreparedMixer,
-    bank: &Bank,
+    bank: &[StereoSource],
     sr: f32,
     frames: usize,
     block: usize,
@@ -300,7 +301,7 @@ fn run(
 }
 fn plain(
     m: &mut PreparedMixer,
-    bank: &Bank,
+    bank: &[StereoSource],
     sr: f32,
     frames: usize,
     block: usize,
@@ -1182,4 +1183,483 @@ fn healthy_partitions_are_exact_at_every_rate_and_block_with_caller_timed_contro
         assert!(outputs[0].0.iter().all(|x| x.is_finite()));
         assert!(outputs[0].0[1100..].iter().any(|x| x.abs() > 0.01));
     }
+}
+
+// ---------- delay compensation ----------
+
+/// Independent delay oracle: write the input into a FIFO, then read its oldest frame.
+struct FixedLatency {
+    fifo: std::collections::VecDeque<[f32; 2]>,
+    frames: u32,
+}
+impl FixedLatency {
+    fn new(frames: u32) -> Self {
+        Self {
+            fifo: std::collections::VecDeque::from(vec![[0.0; 2]; frames as usize]),
+            frames,
+        }
+    }
+}
+impl Device for FixedLatency {
+    fn latency_frames(&self) -> u32 {
+        self.frames
+    }
+    fn set_param(&mut self, _: u32, _: f32) {}
+    fn process(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        _: Option<(&[f32], &[f32])>,
+        _: &[NoteEvent],
+    ) {
+        for (l, r) in l.iter_mut().zip(r) {
+            self.fifo.push_back([*l, *r]);
+            [*l, *r] = self.fifo.pop_front().unwrap();
+        }
+    }
+    fn reset(&mut self) {
+        self.fifo.make_contiguous().fill([0.0; 2]);
+    }
+}
+
+/// Makes detector alignment observable without depending on a compressor envelope.
+struct AddDetector;
+impl Device for AddDetector {
+    fn set_param(&mut self, _: u32, _: f32) {}
+    fn process(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        sidechain: Option<(&[f32], &[f32])>,
+        _: &[NoteEvent],
+    ) {
+        let (dl, dr) = sidechain.unwrap();
+        for i in 0..l.len() {
+            l[i] += dl[i];
+            r[i] += dr[i];
+        }
+    }
+    fn reset(&mut self) {}
+}
+
+fn delayed_track(id: u64, output: u64, insert: u64, bound: u32) -> Track {
+    let mut track = track(id, Some(output), &[insert]);
+    track.inserts[0].latency_frames = bound;
+    track
+}
+
+fn impulse(id: u64, frames: usize, l: f32, r: f32) -> (SourceId, Vec<f32>, Vec<f32>) {
+    let mut left = vec![0.0; frames];
+    let mut right = vec![0.0; frames];
+    left[0] = l;
+    right[0] = r;
+    (SourceId::Channel(id), left, right)
+}
+
+fn expect_impulse(out: (Vec<f32>, Vec<f32>), at: usize, left: f32, right: f32) {
+    for (frame, (l, r)) in out.0.into_iter().zip(out.1).enumerate() {
+        assert_eq!(
+            (l, r),
+            if frame == at {
+                (left, right)
+            } else {
+                (0.0, 0.0)
+            },
+            "frame {frame}, expected aligned impulse at {at}"
+        );
+    }
+}
+
+#[test]
+fn pdc_saturation_and_dry_paths_align_at_exactly_49_frames() {
+    let sr = 48_000.0;
+    let m = Mixer {
+        tracks: vec![track(0, None, &[]), delayed_track(1, 0, 10, 60)],
+        sources: vec![source(1, 1), source(2, 0)],
+        ..Mixer::default()
+    };
+    for block in [1, 37, 64, 127, 128] {
+        let make = || {
+            let mut sat = grooviq_dsp::saturation::Saturation::new(sr);
+            // The real saturator retains its 49-frame latency at fully dry mix.
+            sat.set_param(7, 0.0);
+            prepare_pdc(&m, vec![(10, Box::new(sat))], &[], config(sr, 128))
+        };
+        let a = impulse(1, 160, 0.125, -0.25);
+        let b = impulse(2, 160, 0.375, 0.125);
+        expect_impulse(
+            plain(&mut make(), &[a.clone(), b], sr, 160, block),
+            49,
+            0.5,
+            -0.125,
+        );
+        let inverse = impulse(2, 160, -0.125, 0.25);
+        expect_impulse(
+            plain(&mut make(), &[a, inverse], sr, 160, block),
+            49,
+            0.0,
+            0.0,
+        );
+    }
+}
+
+#[test]
+fn pdc_aligns_pre_and_post_sends_at_a_bus_then_passes_through_master_insert() {
+    let sr = 48_000.0;
+    let mut master = track(0, None, &[90]);
+    master.inserts[0].latency_frames = 7;
+    let m = Mixer {
+        tracks: vec![
+            master,
+            track(1, Some(0), &[]),
+            delayed_track(2, 3, 20, 420),
+            track(3, Some(0), &[]),
+        ],
+        sends: [Tap::PreFader, Tap::PostFader]
+            .into_iter()
+            .enumerate()
+            .map(|(i, tap)| Send {
+                id: SendId(i as u64 + 1),
+                from: MixerTrackId(1),
+                to: MixerTrackId(3),
+                tap,
+                gain: 1.0,
+            })
+            .collect(),
+        sources: vec![source(1, 1), source(2, 2), source(3, 3)],
+        ..Mixer::default()
+    };
+    for block in [1, 37, 64, 127, 128] {
+        let d: Devices = vec![
+            (20, Box::new(FixedLatency::new(317))),
+            (90, Box::new(FixedLatency::new(7))),
+        ];
+        let mut k = prepare_pdc(&m, d, &[gain(1, 0.25, 0.5)], config(sr, 128));
+        let inputs = [
+            impulse(1, 520, 4.0, 2.0),
+            impulse(2, 520, 2.0, -3.0),
+            impulse(3, 520, 1.0, 2.0),
+        ];
+        // Track 1 contributes once to Master post-fader and twice to the bus.
+        expect_impulse(plain(&mut k, &inputs, sr, 520, block), 324, 9.0, 3.0);
+    }
+}
+
+#[test]
+fn pdc_aligns_right_only_detectors_at_each_insert_input() {
+    let sr = 48_000.0;
+    let mut receiver = track(3, Some(0), &[30, 31, 32]);
+    receiver.inserts[1].latency_frames = 7;
+    let m = Mixer {
+        tracks: vec![
+            track(0, None, &[]),
+            delayed_track(1, 0, 10, 60),
+            track(2, Some(0), &[]),
+            receiver,
+        ],
+        sidechains: vec![
+            Sidechain {
+                from: MixerTrackId(1),
+                to: InsertId(30),
+                tap: Tap::PreFader,
+            },
+            Sidechain {
+                from: MixerTrackId(2),
+                to: InsertId(32),
+                tap: Tap::PreFader,
+            },
+        ],
+        sources: vec![source(1, 1), source(2, 2), source(3, 3)],
+        ..Mixer::default()
+    };
+    let d: Devices = vec![
+        (10, Box::new(FixedLatency::new(49))),
+        (30, Box::new(AddDetector)),
+        (31, Box::new(FixedLatency::new(7))),
+        (32, Box::new(AddDetector)),
+    ];
+    let mut k = prepare_pdc(
+        &m,
+        d,
+        &[gain(1, 0.0, 0.0), gain(2, 0.0, 0.0)],
+        config(sr, 128),
+    );
+    let inputs = [
+        impulse(1, 160, 0.0, 2.0),
+        impulse(2, 160, 0.0, 4.0),
+        impulse(3, 160, 1.0, 8.0),
+    ];
+    // The first insert waits 49 for its detector. The last detector waits 49 + 7 for its insert.
+    expect_impulse(plain(&mut k, &inputs, sr, 160, 37), 56, 1.0, 14.0);
+}
+
+#[test]
+fn pdc_preserves_pending_history_across_topology_changes_and_render_refusal() {
+    let sr = 48_000.0;
+    let make = |add_track| {
+        let mut m = Mixer {
+            tracks: vec![track(0, None, &[]), delayed_track(2, 0, 20, 60)],
+            sources: vec![source(1, 0)],
+            ..Mixer::default()
+        };
+        if add_track {
+            m.tracks.push(track(1, Some(0), &[]));
+        }
+        prepare_pdc(
+            &m,
+            vec![(20, Box::new(FixedLatency::new(49)))],
+            &[],
+            config(sr, 128),
+        )
+    };
+    let mut old = make(false);
+    let mut new = make(true);
+    let mut signal = [impulse(1, 80, 0.25, -0.5)];
+    expect_impulse(plain(&mut old, &signal, sr, 37, 37), 0, 0.0, 0.0);
+    new.transfer_from(&mut old, &[InsertId(20)]).unwrap();
+    assert_eq!(
+        new.render(&transport(sr, 37, 1, 120.0), &[], &mut [0.0], &mut [0.0]),
+        Err(RenderError::SourceCount {
+            expected: 1,
+            got: 0
+        }),
+    );
+    signal[0].1.fill(0.0);
+    signal[0].2.fill(0.0);
+    expect_impulse(plain(&mut new, &signal, sr, 43, 37), 12, 0.25, -0.5);
+
+    signal[0].1[0] = 1.0;
+    expect_impulse(plain(&mut new, &signal, sr, 1, 1), 0, 0.0, 0.0);
+    new.reset();
+    signal[0].1[0] = 0.0;
+    expect_impulse(plain(&mut new, &signal, sr, 80, 37), 0, 0.0, 0.0);
+}
+
+fn prepare_pdc(
+    m: &Mixer,
+    devices: Devices,
+    gains: &[TrackGain],
+    cfg: PrepareConfig,
+) -> PreparedMixer {
+    PreparedMixer::prepare_compensated(
+        compile(m, Budget::default()).unwrap(),
+        bind(devices),
+        gains,
+        cfg,
+    )
+    .unwrap()
+}
+
+#[test]
+fn pdc_drops_pending_history_when_a_send_id_keeps_its_delay_but_changes_tap() {
+    let sr = 48_000.0;
+    let make = |tap| {
+        let m = Mixer {
+            tracks: vec![
+                track(0, None, &[]),
+                track(1, Some(0), &[]),
+                delayed_track(2, 3, 20, 60),
+                track(3, Some(0), &[]),
+            ],
+            sends: vec![Send {
+                id: SendId(1),
+                from: MixerTrackId(1),
+                to: MixerTrackId(3),
+                tap,
+                gain: 1.0,
+            }],
+            sources: vec![source(1, 1)],
+            ..Mixer::default()
+        };
+        prepare_pdc(
+            &m,
+            vec![(20, Box::new(FixedLatency::new(49)))],
+            &[gain(1, 0.0, 0.0)],
+            config(sr, 128),
+        )
+    };
+    let mut old = make(Tap::PreFader);
+    let mut new = make(Tap::PostFader);
+    let mut signal = [impulse(1, 80, 0.25, -0.5)];
+    expect_impulse(plain(&mut old, &signal, sr, 37, 37), 0, 0.0, 0.0);
+    new.transfer_from(&mut old, &[InsertId(20)]).unwrap();
+    signal[0].1.fill(0.0);
+    signal[0].2.fill(0.0);
+    expect_impulse(plain(&mut new, &signal, sr, 43, 37), 0, 0.0, 0.0);
+}
+
+#[test]
+fn pdc_fault_clears_queued_non_finite_input_and_blind_edits_are_refused() {
+    let sr = 48_000.0;
+    let m = Mixer {
+        tracks: vec![track(0, None, &[90]), delayed_track(2, 0, 20, 60)],
+        sources: vec![source(1, 0)],
+        ..Mixer::default()
+    };
+    let mut k = prepare_pdc(
+        &m,
+        vec![
+            (20, Box::new(FixedLatency::new(49))),
+            (90, Box::new(Fault(true))),
+        ],
+        &[],
+        config(sr, 128),
+    );
+    assert_eq!(k.master_latency_frames(), Some(49));
+    assert_eq!(
+        k.set_param(InsertId(90), 0, 0.0),
+        Err(ParamError::RequiresPreparedInstall)
+    );
+    let signal = [impulse(1, 80, f32::NAN, -0.5)];
+    let report = k.render(
+        &transport(sr, 0, 37, 120.0),
+        &blocks(&signal, 0, 37),
+        &mut [0.0; 37],
+        &mut [0.0; 37],
+    );
+    assert_eq!(
+        report,
+        Ok(RenderReport {
+            frames: 37,
+            silenced: 1
+        })
+    );
+    let mut l = [0.0; 43];
+    let mut r = [0.0; 43];
+    let report = k.render(
+        &transport(sr, 37, 43, 120.0),
+        &blocks(&signal, 37, 43),
+        &mut l,
+        &mut r,
+    );
+    assert_eq!(
+        report,
+        Ok(RenderReport {
+            frames: 43,
+            silenced: 0
+        })
+    );
+    assert_eq!((l, r), ([0.0; 43], [0.0; 43]));
+}
+
+#[test]
+fn pdc_preparation_charges_exact_stereo_history_and_refuses_above_its_bound() {
+    let sr = 48_000.0;
+    let m = Mixer {
+        tracks: vec![track(0, None, &[]), delayed_track(1, 0, 10, 60)],
+        sources: vec![source(1, 0)],
+        ..Mixer::default()
+    };
+    let cfg = config(sr, 128);
+    let make = |frames, cfg| {
+        PreparedMixer::prepare_compensated(
+            compile(&m, Budget::default()).unwrap(),
+            bind(vec![(10, Box::new(FixedLatency::new(frames)))]),
+            &[],
+            cfg,
+        )
+    };
+    let res = make(49, cfg).unwrap().resources();
+    assert_eq!(
+        res.audio_bytes - make(0, cfg).unwrap().resources().audio_bytes,
+        49 * 2 * 4
+    );
+    let required = res.audio_bytes + res.table_bytes;
+    assert!(
+        make(
+            49,
+            PrepareConfig {
+                max_bytes: required,
+                ..cfg
+            }
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        make(
+            49,
+            PrepareConfig {
+                max_bytes: required - 1,
+                ..cfg
+            }
+        )
+        .err(),
+        Some(PrepareError::Budget {
+            required,
+            limit: required - 1
+        }),
+    );
+    assert_eq!(
+        make(61, cfg).err(),
+        Some(PrepareError::Latency(LatencyError::AboveDeclared {
+            insert: InsertId(10),
+            actual: 61,
+            declared: 60,
+        })),
+    );
+}
+
+#[test]
+fn pdc_does_not_reuse_a_ring_when_both_ends_shift_by_the_same_amount() {
+    let sr = 48_000.0;
+    let m = Mixer {
+        tracks: vec![
+            track(0, None, &[]),
+            delayed_track(1, 0, 10, 60),
+            delayed_track(2, 0, 20, 60),
+        ],
+        sources: vec![source(1, 1)],
+        ..Mixer::default()
+    };
+    let make = |start| {
+        prepare_pdc(
+            &m,
+            vec![
+                (10, Box::new(FixedLatency::new(start))),
+                (20, Box::new(FixedLatency::new(start + 49))),
+            ],
+            &[],
+            config(sr, 128),
+        )
+    };
+    let mut old = make(1);
+    let mut new = make(6);
+    let mut signal = [impulse(1, 100, 0.25, -0.5)];
+    expect_impulse(plain(&mut old, &signal, sr, 37, 37), 0, 0.0, 0.0);
+    assert_eq!(
+        new.transfer_from(&mut old, &[InsertId(10)]),
+        Err(TransferError::Latency(InsertId(10)))
+    );
+    new.transfer_from(&mut old, &[]).unwrap();
+    signal[0].1.fill(0.0);
+    signal[0].2.fill(0.0);
+    expect_impulse(plain(&mut new, &signal, sr, 63, 37), 0, 0.0, 0.0);
+}
+
+#[test]
+fn pdc_preserves_the_wet_saturator_and_shifts_only_the_parallel_dry_input() {
+    let sr = 48_000.0;
+    let m = Mixer {
+        tracks: vec![track(0, None, &[]), delayed_track(1, 0, 10, 60)],
+        sources: vec![source(1, 1), source(2, 0)],
+        ..Mixer::default()
+    };
+    let make = || {
+        let mut sat = grooviq_dsp::saturation::Saturation::new(sr);
+        sat.set_param(1, 9.0);
+        sat
+    };
+    let mut k = prepare_pdc(&m, vec![(10, Box::new(make()))], &[], config(sr, 128));
+    let (frames, block) = (128, 37);
+    let sat_input = impulse(1, frames, 0.4, -0.5);
+    let dry_input = impulse(2, frames, 0.2, 0.25);
+    let (mut l, mut r) = (sat_input.1.clone(), sat_input.2.clone());
+    make().process(&mut l, &mut r, None, &[]);
+    assert!(l.iter().any(|x| x.abs() > 0.001));
+    l[49] += 0.2;
+    r[49] += 0.25;
+    assert_eq!(
+        plain(&mut k, &[sat_input, dry_input], sr, frames, block),
+        (l, r)
+    );
 }

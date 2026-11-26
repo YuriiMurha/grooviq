@@ -1,5 +1,6 @@
 import { expect, test as base, type Locator, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import type deviceParams from "../../../tests/fixtures/device-params.json";
 import { keepWebglFrames } from "./webglProbe";
 import { installMockTauri, type MockChannel, type MockProject, type MockSeed } from "./mockTauri";
 
@@ -7,10 +8,10 @@ import { installMockTauri, type MockChannel, type MockProject, type MockSeed } f
  * Rust tests keep in step with `grooviq_dsp::sampler`). */
 const DEVICE_PARAMS = JSON.parse(
   readFileSync(new URL("../../../tests/fixtures/device-params.json", import.meta.url), "utf8"),
-) as { sampler: MockSeed["samplerParams"]; synth: MockSeed["synthParams"] };
+) as typeof deviceParams;
 const SAMPLER_PARAMS = DEVICE_PARAMS.sampler;
 /** The synth's parameter ids, ranges and defaults, in the engine's order. */
-export const SYNTH_PARAMS = DEVICE_PARAMS.synth!;
+export const SYNTH_PARAMS = DEVICE_PARAMS.synth;
 /** Every synth factory preset's 40 values in SPEC order (dsp/tests/params_fixture.rs writes it). */
 export const SYNTH_PRESETS = JSON.parse(
   readFileSync(new URL("../../../tests/fixtures/synth-presets.json", import.meta.url), "utf8"),
@@ -166,7 +167,7 @@ export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; startupPa
   },
   app: async ({ startupPage }, use) => {
     await startupPage.goto("/");
-    await expect(startupPage.getByRole("button", { name: "Stop" })).toBeVisible();
+    await expect(startupPage.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
     await workspaceReady(startupPage);
     await use(startupPage);
   },

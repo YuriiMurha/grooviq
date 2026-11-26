@@ -75,3 +75,36 @@ jobs:
       # The build downloads LLVM's prebuilt RTSan runtime (rtsan-standalone-sys, with curl).
       # Cargo is on PATH here, not in ~/.cargo/bin where the Makefile looks by default.
       - run: make rtsan CARGO=cargo
+
+  loom:
+    needs: optional-inputs
+    # A failed selector must retain coverage; only an explicit false skips work.
+    if: ${{ always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
+    name: loom (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v5
+      - name: Key the Rust cache on the root manifest
+        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
+      - name: Install ALSA headers
+        timeout-minutes: 4
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libasound2-dev
+      - run: rustup toolchain install
+        timeout-minutes: 3
+      - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          key: loom
+          workspaces: . -> target/loom
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run the worker protocol models
+        env:
+          CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: |
+          echo "Rust cache exact hit: ${CACHE_HIT:-false}"
+          time make test-loom CARGO=cargo

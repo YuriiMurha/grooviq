@@ -1,0 +1,75 @@
+/* Industrial: graphite faceplates, ivory legends and warm signal lamps. */
+:root[data-theme="industrial"] {
+  --bg: #0b0c0d;
+  --panel: #17181b;
+  --raised: #24262a;
+  --line: #41444a;
+  --line-soft: #292b30;
+  --text: #eeede8;
+  --muted: #b4b3ad;
+  --faint: #9a9992;
+  --accent: #ff5f1f;
+  --on-accent: #070808;
+  --play: #ff5f1f;
+  --on-play: #070808;
+  --select: #eeede8;
+  --ok: #ffb020;
+  --mute: #a6afb8;
+  --solo: #8bb7ff;
+  --warn: #efcc76;
+  --error: #ff7489;
+
+  /* Slide fills turn in hue so they stay separate from velocity shading. */
+  --ink-1: #57a8ff; --ink-1b: #6766ff;
+  --ink-2: #80dd8f; --ink-2b: #1bbc73;
+  --ink-3: #d4db52; --ink-3b: #58ae29;
+  --ink-4: #ef73b7; --ink-4b: #dc445b;
+  --ink-5: #4fefef; --ink-5b: #0f86ce;
+  --ink-6: #9d6fe3; --ink-6b: #be45cf;
+
+  --font: "Manrope Variable", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --radius-s: 0px;
+  --radius-m: 0px;
+  --radius-l: 0px;
+  --paper: #eeede8;
+  --well: #070808;
+  --rec: #f54561;
+  --hair: rgba(238, 237, 232, 0.08);
+  --step-a: #2a2c31;
+  --step-b: #212327;
+  --step-lit: #373a40;
+  --grid-focus: #fff3c4;
+  --grid-playhead: #ff5f1f;
+  --knob-track: #45474d;
+  --reg-x: 0px;
+  --reg-y: 0px;
+
+  --roll-row: #1b1c1f;
+  --roll-row-black: #111214;
+  --roll-dim: rgba(7, 8, 8, 0.48);
+  --roll-line: rgba(238, 237, 232, 0.07);
+  --roll-beat: rgba(238, 237, 232, 0.15);
+  --roll-bar: rgba(238, 237, 232, 0.29);
+  --roll-box: rgba(238, 237, 232, 0.12);
+  --roll-playhead: #ff5f1f;
+  --roll-key-white: #e4dfd2;
+  --roll-key-black: #222326;
+  --roll-key-held: #ad701b;
+  --roll-key-scale: #ad701b;
+
+  --dev-osc1: #71dbe4;
+  --dev-osc2: #c691f2;
+  --dev-filter: #f2cc76;
+  --dev-amp: #5ba3f3;
+  --dev-lfo: #f78eb4;
+  --dev-mix: #99cd8d;
+  --dev-voice: #ff5f1f;
+  --dev-card: #212327;
+  --dev-shadow: inset 0 1px 0 rgba(238, 237, 232, 0.08), 0 0 0 1px #070808,
+    0 3px 6px -2px rgba(7, 8, 8, 0.65);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --z-overlay: 20;
+  --z-device: 5;
+  --toolbar-h: 56px;
+}

@@ -138,10 +138,12 @@ fn mixer_runtime_realtime() {
             input(0.13, 0.8),
         );
         let (mut ol, mut or) = (vec![0.0f32; frames], vec![0.0f32; frames]);
-        let mut refusals = [None; 4];
+        let mut cold_refusals = [None; 4];
+        let mut warmed_refusals = [None; 4];
         let mut reports = [RenderReport::default(); 18];
         let mut unknown = Ok(());
         let reset_at = SPANS.iter().sum::<usize>();
+        let warmed_at = reset_at + SPANS[..4].iter().sum::<usize>();
         let param_at = reset_at * 2;
 
         super::realtime(|| {
@@ -169,15 +171,22 @@ fn mixer_runtime_realtime() {
                         },
                     ];
                     let t = transport(sr, at as u64, n);
-                    if call == 0 {
+                    let refusals = if at == 0 {
+                        Some(&mut cold_refusals)
+                    } else if at == warmed_at {
+                        Some(&mut warmed_refusals)
+                    } else {
+                        None
+                    };
+                    if let Some(refusals) = refusals {
                         let swapped = [blocks[1], blocks[0]];
                         let none: [SourceBlock; 0] = [];
-                        refusals = [
+                        *refusals = [
                             k.render(&t, &swapped, &mut ol[at..at + n], &mut or[at..at + n])
                                 .err(),
                             k.render(&t, &none, &mut ol[at..at + n], &mut or[at..at + n])
                                 .err(),
-                            k.render(&transport(sr, 0, 129), &blocks, &mut ol, &mut or)
+                            k.render(&transport(sr, at as u64, 129), &blocks, &mut ol, &mut or)
                                 .err(),
                             k.render(
                                 &transport(sr * 2.0, at as u64, n),
@@ -199,7 +208,7 @@ fn mixer_runtime_realtime() {
                                 right: &[],
                             },
                         ];
-                        k.render(&transport(sr, 0, 0), &empty, &mut [], &mut [])
+                        k.render(&transport(sr, at as u64, 0), &empty, &mut [], &mut [])
                             .unwrap();
                     }
                     reports[call] = k
@@ -211,7 +220,20 @@ fn mixer_runtime_realtime() {
             }
         });
 
-        assert!(refusals.iter().all(Option::is_some), "{refusals:?}");
+        let expected_refusals = [
+            Some(RenderError::SourceOrder { index: 0 }),
+            Some(RenderError::SourceCount {
+                expected: 2,
+                got: 0,
+            }),
+            Some(RenderError::TooManyFrames {
+                frames: 129,
+                max: 128,
+            }),
+            Some(RenderError::SampleRate),
+        ];
+        assert_eq!(cold_refusals, expected_refusals, "{sr} Hz, cold");
+        assert_eq!(warmed_refusals, expected_refusals, "{sr} Hz, warmed");
         assert_eq!(unknown, Err(ParamError::UnknownInsert(InsertId(42))));
         assert!(reports.iter().all(|r| r.silenced == 0 && r.frames > 0));
 
@@ -246,8 +268,15 @@ fn mixer_runtime_realtime() {
                 at += n;
             }
         }
-        assert_eq!(ol, rl, "{sr} Hz");
-        assert_eq!(or, rr, "{sr} Hz");
+        for (channel, actual, expected) in [("left", &ol, &rl), ("right", &or, &rr)] {
+            for (frame, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "{sr} Hz, {channel} frame {frame} (warmed refusals at {warmed_at})"
+                );
+            }
+        }
         let dry: Vec<f32> = s1l.iter().zip(&s2l).map(|(a, b)| a + b).collect();
         assert_ne!(ol, dry);
         assert!(ol.iter().any(|x| x.abs() > 0.05));

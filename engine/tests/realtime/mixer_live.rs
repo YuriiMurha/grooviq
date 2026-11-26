@@ -37,6 +37,20 @@ fn mix(variant: u32) -> MixSetup {
         device(10, "algorithmic_reverb", vec![]),
         device(20, "comp", vec![-20.0 - variant as f32, 4.0]),
         device(30, "delay", vec![]),
+        // Alternating 43 and 49 frames rebuilds histories at the detector and Master,
+        // even when the synth is quiet.
+        device(
+            31,
+            "drive",
+            vec![
+                1.0,
+                variant as f32 % 12.0,
+                0.0,
+                0.5,
+                0.0,
+                1.0 + (variant % 2) as f32,
+            ],
+        ),
     ];
     if variant % 2 == 1 {
         t2.push((40, 0));
@@ -48,7 +62,7 @@ fn mix(variant: u32) -> MixSetup {
                 track(0, None, &[]),
                 track(1, Some(0), &[(10, 0)]),
                 track(2, Some(0), &t2),
-                track(3, Some(0), &[(30, 0)]),
+                track(3, Some(0), &[(30, 0), (31, 49)]),
             ],
             sends: vec![Send {
                 id: SendId(1),
@@ -57,11 +71,14 @@ fn mix(variant: u32) -> MixSetup {
                 tap: Tap::PreFader,
                 gain: 0.3,
             }],
-            sidechains: vec![Sidechain {
-                from: MixerTrackId(1),
-                to: InsertId(20),
-                tap: Tap::PostFader,
-            }],
+            sidechains: [1, 3]
+                .into_iter()
+                .map(|from| Sidechain {
+                    from: MixerTrackId(from),
+                    to: InsertId(20),
+                    tap: Tap::PostFader,
+                })
+                .collect(),
             sources: vec![
                 Source {
                     id: SourceId::Channel(3),
@@ -342,8 +359,18 @@ fn full_fading_room_returns_removed_nodes_under_guard() {
 /// A source transaction reaching a faulted graph is refused whole inside the callback and
 /// returns every owned node in its envelope.
 #[test]
+#[cfg(feature = "test-hooks")]
 fn faulted_graph_returns_refused_sources_under_guard() {
+    let mut initial = mix(0);
+    let MixSetup::Routed(routed) = &mut initial else {
+        unreachable!()
+    };
+    routed.mixer.sources.push(Source {
+        id: SourceId::Channel(1),
+        destination: MixerTrackId(1),
+    });
     let state = EngineState {
+        mix: initial.clone(),
         channels: vec![synth(1)],
         ..EngineState::default()
     };
@@ -359,8 +386,16 @@ fn faulted_graph_returns_refused_sources_under_guard() {
     // The panic itself allocates its payload: outside the guard, as a fault is.
     p.process(&mut out, 2);
     // The controller has not collected the fault yet: it admits the edit.
-    c.set_sources_and_mix(edit(vec![1], vec![1, 2, 3])).unwrap();
-    c.set_mix(MixSetup::LegacyDirect).unwrap();
+    let mut update = edit(vec![1], vec![1, 2, 3]);
+    let MixSetup::Routed(routed) = &mut initial else {
+        unreachable!()
+    };
+    routed.mixer.sources.push(Source {
+        id: SourceId::Channel(2),
+        destination: MixerTrackId(2),
+    });
+    update.mix = initial;
+    c.set_sources_and_mix(update).unwrap();
     super::realtime(|| p.process(&mut out, 2));
     super::realtime(|| p.process(&mut out, 2));
     let events = c.check_health();

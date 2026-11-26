@@ -32,6 +32,10 @@ tempfile = "3"
 name = "render"
 harness = false
 
+[[bench]]
+name = "song_export"
+harness = false
+
 # Instruction counts through Callgrind (Apache-2.0 OR MIT). Valgrind runs on Linux only.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 gungraun = "0.20.0"

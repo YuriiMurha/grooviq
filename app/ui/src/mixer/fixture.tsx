@@ -2,7 +2,8 @@
 // stream, and a stand-in host that applies or refuses commands. No engine, IPC or audio; never
 // part of the app's build (a non-production Vite input).
 //
-// Query: ?tracks=<n> generated tracks (0 for none), ?long=1 long names and chains.
+// Query: ?tracks=<n> generated tracks (0 for none), ?long=1 long names and chains,
+// ?offscreen-send=1 makes the last generated track a send destination.
 
 import "@fontsource-variable/manrope";
 import "../theme/styles";
@@ -13,6 +14,7 @@ import { createRoot } from "react-dom/profiling";
 import { initializeTheme } from "../theme/bootstrap";
 import { waitForStartupStyles } from "../theme/waitForStartupStyles";
 import { Mixer } from "./Mixer";
+import { StripProfiler } from "./stripProfiler";
 import type { MeterSource, MixerCommand, MixerError, MixerInsert, MixerMaster, MixerOption, MixerProps, MixerTrack } from "./mixerModel";
 
 const EFFECTS: MixerOption[] = [
@@ -116,6 +118,7 @@ function initial(): State {
   if (count !== null) {
     const n = Math.max(0, Math.floor(Number(count)) || 0);
     tracks = Array.from({ length: n }, (_, i) => base(`n-${i + 1}`, `Track ${i + 1}`, "Instrument", (i % 6) + 1, -6 - (i % 7), i % 3 ? ["EQ"] : []));
+    if (tracks.length && q.has("offscreen-send")) tracks[tracks.length - 1].kind = "Return";
   } else {
     tracks = [
       base("n-kick", "Kick", "Instrument", 1, -4, ["EQ", "Drum Shaper"]),
@@ -234,11 +237,12 @@ declare global {
     /** The fixture's host, for the Playwright spec. */
     mixerFixture: {
       log: MixerCommand[];
-      stats(): { meterFrames: number; mixerCommits: number };
+      stats(): { meterFrames: number; mixerCommits: number; stripCommits: Record<string, number> };
       refuseNext(message: string): void;
       deferNextCommit(): void;
       settleCommit(accepted: boolean): void;
       setPending(id: string, pending: boolean): void;
+      offerSend(id: string, destination: MixerOption): void;
       remove(id: string): void;
       replace(id: string, newId: string): void;
       removeSend(id: string, sendId: string): void;
@@ -249,6 +253,8 @@ declare global {
 
 /** Every command the mixer emitted, in order. */
 const LOG: MixerCommand[] = [];
+const stripCommits = new Map<string, number>();
+const countStripCommit = (id: string) => stripCommits.set(id, (stripCommits.get(id) ?? 0) + 1);
 
 /** The state the meter source reads. */
 let shownState: State | null = null;
@@ -257,7 +263,7 @@ const METERS = meterSource(() => shownState);
 export function Fixture() {
   const [state, setState] = useState(initial);
   const deferNext = useRef(false);
-  const deferred = useRef<{ command: Extract<MixerCommand, { type: "param" }>; resolve: () => void } | null>(null);
+  const deferred = useRef<{ command: Extract<MixerCommand, { type: "param" | "addSend" }>; resolve: () => void } | null>(null);
   const afterRender = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
     shownState = state;
@@ -270,7 +276,7 @@ export function Fixture() {
   useLayoutEffect(() => {
     window.mixerFixture = {
       log: LOG,
-      stats: () => ({ meterFrames, mixerCommits }),
+      stats: () => ({ meterFrames, mixerCommits, stripCommits: Object.fromEntries(stripCommits) }),
       refuseNext: (message) => setState((s) => ({ ...s, refuse: message })),
       deferNextCommit: () => { deferNext.current = true; },
       settleCommit: (accepted) => {
@@ -278,11 +284,18 @@ export function Fixture() {
         if (!pending) return;
         deferred.current = null;
         afterRender.current = pending.resolve;
-        setState((s) => accepted
-          ? { ...apply(s, pending.command), error: null }
-          : { ...s, error: { nodeId: pending.command.target.nodeId, message: "Refused delayed fixture commit." } });
+        const { command } = pending;
+        setState((s) => {
+          if (!accepted) {
+            const nodeId = command.type === "param" ? command.target.nodeId : command.nodeId;
+            return { ...s, error: { nodeId, message: "Refused delayed fixture commit." } };
+          }
+          const next = apply(s, command);
+          return { ...next, tracks: command.type === "addSend" ? wire(next.tracks, next.master) : next.tracks, error: null };
+        });
       },
       setPending: (id, pending) => setState((s) => update(s, id, (t) => ({ ...t, pending }))),
+      offerSend: (id, destination) => setState((s) => update(s, id, (t) => ({ ...t, sendDestinations: [...t.sendDestinations, destination] }))),
       remove: (id) => setState((s) => ({ ...s, tracks: s.tracks.filter((t) => t.id !== id) })),
       replace: (id, newId) => setState((s) => ({ ...s, tracks: s.tracks.map((t) => (t.id === id ? { ...t, id: newId, sends: t.sends.map((x) => ({ ...x, id: uid("send") })) } : t)) })),
       removeSend: (id, sendId) => setState((s) => update(s, id, (t) => ({ ...t, sends: t.sends.filter((x) => x.id !== sendId) }))),
@@ -292,7 +305,7 @@ export function Fixture() {
 
   const onCommand = (c: MixerCommand) => {
     window.mixerFixture.log.push(c);
-    if (c.type === "param" && c.phase === "commit" && deferNext.current) {
+    if (deferNext.current && (c.type === "addSend" || (c.type === "param" && c.phase === "commit"))) {
       deferNext.current = false;
       return new Promise<void>((resolve) => { deferred.current = { command: c, resolve }; });
     }
@@ -317,7 +330,11 @@ export function Fixture() {
         {state.opened && <span role="status">Opened {state.opened}</span>}
         <p>Silent fixture · simulated meters</p>
       </header>
-      {measure ? <Profiler id="mixer" onRender={() => { mixerCommits++; }}>{mixer}</Profiler> : mixer}
+      {measure ? (
+        <Profiler id="mixer" onRender={() => { mixerCommits++; }}>
+          <StripProfiler.Provider value={countStripCommit}>{mixer}</StripProfiler.Provider>
+        </Profiler>
+      ) : mixer}
     </main>
   );
 }

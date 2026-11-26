@@ -316,25 +316,11 @@ pub async fn transport_stop(audio: State<'_, Audio>) -> Result<(), String> {
     transport(&audio, Command::Stop)
 }
 
-/// A project was replaced (new, opened, restored): the autosave on disk is the old one's, and
-/// a crash now must not offer it back. One the folder will not drop is told in the log; the
-/// next autosave of the open project replaces it.
-fn forget_autosave(audio: &Audio) {
-    if let Some(dir) = lock(&audio.recovery).as_ref()
-        && let Err(e) = dir.clear_autosave()
-    {
-        lock(&audio.log).push(
-            crate::audio_log::Level::Warn,
-            format!("The previous project's autosave could not be removed: {e}"),
-        );
-    }
-}
-
 /// Starts an empty, untitled project. The UI asks about unsaved changes first.
 #[tauri::command]
 pub async fn project_new(app: AppHandle, audio: State<'_, Audio>) -> Result<ProjectView, String> {
     let view = replaced(&app, &audio, |s| s.new_project().map_err(|e| e.to_string()))?;
-    forget_autosave(&audio);
+    audio.clear_retired_autosaves().await;
     Ok(view)
 }
 
@@ -351,8 +337,9 @@ pub async fn project_open(
         let budget = session(&audio).media_budget();
         move || {
             let loaded =
-                grooviq_project::load_budgeted(&path, &budget).map_err(|e| e.to_string())?;
-            let decoded = grooviq_project::decode_samples_budgeted_checked(&loaded, &budget)?;
+                grooviq_project::file::load_for_open(&path, &budget).map_err(|e| e.to_string())?;
+            let decoded =
+                grooviq_project::decode_samples_budgeted_checked(loaded.loaded(), &budget)?;
             Ok((loaded, decoded))
         }
     })
@@ -360,7 +347,7 @@ pub async fn project_open(
     let report = replaced(&app, &audio, |s| {
         s.open(&path, loaded, decoded).map_err(|e| e.to_string())
     })?;
-    forget_autosave(&audio);
+    audio.clear_retired_autosaves().await;
     Ok(report)
 }
 
@@ -398,9 +385,8 @@ async fn save_to(audio: &Audio, path: Option<PathBuf>) -> Result<ProjectView, St
         };
         (session.view(), applied && !session.needs_confirmation())
     };
-    if clean && let Some(dir) = lock(&audio.recovery).as_ref() {
-        // Nothing unsaved is left to recover. A stale autosave is only an older copy.
-        let _ = dir.clear_autosave();
+    if clean {
+        audio.clear_retired_autosaves().await;
     }
     Ok(view)
 }
@@ -514,7 +500,7 @@ pub async fn recovery_restore(
         )
         .map_err(|e| e.to_string())
     })?;
-    forget_autosave(&audio);
+    audio.clear_retired_autosaves().await;
     lock(&audio.pending_recovery).take();
     // No longer offered. If the folder refuses, it is offered again next launch: not worth
     // failing the restore over.

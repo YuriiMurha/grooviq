@@ -1,3 +1,4 @@
+import { choosePickerOption, pickerButton } from "./listPickerHelpers";
 import type { Page } from "@playwright/test";
 import { test, expect, project, soundsFor, clickCell } from "./fixture";
 import type { PatternsView, PatternReply } from "../src/api/patterns";
@@ -44,7 +45,7 @@ test.beforeEach(async ({ app, mock }) => {
   await app.keyboard.press("ControlOrMeta+o");
   await expect(app.getByRole("region", { name: "Channel rack" })).toBeVisible();
   await expect.poll(async () => (await patterns(app)).generation).toBe(1);
-  await expect(app.getByRole("combobox", { name: "Playback mode" })).toHaveValue("pattern");
+  await expect(pickerButton(app, "Playback mode")).toHaveAccessibleName("Playback mode: Pattern");
 });
 for (const flow of ["new", "open"] as const) for (const answer of ["cancel", "save"] as const) {
   test(`pending accepted picker mutation guards ${flow} with ${answer}`, async ({ app, mock }) => {
@@ -293,14 +294,14 @@ test("T9 reduced: no-op/read/clean save and native mode persistence do not inven
   const noop = await reset(app, 1); expect(noop.status === "applied" && noop.changed).toBe(false);
   const same = await ipc<ArrangementReply>(app, "arrangement_mode", { generation: initial.generation, revision: initial.revision, mode: "pattern" }); expect(same.changed).toBe(false);
   expect((await arrangement(app)).revision).toBe(initial.revision);
-  const mode = app.getByRole("combobox", { name: "Playback mode" }); await mode.selectOption("song");
-  await expect(mode).toHaveValue("song");
+  const mode = pickerButton(app, "Playback mode"); await choosePickerOption(app, "Playback mode", "Song");
+  await expect(mode).toHaveAccessibleName("Playback mode: Song");
   const changed = await arrangement(app); expect(changed.revision).toBe(initial.revision + 1);
   await app.keyboard.press("ControlOrMeta+s"); await expect.poll(async () => (await mock.view()).dirty).toBe(false);
   expect((await arrangement(app)).revision).toBe(changed.revision);
   await mock.eval(`(m) => m.queueDialog('${file}')`); await app.keyboard.press("ControlOrMeta+o");
   await expect.poll(async () => (await arrangement(app)).generation).toBe(initial.generation + 1);
-  await expect(mode).toHaveValue("song"); expect((await arrangement(app)).revision).toBe(0);
+  await expect(mode).toHaveAccessibleName("Playback mode: Song"); expect((await arrangement(app)).revision).toBe(0);
   expect(await mock.calls("transport_play")).toHaveLength(0);
 });
 test("T9 reduced: history admission refusal preserves real stacks, values, revision and capabilities", async ({ app, mock }) => {
@@ -311,7 +312,7 @@ test("T9 reduced: history admission refusal preserves real stacks, values, revis
   expect(effect(await history(app, true))).toEqual({ kind: "samplerTrim", channel: 2 });
 });
 for (const refused of [false, true]) test(`T9 mode transition fences new gestures and releases after refusal ${refused}`, async ({ app, mock }) => {
-  const mode = app.getByRole("combobox", { name: "Playback mode" });
+  const mode = pickerButton(app, "Playback mode");
   const hint = app.getByLabel("Hint");
   const expectTransportHints = async (applied: "pattern" | "song") => {
     const other = applied === "song" ? "pattern" : "song";
@@ -325,7 +326,7 @@ for (const refused of [false, true]) test(`T9 mode transition fences new gesture
     await expect(hint).toContainText(new RegExp(`\\b${applied}\\b`));
     await expect(hint).not.toContainText(new RegExp(`\\b${other}\\b`));
   };
-  await expect(mode).toHaveValue("pattern");
+  await expect(mode).toHaveAccessibleName("Playback mode: Pattern");
   await expectTransportHints("pattern");
   const before = (await mock.calls("project_edit")).length;
   // A local tempo draft must enter the session queue before the mode's revision is read.
@@ -333,7 +334,7 @@ for (const refused of [false, true]) test(`T9 mode transition fences new gesture
   expect((await mock.view()).bpm).toBe(120);
   await mock.eval("(m) => m.holdCommand('arrangement_mode')");
   if (refused) await mock.eval("(m) => m.refuseWorkspaceNext('generated mode admission refusal')");
-  await mode.selectOption("song");
+  await choosePickerOption(app, "Playback mode", "Song");
   await expect.poll(async () => (await mock.calls("arrangement_mode")).length).toBe(1);
   await expect(mode).toBeDisabled();
   expect((await arrangement(app)).playMode).toBe("pattern");
@@ -348,7 +349,7 @@ for (const refused of [false, true]) test(`T9 mode transition fences new gesture
   expect(await mock.calls("project_edit")).toHaveLength(edits);
   await mock.eval("(m) => m.releaseCommand('arrangement_mode')");
   await expect(mode).toBeEnabled();
-  await expect(mode).toHaveValue(refused ? "pattern" : "song");
+  await expect(mode).toHaveAccessibleName(refused ? "Playback mode: Pattern" : "Playback mode: Song");
   expect((await arrangement(app)).playMode).toBe(refused ? "pattern" : "song");
   await expectTransportHints(refused ? "pattern" : "song");
   if (refused) await expect(app.getByRole("status", { name: "Messages" })).toContainText("generated mode admission refusal");
@@ -357,6 +358,36 @@ for (const refused of [false, true]) test(`T9 mode transition fences new gesture
   expect((await patterns(app)).view.pattern.cells["1"][4]).not.toBeNull();
   expect(await mock.calls("transport_play")).toHaveLength(0);
 });
+test("a mode switch refuses new rack edits until the final project readback", async ({ app, mock }) => {
+  const nativeMode = app.getByRole("combobox", { name: "Playback mode", exact: true });
+  const pickerMode = app.getByRole("button", { name: /^Playback mode:/ });
+  const mode = nativeMode.or(pickerMode);
+  const before = (await mock.calls("project_edit")).length;
+  const views = (await mock.calls("project_view")).length;
+
+  await mock.eval("(m) => m.holdCommand('project_view')");
+  try {
+    if (await nativeMode.count()) {
+      await nativeMode.selectOption("song");
+    } else {
+      await pickerMode.click();
+      await app.getByRole("listbox", { name: "Playback mode", exact: true }).getByRole("option", { name: "Song", exact: true }).click();
+    }
+    await expect.poll(async () => (await mock.calls("project_view")).length).toBeGreaterThan(views);
+    expect((await arrangement(app)).playMode).toBe("song");
+    await expect(mode).toBeDisabled();
+    await clickCell(app, 0, 4);
+  } finally {
+    await mock.eval("(m) => m.releaseCommand('project_view')");
+  }
+
+  await expect(mode).toBeEnabled();
+  await clickCell(app, 0, 5);
+  await expect.poll(async () => (await patterns(app)).view.pattern.cells["1"][5]).not.toBeNull();
+  expect(await mock.calls("project_edit")).toHaveLength(before + 1);
+  expect((await patterns(app)).view.pattern.cells["1"][4]).toBeNull();
+});
+
 test("T9 reduced: dedicated/global inverses retain optional values, order and identity relations", async ({ app }) => {
   const before = await ipc<TrimState>(app, "sampler_trim_view", { channel: 2 });
   const resetReply = await reset(app); expect(resetReply.status).toBe("applied"); if (resetReply.status !== "applied") throw new Error(resetReply.message);
@@ -444,7 +475,11 @@ test("T9 F5 preserves the open roll, selected channel and requested split", asyn
       const contentHeight = (await app.locator(".workspace").boundingBox())!.height;
       return Math.abs(Number(await splitter.getAttribute("aria-valuenow")) - rackHeight / contentHeight * 100);
     }).toBeLessThanOrEqual(0.05);
-    if (!visible) await expect.poll(async () => Number(await splitter.getAttribute("aria-valuenow"))).toBe(Math.round(parseFloat(requested) * 10) / 10);
+    if (!visible) await expect.poll(async () => {
+      const rackHeight = (await app.locator(".panel-rack").boundingBox())!.height;
+      const contentHeight = (await app.locator(".workspace").boundingBox())!.height;
+      return rackHeight - Math.round(contentHeight * (parseFloat(requested) / 100));
+    }).toBe(0);
   }
 });
 test("T9 reduced: absent original trim entries survive inverse and failed Open preserves capabilities", async ({ app, mock }) => {

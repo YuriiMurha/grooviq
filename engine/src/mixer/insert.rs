@@ -1,4 +1,5 @@
 use super::InsertId;
+use super::delay::DelayIndex;
 use grooviq_dsp::Device;
 
 /// What makes two prepared devices interchangeable for a survivor transfer: the same
@@ -11,7 +12,7 @@ pub struct InsertIdentity {
 }
 
 /// A built-in device the caller constructed, preset, seeded and prepared for the mixer's
-/// sample rate off-thread. The kernel neither inspects nor bounds its memory or latency.
+/// sample rate off-thread. Compensated preparation checks its reported latency against the insert's bound.
 pub struct PreparedInsert {
     pub id: InsertId,
     pub device: Box<dyn Device>,
@@ -41,11 +42,14 @@ pub(super) struct InsertSlot {
     pub(super) device: Box<dyn Device>,
     pub(super) identity: InsertIdentity,
     pub(super) detector: (u32, u32),
+    pub(super) delay: DelayIndex,
+    pub(super) latency: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParamError {
     UnknownInsert(InsertId),
+    RequiresPreparedInstall,
 }
 
 /// Sorted insert identity to chain slot, built off-thread; lookups are a binary search.

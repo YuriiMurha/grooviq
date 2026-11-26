@@ -73,7 +73,7 @@ pub struct RecoveryDir {
     root: PathBuf,
     /// Held, and locked, for the app's life.
     lock: File,
-    /// The number of the newest autosave file this session wrote.
+    /// The number reserved for the newest autosave attempt.
     written: AtomicU64,
     confirmed: std::sync::Mutex<Option<String>>,
 }
@@ -311,11 +311,19 @@ impl RecoveryDir {
 
     /// The files named `<prefix><number>.grooviq`, oldest first, as `(number, path)`.
     fn numbered(&self, prefix: &str) -> Vec<(u64, PathBuf)> {
+        Self::numbered_entries(
+            prefix,
+            fs::read_dir(&self.root).into_iter().flatten().flatten(),
+        )
+    }
+
+    fn numbered_entries(
+        prefix: &str,
+        entries: impl IntoIterator<Item = fs::DirEntry>,
+    ) -> Vec<(u64, PathBuf)> {
         let suffix = format!(".{EXTENSION}");
-        let mut found: Vec<(u64, PathBuf)> = fs::read_dir(&self.root)
+        let mut found: Vec<(u64, PathBuf)> = entries
             .into_iter()
-            .flatten()
-            .flatten()
             .filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let number = name
@@ -418,7 +426,29 @@ impl RecoveryDir {
         between: impl FnOnce() -> io::Result<()>,
         disk: &mut impl Disk,
     ) -> io::Result<()> {
-        let number = self.written.fetch_add(1, Ordering::AcqRel) + 1;
+        self.write_reserved_autosave(
+            self.reserve_autosave(),
+            project,
+            samples,
+            original,
+            between,
+            disk,
+        )
+    }
+
+    pub(crate) fn reserve_autosave(&self) -> u64 {
+        self.written.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub(crate) fn write_reserved_autosave(
+        &self,
+        number: u64,
+        project: &Project,
+        samples: &SampleFiles,
+        original: Option<&Path>,
+        between: impl FnOnce() -> io::Result<()>,
+        disk: &mut impl Disk,
+    ) -> io::Result<()> {
         let name = format!("{AUTOSAVE}{number}.{EXTENSION}");
         let file = self.root.join(&name);
         if let Err(e) = stage_save(project, samples, &file, disk)?.commit(disk) {
@@ -469,18 +499,24 @@ impl RecoveryDir {
         Ok(())
     }
 
-    #[doc(hidden)]
-    pub fn write_sequence(&self) -> u64 {
-        self.written.load(Ordering::Acquire)
-    }
-
-    /// Clears only the write this tick made, never a newer project's snapshot.
-    #[doc(hidden)]
-    pub fn clear_autosave_if_current(&self, sequence: u64) -> io::Result<()> {
-        if self.write_sequence() == sequence {
-            self.clear_autosave()?;
+    /// Called with the recovery mutex held. Leave newer attempts intact, including complete
+    /// snapshots whose metadata has yet to be confirmed.
+    pub(crate) fn clear_autosaves_through(&self, through: u64) -> io::Result<()> {
+        let entries = fs::read_dir(&self.root)?.collect::<io::Result<Vec<_>>>()?;
+        remove(&self.root.join(LEGACY_AUTOSAVE))?;
+        for (_, path) in Self::numbered_entries(AUTOSAVE, entries)
+            .into_iter()
+            .take_while(|(n, _)| *n <= through)
+        {
+            remove(&path)?;
         }
-        Ok(())
+        let meta = self.root.join(META);
+        // With a newer attempt, keep its metadata if it committed. If the metadata still
+        // describes a removed file, startup will offer the newer snapshot on its own.
+        if self.written.load(Ordering::Acquire) == through {
+            remove(&meta)?;
+        }
+        RealDisk.sync_folder(&meta)
     }
 
     /// Removes the autosave: the project was just saved, so there is nothing to recover.

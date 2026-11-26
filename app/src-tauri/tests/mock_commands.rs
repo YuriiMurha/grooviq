@@ -30,10 +30,10 @@ fn mocked() -> BTreeSet<String> {
     let mock = read("../ui/e2e/mockTauri.ts");
     let mut lines = mock
         .lines()
-        .skip_while(|l| !l.trim_start().starts_with("const commands: Record<"));
+        .skip_while(|l| !l.trim_start().eq("const commands = {"));
     assert!(lines.next().is_some(), "the mock has a `commands` table");
     lines
-        .take_while(|l| *l != "  };")
+        .take_while(|l| *l != "  } satisfies MockCommands;")
         .filter_map(|l| {
             let key = l.strip_prefix("    ")?.split_once(':')?.0;
             key.chars()

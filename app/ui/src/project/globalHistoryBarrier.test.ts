@@ -28,7 +28,7 @@ it("a stale origin and an active drag cannot enter native command", async () => 
 
 const nativeView = (): ProjectView => ({ name: "History", path: null, dirty: true, bpm: 120,
   timeSignature: { beats: 4, unit: 4 }, channels: [], pattern: { id: 1, name: "A", steps: 16, swing: 0, cells: {} },
-  autosavedAt: null, key: null, notesRevision: 8, recording: false, canUndo: true, canRedo: false, generation: 7, patternRevision: 1 });
+  autosavedAt: null, key: null, notesRevision: 8, recording: false, canUndo: true, canRedo: false, projectCanUndo: true, projectCanRedo: false, generation: 7, patternRevision: 1 });
 function historyLane() {
   const queue = new ProjectCommandQueue(); const view = nativeView();
   const invalidate = vi.fn(); const adopt = vi.fn();
@@ -76,7 +76,7 @@ it("replacement while native read is held cannot publish or invalidate the new p
 });
 it("same numeric sampler state still publishes a fresh observed object, isolating its channel", async () => {
   const { adapter, view, adopt, invalidate } = historyLane();
-  const channel = { id: 42, name: "Sampler", color: 0, sampleName: "generated.wav", missing: false, sampleFrames: 2,
+  const channel = { id: 42, name: "Sampler", color: 0, sampleName: "generated.wav", sampleNameBasis: null, sampleReference: null, missing: false, sampleFrames: 2,
     volume: 1, pan: 0, mute: false, solo: false, sampler: { start: 0, end: 1 }, kind: "sampler" as const, synth: {}, preset: null, choke: 0, roll: false };
   const before = { ...view, channels: [channel] };
   const fresh = { ...before, channels: [{ ...channel, sampler: { ...channel.sampler } }] };

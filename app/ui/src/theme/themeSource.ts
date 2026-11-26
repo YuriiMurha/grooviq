@@ -1,3 +1,17 @@
+const CSS_STRING = /"(?:\\(?:\r\n|.)|[^"\\\n\r\f])*"|'(?:\\(?:\r\n|.)|[^'\\\n\r\f])*'/;
+// Consume complete comments and strings before looking for unsupported tokens or delimiters.
+const THEME_SYNTAX = new RegExp([
+  /(\/\*.*?\*\/)/.source,
+  CSS_STRING.source,
+  /((?<![\w\u0080-\uFFFF-])url\(|[!"'\\]|\/\*)/.source,
+  /([{};()[\]])/.source,
+].join("|"), "gis");
+const THEME_VALUE_TOKEN = new RegExp([
+  CSS_STRING.source,
+  // Identifier characters, hash and at-keyword prefixes cannot precede a standalone var().
+  /(?<![\w#@\u0080-\uFFFF-])var\(\s*(--[\w-]+)\s*\)/.source,
+].join("|"), "gs");
+
 /** Read a theme file's single flat rule before the CSS build rewrites values. */
 export function parseThemeDeclarations(css: string, selector: string): Map<string, string> {
   const declarations = new Map<string, string>();
@@ -6,11 +20,14 @@ export function parseThemeDeclarations(css: string, selector: string): Map<strin
   let statement = "";
   let inThemeRule = false;
   let seenThemeRule = false;
-  // Match strings as units so punctuation inside them never starts a comment or splits a declaration.
-  const syntax = /(\/\*.*?\*\/)|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\\.|([{};()[\]])/gs;
-  for (const match of css.matchAll(syntax)) {
-    const [token, comment, delimiter] = match;
-    // Let the next structural token collect the whole quoted or escaped value.
+  for (const match of css.matchAll(THEME_SYNTAX)) {
+    const [token, comment, unsupported, delimiter] = match;
+    if (unsupported === "!") throw new Error(`Unsupported CSS "!" while reading ${selector}`);
+    if (unsupported === "\\") throw new Error(`Unsupported CSS escape while reading ${selector}`);
+    if (unsupported === '"' || unsupported === "'") throw new Error(`Unterminated CSS string while reading ${selector}`);
+    if (unsupported === "/*") throw new Error(`Unterminated CSS comment while reading ${selector}`);
+    if (unsupported) throw new Error(`Unsupported CSS url() while reading ${selector}`);
+    // Let the next structural token collect the whole quoted value.
     if (!comment && !delimiter) continue;
     if (delimiter === "(" || delimiter === "[") {
       groups.push(delimiter === "(" ? ")" : "]");
@@ -44,9 +61,11 @@ export function parseThemeDeclarations(css: string, selector: string): Map<strin
     }
     if (groups.length) throw new Error(`Unbalanced delimiters while reading ${selector}`);
     const declaration = /^(--[\w-]+)\s*:\s*(.*)$/s.exec(text);
+    if (text && !declaration) {
+      throw new Error(`Unsupported declaration ${JSON.stringify(text)} while reading ${selector}`);
+    }
     if (declaration) {
       const [, name, value] = declaration;
-      if (/!\s*important$/i.test(value)) throw new Error(`${selector} ${name} must not use !important`);
       declarations.set(name, value);
     }
     if (delimiter === "}") inThemeRule = false;
@@ -70,7 +89,8 @@ export function resolveThemeDeclarations(declarations: ReadonlyMap<string, strin
 
     resolving.add(name);
     let missing = false;
-    const expanded = value.replace(/\bvar\(\s*(--[\w-]+)\s*\)/g, (_, reference: string) => {
+    const expanded = value.replace(THEME_VALUE_TOKEN, (token: string, reference: string | undefined) => {
+      if (reference === undefined) return token;
       const replacement = resolve(reference);
       missing ||= replacement === "";
       return replacement;

@@ -1,9 +1,8 @@
 name: perf
 
-# Speed numbers for benchmark inputs. Render timing is informational; roll timing retries a
-# budget failure once. Instruction counts are exact: that job fails when a benchmark runs
-# more than 1 % more instructions than on the merge commit's first parent (the base branch
-# tip GitHub merged onto). None is a required check.
+# Render timing is informational. Roll timing retries a budget failure once. M3 export timing
+# checks a single batch. The instruction job fails when a count rises by more than 1 % from
+# the merge commit's first parent (the base tip GitHub merged onto). None is a required check.
 
 on:
   push:
@@ -117,6 +116,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v5
+      - name: Key the Rust cache on the root manifest
+        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
       - run: rustup toolchain install
         timeout-minutes: 3
       - uses: actions/setup-python@v6
@@ -166,6 +167,29 @@ jobs:
         with:
           name: perf-${{ matrix.os }}
           path: perf/
+
+  song-export:
+    needs: optional-inputs
+    if: ${{ !inputs.capture_only && !inputs.rt_workers_probe && always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
+    name: M3 export timing (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Key the Rust cache on the root manifest
+        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libasound2-dev
+      - run: rustup toolchain install
+        timeout-minutes: 3
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: song-export
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check the warmed production export budget
+        shell: bash
+        env:
+          GROOVIQ_SONG_EXPORT_BUDGET: '1'
+        run: make --silent bench-song | tee -a "$GITHUB_STEP_SUMMARY"
 
   # The same scene must render the same bits on every platform (the export rule).
   determinism:
@@ -265,7 +289,7 @@ jobs:
             exit 1
           fi
           overlay=$(mktemp -d)
-          paths=(tests/golden/benches/instructions.rs tests/golden/benches/support/synth_workload.rs tests/golden/benches/support/sampler_workload.rs)
+          paths=(tests/golden/benches/instructions.rs tests/golden/benches/support/synth_workload.rs tests/golden/benches/support/sampler_workload.rs tests/golden/benches/support/song_workload.rs)
           for path in "${paths[@]}"; do
             mkdir -p "$overlay/$(dirname "$path")"
             cp "$path" "$overlay/$path"

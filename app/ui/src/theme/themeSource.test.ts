@@ -56,7 +56,64 @@ test("rejects imports before the theme rule", () => {
 
 test("rejects an important value that would bypass a later override", () => {
   const css = `${testSelector} { --ink: oklch(0.7 0.1 20) !important; --ink: #123; }`;
-  expect(() => parseThemeDeclarations(css, testSelector)).toThrow("--ink must not use !important");
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported CSS "!" while reading ${testSelector}`);
+});
+
+test("rejects a bare ! in a value that would overwrite a valid declaration", () => {
+  const css = `${testSelector} { --ink-1:#123; --ink-1:#456 ! x; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported CSS "!" while reading ${testSelector}`);
+});
+
+test("rejects an escaped custom-property name that would override a plain name", () => {
+  const css = `${testSelector} { --ink-1: #123; --ink\\-1: #456; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported CSS escape while reading ${testSelector}`);
+});
+
+test.each([
+  ["line feed", "\n"],
+  ["carriage return", "\r"],
+  ["form feed", "\f"],
+])("rejects a string with a raw %s before a later quote", (_, newline) => {
+  const css = `${testSelector} { --font: "broken${newline}; --ink-1: #456; --font: "fallback; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unterminated CSS string while reading ${testSelector}`);
+});
+
+test("rejects a stray quote at the end of a value", () => {
+  const css = `${testSelector} { --font: fallback'; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unterminated CSS string while reading ${testSelector}`);
+});
+
+test.each([
+  "url(a/*b*/c)",
+  'URL("a")',
+])("rejects %s before interpreting its contents", (value) => {
+  const css = `${testSelector} { --image: ${value}; --ink-1: #123; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported CSS url() while reading ${testSelector}`);
+});
+
+test("rejects an escaped important annotation that would bypass a later override", () => {
+  const css = `${testSelector} { --ink-1: #456 !\\important; --ink-1: #123; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported CSS "!" while reading ${testSelector}`);
+});
+
+test("rejects an unsupported declaration", () => {
+  const css = `${testSelector} { --ink-1: #123; color: red; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported declaration "color: red" while reading ${testSelector}`);
+});
+
+test("rejects an unterminated comment", () => {
+  const css = `${testSelector} { --ink-1: #123 /* }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unterminated CSS comment while reading ${testSelector}`);
+});
+
+test("keeps escaped quotes, url() text and exclamation marks inside strings", () => {
+  const css = `${testSelector} { --font: "a\\"url(b)!"; --ink-1: #123; }`;
+  expect(parseThemeDeclarations(css, testSelector).get("--font")).toBe('"a\\"url(b)!"');
+});
+
+test("ignores backslashes and exclamation marks inside comments", () => {
+  const css = `${testSelector} { /* a\\ b */ /* ! */ --ink-1:#123; }`;
+  expect(parseThemeDeclarations(css, testSelector).get("--ink-1")).toBe("#123");
 });
 
 test("rejects a theme selector inside a conditional rule", () => {
@@ -67,6 +124,38 @@ test("rejects a theme selector inside a conditional rule", () => {
 test("rejects a nested block in a theme rule", () => {
   const css = `${testSelector} { --ink: #123; @supports (display: grid) { --ink: #456; } }`;
   expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`${testSelector} must not contain nested blocks`);
+});
+
+test.each([
+  ['"var(--ink)"', '"var(--ink)"'],
+  ['"var(--absent)"', '"var(--absent)"'],
+  ["'var(--ink)'", "'var(--ink)'"],
+  ["'var(--absent)'", "'var(--absent)'"],
+  ['"a\\"var(--ink)", var(--ink)', '"a\\"var(--ink)", #123'],
+  ['"a\\\r\nvar(--ink)"', '"a\\\r\nvar(--ink)"'],
+])("preserves quoted text when resolving %j", (value, expected) => {
+  const declarations = parseThemeDeclarations(`:root { --ink: #123; --value: ${value}; }`, ":root");
+  expect(resolveThemeDeclarations(declarations).get("--value")).toBe(expected);
+});
+
+test("preserves quoted text from a referenced declaration", () => {
+  const declarations = parseThemeDeclarations(':root { --value: var(--label); --label: "var(--absent)"; }', ":root");
+  expect(resolveThemeDeclarations(declarations).get("--value")).toBe('"var(--absent)"');
+});
+
+test.each([
+  ["some-var(--ink)", "some-var(--ink)"],
+  ["some-var(--absent)", "some-var(--absent)"],
+  ["some-var(var(--ink))", "some-var(#123)"],
+  ["some-var(--absent),var(--ink)", "some-var(--absent),#123"],
+  ["some_var(--ink)", "some_var(--ink)"],
+  ["name1var(--ink)", "name1var(--ink)"],
+  ["évar(--ink)", "évar(--ink)"],
+  ["#var(--ink)", "#var(--ink)"],
+  ["@var(--ink)", "@var(--ink)"],
+])("resolves only complete var() functions in %j", (value, expected) => {
+  const declarations = parseThemeDeclarations(`:root { --ink: #123; --value: ${value}; }`, ":root");
+  expect(resolveThemeDeclarations(declarations).get("--value")).toBe(expected);
 });
 
 test("resolves alias chains and multi-value properties against the overlaid palette", () => {

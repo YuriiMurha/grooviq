@@ -47,6 +47,7 @@ class AgentTests(unittest.TestCase):
         self.agent.verify_sources = Mock()
         self.agent.remote_tips = Mock(return_value={"main": HEAD, "batch": None})
         self.agent.run_tick = Mock(return_value=subprocess.CompletedProcess([], 0, "waiting\n"))
+        self.agent.commit_message = Mock(return_value=merge_train.Batch(HEAD, [(12, HEAD)], []).message())
         self.scratch = self.agent.state / "tick-fixture"
         self.agent.checkout = Mock(return_value=nullcontext((self.scratch / "checkout", self.scratch / "train.py")))
 
@@ -217,8 +218,7 @@ class AgentTests(unittest.TestCase):
         self.agent.commit_tree = Mock(side_effect=lambda sha: TREE if sha == TESTED else landed_tree)
         self.agent.ci_run_id = Mock(return_value=run_id)
         self.agent.run_tick.return_value = subprocess.CompletedProcess(
-            [], 1, f"Tested batch {NEXT}\nMerged #12 at {HEAD}\nHeld #13: checks pending\n"
-                   f"Tested batch {TESTED}\nMerged #14 at {LANDED}\n"
+            [], 1, f"Tested batch {TESTED}\nMerged #12 at {LANDED}\n",
         )
 
     def test_ledger_uses_reported_landing_even_if_main_moved_again(self):
@@ -248,6 +248,9 @@ class AgentTests(unittest.TestCase):
 
     def test_recovered_prefix_is_partial_and_survives_tick_rotation(self):
         self.landed_tick(landed_tree=NEXT)
+        self.agent.commit_message.return_value = merge_train.Batch(
+            HEAD, [(12, HEAD), (14, NEXT)], [],
+        ).message()
         self.agent.run_tick.return_value = subprocess.CompletedProcess(
             [], 0, f"Tested batch {TESTED}\nMerged #12 at {LANDED}\nRecovered landed prefix of batch {TESTED} (12).\n"
         )
@@ -267,22 +270,164 @@ class AgentTests(unittest.TestCase):
         self.agent.remote_tips.side_effect = None
         self.agent.run_tick.side_effect = [
             subprocess.CompletedProcess([], 0, f"Tested batch {TESTED}\nMerged #12 at {LANDED}\n"),
-            subprocess.CompletedProcess([], 0, f"Tested batch {NEXT}\nMerged #14 at {TREE}\n"),
+            subprocess.CompletedProcess([], 0, f"Tested batch {NEXT}\nMerged #12 at {LANDED}\n"),
+            subprocess.CompletedProcess([], 0, f"Tested batch {TESTED}\nMerged #12 at {TREE}\n"),
         ]
         with patch.object(agent_module, "TICK_HISTORY", 1):
-            for _ in range(2):
+            for _ in range(3):
                 self.assertEqual(self.agent.tick()["status"], "completed")
         rows = [json.loads(line) for line in self.agent.landings.read_text().splitlines()]
         self.assertEqual([(row["tested_batch"], row["landed_tip"]) for row in rows],
-                         [(TESTED, LANDED), (NEXT, TREE)])
+                         [(TESTED, LANDED), (NEXT, LANDED), (TESTED, TREE)])
 
-    def test_matching_trees_without_a_ci_run_are_partial(self):
+    def test_full_landing_is_complete_after_rebuild_timeout_or_recovery(self):
+        self.landed_tick()
+        self.agent.remote_tips.side_effect = None
+        self.agent.commit_message.return_value = merge_train.Batch(
+            HEAD, [(12, HEAD)], [(14, NEXT)],
+        ).message()
+        landed = f"Tested batch {TESTED}\nMerged #12 at {LANDED}\n"
+        self.agent.run_tick.return_value = subprocess.CompletedProcess(
+            [], 124, landed, "Merge train stopped: tick deadline reached before rebuilding the batch after landing.\n",
+        )
+        self.assertEqual(self.agent.tick()["status"], "stopped")
+        self.assertTrue(json.loads(self.agent.ticks.read_text())["timed_out"])
+        row = json.loads(self.agent.landings.read_text())
+        self.assertEqual(row["status"], "complete")
+        self.agent.resume()
+        self.agent.run_tick.return_value = subprocess.CompletedProcess(
+            [], 0, landed + f"Recovered landed prefix of batch {TESTED} (#12).\n",
+        )
+        self.assertEqual(self.agent.tick()["status"], "completed")
+        self.assertEqual(self.agent.landings.read_text().splitlines(), [json.dumps(row)])
+
+    def test_first_record_of_a_fully_recovered_batch_is_complete(self):
+        self.landed_tick()
+        self.scratch.mkdir()
+        self.agent.latch({}, "", ["tick in progress"], pending=True, scratch=self.scratch.name)
+        (self.scratch / "stdout").write_text(f"Tested batch {TESTED}\nMerged #12 at {LANDED}\n")
+        with (patch.object(self.agent, "latch", side_effect=KeyboardInterrupt),
+              self.assertRaises(KeyboardInterrupt)):
+            self.agent.tick()
+        self.assertTrue(self.agent.landings.exists(), "recovery finalized the latch before recording the landing")
+        self.assertEqual(json.loads(self.agent.landings.read_text())["status"], "complete")
+        self.assertEqual(self.agent.tick()["status"], "latched")
+        self.assertEqual(len(self.agent.landings.read_text().splitlines()), 1)
+
+    def test_held_next_batch_and_recovered_prefix_share_one_ledger_row(self):
+        self.landed_tick()
+        self.agent.remote_tips.side_effect = None
+        result = self.agent.run_tick.return_value
+        result.stderr = "Merge train stopped: Held #14: checks pending.\n"
+        self.assertEqual(self.agent.tick()["status"], "stopped")
+        first = self.agent.landings.read_bytes()
+        self.agent.resume()
+        self.agent.run_tick.return_value = subprocess.CompletedProcess(
+            [], 0, result.stdout + f"Recovered landed prefix of batch {TESTED} (#12).\n",
+        )
+        self.assertEqual(self.agent.tick()["status"], "completed")
+        self.assertEqual(self.agent.landings.read_bytes(), first)
+
+    def test_interruption_before_final_latch_can_replay_the_landing(self):
+        self.landed_tick()
+        self.scratch.mkdir()
+        (self.scratch / "stdout").write_text(self.agent.run_tick.return_value.stdout)
+        latch = self.agent.latch
+
+        def interrupt_final_latch(*args, **kwargs):
+            if kwargs.get("pending"):
+                return latch(*args, **kwargs)
+            raise KeyboardInterrupt
+
+        with patch.object(self.agent, "latch", side_effect=interrupt_final_latch):
+            for _ in range(2):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.agent.tick()
+                self.assertTrue(self.agent.landings.exists(), "final latch preceded the ledger write")
+                self.assertEqual(json.loads(self.agent.landings.read_text())["status"], "complete")
+                self.assertTrue(json.loads(self.agent.stopped.read_text())["pending"])
+        self.assertEqual(self.agent.tick()["status"], "latched")
+        self.assertFalse(json.loads(self.agent.stopped.read_text())["pending"])
+        self.assertEqual(len(self.agent.landings.read_text().splitlines()), 1)
+
+    def test_full_landing_is_complete_when_ci_link_lookup_fails(self):
         self.landed_tick()
         self.agent.ci_run_id.side_effect = RuntimeError("run lookup failed")
         self.agent.tick()
         row = json.loads(self.agent.landings.read_text())
         self.assertTrue(row["match"])
-        self.assertEqual(row["status"], "partial")
+        self.assertEqual(row["status"], "complete")
+        self.assertIsNone(row["ci_run_id"])
+        self.assertEqual(row["ci_error"], "run lookup failed")
+
+    def test_landing_replay_rechecks_missing_membership_without_losing_evidence(self):
+        self.landed_tick()
+        record = {"recorded_utc": "first", "stdout": [f"Tested batch {TESTED}", f"Merged #12 at {LANDED}"]}
+        self.agent.commit_message.side_effect = OSError("transient membership read failure")
+        self.agent.record_landing(record)
+        first = json.loads(self.agent.landings.read_text())
+        self.assertEqual(first["status"], "partial")
+        self.assertEqual(first["tested_members_error"], "transient membership read failure")
+
+        self.agent.commit_tree.side_effect = OSError("trees temporarily unreadable")
+        self.agent.ci_run_id.side_effect = OSError("CI temporarily unreadable")
+        self.agent.commit_message.side_effect = None
+        replay = dict(record, recorded_utc="replay")
+        self.agent.record_landing(replay)
+        recovered = self.agent.landings.read_bytes()
+        self.assertEqual(len(recovered.splitlines()), 1)
+        row = json.loads(recovered)
+        self.assertEqual(row["status"], "complete")
+        for key in ("recorded_utc", "tested_batch", "landed_tip", "landed_prefix",
+                    "landed_tree", "tested_tree", "match", "ci_run_id"):
+            self.assertEqual(row[key], first[key], key)
+        self.assertTrue(row["match"])
+        self.assertEqual(row["ci_run_id"], 123)
+        self.assertFalse(any(key.endswith("_error") for key in row))
+
+        self.agent.commit_message.side_effect = OSError("membership temporarily unreadable")
+        self.agent.record_landing(replay)
+        self.assertEqual(self.agent.landings.read_bytes(), recovered)
+
+    def test_replay_upgrades_a_legacy_partial_row_with_matching_trees(self):
+        self.landed_tick()
+        legacy = {
+            "recorded_utc": "first", "tested_batch": TESTED, "landed_tip": LANDED,
+            "landed_prefix": [[12, LANDED]], "landed_tree": TREE, "tested_tree": TREE,
+            "match": True, "ci_run_id": 123, "status": "partial",
+        }
+        self.agent.landings.write_text(json.dumps(legacy) + "\n")
+        self.agent.record_landing({
+            "recorded_utc": "replay", "recovered_pending": True,
+            "stdout": [f"Tested batch {TESTED}", f"Merged #12 at {LANDED}"],
+        })
+
+        rows = [json.loads(line) for line in self.agent.landings.read_text().splitlines()]
+        self.assertEqual(rows, [{**legacy, "status": "complete"}])
+        self.agent.commit_message.assert_called_once_with(TESTED)
+
+    def test_landing_replay_keeps_incomplete_coverage_and_tree_mismatch_truthful(self):
+        for matches in (True, False):
+            with self.subTest(matching_trees=matches):
+                self.agent.landings.unlink(missing_ok=True)
+                self.landed_tick(landed_tree=TREE if matches else NEXT)
+                members = merge_train.Batch(HEAD, [(12, HEAD), (14, NEXT)], []).message()
+                ordered = [f"Tested batch {TESTED}", f"Merged #12 at {NEXT}", f"Merged #14 at {LANDED}"]
+                reversed_order = [f"Tested batch {TESTED}", f"Merged #14 at {NEXT}", f"Merged #12 at {LANDED}"]
+                record = {"recorded_utc": "first", "stdout": reversed_order if matches else ordered}
+                self.agent.commit_message.side_effect = OSError("transient membership read failure")
+                self.agent.record_landing(record)
+                self.agent.commit_message.side_effect = None
+                self.agent.commit_message.return_value = members
+                if matches:
+                    first = self.agent.landings.read_bytes()
+                    self.agent.record_landing(dict(record, stdout=ordered))
+                    self.assertEqual(self.agent.landings.read_bytes(), first)
+                self.agent.record_landing(record)
+                row = json.loads(self.agent.landings.read_text())
+                self.assertEqual(row["status"], "partial" if matches else "mismatch")
+                self.assertIs(row["match"], matches)
+                self.assertNotIn("tested_members_error", row)
 
     def test_tick_record_has_a_byte_cap_and_keeps_valid_json(self):
         self.agent.set_order(ORDER)
@@ -679,6 +824,22 @@ class AgentTests(unittest.TestCase):
         self.assertIn("wall-clock limit", " ".join(record["reason"]))
         self.assertTrue(self.agent.stopped.exists())
 
+    def test_child_success_after_deadline_latches_as_timeout(self):
+        self.agent.set_order(ORDER)
+        self.agent.run_tick = agent_module.Agent.run_tick.__get__(self.agent)
+        self.scratch.mkdir()
+        process = Mock(returncode=0)
+        child = Mock()
+        child.__enter__ = Mock(return_value=process)
+        child.__exit__ = Mock(return_value=False)
+        with (patch.object(agent_module, "TICK_TIMEOUT", 1),
+              patch.object(agent_module.time, "monotonic", side_effect=[100, 102]),
+              patch.object(agent_module.subprocess, "Popen", return_value=child)):
+            outcome = self.agent.tick()
+        self.assertEqual((outcome["status"], outcome["exit_code"]), ("stopped", 124))
+        self.assertTrue(json.loads(self.agent.ticks.read_text())["timed_out"])
+        self.assertFalse(json.loads(self.agent.stopped.read_text())["pending"])
+
     def test_timeout_retains_stdout_from_real_unbuffered_child(self):
         script = self.root / "train.py"
         script.write_text("import time\nprint('visible before hang')\ntime.sleep(60)\n")
@@ -689,6 +850,10 @@ class AgentTests(unittest.TestCase):
 
     def test_hard_timeout_reconciles_an_inflight_squash_and_records_prefix(self):
         self.agent.set_order(ORDER)
+        self.scratch.mkdir()
+        self.agent.commit_message.return_value = merge_train.Batch(
+            HEAD, [(12, HEAD), (14, HEAD), (16, HEAD)], [],
+        ).message()
         self.agent.run_tick.side_effect = subprocess.TimeoutExpired(
             "fixture", 720,
             output=(f"Tested batch {TESTED}\n"
@@ -722,6 +887,9 @@ class AgentTests(unittest.TestCase):
 
     def test_orphaned_two_member_batch_with_one_landing_is_partial(self):
         self.agent.set_order(f"batch=2\n{ORDER}14={NEXT}\n")
+        self.agent.commit_message.return_value = merge_train.Batch(
+            HEAD, [(12, HEAD), (14, NEXT)], [],
+        ).message()
         self.scratch.mkdir()
         self.agent.latch({}, "", ["tick in progress"], pending=True, scratch=self.scratch.name)
         (self.scratch / "stdout").write_text(
@@ -755,6 +923,7 @@ class AgentTests(unittest.TestCase):
 
     def test_non_timeout_child_stop_reconciles_dangling_attempt(self):
         self.agent.set_order(ORDER)
+        self.scratch.mkdir()
         stdout = f"Tested batch {TESTED}\nSquash attempt #12 {HEAD} after {NEXT}\n"
         self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, stdout, "connection reset")
         self.agent.commit_tree = Mock(return_value=TREE)
@@ -777,8 +946,23 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(any("Unconfirmed squash of #12" in line for line in row["reason"]))
         self.assertFalse(self.agent.landings.exists())
 
+    def test_definite_rejection_remains_the_latch_reason(self):
+        self.agent.set_order(ORDER)
+        stdout = f"Tested batch {TESTED}\nSquash attempt #12 {HEAD} after {NEXT}\n"
+        rejection = ("Merge train stopped: Stopped at #12: gh: Pull Request is not mergeable (HTTP 405). "
+                     "Merged so far: none confirmed.")
+        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, stdout, rejection + "\n")
+        unavailable = subprocess.CalledProcessError(1, "gh", stderr="HTTP 503")
+        with patch.object(agent_module.subprocess, "run", side_effect=unavailable):
+            self.assertEqual(self.agent.tick()["status"], "stopped")
+        self.assertEqual(json.loads(self.agent.stopped.read_text())["reason"], [rejection])
+        self.assertFalse(self.agent.landings.exists())
+
     def test_signal_marks_confirmed_prefix_partial_even_with_matching_trees(self):
         self.agent.set_order(ORDER)
+        self.agent.commit_message.return_value = merge_train.Batch(
+            HEAD, [(12, HEAD), (14, NEXT)], [],
+        ).message()
         self.agent.run_tick.return_value = subprocess.CompletedProcess(
             [], -signal.SIGTERM, f"Tested batch {TESTED}\nMerged #12 at {LANDED}\n",
         )
@@ -789,6 +973,9 @@ class AgentTests(unittest.TestCase):
 
     def test_cooperative_timeout_records_confirmed_prefix(self):
         self.agent.set_order(ORDER)
+        self.agent.commit_message.return_value = merge_train.Batch(
+            HEAD, [(12, HEAD), (14, NEXT)], [],
+        ).message()
         self.agent.run_tick.return_value = subprocess.CompletedProcess(
             [], 124, f"Tested batch {TESTED}\nMerged #12 at {LANDED}\n",
             "Merge train stopped: tick deadline reached before squash of #14.\n",
@@ -1150,6 +1337,108 @@ print(json.dumps({'marker': MARKER, 'argv': sys.argv[1:], 'cwd': os.getcwd(),
         self.assertEqual(list(self.agent.state.glob("tick-*")), [])
         self.assertEqual(self.git(self.repo, "worktree", "list", "--porcelain"), before_worktrees)
 
+    def test_landing_uses_train_pr_trailers_from_the_tested_commit(self):
+        base = self.publish(self.reviewed_sources())
+        tree = self.git(self.repo, "rev-parse", f"{base}^{{tree}}")
+        message = merge_train.Batch(base, [(12, HEAD)], [(14, NEXT)]).message()
+        tested = self.git(self.repo, "commit-tree", tree, "-p", base, "-m", message)
+        landed = self.git(self.repo, "commit-tree", tree, "-p", base, "-m", "Squash #12")
+        self.agent.state.mkdir(parents=True)
+        self.agent.ci_run_id = Mock(return_value=123)
+        self.agent.record_landing({
+            "recorded_utc": agent_module.stamp(),
+            "stdout": [f"Tested batch {tested}", f"Merged #12 at {landed}"],
+            "stderr": [], "exit_code": 124, "timed_out": True,
+        })
+        row = json.loads(self.agent.landings.read_text())
+        self.assertEqual((row["status"], row["landed_prefix"]), ("complete", [[12, landed]]))
+
+    def publish_landing_fixture(self, *, dangling=False):
+        base = self.publish(self.reviewed_sources())
+        tree = self.git(self.repo, "rev-parse", f"{base}^{{tree}}")
+        message = merge_train.Batch(base, [(12, HEAD)], []).message()
+        tested = self.git(self.repo, "commit-tree", tree, "-p", base, "-m", message)
+        landed = self.git(self.repo, "commit-tree", tree, "-p", base, "-m", "Squash #12")
+        landing = f"Squash attempt #12 {HEAD} after {base}" if dangling else f"Merged #12 at {landed}"
+        stdout = f"Tested batch {tested}\n{landing}\n"
+        revision = self.publish({"merge_train.py": f"print({stdout!r}, end='')\n"})
+        self.pin_fixture(revision)
+        self.agent.set_order(ORDER)
+        self.agent.ci_run_id = Mock(return_value=123)
+        return tested, landed, stdout
+
+    def check_ledger_replace_failure(self, *, replaced):
+        tested, landed, stdout = self.publish_landing_fixture()
+        before = self.git(self.repo, "worktree", "list", "--porcelain")
+        replace = Path.replace
+
+        def fail_replace(path, target):
+            if target == self.agent.landings:
+                if replaced:
+                    replace(path, target)
+                raise OSError("injected ledger replace failure")
+            return replace(path, target)
+
+        with patch.object(self.agent, "run_tick", wraps=self.agent.run_tick) as train:
+            with patch.object(Path, "replace", fail_replace):
+                error = self.agent.tick()
+                self.assertEqual(error["status"], "error")
+                self.assertIn("injected ledger replace failure", error["error"])
+                pending = self.agent.stopped.read_bytes()
+                stopped = json.loads(pending)
+                self.assertTrue(stopped["pending"])
+                scratch = self.agent.state / stopped["scratch"]
+                self.assertTrue((scratch / "checkout" / ".git").is_file(), "pending checkout was pruned")
+                self.assertEqual((scratch / "stdout").read_text(), stdout)
+                self.assertEqual(self.agent.landings.exists(), replaced)
+                # An orphan recovery must survive the same error again.
+                self.assertEqual(self.agent.tick()["status"], "error")
+                self.assertEqual(self.agent.stopped.read_bytes(), pending)
+                self.assertEqual((scratch / "stdout").read_text(), stdout)
+                self.assertTrue((scratch / "checkout" / ".git").is_file())
+            self.assertEqual(self.agent.tick()["status"], "latched")
+            train.assert_called_once()
+        stopped = json.loads(self.agent.stopped.read_text())
+        self.assertFalse(stopped["pending"])
+        self.assertEqual(stopped["output"], stdout)
+        self.assertEqual(stopped["reason"], ["previous tick did not finish"])
+        self.assertFalse(scratch.exists())
+        self.assertEqual(self.git(self.repo, "worktree", "list", "--porcelain"), before)
+        rows = self.agent.landings.read_text().splitlines()
+        self.assertEqual(len(rows), 1)
+        row = json.loads(rows[0])
+        self.assertEqual((row["tested_batch"], row["landed_tip"], row["status"]), (tested, landed, "complete"))
+
+    def test_ledger_replace_failure_keeps_real_checkout_for_recovery(self):
+        self.check_ledger_replace_failure(replaced=False)
+
+    def test_ledger_replay_after_unobserved_replace_records_one_row(self):
+        self.check_ledger_replace_failure(replaced=True)
+
+    def test_pending_retry_keeps_a_confirmed_squash_when_github_becomes_unavailable(self):
+        _, landed, _ = self.publish_landing_fixture(dangling=True)
+        replace, run = Path.replace, subprocess.run
+        pull = {"merged": True, "merge_commit_sha": landed, "head": {"sha": HEAD}, "base": {"ref": "main"}}
+
+        def fail_replace(path, target):
+            if target == self.agent.landings:
+                raise OSError("injected ledger replace failure")
+            return replace(path, target)
+
+        lookup = Mock(side_effect=[Mock(stdout=json.dumps(pull)), OSError("GitHub unavailable")])
+
+        def run_with_pull_lookup(command, *args, **kwargs):
+            if command[:2] == ["gh", "api"]:
+                return lookup(command)
+            return run(command, *args, **kwargs)
+
+        with patch.object(agent_module.subprocess, "run", side_effect=run_with_pull_lookup):
+            with patch.object(Path, "replace", fail_replace):
+                self.assertEqual(self.agent.tick()["status"], "error")
+            self.assertEqual(self.agent.tick()["status"], "latched")
+        self.assertTrue(self.agent.landings.exists(), "the retry lost an already confirmed squash")
+        self.assertEqual(json.loads(self.agent.landings.read_text())["landed_prefix"], [[12, landed]])
+
     def check_orphan_finishes(self, interrupt):
         stdout = [f"Tested batch {TESTED}", f"Merged #12 at {HEAD}", f"Merged #14 at {LANDED}"]
         self.publish(self.reviewed_sources())
@@ -1174,6 +1463,9 @@ print("finished", file=sys.stderr)
         self.agent.set_order(ORDER)
         before = self.git(self.repo, "worktree", "list", "--porcelain")
         self.agent.commit_tree = Mock(return_value=TREE)
+        self.agent.commit_message = Mock(return_value=merge_train.Batch(
+            HEAD, [(12, HEAD), (14, NEXT)], [],
+        ).message())
         self.agent.ci_run_id = Mock(return_value=123)
         supervisor_source = f"""import sys
 sys.path.insert(0, {str(CHECKOUT)!r})

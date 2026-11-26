@@ -157,10 +157,10 @@ export function outputChoices(options: readonly MixerOption[], outputId: string 
   return { options, label };
 }
 
-/** The host supplies route choices. The picker also hides destinations already used in this strip. */
-export function availableSends(options: readonly MixerOption[], sends: readonly MixerSend[]): MixerOption[] {
+/** Keep the host's order while excluding existing sends and the main output. */
+export function availableSends({ sendDestinations, sends, outputId }: Pick<MixerTrack, "sendDestinations" | "sends" | "outputId">): MixerOption[] {
   const used = new Set(sends.map((send) => send.destinationId));
-  return options.filter((option) => !used.has(option.id));
+  return sendDestinations.filter(({ id }) => id !== outputId && !used.has(id));
 }
 
 /** Fader view: the finite bottom stop denotes off, matching the approved prototype. */
@@ -280,6 +280,7 @@ export class MixerGestures {
   private active = new Map<string, Active>();
   private moving = new Map<string, number>();
   private pending = new Map<string, Pending>();
+  private listeners = new Set<() => void>();
   private nextToken = 1;
   private seq = 1;
   private closed = false;
@@ -288,6 +289,17 @@ export class MixerGestures {
   /** Points the gestures at the host's latest props and callbacks (every render). */
   connect(host: GestureHost) {
     this.host = host;
+  }
+
+  /** Memoized strips can read live send previews without new props on every gesture update. */
+  subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  };
+
+  private changed() {
+    this.host.changed();
+    for (const listener of this.listeners) listener();
   }
 
   /** The value to show instead of the host's, if any. */
@@ -359,7 +371,7 @@ export class MixerGestures {
       else if (this.host.locked(p.target) && p.visible) {
         // Once the host takes control, an old preview must not reappear on unlock.
         p.visible = false;
-        this.host.changed();
+        this.changed();
       }
     }
     for (const [key, a] of [...this.active]) {
@@ -396,11 +408,11 @@ export class MixerGestures {
 
   private show(key: string, value: number) {
     this.moving.set(key, value);
-    this.host.changed();
+    this.changed();
   }
 
   private unshow(key: string) {
-    if (this.moving.delete(key)) this.host.changed();
+    if (this.moving.delete(key)) this.changed();
   }
 
   /** A removed target: forget it without a word to the host. */
@@ -422,7 +434,7 @@ export class MixerGestures {
     const seq = this.seq++;
     this.pending.set(key, { seq, target: t, value, visible: true });
     this.moving.delete(key);
-    this.host.changed();
+    this.changed();
     const result = this.host.emit({ target: t, value, phase: "commit" });
     const settle = () => {
       if (this.pending.get(key)?.seq !== seq) return;
@@ -433,7 +445,7 @@ export class MixerGestures {
         active.origin = this.host.stored(t) ?? active.origin;
         active.originPending = undefined;
       }
-      this.host.changed();
+      this.changed();
     };
     if (result && typeof result.then === "function") result.then(settle, settle);
     else settle();
