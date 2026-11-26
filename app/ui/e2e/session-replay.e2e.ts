@@ -35,11 +35,20 @@ test("mock replays the real offline Session transcript", async ({ page }) => {
   expect(actual).toEqual(replay.expected);
 });
 
+type PointRun = { op: Record<string, unknown> & { content?: { type: string } }; repeats: number; count: number; start: number };
+type MediaReply = { ok?: unknown; error?: string };
 const mediaReplay = JSON.parse(readFileSync(new URL("../../../tests/fixtures/arrangement-media-replay.json", import.meta.url), "utf8")) as {
   files: Record<string, number[] | null>;
-  steps: typeof replay.steps;
-  expected: unknown[];
+  steps: { command: string; args: Record<string, unknown> & { pointRuns?: PointRun[] } }[];
+  expected: MediaReply[];
 };
+
+function withoutSerdePosition(reply: MediaReply): MediaReply {
+  if (reply.ok && typeof reply.ok === "object" && "message" in reply.ok && typeof reply.ok.message === "string") {
+    return { ok: { ...reply.ok, message: reply.ok.message.replace(/ at line \d+ column \d+$/, "") } };
+  }
+  return reply;
+}
 
 test("mock replays offline arrangement media, WFP1 and automation replies", async ({ page }) => {
   const files: MockSeed["files"] = Object.fromEntries(
@@ -51,8 +60,19 @@ test("mock replays offline arrangement media, WFP1 and automation replies", asyn
       __TAURI_INTERNALS__: { invoke: (command: string, args: Record<string, unknown>) => Promise<unknown> };
     }).__TAURI_INTERNALS__;
     const results = [];
-    for (const { command, args } of steps) {
+    for (const { command, args: { pointRuns, ...args } } of steps) {
       try {
+        if (pointRuns) {
+          const operations = pointRuns.flatMap(({ op, repeats, count, start }) => {
+            if (count === 0) return Array(repeats).fill(op);
+            const points = Array.from({ length: count }, (_, index) => ({ mode: "hold", tick: start + index, value: 0.5 }));
+            const operation = op.content?.type === "automation"
+              ? { ...op, content: { ...op.content, points } }
+              : { ...op, points };
+            return Array(repeats).fill(operation);
+          });
+          args.editsJson = JSON.stringify(operations);
+        }
         let ok = await invoke(command, args);
         if (ok instanceof ArrayBuffer) ok = Array.from(new Uint8Array(ok));
         if (command === "project_save_as" || command === "project_new" || command === "channel_add_synth") ok = null;
@@ -66,7 +86,10 @@ test("mock replays offline arrangement media, WFP1 and automation replies", asyn
   }, mediaReplay.steps);
   expect(actual).toHaveLength(mediaReplay.expected.length);
   for (const [index, step] of mediaReplay.steps.entries()) {
-    expect(actual[index], `Replay step ${index + 1}: ${step.command} ${JSON.stringify(step.args)}`).toEqual(mediaReplay.expected[index]);
+    // The native fixture records serde's line/column suffix. Only the browser comparison
+    // ignores it because JSON.parse makes input positions unavailable to the mock.
+    expect(actual[index], `Replay step ${index + 1}: ${step.command} ${JSON.stringify(step.args)}`)
+      .toEqual(withoutSerdePosition(mediaReplay.expected[index]));
   }
 });
 
@@ -100,7 +123,7 @@ test("a seeded automation clip can resize with its decoded curve", async ({ page
         kind: "resize", clip: 3, startTick: 240, content: { ...content, offsetTick: 240, lengthTicks: 720 },
       }]),
     });
-    // Native refuses during decoding before the stamp check or any operation, unlike the mock.
+    // The request limit applies during decoding, before the stamp check or any operation.
     const oversized = await invoke("arrangement_edit", {
       ...stamp, revision: 1, editsJson: JSON.stringify([
         { kind: "createClip", track: 2, startTick: 960, name: "Oversized", muted: false,

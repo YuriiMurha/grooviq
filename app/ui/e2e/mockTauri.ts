@@ -298,6 +298,12 @@ export function installMockTauri(seed: MockSeed): void {
   let trimUndo: TrimChange[] = [];
   let trimRedo: TrimChange[] = [];
   type Arrangement = NonNullable<Project["arrangement"]>;
+  // Curves are immutable allocations. Copy clip metadata for edits and history while retaining
+  // those allocations. The JSON clone in Save/Open deliberately decodes each clip independently.
+  const cloneArrangement = ({ clips, ...metadata }: Arrangement): Arrangement => ({
+    ...clone(metadata),
+    clips: clips.map(clip => ({ ...clip, content: { ...clip.content } })),
+  });
   const arrangementIds = (arrangement: Arrangement | undefined) => arrangement ? [
     ...arrangement.tracks.map(track => track.id),
     ...arrangement.audioAssets.map(asset => asset.id),
@@ -1483,7 +1489,7 @@ export function installMockTauri(seed: MockSeed): void {
       const earlier = (a: number, b: number) => undo ? a > b : a < b;
       let effect: { kind: "empty" } | { kind: "arrangement" } | { kind: "notes"; pattern: number } | { kind: "samplerTrim"; channel: number } = { kind: "empty" };
       if (clip && (!note || earlier(clip.order, note.change.order ?? 0)) && (!trim || earlier(clip.order, trim.order))) {
-        const candidate = clone(s.project); candidate.arrangement = clone(undo ? clip.before : clip.after);
+        const candidate: Project = { ...s.project, arrangement: cloneArrangement(undo ? clip.before : clip.after) };
         const bank = new Map(patternBank);
         for (const added of clip.addedPatterns) {
           const id = added.initial.id;
@@ -1548,22 +1554,113 @@ export function installMockTauri(seed: MockSeed): void {
   /** Finite clip-edit counterpart to Session::edit_arrangement. */
   const editArrangement = (args: Record<string, unknown>) => {
     try {
+      const maxSongTicks = 38_400_000;
+      const maxCurvePoints = 16_384, maxTotalPoints = 1_000_000;
+      const int = (value: unknown, max = maxSongTicks): number => { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > max) throw "Invalid arrangement integer"; return value; };
+      const safeUint = (value: unknown) => int(value, Number.MAX_SAFE_INTEGER);
+      const raw = String(args.editsJson);
+      if (new TextEncoder().encode(raw).length > 64 * 1024 * 1024) throw "Arrangement request exceeds 64 MiB";
+      const operations: unknown = JSON.parse(raw);
+      if (!Array.isArray(operations)) throw "Invalid arrangement batch";
+      let requestedAutomationPoints = 0;
+      const required = <T,>(value: T | undefined, key: string): T => {
+        if (value === undefined) throw `missing field \`${key}\``;
+        return value;
+      };
+      const serdeType = (value: unknown) => {
+        if (typeof value === "number") return `${Number.isInteger(value) ? "integer" : "floating point"} \`${value}\``;
+        if (typeof value === "string") return `string ${JSON.stringify(value)}`;
+        if (typeof value === "boolean") return `boolean \`${value}\``;
+        if (value === null) return "null";
+        return Array.isArray(value) ? "sequence" : "map";
+      };
+      const record = (value: unknown): Record<string, unknown> => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          throw `invalid type: ${serdeType(value)}, expected an object with named fields`;
+        }
+        return value as Record<string, unknown>;
+      };
+      const integerField = (value: unknown, width: "u32" | "u64"): number => {
+        const max = width === "u32" ? 0xffffffff : 2 ** 64;
+        if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= max) return value;
+        const kind = typeof value === "number" && Number.isInteger(value) ? "value" : "type";
+        throw `invalid ${kind}: ${serdeType(value)}, expected ${width}`;
+      };
+      const stringField = (value: unknown): string => {
+        if (typeof value === "string") return value;
+        throw `invalid type: ${serdeType(value)}, expected a string`;
+      };
+      const automationTarget = (value: unknown): MockAutomationTarget => {
+        const target = record(value);
+        const type = stringField(required(target.type, "type"));
+        const channel = integerField(required(target.channel, "channel"), "u32");
+        const instrument = target.instrument == null ? undefined : stringField(target.instrument);
+        const param = target.param == null ? undefined : stringField(target.param);
+        if (type === "channelVolume" || type === "channelPan") return { type, channel };
+        if (type === "instrumentParam") {
+          return { type, channel, instrument: required(instrument, "instrument"), param: required(param, "param") };
+        }
+        throw `unknown variant \`${type}\`, expected one of \`channelVolume\`, \`channelPan\`, \`instrumentParam\``;
+      };
+      const automationPoints = (value: unknown): CurvePoint[] => {
+        if (!Array.isArray(value)) throw `invalid type: ${serdeType(value)}, expected at most 16384 entries`;
+        return value.map((entry: unknown, index): CurvePoint => {
+          if (index === maxCurvePoints) throw "arrangement list limit exceeded";
+          const point = record(entry);
+          const tick = integerField(required(point.tick, "tick"), "u64");
+          const rawValue = required(point.value, "value");
+          if (typeof rawValue !== "number") throw `invalid type: ${serdeType(rawValue)}, expected f32`;
+          const mode = stringField(required(point.mode, "mode"));
+          if (mode !== "linear" && mode !== "hold") throw `unknown variant \`${mode}\`, expected \`linear\` or \`hold\``;
+          if (++requestedAutomationPoints > maxTotalPoints) throw "total automation point limit exceeded";
+          return { tick, value: Math.fround(rawValue), mode };
+        });
+      };
+      const automationContent = (fields: Record<string, unknown>): MockAutomationContent => ({
+        type: "automation",
+        target: automationTarget(required(fields.target ?? undefined, "target")),
+        priority: integerField(required(fields.priority ?? undefined, "priority"), "u32"),
+        offsetTick: integerField(required(fields.offsetTick ?? undefined, "offsetTick"), "u32"),
+        lengthTicks: integerField(required(fields.lengthTicks ?? undefined, "lengthTicks"), "u64"),
+        points: automationPoints(required(fields.points ?? undefined, "points")),
+      });
+      // Decode automation fields for the whole request before checking its stamp or applying
+      // any operation. Native also counts point fields on operations that don't use them.
+      const decoded = operations.map((rawOperation: unknown, index) => {
+        if (index === 100_000) throw "Arrangement operation limit";
+        const op = record(rawOperation);
+        const isAutomationEdit = op.kind === "setAutomationPoints" || op.kind === "setAutomationClip";
+        let clipId: number | undefined;
+        let content: MockAutomationContent | undefined;
+        let points: CurvePoint[] | undefined;
+        let target: MockAutomationTarget | undefined;
+        let priority: number | undefined;
+        for (const [key, value] of Object.entries(op)) {
+          if (value == null) continue;
+          if (key === "clip" && isAutomationEdit) clipId = integerField(value, "u32");
+          if (key === "content" && (value as { type?: unknown }).type === "automation") content = automationContent(record(value));
+          if (key === "points") points = automationPoints(value);
+          if (key === "target") target = automationTarget(value);
+          if (key === "priority") priority = integerField(value, "u32");
+        }
+        if (isAutomationEdit) {
+          required(clipId, "clip");
+          if (op.kind === "setAutomationPoints") required(points, "points");
+          else { required(target, "target"); required(priority, "priority"); }
+        }
+        return { op, content, points, target, priority };
+      });
       workspaceStamp(args); saveActivePattern();
       if (s.project.patternClips?.length) throw "Legacy clip records are outside the finite playlist fixture";
-      const raw = String(args.editsJson); if (new TextEncoder().encode(raw).length > 64 * 1024 * 1024) throw "Arrangement request too large";
-      const operations: Record<string, unknown>[] = JSON.parse(raw);
-      if (!Array.isArray(operations) || operations.length > 100_000) throw "Invalid arrangement batch";
-      const before: Arrangement = clone(s.project.arrangement ?? emptyArrangement());
-      const candidate = clone(s.project); const arrangement = clone(before); candidate.arrangement = arrangement;
+      const before = s.project.arrangement ?? emptyArrangement();
+      const arrangement = cloneArrangement(before);
+      const candidate: Project = { ...s.project, arrangement };
       const addedPatterns = new Map<number, PatternEntry>();
       const sourcePattern = (id: number) => addedPatterns.get(id) ?? patternBank.get(id);
       let next = candidate.nextId;
       const issued = new Set([...candidate.channels.map(c => c.id), ...patternBank.keys(), ...arrangementIds(arrangement)]);
       const ids: number[] = [], tracksByOperation = new Map<number, number>();
       const allocate = () => { while (next < 0xffffffff && issued.has(next)) next++; if (next >= 0xffffffff) throw "Project ids exhausted"; const id = next++; issued.add(id); return id; };
-      const maxSongTicks = 38_400_000;
-      const int = (value: unknown, max = maxSongTicks): number => { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > max) throw "Invalid arrangement integer"; return value; };
-      const safeUint = (value: unknown) => int(value, Number.MAX_SAFE_INTEGER);
       const name = (value: unknown): string => { if (typeof value !== "string") throw "Invalid clip name"; return value; };
       const patternContent = (value: unknown): PatternContent => {
         if (!value || typeof value !== "object" || !("type" in value) || value.type !== "pattern" || !("pattern" in value) || !("offsetTick" in value) || !("lengthTicks" in value)) throw "Only pattern content is supported by this finite fixture";
@@ -1578,33 +1675,6 @@ export function installMockTauri(seed: MockSeed): void {
         return { type: "audio", asset: int(fields.asset, 0xffffffff), sourceStart: safeUint(fields.sourceStart),
           sourceEnd: safeUint(fields.sourceEnd), gain: Math.fround(fields.gain), reverse: fields.reverse,
           fadeIn: safeUint(fields.fadeIn), fadeOut: safeUint(fields.fadeOut) };
-      };
-      let requestedAutomationPoints = 0;
-      const automationContent = (value: unknown): MockAutomationContent => {
-        if (!value || typeof value !== "object" || !("type" in value) || value.type !== "automation") throw "Resize must preserve source, target and priority";
-        const fields = value as Record<string, unknown>;
-        const rawTarget = fields.target as Record<string, unknown> | undefined;
-        const channel = int(rawTarget?.channel, 0xffffffff);
-        let target: MockAutomationTarget;
-        if (rawTarget?.type === "channelVolume" || rawTarget?.type === "channelPan") {
-          target = { type: rawTarget.type, channel };
-        } else if (rawTarget?.type === "instrumentParam" &&
-          typeof rawTarget.instrument === "string" && typeof rawTarget.param === "string") {
-          target = { type: "instrumentParam", channel, instrument: rawTarget.instrument, param: rawTarget.param };
-        } else throw "Invalid automation target";
-        if (!Array.isArray(fields.points)) throw "Invalid automation points";
-        if (fields.points.length > 16_384) throw "arrangement list limit exceeded";
-        requestedAutomationPoints += fields.points.length;
-        if (requestedAutomationPoints > 1_000_000) throw "total automation point limit exceeded";
-        const points = fields.points.map((point: unknown): CurvePoint => {
-          if (!point || typeof point !== "object" || !("tick" in point) || !("value" in point) ||
-            typeof point.value !== "number" || !("mode" in point) || (point.mode !== "linear" && point.mode !== "hold")) {
-            throw "Invalid automation point";
-          }
-          return { tick: safeUint(point.tick), value: Math.fround(point.value), mode: point.mode };
-        });
-        return { type: "automation", target, priority: int(fields.priority, 0xffffffff),
-          offsetTick: int(fields.offsetTick, 0xffffffff), lengthTicks: safeUint(fields.lengthTicks), points };
       };
       const assignAutomationPriority = (content: MockClipContent) => {
         if (content.type === "automation") content.priority = allocate();
@@ -1622,8 +1692,7 @@ export function installMockTauri(seed: MockSeed): void {
         if (!result) throw `Unknown clip ${id}`;
         return result;
       };
-      operations.forEach((op, index) => {
-        if (!op || typeof op !== "object") throw "Invalid arrangement operation";
+      decoded.forEach(({ op, content: decodedContent, points, target: decodedTarget, priority: decodedPriority }, index) => {
         if (op.kind === "setLoop") {
           if (op.region === null) arrangement.loopRegion = null;
           else {
@@ -1638,8 +1707,7 @@ export function installMockTauri(seed: MockSeed): void {
           const target = op.kind === "createClip" ? track(op.track) : tracksByOperation.get(int(op.trackOperation, 100_000));
           if (target === undefined) throw "Track must refer to an earlier CreateTrack";
           if (typeof op.muted !== "boolean") throw "Invalid muted flag";
-          const content = (op.content as { type?: unknown } | null)?.type === "automation"
-            ? automationContent(op.content) : patternContent(op.content);
+          const content = decodedContent ?? patternContent(op.content);
           const id = allocate();
           assignAutomationPriority(content);
           const startTick = content.type === "automation" ? safeUint(op.startTick) : int(op.startTick);
@@ -1649,7 +1717,7 @@ export function installMockTauri(seed: MockSeed): void {
           const source = clip(op.clip);
           const start = source.content.type === "pattern" ? int(op.startTick) : safeUint(op.startTick);
           if (op.kind === "copy") {
-            const copy = { ...clone(source), id: allocate(), track: destination, startTick: start };
+            const copy = { ...source, content: { ...source.content }, id: allocate(), track: destination, startTick: start };
             assignAutomationPriority(copy.content);
             arrangement.clips.push(copy); ids.push(copy.id);
           }
@@ -1702,7 +1770,8 @@ export function installMockTauri(seed: MockSeed): void {
             source.content = { ...source.content, ...resized }; source.startTick = safeUint(op.startTick);
           } else if (source.content.type === "automation") {
             const original = source.content;
-            const resized = automationContent(op.content);
+            if (!decodedContent) throw "Resize must preserve source, target and priority";
+            const resized = decodedContent;
             if (!sameAutomationTarget(original.target, resized.target) || original.priority !== resized.priority ||
               !sameCurve(original.points, resized.points)) throw "Resize must preserve source, target and priority";
             const startTick = safeUint(op.startTick);
@@ -1727,6 +1796,45 @@ export function installMockTauri(seed: MockSeed): void {
           const source = clip(op.clip);
           if (typeof op.muted !== "boolean") throw "Invalid muted flag";
           source.name = name(op.name); source.muted = op.muted;
+        } else if (op.kind === "setAutomationPoints" || op.kind === "setAutomationClip") {
+          const source = clip(op.clip);
+          const content = source.content;
+          if (content.type !== "automation") throw `Clip ${source.id} is not an automation clip`;
+          if (op.kind === "setAutomationPoints") {
+            const replacement = required(points, "points");
+            const start = content.offsetTick, end = start + content.lengthTicks;
+            if (end >= 2 ** 64) throw "Automation source range overflow";
+            if (replacement.some(point => point.tick < start || point.tick >= end)) {
+              throw `Clip ${source.id}: point is outside the automation source range`;
+            }
+            if (replacement.some((point, index) => index > 0 && replacement[index - 1].tick >= point.tick)) {
+              throw `Clip ${source.id}: automation ticks must be strictly increasing`;
+            }
+            const original = content.points;
+            if (sameCurve(original.filter(point => point.tick >= start && point.tick < end), replacement)) return;
+            const merged = [
+              ...original.filter(point => point.tick < start),
+              ...replacement,
+              ...original.filter(point => point.tick >= end),
+            ];
+            for (const { content: sibling } of arrangement.clips) {
+              if (sibling.type === "automation" && sibling.points === original) sibling.points = merged;
+            }
+          } else {
+            const target = required(decodedTarget, "target"), priority = required(decodedPriority, "priority");
+            if (!sameAutomationTarget(content.target, target)) {
+              const sibling = arrangement.clips.find(clip => clip !== source &&
+                clip.content.type === "automation" && clip.content.points === content.points &&
+                !sameAutomationTarget(clip.content.target, target));
+              if (sibling) {
+                throw `Clip ${source.id} shares its automation source with clip ${sibling.id} (${sibling.name}) on a different target; make it unique first.`;
+              }
+            }
+            if (priority > next) throw `Clip ${source.id}: automation priority ${priority} exceeds the next available id ${next}`;
+            content.target = target;
+            content.priority = priority === next ? allocate() : priority;
+            issued.add(content.priority);
+          }
         } else if (op.kind === "deleteClip") {
           const source = clip(op.clip);
           arrangement.clips = arrangement.clips.filter(candidate => candidate.id !== source.id);
@@ -1742,9 +1850,17 @@ export function installMockTauri(seed: MockSeed): void {
         } else throw "This arrangement operation is outside the finite fixture";
       });
       if (arrangement.tracks.length > 256 || arrangement.clips.length > 100_000) throw "Arrangement bounds exceeded";
+      const entityIds = new Set([
+        ...candidate.channels.map(channel => channel.id), ...patternBank.keys(), ...addedPatterns.keys(),
+        ...arrangement.tracks.map(track => track.id), ...arrangement.clips.map(clip => clip.id), ...audioAssets.keys(),
+      ]);
       const layers = new Map<number, { target: MockAutomationTarget; start: number; end: number }[]>();
       for (const { content, startTick } of arrangement.clips) {
         if (content.type !== "automation") continue;
+        if (content.priority === 0xffffffff || entityIds.has(content.priority)) {
+          throw "Invalid arrangement: bounds, identity, reference or native parameter range.";
+        }
+        if (startTick + content.lengthTicks >= 2 ** 64) throw "automation end overflow";
         const fragments = layers.get(content.priority) ?? [];
         fragments.push({ target: content.target, start: startTick, end: startTick + content.lengthTicks });
         layers.set(content.priority, fragments);
@@ -1775,12 +1891,12 @@ export function installMockTauri(seed: MockSeed): void {
           const spec = channel && target.type === "instrumentParam" && (channel.kind ?? "sampler") === target.instrument
             ? (target.instrument === "sampler" ? PARAMS : SYNTH_PARAMS).find(([id]) => id === target.param)
             : undefined;
-          const min = target.type === "channelPan" ? -1 : target.type === "channelVolume" ? 0 : spec?.[1];
-          const max = target.type === "channelPan" ? 1 : target.type === "channelVolume" ? 2 : spec?.[2];
+          const min = target.type === "channelPan" ? -1 : target.type === "channelVolume" ? 0 : spec && Math.fround(spec[1]);
+          const max = target.type === "channelPan" ? 1 : target.type === "channelVolume" ? 2 : spec && Math.fround(spec[2]);
           totalPoints += points.length;
           if (!channel || min === undefined || max === undefined || lengthTicks < 1 ||
             offsetTick + lengthTicks > maxSongTicks || clip.startTick + lengthTicks > maxSongTicks ||
-            points.length > 16_384 || totalPoints > 1_000_000 || points.some((point, index) =>
+            points.length > maxCurvePoints || totalPoints > maxTotalPoints || points.some((point, index) =>
               point.tick > maxSongTicks || (index > 0 && points[index - 1].tick > point.tick) ||
               !(point.value >= min && point.value <= max))) {
             throw `Clip ${clip.id} (${clip.name}): invalid track/source reference, bounds or automation value.`;
@@ -1792,7 +1908,7 @@ export function installMockTauri(seed: MockSeed): void {
       candidate.nextId = next;
       workspaceAdmit(candidate, true, [...allPatterns(), ...Array.from(addedPatterns.values(), entry => entry.pattern)]);
       clearWorkspaceRedo();
-      clipUndo.push({ order: historyOrder++, before, after: clone(arrangement), addedPatterns: Array.from(addedPatterns.values(), entry => ({ initial: clone(entry.pattern) })) });
+      clipUndo.push({ order: historyOrder++, before, after: arrangement, addedPatterns: Array.from(addedPatterns.values(), entry => ({ initial: clone(entry.pattern) })) });
       for (const [id, entry] of addedPatterns) patternBank.set(id, entry);
       if (addedPatterns.size) patternsRevision++;
       s.project.arrangement = arrangement; s.project.nextId = next; pruneWorkspaceHistory(); changed();
@@ -1887,9 +2003,8 @@ export function installMockTauri(seed: MockSeed): void {
       if (publishing) await publishing.promise;
       workspaceStamp(args);
       if (intent.cancelled || pendingMedia.get(key) !== intent) throw "Media request cancelled or superseded";
-      const candidate = clone(s.project);
-      const arrangement = candidate.arrangement ?? emptyArrangement();
-      candidate.arrangement = arrangement;
+      const arrangement = cloneArrangement(before);
+      const candidate: Project = { ...s.project, arrangement };
       const name = path.split(/[/\\]/).at(-1) || "sample";
       const sample = { path: name, file: null };
       const createdIds: number[] = [];

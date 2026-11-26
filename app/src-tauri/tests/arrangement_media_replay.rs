@@ -228,6 +228,7 @@ fn steps() -> Vec<Value> {
         waveform(2, 0, 4),
     ];
     steps.extend(automation_steps());
+    steps.extend(automation_edit_steps());
     steps
 }
 
@@ -443,6 +444,354 @@ fn automation_steps() -> Vec<Value> {
     ]
 }
 
+fn automation_edit_steps() -> Vec<Value> {
+    let step = |command: &str, args: Value| json!({"command": command, "args": args});
+    let view = || step("arrangement_view", json!({"offset":0,"limit":32}));
+    let edit_at = |generation, revision, ops: Vec<Value>| {
+        step(
+            "arrangement_edit",
+            json!({"generation":generation,"revision":revision,"editsJson":json!(ops).to_string()}),
+        )
+    };
+    let edit = |revision, ops| edit_at(6, revision, ops);
+    let curve = |generation, revision, clip| {
+        step(
+            "arrangement_curve",
+            json!({"generation":generation,"revision":revision,"clip":clip}),
+        )
+    };
+    let history = |revision, undo| {
+        step(
+            "arrangement_history",
+            json!({"generation":6,"revision":revision,"undo":undo}),
+        )
+    };
+    let point = |tick, value, mode| json!({"tick":tick,"value":value,"mode":mode});
+    let points = |clip, points: Vec<Value>| json!({"kind":"setAutomationPoints","clip":clip,"points":points});
+    let settings = |clip, target: Value, priority: u32| json!({"kind":"setAutomationClip","clip":clip,"target":target,"priority":priority});
+    let volume = || json!({"type":"channelVolume","channel":1});
+    let pan = || json!({"type":"channelPan","channel":1});
+    let param = |instrument, param| json!({"type":"instrumentParam","channel":1,"instrument":instrument,"param":param});
+    let copy = |clip, start| json!({"kind":"copy","clip":clip,"track":2,"startTick":start});
+    let create_track = || json!({"kind":"createTrack","name":"Allocator probe","color":0});
+    let initial = vec![
+        point(99, 0.1, "linear"),
+        point(100, 0.2, "hold"),
+        point(150, 1.5, "linear"),
+        point(199, 0.8, "hold"),
+        point(200, 0.3, "linear"),
+    ];
+    let create = |name, start| {
+        json!({"kind":"createClip","track":2,"name":name,"startTick":start,
+        "muted":false,"content":{"type":"automation","target":volume(),"priority":99,
+        "offsetTick":100,"lengthTicks":100,"points":initial}})
+    };
+    let window = || vec![point(100, 0.4, "linear"), point(149, 0.7, "hold")];
+    // Keep large point probes compact in the checked-in tape. Both runners expand the same runs.
+    let boundary = |generation, revision, probes: Vec<Value>| {
+        step(
+            "arrangement_edit",
+            json!({"generation":generation,"revision":revision,"pointRuns":probes}),
+        )
+    };
+    let run =
+        |op, repeats, count, start| json!({"op":op,"repeats":repeats,"count":count,"start":start});
+    let large_clip = || {
+        json!({"kind":"createClip","track":2,"name":"Large curve","startTick":8000,
+        "muted":false,"content":{"type":"automation","target":volume(),"priority":0,
+        "offsetTick":100,"lengthTicks":16384,"points":[point(0, 0.5, "hold")]}})
+    };
+    vec![
+        step("project_new", json!({})),
+        step("channel_add_synth", json!({"generation":6,"preset":"Init"})),
+        edit(
+            1,
+            vec![
+                json!({"kind":"createTrack","name":"Automation edits","color":0}),
+                create("Shared", 960),
+                create("Independent", 1920),
+                copy(3, 2880),
+                json!({"kind":"slice","clip":3,"tick":1010}),
+                json!({"kind":"createClip","track":2,"name":"Notes","startTick":0,"muted":false,
+                "content":{"type":"pattern","pattern":0,"offsetTick":0,"lengthTicks":960}}),
+                create_track(),
+            ],
+        ),
+        edit(
+            2,
+            vec![
+                points(3, window()),
+                settings(7, volume(), 12),
+                create_track(),
+            ],
+        ),
+        view(),
+        curve(6, 3, 3),
+        curve(6, 3, 7),
+        curve(6, 3, 9),
+        curve(6, 3, 5),
+        edit(3, vec![points(3, window()), settings(7, volume(), 12)]),
+        edit(3, vec![points(3, vec![]), points(3, window())]),
+        history(3, true),
+        view(),
+        curve(6, 4, 7),
+        // A no-op after Undo must leave the pending Redo available.
+        edit(
+            4,
+            vec![
+                points(3, vec![point(100, 0.2, "hold")]),
+                settings(7, volume(), 8),
+            ],
+        ),
+        history(4, false),
+        view(),
+        curve(6, 5, 9),
+        edit(5, vec![points(9, vec![])]),
+        curve(6, 6, 3),
+        edit(
+            6,
+            vec![points(
+                9,
+                vec![point(150, 0.6, "hold"), point(199, 2.00000001, "linear")],
+            )],
+        ),
+        curve(6, 7, 7),
+        edit(7, vec![points(9, vec![point(149, 0.1, "hold")])]),
+        edit(
+            7,
+            vec![points(
+                9,
+                vec![point(200, 0.1, "hold"), point(150, 0.1, "hold")],
+            )],
+        ),
+        edit(
+            7,
+            vec![points(
+                9,
+                vec![point(150, 0.1, "hold"), point(150, 0.2, "linear")],
+            )],
+        ),
+        edit(
+            7,
+            vec![points(
+                9,
+                vec![point(151, 0.1, "hold"), point(150, 0.2, "linear")],
+            )],
+        ),
+        edit(7, vec![points(9, vec![point(150, -0.1, "hold")])]),
+        edit(7, vec![points(9, vec![point(150, 2.01, "hold")])]),
+        edit(7, vec![points(10, vec![])]),
+        edit(7, vec![points(99, vec![])]),
+        edit(7, vec![settings(10, volume(), 8)]),
+        edit(7, vec![settings(99, volume(), 8)]),
+        edit(6, vec![points(3, window())]),
+        edit(6, vec![points(3, vec![point(100, 0.2, "step")])]),
+        edit(6, vec![points(3, vec![point(-1, 0.2, "hold")])]),
+        edit(6, vec![points(-1, vec![point(100, 0.2, "step")])]),
+        edit(
+            6,
+            vec![points(
+                3,
+                vec![json!({"tick":100,"value":null,"mode":"hold"})],
+            )],
+        ),
+        edit(6, vec![json!({"kind":"setAutomationPoints","clip":3})]),
+        edit(
+            6,
+            vec![json!({"kind":"setAutomationClip","clip":5,"target":volume(),"priority":-1})],
+        ),
+        edit(
+            6,
+            vec![settings(
+                5,
+                json!({"type":"instrumentParam","channel":1,"instrument":"synth"}),
+                6,
+            )],
+        ),
+        edit(
+            7,
+            vec![settings(5, json!({"type":"trackVolume","channel":1}), 6)],
+        ),
+        edit(7, vec![settings(3, pan(), u32::MAX)]),
+        edit(
+            7,
+            vec![json!({"kind":"deleteClip","clip":7}), settings(3, pan(), 4)],
+        ),
+        edit(7, vec![settings(5, volume(), 15)]),
+        edit(7, vec![settings(5, volume(), 2)]),
+        edit(7, vec![settings(5, pan(), 12)]),
+        edit(
+            7,
+            vec![settings(5, json!({"type":"channelVolume","channel":99}), 6)],
+        ),
+        edit(7, vec![settings(5, param("sampler", "start"), 6)]),
+        edit(7, vec![settings(5, param("synth", "missing"), 6)]),
+        edit(7, vec![settings(5, pan(), 6)]),
+        edit(
+            7,
+            vec![
+                points(9, vec![point(150, 3.0, "hold")]),
+                settings(5, volume(), 15),
+            ],
+        ),
+        edit(
+            7,
+            vec![
+                settings(5, volume(), 14),
+                create_track(),
+                points(9, vec![point(150, 0.25, "hold")]),
+                points(5, vec![point(200, 0.1, "hold")]),
+            ],
+        ),
+        edit(
+            7,
+            vec![
+                points(9, vec![point(150, 0.25, "hold")]),
+                points(5, vec![point(100, 3.0, "hold")]),
+                create_track(),
+            ],
+        ),
+        view(),
+        curve(6, 7, 9),
+        edit(7, vec![settings(5, volume(), 15)]),
+        edit(
+            7,
+            vec![
+                points(5, vec![point(100, -1.0, "hold"), point(199, 1.0, "linear")]),
+                settings(5, pan(), 14),
+                create_track(),
+            ],
+        ),
+        edit(8, vec![points(5, vec![point(100, -1.01, "hold")])]),
+        edit(8, vec![points(5, vec![point(100, 1.01, "hold")])]),
+        edit(
+            8,
+            vec![
+                points(5, vec![point(100, 0.0, "hold"), point(199, 1.0, "linear")]),
+                settings(5, param("synth", "osc1_level"), 14),
+            ],
+        ),
+        edit(9, vec![points(5, vec![point(100, 1.01, "hold")])]),
+        // An inverse plus a copy must keep sharing through undo and redo.
+        edit(
+            9,
+            vec![points(3, vec![]), points(3, window()), copy(3, 3840)],
+        ),
+        history(10, true),
+        history(11, false),
+        edit(12, vec![points(16, vec![point(100, 0.45, "linear")])]),
+        curve(6, 13, 3),
+        curve(6, 13, 9),
+        step(
+            "project_save_as",
+            json!({"path":"/qa/edited-automation.grooviq"}),
+        ),
+        step("project_new", json!({})),
+        step(
+            "project_open",
+            json!({"path":"/qa/edited-automation.grooviq"}),
+        ),
+        view(),
+        curve(8, 0, 5),
+        curve(8, 0, 7),
+        curve(8, 0, 9),
+        edit_at(
+            8,
+            0,
+            vec![points(3, vec![]), settings(3, volume(), 18), create_track()],
+        ),
+        curve(8, 1, 3),
+        curve(8, 1, 7),
+        curve(8, 1, 9),
+        boundary(8, 0, vec![run(points(99, vec![]), 1, 16_385, 100)]),
+        boundary(
+            8,
+            0,
+            vec![
+                run(points(99, vec![]), 61, 16_384, 100),
+                run(large_clip(), 1, 577, 100),
+            ],
+        ),
+        boundary(
+            8,
+            0,
+            vec![
+                run(points(99, vec![]), 61, 16_384, 100),
+                run(json!({"kind":"deleteClip","clip":99}), 1, 576, 100),
+            ],
+        ),
+        boundary(
+            8,
+            0,
+            vec![
+                run(points(99, vec![]), 61, 16_384, 100),
+                run(json!({"kind":"deleteClip","clip":99}), 1, 577, 100),
+            ],
+        ),
+        boundary(
+            8,
+            1,
+            vec![
+                run(large_clip(), 1, 0, 0),
+                run(points(20, vec![]), 1, 16_384, 100),
+            ],
+        ),
+        boundary(
+            8,
+            1,
+            vec![
+                run(large_clip(), 1, 0, 0),
+                run(points(20, vec![]), 1, 16_383, 100),
+                run(copy(20, 24000), 61, 0, 0),
+            ],
+        ),
+        edit_at(8, 1, vec![create_track()]),
+        // No later operation in these batches can mask a missed priority allocation.
+        edit_at(8, 2, vec![settings(5, param("synth", "osc1_level"), 21)]),
+        edit_at(8, 3, vec![settings(5, param("synth", "osc1_level"), 22)]),
+        {
+            let mut overflowing = large_clip();
+            overflowing["content"]["lengthTicks"] = json!(u64::MAX);
+            edit_at(8, 4, vec![overflowing, points(23, vec![])])
+        },
+        {
+            let mut overflowing = large_clip();
+            overflowing["content"]["lengthTicks"] = json!(u64::MAX);
+            edit_at(8, 4, vec![overflowing])
+        },
+    ]
+}
+
+fn edits_json(args: &Value) -> String {
+    if let Some(runs) = args["pointRuns"].as_array() {
+        let mut ops = Vec::new();
+        for run in runs {
+            let mut op = run["op"].clone();
+            let count = run["count"].as_u64().unwrap();
+            if count != 0 {
+                let start = run["start"].as_u64().unwrap();
+                let points = json!(
+                    (start..start + count)
+                        .map(|tick| json!({"tick":tick,"mode":"hold","value":0.5}))
+                        .collect::<Vec<_>>()
+                );
+                if op["content"]["type"] == "automation" {
+                    op["content"]["points"] = points;
+                } else {
+                    op["points"] = points;
+                }
+            }
+            ops.extend(std::iter::repeat_n(
+                op,
+                run["repeats"].as_u64().unwrap() as usize,
+            ));
+        }
+        json!(ops).to_string()
+    } else {
+        args["editsJson"].as_str().unwrap().into()
+    }
+}
+
 #[test]
 fn arrangement_media_matches_shared_replay() {
     let path = concat!(
@@ -482,7 +831,7 @@ fn arrangement_media_matches_shared_replay() {
                 &session,
                 n("generation"),
                 n("revision"),
-                string("editsJson"),
+                &edits_json(args),
             ))),
             "arrangement_view" => {
                 arrangement_view(&session, n("offset") as usize, n("limit") as usize)
