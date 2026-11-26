@@ -12,6 +12,17 @@ pub const SPEC: [(f32, f32, f32); 7] = [
     (0.0, 1.0, 1.0),    // mix
     (-24.0, 12.0, 0.0), // output dB
 ];
+
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 7] = [
+    "attack",
+    "sustain",
+    "mode",
+    "shape",
+    "saturation",
+    "mix",
+    "output",
+];
 pub const PRESETS: &[&str] = &["Kick Punch", "Snare Body", "Bus Softening"];
 pub fn preset(name: &str) -> Option<Vec<(u32, f32)>> {
     let values = match name {
