@@ -38,25 +38,27 @@ type DprHost = Pick<EventTarget, "addEventListener" | "removeEventListener"> & {
   matchMedia?: (query: string) => EventTarget;
 };
 
+const DPR_CHECK_INTERVAL_MS = 500;
+
 /** A resolution query only reports when crossing its current match, so re-arm at the new DPR. */
 export function subscribeGridDpr(host: DprHost, onChange: (ratio: number) => void): () => void {
-  let ratio = host.devicePixelRatio || 1;
+  let ratio: number | undefined;
   let query: EventTarget | undefined;
-  const arm = () => {
-    query?.removeEventListener("change", update);
-    query = host.matchMedia?.(`(resolution: ${ratio}dppx)`);
-    query?.addEventListener("change", update);
-  };
   const update = () => {
     const next = host.devicePixelRatio || 1;
     if (next === ratio) return;
     ratio = next;
-    arm();
-    onChange(ratio);
+    query?.removeEventListener("change", update);
+    query = host.matchMedia?.(`(resolution: ${next}dppx)`);
+    query?.addEventListener("change", update);
+    onChange(next);
   };
-  arm();
+  update();
   host.addEventListener("resize", update);
+  // Chromium can change DPR at a fixed viewport size without notifying media queries or observers.
+  const timer = setInterval(update, DPR_CHECK_INTERVAL_MS);
   return () => {
+    clearInterval(timer);
     host.removeEventListener("resize", update);
     query?.removeEventListener("change", update);
   };

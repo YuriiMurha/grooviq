@@ -80,6 +80,8 @@ it("re-arms the resolution query at each new DPR and removes both listeners on c
   const changed = vi.fn();
   const stop = subscribeGridDpr(host, changed);
   expect(host.matchMedia.mock.calls).toEqual([["(resolution: 1dppx)"]]);
+  expect(changed.mock.calls).toEqual([[1]]);
+  changed.mockClear();
 
   const first = host.matchMedia.mock.results[0].value;
   host.devicePixelRatio = 2;
@@ -103,4 +105,34 @@ it("re-arms the resolution query at each new DPR and removes both listeners on c
   last?.dispatchEvent(new Event("change"));
   host.dispatchEvent(new Event("resize"));
   expect(changed).toHaveBeenCalledTimes(3);
+});
+
+it("catches DPR changes without browser events and stops checking after cleanup", () => {
+  vi.useFakeTimers();
+  const host = Object.assign(new EventTarget(), {
+    devicePixelRatio: 1,
+    matchMedia: vi.fn<(query: string) => EventTarget>(() => new EventTarget()),
+  });
+  const changed = vi.fn();
+  const stop = subscribeGridDpr(host, changed);
+  try {
+    changed.mockClear(); // Only count changes after subscribing.
+    host.devicePixelRatio = 2;
+    vi.advanceTimersByTime(249);
+    expect(changed).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(751);
+    expect(changed.mock.calls).toEqual([[2]]);
+    expect(host.matchMedia.mock.calls.at(-1)).toEqual(["(resolution: 2dppx)"]);
+
+    vi.advanceTimersByTime(1000);
+    expect(changed).toHaveBeenCalledTimes(1);
+    stop();
+    expect(vi.getTimerCount()).toBe(0);
+    host.devicePixelRatio = 1;
+    vi.advanceTimersByTime(1000);
+    expect(changed).toHaveBeenCalledTimes(1);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
 });
