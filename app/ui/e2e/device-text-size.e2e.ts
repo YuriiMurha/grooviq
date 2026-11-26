@@ -10,12 +10,13 @@ test.use({ seed: { project: beat, files: soundsFor(["Percussion"]) } });
 
 async function undersizedText(dialog: Locator): Promise<string[]> {
   return dialog.evaluate((root) => {
+    const scale = root.getBoundingClientRect().height / root.clientHeight;
     const issues: string[] = [];
     for (const element of root.querySelectorAll("*")) {
       const style = getComputedStyle(element);
       if (style.visibility !== "visible" || !element.getClientRects().length) continue;
       if (element.closest("details:not([open])") && !element.closest("summary")) continue;
-      const size = Number.parseFloat(style.fontSize);
+      const size = Number.parseFloat(style.fontSize) * scale;
       if (size >= 11) continue;
       // Read each element's own text, so a caption inherits its own computed size even when
       // its container or neighbouring value already meets the floor.
@@ -32,7 +33,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 900, height: 560 
   test.describe(`${viewport.width}×${viewport.height}`, () => {
     test.use({ viewport });
 
-    test("visible sampler and synth text is at least 11 design px", async ({ app }) => {
+    test("visible sampler and synth text paints at 11 px or larger", async ({ app }) => {
       const findings: string[] = [];
       for (const name of ["Percussion sampler", "Missing sampler", "Bass synth"]) {
         await app.getByRole("button", { name: `Edit the ${name}`, exact: true }).click();
@@ -50,7 +51,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 900, height: 560 
         findings.push(...(await undersizedText(dialog)).map((issue) => `${name} | ${issue}`));
         await dialog.getByRole("button", { name: `Close the ${name}` }).click();
       }
-      expect(findings, "Editor text below 11 CSS px").toEqual([]);
+      expect(findings, "Editor text paints below 11 CSS px").toEqual([]);
     });
   });
 }
