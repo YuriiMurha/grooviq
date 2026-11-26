@@ -15,7 +15,7 @@
 use crate::backup::prepare_backup_on;
 use crate::compile::synth_values;
 use crate::compile::{compile_pattern, engine_state, sampler_values};
-use crate::file::{Disk, Loaded, RealDisk, SampleFiles, stage_save};
+use crate::file::{Disk, Loaded, LoadedForOpen, RealDisk, SampleFiles, matches_json, stage_save};
 use crate::model::{
     BPM, Channel, DEFAULT_KEY, DEFAULT_VELOCITY, EXTENSION, MAX_NOTES_PER_PATTERN, MAX_STEPS, Note,
     Pattern, Project, ProjectKey, SCALES, SampleRef, TimeSignature, VOLUME, is_plain_step,
@@ -1650,7 +1650,7 @@ impl Session {
             })
             // History can restore a whole pattern or advance an allocator floor. Compare
             // the serialized model too, so a matching position alone cannot hide changes.
-            && serde_json::to_vec(&self.project).is_ok_and(|json| json == saved.project_json)
+            && matches_json(&self.project, saved.project_json.as_slice())
     }
 
     fn current(&self) -> &Pattern {
@@ -3202,9 +3202,34 @@ impl Session {
     pub fn open(
         &mut self,
         path: &Path,
-        loaded: Loaded,
+        loaded: impl Into<LoadedForOpen>,
         decoded: DecodedSamples,
     ) -> Result<OpenReport, SessionError> {
+        let LoadedForOpen {
+            loaded,
+            unchanged_at,
+        } = loaded.into();
+        let warnings = self.replace_loaded(path, loaded, decoded)?;
+        if warnings.is_empty()
+            && unchanged_at.as_deref() == Some(path)
+            && path
+                .file_stem()
+                .is_some_and(|stem| stem.to_string_lossy() == self.project.name)
+        {
+            self.remember_saved_state();
+        }
+        Ok(OpenReport {
+            view: self.view(),
+            warnings,
+        })
+    }
+
+    fn replace_loaded(
+        &mut self,
+        path: &Path,
+        loaded: Loaded,
+        decoded: DecodedSamples,
+    ) -> Result<Vec<String>, SessionError> {
         let Loaded {
             mut project,
             samples,
@@ -3225,10 +3250,7 @@ impl Session {
             warnings.push(error.clone());
         }
         self.path = Some(path.to_path_buf());
-        Ok(OpenReport {
-            view: self.view(),
-            warnings,
-        })
+        Ok(warnings)
     }
 
     /// Opens a recovered autosave as the project it was: at its `original` path (or untitled),
@@ -3240,11 +3262,13 @@ impl Session {
         decoded: DecodedSamples,
         now: Instant,
     ) -> Result<OpenReport, SessionError> {
-        let mut report = self.open(original.unwrap_or(Path::new("")), loaded, decoded)?;
+        let warnings = self.replace_loaded(original.unwrap_or(Path::new("")), loaded, decoded)?;
         self.path = original.map(Path::to_path_buf);
         self.changed_outside_history(true, now);
-        report.view = self.view();
-        Ok(report)
+        Ok(OpenReport {
+            view: self.view(),
+            warnings,
+        })
     }
 
     /// Snapshots what to save, cheaply (the sample bytes are shared). `path` is a new place
@@ -3726,6 +3750,118 @@ mod dirty_tests {
             .effect
     }
 
+    fn open_file(s: &mut Session, path: &Path) -> OpenReport {
+        let loaded = crate::file::load_for_open(path, &s.media_budget()).unwrap();
+        let decoded = decode_samples(loaded.loaded());
+        s.open(path, loaded, decoded).unwrap()
+    }
+
+    #[test]
+    fn clean_v4_open_saves_identical_bytes() {
+        let (mut s, dir, now) = rig();
+        // Four frames of mono 48 kHz, 16-bit PCM.
+        let file = crate::SampleFile {
+            name: "unit.wav".into(),
+            bytes: Arc::new(
+                b"RIFF\x2c\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\xbb\0\0\0\x77\x01\0\x02\0\x10\0data\x08\0\0\0\0\0\x0a\0\xf6\xff\0\0"
+                    .to_vec(),
+            ),
+        };
+        s.add_channel(
+            Path::new("unit.wav"),
+            file,
+            Arc::new(SampleBuf {
+                rate: 48_000.0,
+                l: vec![0.0; 4],
+                r: vec![0.0; 4],
+            }),
+            now,
+        )
+        .unwrap();
+        let path = save(&mut s, &dir);
+        let original = std::fs::read(&path).unwrap();
+        let report = open_file(&mut s, &path);
+        assert!(report.warnings.is_empty());
+        assert!(!report.view.dirty);
+        s.save(None, dir.path()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn mixer_undo_returns_to_a_clean_v4_open() {
+        let (mut s, dir, now) = rig();
+        let path = save(&mut s, &dir);
+        assert!(!open_file(&mut s, &path).view.dirty);
+        fader(&mut s, -3.0, now);
+        step(&mut s, true, now);
+        assert!(!s.needs_confirmation());
+        step(&mut s, false, now);
+        assert!(s.needs_confirmation());
+    }
+
+    #[test]
+    fn a_migrated_open_stays_dirty_after_undo() {
+        use std::io::Write;
+
+        let (mut s, dir, now) = rig();
+        for version in 1..crate::model::VERSION {
+            let path = dir.path().join("legacy.grooviq");
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            zip.start_file("project.json", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(
+                format!(
+                    r#"{{"format":"grooviq-project","version":{version},"name":"legacy","nextId":1,"patterns":[{{"id":0,"nextNoteId":1}}]}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            zip.finish().unwrap();
+            let report = open_file(&mut s, &path);
+            assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+            assert!(!report.view.dirty);
+            fader(&mut s, -3.0, now);
+            step(&mut s, true, now);
+            assert!(s.needs_confirmation(), "version {version}");
+        }
+    }
+
+    #[test]
+    fn open_repairs_with_or_without_warnings_stay_dirty_after_undo() {
+        let (mut s, dir, now) = rig();
+        let path = dir.path().join("beat.grooviq");
+        for warned in [true, false] {
+            let mut p = Project::new();
+            p.name = "beat".into();
+            if warned {
+                p.bpm = 1.0;
+            } else {
+                p.patterns[0].next_note_id = 0;
+            }
+            crate::save(&p, &SampleFiles::new(), &path).unwrap();
+            let report = open_file(&mut s, &path);
+            assert_eq!(!report.warnings.is_empty(), warned);
+            assert!(!report.view.dirty);
+            fader(&mut s, -3.0, now);
+            step(&mut s, true, now);
+            assert!(s.needs_confirmation());
+        }
+    }
+
+    #[test]
+    fn a_renamed_file_stays_dirty_after_undo() {
+        let (mut s, dir, now) = rig();
+        let original = save(&mut s, &dir);
+        let path = dir.path().join("renamed.grooviq");
+        std::fs::rename(original, &path).unwrap();
+        let report = open_file(&mut s, &path);
+        assert!(report.warnings.is_empty());
+        assert!(!report.view.dirty);
+        fader(&mut s, -3.0, now);
+        step(&mut s, true, now);
+        assert!(s.needs_confirmation());
+    }
+
     #[test]
     fn mixer_undo_and_redo_report_the_saved_position() {
         let (mut s, dir, now) = rig();
@@ -3921,7 +4057,7 @@ mod dirty_tests {
     }
 
     #[test]
-    fn replacing_a_redo_branch_keeps_the_project_dirty_until_save() {
+    fn replacing_a_redo_branch_conservatively_keeps_the_project_dirty() {
         let (mut s, dir, now) = rig();
         save(&mut s, &dir);
         fader(&mut s, -3.0, now);
@@ -3935,7 +4071,7 @@ mod dirty_tests {
     }
 
     #[test]
-    fn eviction_cannot_make_a_trimmed_history_match_an_empty_checkpoint() {
+    fn history_eviction_conservatively_keeps_the_project_dirty() {
         let (mut s, dir, now) = rig();
         s.set_history_limits(crate::HistoryLimits {
             steps: 1,
@@ -3953,7 +4089,7 @@ mod dirty_tests {
     }
 
     #[test]
-    fn a_setting_change_keeps_the_project_dirty_even_if_reentered() {
+    fn a_reentered_setting_conservatively_keeps_the_project_dirty() {
         let (mut s, dir, now) = rig();
         let saved_bpm = s.project.bpm;
         save(&mut s, &dir);
@@ -3988,6 +4124,37 @@ mod dirty_tests {
         assert!(s.needs_confirmation());
         job.write(dir.path()).unwrap();
         assert!(s.finish_save(&job));
+        assert!(s.needs_confirmation());
+        step(&mut s, false, now);
+        step(&mut s, true, now);
+        assert!(s.needs_confirmation());
+    }
+
+    #[test]
+    fn unconfirmed_save_cannot_leave_the_previous_file_as_checkpoint() {
+        struct RefuseTargetDirectory<'a>(&'a Path);
+
+        impl Disk for RefuseTargetDirectory<'_> {
+            fn sync_folder(&mut self, path: &Path) -> io::Result<()> {
+                if path == self.0 {
+                    return Err(io::Error::other("target directory sync refused"));
+                }
+                RealDisk.sync_folder(path)
+            }
+        }
+
+        let (mut s, dir, now) = rig();
+        let path = save(&mut s, &dir);
+        fader(&mut s, -3.0, now);
+        let error = s
+            .save_on(None, dir.path(), &mut RefuseTargetDirectory(&path))
+            .unwrap_err();
+        assert!(error.directory_unconfirmed());
+        assert_eq!(
+            crate::load(&path).unwrap().project.mixer.tracks[0].level,
+            Level::Db(-3.0)
+        );
+        step(&mut s, true, now);
         assert!(s.needs_confirmation());
     }
 }

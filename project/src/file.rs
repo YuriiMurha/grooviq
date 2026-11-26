@@ -20,7 +20,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zip::result::ZipError;
@@ -91,6 +91,27 @@ pub struct Loaded {
     /// Things the person should know, one sentence each: fixes, and samples that were not in
     /// the file.
     pub warnings: Vec<String>,
+}
+
+/// A load prepared for opening in a session, with provenance for its saved checkpoint.
+pub struct LoadedForOpen {
+    pub(crate) loaded: Loaded,
+    pub(crate) unchanged_at: Option<PathBuf>,
+}
+
+impl LoadedForOpen {
+    pub fn loaded(&self) -> &Loaded {
+        &self.loaded
+    }
+}
+
+impl From<Loaded> for LoadedForOpen {
+    fn from(loaded: Loaded) -> Self {
+        Self {
+            loaded,
+            unchanged_at: None,
+        }
+    }
 }
 
 /// Why a project did not open.
@@ -171,6 +192,42 @@ impl Write for Capped {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+pub(crate) fn matches_json(value: &impl Serialize, mut expected: impl BufRead) -> bool {
+    struct Matching<'a, R>(&'a mut R);
+
+    impl<R: BufRead> Write for Matching<'_, R> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes.is_empty() {
+                return Ok(0);
+            }
+            let expected = self.0.fill_buf()?;
+            let n = bytes.len().min(expected.len());
+            if n == 0 || bytes[..n] != expected[..n] {
+                return Err(io::Error::other("project JSON differs"));
+            }
+            self.0.consume(n);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    serde_json::to_writer(Matching(&mut expected), value).is_ok()
+        && expected.fill_buf().is_ok_and(|rest| rest.is_empty())
+}
+
+#[cfg(test)]
+#[test]
+fn json_comparison_rejects_short_long_and_different_input() {
+    let matches = |bytes| matches_json(&[1, 2], BufReader::with_capacity(2, bytes));
+    assert!(matches(b"[1,2]".as_slice()));
+    assert!(!matches(b"[1,2".as_slice()));
+    assert!(!matches(b"[1,2] ".as_slice()));
+    assert!(!matches(b"[1,3]".as_slice()));
 }
 
 /// `project.json`'s bytes: compact (pretty printing tripled a note-heavy project), and at most
@@ -710,19 +767,29 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
 /// limit is not loaded: the warning says it is too big, and the channel keeps its entry name (a
 /// later save refuses rather than drop it).
 fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
-    load_inner(path, limits, None)
+    load_inner(path, limits, None, false).map(|result| result.loaded)
 }
 pub fn load_budgeted(
     path: &Path,
     budget: &grooviq_engine::media_budget::MediaBudget,
 ) -> Result<Loaded, LoadError> {
-    load_inner(path, LIMITS, Some(budget))
+    load_inner(path, LIMITS, Some(budget), false).map(|result| result.loaded)
+}
+
+/// Loads outside the session lock and checks whether the current-format manifest was
+/// preserved, including fields the loader can repair silently.
+pub fn load_for_open(
+    path: &Path,
+    budget: &grooviq_engine::media_budget::MediaBudget,
+) -> Result<LoadedForOpen, LoadError> {
+    load_inner(path, LIMITS, Some(budget), true)
 }
 fn load_inner(
     path: &Path,
     limits: Limits,
     budget: Option<&grooviq_engine::media_budget::MediaBudget>,
-) -> Result<Loaded, LoadError> {
+    check_unchanged: bool,
+) -> Result<LoadedForOpen, LoadError> {
     let mut left = limits.total;
     let mut file = File::open(path)?;
     // A zip starts with "PK"; anything else is not one of ours, and says so plainly instead of
@@ -876,10 +943,26 @@ fn load_inner(
             asset.sample.file = None;
         }
     }
-    Ok(Loaded {
-        project,
-        samples,
-        warnings,
+    let unchanged = check_unchanged
+        && version == VERSION
+        && warnings.is_empty()
+        && project_json(&mut zip, limits.json).is_ok_and(|reader| {
+            matches_json(
+                &Document {
+                    format: FORMAT,
+                    version: VERSION,
+                    project: &project,
+                },
+                BufReader::new(reader),
+            )
+        });
+    Ok(LoadedForOpen {
+        loaded: Loaded {
+            project,
+            samples,
+            warnings,
+        },
+        unchanged_at: unchanged.then(|| path.to_path_buf()),
     })
 }
 
