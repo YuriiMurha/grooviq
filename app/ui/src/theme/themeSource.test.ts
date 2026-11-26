@@ -143,6 +143,21 @@ test("preserves quoted text from a referenced declaration", () => {
   expect(resolveThemeDeclarations(declarations).get("--value")).toBe('"var(--absent)"');
 });
 
+test.each([
+  ["some-var(--ink)", "some-var(--ink)"],
+  ["some-var(--absent)", "some-var(--absent)"],
+  ["some-var(var(--ink))", "some-var(#123)"],
+  ["some-var(--absent),var(--ink)", "some-var(--absent),#123"],
+  ["some_var(--ink)", "some_var(--ink)"],
+  ["name1var(--ink)", "name1var(--ink)"],
+  ["évar(--ink)", "évar(--ink)"],
+  ["#var(--ink)", "#var(--ink)"],
+  ["@var(--ink)", "@var(--ink)"],
+])("resolves only complete var() functions in %j", (value, expected) => {
+  const declarations = parseThemeDeclarations(`:root { --ink: #123; --value: ${value}; }`, ":root");
+  expect(resolveThemeDeclarations(declarations).get("--value")).toBe(expected);
+});
+
 test("resolves alias chains and multi-value properties against the overlaid palette", () => {
   const base = parseThemeDeclarations(":root { --ink: #123; --step: var(--ink); --device: var(--step); --shadow: 0 0 0 1px var(--device); }", ":root");
   const variant = parseThemeDeclarations(':root[data-theme="test"] { --ink: #456; }', ':root[data-theme="test"]');
