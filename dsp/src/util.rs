@@ -91,9 +91,11 @@ impl Smooth {
 
 /// Caps the wet-path high cut of Delay, Character Delay, and Reverb at 45% of the sample rate.
 ///
-/// Pass the device's sample rate after its constructor's rate clamp. Pass the smoothed frequency
-/// in Hz to match the active coefficients, or the requested frequency to estimate where they
-/// will settle. The original f32 log2/exp2 round trip can shift an uncapped request by a few ulps.
+/// Editors showing a running device should read its meter 3 (the active value). For an estimate,
+/// pass the rate the device actually runs at after its constructor's clamp (Delay and Reverb:
+/// 8,000–384,000 Hz; Character Delay: 22,050–192,000 Hz), not the host rate. Pass the smoothed
+/// frequency in Hz to match the active coefficients, or the requested frequency to estimate where
+/// they will settle. The original f32 log2/exp2 round trip can shift an uncapped request by a few ulps.
 pub fn effective_high_cut(high_cut_hz: f64, sample_rate: f64) -> f64 {
     high_cut_hz.min(0.45 * sample_rate)
 }
