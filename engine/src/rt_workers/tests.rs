@@ -398,6 +398,19 @@ fn a_worker_can_acknowledge_the_new_generation_before_claiming_the_old() {
     // SAFETY: only atomic gates are shared. The delays are bounded and test-only.
     unsafe impl Jobs for SwapJobs {
         fn run(&self, job: JobId, slot: WorkerSlot) {
+            if (job, slot) == (1, 0)
+                && let Some(worker) = &self.worker
+            {
+                // Job 2 has been offered. Keep callback work running until the worker
+                // claims it so the empty-tail fast path cannot take back the offer.
+                let start = Instant::now();
+                while !worker.entered.load(Ordering::Acquire)
+                    && start.elapsed() < Duration::from_secs(2)
+                {
+                    std::hint::spin_loop();
+                }
+                return;
+            }
             let gate = match (job, slot) {
                 (0, 0) => self.callback.as_ref(),
                 (2, 1) => self.worker.as_ref(),
@@ -447,8 +460,11 @@ fn a_worker_can_acknowledge_the_new_generation_before_claiming_the_old() {
         wait_for(|| pool.shared.workers[0].acknowledged() == new.number);
         assert!(!pool.quiescent(old), "callback still has a pin");
         before_dispatch.release();
-        while_claimed.wait();
-        assert!(callback.join().unwrap());
+        assert!(
+            callback.join().unwrap(),
+            "the acknowledged worker must hold job 2 past the deadline"
+        );
+        assert!(while_claimed.entered.load(Ordering::Acquire));
         // The pin has been cleared and the worker already acknowledged the new generation.
         assert!(!pool.quiescent(old), "worker still has an old claim");
         assert!(pool.reclaim(old).is_none());
