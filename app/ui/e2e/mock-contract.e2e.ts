@@ -322,15 +322,17 @@ test.describe("arrangement media contract", () => {
   });
   test.use({ seed: { project: initial }, deviceScaleFactor: 2 });
 
-  test("native file drops broadcast physical enter, over and drop coordinates", async ({ app, mock }) => {
-    // Tauri manager/webview.rs::on_webview_event forwards PhysicalPosition, and
-    // src/rack/fileDrop.ts subscribes independently of a position-aware consumer.
-    await app.evaluate(() => {
+  test("native file drops broadcast platform-specific enter, over and drop coordinates", async ({ app, mock, browserName }) => {
+    // Chromium represents Windows; WebKit represents macOS (ci.yml and playwright.config.ts).
+    // Tauri forwards Wry coordinates unchanged to independent rack and playlist listeners.
+    const windows = browserName === "chromium";
+    await app.evaluate((windows) => {
       const shell = (window as unknown as { __TAURI_INTERNALS__: {
         invoke: (command: string, args: unknown) => Promise<unknown>;
         transformCallback: (handler: (event: { payload: { position: { x: number; y: number } } }) => void) => number;
       } }).__TAURI_INTERNALS__;
       const rack: unknown[] = [], playlist: unknown[] = [];
+      const scale = windows ? devicePixelRatio : 1;
       const register = (event: string, handler: Parameters<typeof shell.transformCallback>[0]) =>
         shell.invoke("plugin:event|listen", { event, handler: shell.transformCallback(handler) });
       return Promise.all(["enter", "over", "drop"].flatMap(type => {
@@ -338,21 +340,22 @@ test.describe("arrangement media contract", () => {
         return [
           register(event, ({ payload }) => rack.push({ type, ...payload })),
           register(event, ({ payload }) => playlist.push({
-            type, x: payload.position.x / devicePixelRatio, y: payload.position.y / devicePixelRatio,
+            type, x: payload.position.x / scale, y: payload.position.y / scale,
           })),
         ];
       })).then(() => {
         // Store the arrays by reference so the next browser action can deliver the events.
         Object.assign(window, { __audioDropEvents: { rack, playlist, dpr: devicePixelRatio } });
       });
-    });
+    }, windows);
     await mock.dropAudio(path, { x: 311, y: 127 });
+    const position = windows ? { x: 622, y: 254 } : { x: 311, y: 127 };
     expect(await app.evaluate(() => Reflect.get(window, "__audioDropEvents"))).toEqual({
       dpr: 2,
       rack: [
-        { type: "enter", paths: [path], position: { x: 622, y: 254 } },
-        { type: "over", position: { x: 622, y: 254 } },
-        { type: "drop", paths: [path], position: { x: 622, y: 254 } },
+        { type: "enter", paths: [path], position },
+        { type: "over", position },
+        { type: "drop", paths: [path], position },
       ],
       playlist: ["enter", "over", "drop"].map(type => ({ type, x: 311, y: 127 })),
     });
