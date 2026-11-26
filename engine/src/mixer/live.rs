@@ -40,17 +40,34 @@ pub fn describe_builtin_insert(insert: InsertId, kind: &str) -> Option<super::In
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnsupportedInsertRate {
-    kind: String,
+    inserts: Vec<UnsupportedInsert>,
     rate: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct UnsupportedInsert {
+    id: InsertId,
+    kind: String,
+    range: Option<(f32, f32)>,
 }
 
 impl std::fmt::Display for UnsupportedInsertRate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Mixer insert {} cannot run at {} Hz",
-            self.kind, self.rate
-        )
+        if let [insert] = self.inserts.as_slice() {
+            write!(f, "Mixer insert {}", insert.kind)?;
+        } else {
+            f.write_str("Mixer inserts ")?;
+            for (index, insert) in self.inserts.iter().enumerate() {
+                if index > 0 {
+                    f.write_str(", ")?;
+                }
+                f.write_str(&insert.kind)?;
+                if let Some((min, max)) = insert.range {
+                    write!(f, " ({min}–{max} Hz)")?;
+                }
+            }
+        }
+        write!(f, " cannot run at {} Hz", self.rate)
     }
 }
 
@@ -137,20 +154,41 @@ impl RoutedMix {
 }
 
 impl MixSetup {
-    /// Checks this mix against the actual engine rate before replacing a project or exporting.
+    /// Checks this mix against the actual engine rate during control-side preparation.
     pub fn check_sample_rate(&self, rate: f32) -> Result<(), UnsupportedInsertRate> {
-        if let Self::Routed(mix) = self
-            && let Some(device) = mix.devices.iter().find(|d| {
-                grooviq_dsp::sample_rate_range(&d.kind)
+        let Self::Routed(mix) = self else {
+            return Ok(());
+        };
+        let mut inserts: Vec<_> = mix
+            .devices
+            .iter()
+            .filter_map(|device| {
+                let range = grooviq_dsp::sample_rate_range(&device.kind);
+                range
                     .is_none_or(|(min, max)| !(min..=max).contains(&rate))
+                    .then(|| UnsupportedInsert {
+                        id: device.insert,
+                        kind: device.kind.clone(),
+                        range,
+                    })
             })
-        {
-            return Err(UnsupportedInsertRate {
-                kind: device.kind.clone(),
-                rate,
-            });
+            .collect();
+        if inserts.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        if inserts.len() > 1 {
+            // Mixer order comes from the track chains. Also report unbound devices last.
+            let positions: BTreeMap<_, _> = mix
+                .mixer
+                .tracks
+                .iter()
+                .flat_map(|track| &track.inserts)
+                .enumerate()
+                .map(|(index, insert)| (insert.id, index))
+                .collect();
+            inserts.sort_by_key(|insert| positions.get(&insert.id).copied().unwrap_or(usize::MAX));
+        }
+        Err(UnsupportedInsertRate { inserts, rate })
     }
 
     /// Where the mix sends `source`, if it names it.
