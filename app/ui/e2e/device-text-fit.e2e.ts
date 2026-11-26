@@ -62,6 +62,15 @@ async function inspectTextVisibility(dialog: Locator) {
       styles.set(el, style);
       return style;
     };
+    const opacityOf = (style: CSSStyleDeclaration) => {
+      let opacity = Number(style.opacity);
+      // Other filters can depend on surrounding pixels or an external SVG filter graph.
+      // Contrast here models solid paint and scalar opacity, without rasterizing those effects.
+      for (const [, value, percent] of style.filter.matchAll(/(?:^|\s)opacity\(\s*([\d.]+(?:e[+-]?\d+)?)(%)?\s*\)/gi)) {
+        opacity *= Number(value) / (percent ? 100 : 1);
+      }
+      return opacity;
+    };
     // Let the browser resolve computed RGB and color(srgb …) from color-mix alike.
     const canvas = document.createElement("canvas");
     canvas.width = canvas.height = 1;
@@ -131,7 +140,7 @@ async function inspectTextVisibility(dialog: Locator) {
       let opacity = 1;
       for (let bound: Element | null = el; bound && root.contains(bound); bound = bound.parentElement) {
         const css = styleOf(bound);
-        opacity *= Number(css.opacity);
+        opacity *= opacityOf(css);
         const mask = css.maskImage || css.getPropertyValue("-webkit-mask-image");
         if (css.clipPath !== "none") issues.push(`${selector}: clip-path on ${describe(bound)} (${css.clipPath})`);
         if (mask && mask !== "none") issues.push(`${selector}: mask on ${describe(bound)} (${mask})`);
@@ -145,7 +154,8 @@ async function inspectTextVisibility(dialog: Locator) {
       }
       const svg = el instanceof SVGTextElement ? el.ownerSVGElement : null;
       const [red, green, blue, alpha] = rgba(svg && style.fill !== "currentcolor" ? style.fill : style.color);
-      const ink: Rgba = [red, green, blue, alpha * (svg ? Number(style.fillOpacity) : 1)];
+      // Use the full editor opacity product against the resolved background for a conservative check.
+      const ink: Rgba = [red, green, blue, alpha * opacity * (svg ? Number(style.fillOpacity) : 1)];
       const background = backgroundOf(el);
       const chartFills = new Set<Element>();
       let sampledPlainBackground = !svg;
@@ -184,7 +194,7 @@ async function inspectTextVisibility(dialog: Locator) {
       for (const fill of chartFills) {
         const css = styleOf(fill);
         const [fillRed, fillGreen, fillBlue, fillAlpha] = rgba(css.fill);
-        const painted = over([fillRed, fillGreen, fillBlue, fillAlpha * Number(css.fillOpacity) * Number(css.opacity)], background);
+        const painted = over([fillRed, fillGreen, fillBlue, fillAlpha * Number(css.fillOpacity) * opacityOf(css)], background);
         colours.push({ selector, foreground: over(ink, painted), background: painted });
       }
       for (const control of neighbours) issues.push(`${selector}: overlaps ${describe(control)}`);
@@ -373,7 +383,11 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 900, height: 560 
         test("synth filter text fits", async ({ app }) => {
           const synth = await openEditor(app, "Bass synth");
           await expect(synth.getByRole("radio", { name: mode, exact: true })).toBeChecked();
-          await expect(synth.locator('.dctl[data-param="filter_cutoff"]')).toHaveAttribute("aria-valuenow", String(cutoff));
+          for (const [param, value] of Object.entries({
+            filter_cutoff: cutoff, filter_drive: 0, filter_env_amt: -0.6, filter_res: 0.05,
+          })) {
+            await expect(synth.locator(`.dctl[data-param="${param}"]`)).toHaveAttribute("aria-valuenow", String(value));
+          }
           const response = synth.getByRole("img", { name: "Filter response" });
           await expect(response.getByText("1k", { exact: true })).toBeVisible();
           const findings = new Set<string>();
