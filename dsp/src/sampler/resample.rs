@@ -165,6 +165,10 @@ fn convolve<const N: usize>(
         && let Some(r) = sample.r.get(first..first + N)
     {
         (l, r)
+    } else if N == EXTREME_TAPS
+        && gather_wrapped_loop(sample, voice, first, &mut edge_l, &mut edge_r)
+    {
+        (&edge_l[..], &edge_r[..])
     } else {
         let lo = voice.start.ceil() as i64;
         let hi = voice.end.ceil() as i64 - 1;
@@ -213,6 +217,56 @@ fn convolve<const N: usize>(
     (sum(sl), sum(sr))
 }
 
+#[inline(never)]
+fn gather_wrapped_loop<const N: usize>(
+    sample: &SampleBuf,
+    voice: &Voice,
+    first: i64,
+    edge_l: &mut [f32; N],
+    edge_r: &mut [f32; N],
+) -> bool {
+    if !voice.looping || !voice.wrapped {
+        return false;
+    }
+    let Voice {
+        start,
+        end,
+        lo,
+        hi,
+        len,
+        pos,
+        ..
+    } = *voice;
+    // Keep taps and loop bounds exactly representable as f64, as in loop_index.
+    let max_end = ((1_i64 << 53) - N as i64) as f64;
+    if !(0.0 <= start && start <= lo && lo < hi && hi <= end && end <= max_end)
+        || !(lo..hi).contains(&pos)
+        || [start, end, lo, hi].iter().any(|x| x.fract() != 0.0)
+        || end > sample.l.len().min(sample.r.len()) as f64
+        || len != hi - lo
+    {
+        return false;
+    }
+    let lo = lo as usize;
+    let hi = hi as usize;
+    let (Some(left), Some(right)) = (sample.l.get(lo..hi), sample.r.get(lo..hi)) else {
+        return false;
+    };
+
+    // After the first wrap, both ends map into the same loop period in either direction.
+    // Keep the taps in ascending source-index order and restart each run at the loop start.
+    let mut offset = (first - lo as i64).rem_euclid(left.len() as i64) as usize;
+    let mut written = 0;
+    while written < N {
+        let count = (left.len() - offset).min(N - written);
+        edge_l[written..written + count].copy_from_slice(&left[offset..offset + count]);
+        edge_r[written..written + count].copy_from_slice(&right[offset..offset + count]);
+        written += count;
+        offset = 0;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +281,122 @@ mod tests {
             rate: 48_000.0,
             l,
             r,
+        }
+    }
+
+    #[test]
+    fn wrapped_extreme_gather_matches_each_mapped_stereo_tap() {
+        let sample = SampleBuf {
+            rate: 384_000.0,
+            l: (0..512).map(|i| i as f32).collect(),
+            r: (0..512).map(|i| -(i as f32 + 0.5)).collect(),
+        };
+        for len in [1.0, 3.0, 32.0, 63.0, 127.0, 256.0] {
+            for lo in [0.0, 137.0] {
+                for step in [-32.0, 32.0] {
+                    for pos in [lo, lo + len - 0.25] {
+                        let voice = Voice {
+                            pos,
+                            step,
+                            start: 0.0,
+                            end: 512.0,
+                            looping: true,
+                            wrapped: true,
+                            lo,
+                            hi: lo + len,
+                            len,
+                            ..Voice::OFF
+                        };
+                        let first = pos.floor() as i64 - (EXTREME_TAPS / 2 - 1) as i64;
+                        let mut l = [f32::NAN; EXTREME_TAPS];
+                        let mut r = l;
+                        assert!(gather_wrapped_loop(&sample, &voice, first, &mut l, &mut r));
+                        for i in 0..EXTREME_TAPS {
+                            let k = voice.loop_index(first + i as i64) as usize;
+                            assert_eq!(
+                                (l[i], r[i]),
+                                (sample.l[k], sample.r[k]),
+                                "{voice:?}, tap {i}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_extreme_gather_rejects_intro_fractional_and_invalid_bounds() {
+        let sample = alternating_sample();
+        let voice = Voice {
+            pos: 64.0,
+            step: 32.0,
+            start: 0.0,
+            end: 128.0,
+            looping: true,
+            wrapped: true,
+            lo: 33.0,
+            hi: 96.0,
+            len: 63.0,
+            ..Voice::OFF
+        };
+        for rejected in [
+            Voice {
+                wrapped: false,
+                ..voice
+            },
+            Voice {
+                wrapped: false,
+                step: -32.0,
+                ..voice
+            },
+            Voice {
+                looping: false,
+                ..voice
+            },
+            Voice {
+                lo: 33.25,
+                hi: 96.25,
+                ..voice
+            },
+            Voice {
+                start: 0.25,
+                ..voice
+            },
+            Voice {
+                end: 127.75,
+                ..voice
+            },
+            Voice {
+                start: 34.0,
+                ..voice
+            },
+            Voice { lo: -1.0, ..voice },
+            Voice {
+                end: 129.0,
+                ..voice
+            },
+            Voice {
+                end: 129.0,
+                hi: 129.0,
+                len: 96.0,
+                ..voice
+            },
+            Voice {
+                hi: 33.0,
+                len: 0.0,
+                ..voice
+            },
+            Voice { len: 62.0, ..voice },
+            Voice { pos: 96.0, ..voice },
+        ] {
+            let mut l = [1.0; EXTREME_TAPS];
+            let mut r = [-1.0; EXTREME_TAPS];
+            assert!(!gather_wrapped_loop(
+                &sample, &rejected, -63, &mut l, &mut r
+            ));
+            assert_eq!(l, [1.0; EXTREME_TAPS]);
+            assert_eq!(r, [-1.0; EXTREME_TAPS]);
         }
     }
 
