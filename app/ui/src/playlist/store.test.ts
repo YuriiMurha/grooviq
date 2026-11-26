@@ -65,6 +65,7 @@ describe("coherent native arrangement pages", () => {
 function rig() {
   const queue = new ProjectCommandQueue();
   const effects: string[] = [];
+  let projectOrigin = origin;
   let readQueue: PlaylistAdapter["enqueueRead"] = command => queue.enqueue(command, false);
   let seekNative: PlaylistAdapter["seek"] = async () => { effects.push("native-seek"); return { status: "applied", generation: 2, revision: 9, changed: false, request: null, createdIds: [], reload: false, message: null, warnings: [] }; };
   let current = true, blocked = false, seekBlocked = false, snapshot = page();
@@ -84,10 +85,10 @@ function rig() {
     snapshot = { ...snapshot, revision: snapshot.revision + 1 };
     return { status: "applied", state: await bank(), settlement: { recordingDisarmed: false, waiting: false } };
   };
-  const project = () => ({ generation: 2, pattern: { id: selected } }) as ProjectView;
+  const project = () => ({ generation: projectOrigin.generation, pattern: { id: selected } }) as ProjectView;
   const bank = async (): Promise<PatternsView> => ({ ...await sources(), revision: snapshot.revision, selected, view: project() });
   const baseAdapter: Omit<PlaylistAdapter, "readPatterns"> = {
-    origin: () => ({ ...origin }), current: at => current && at.generation === origin.generation && at.replacements === origin.replacements,
+    origin: () => ({ ...projectOrigin }), current: at => current && at.generation === projectOrigin.generation && at.replacements === projectOrigin.replacements,
     blocked: () => blocked, seekBlocked: () => seekBlocked, beginTransition: beginProjectTransition,
     enqueueRead: command => readQueue(command), enqueueMutation: command => queue.enqueue(command, true),
     seek: (stamp, tick) => seekNative(stamp, tick),
@@ -96,7 +97,7 @@ function rig() {
     importAudio: (stamp, input, ticket) => audioImport(stamp, input, ticket), relinkAudio: async () => { throw new Error("Unexpected relink"); },
     cancelAudio: (ticket: number) => cancelAudio(ticket),
     readProject: async () => { effects.push("read-project"); return project(); },
-    publishProject: (_view, at) => { if (!current || at.generation !== 2) return false; effects.push("publish-project"); return true; },
+    publishProject: (_view, at) => { if (!current || at.generation !== projectOrigin.generation) return false; effects.push("publish-project"); return true; },
     changed: state => { effects.push("publish-controller"); views.push(state); },
   };
   const adapter = { ...baseAdapter, readPatterns: bank };
@@ -107,7 +108,13 @@ function rig() {
     seekBlocked: (v: boolean) => { seekBlocked = v; },
     invoke: (fn: typeof invoke) => { invoke = fn; }, read: (fn: typeof read) => { read = fn; },
     sources: (fn: typeof sources) => { sources = fn; }, replaceSnapshot: (v: ArrangementPage) => { snapshot = v; },
-    select: (fn: typeof select) => { select = fn; }, selectNormally: select };
+    select: (fn: typeof select) => { select = fn; }, selectNormally: select,
+    replaceProject: (next: ArrangementPage) => {
+      controller.retire();
+      projectOrigin = { generation: next.generation, replacements: projectOrigin.replacements + 1 };
+      snapshot = next;
+      controller.replaceMedia();
+    } };
 }
 
 describe("playlist intent and native publication in the existing Session lane", () => {
@@ -483,7 +490,7 @@ describe("playlist audio admission and publication", () => {
     expect(await result).toEqual({ status: "cancelled", reply: cancelled });
   });
 
-  it.each(["unsettled", "stale"] as const)("reports cancellation when the pre-send check would be %s", async status => {
+  it.each(["unsettled", "stale", "project replaced"] as const)("handles pre-send cancellation when %s", async status => {
     const r = rig();
     const settlement = deferred<boolean>();
     const settling = deferred<void>();
@@ -499,11 +506,14 @@ describe("playlist audio admission and publication", () => {
     if (status === "stale") {
       r.replaceSnapshot({ ...page(), revision: snapshot.revision + 1 });
       await r.controller.reload();
+    } else if (status === "project replaced") {
+      r.replaceProject({ ...page(), generation: snapshot.generation + 1, revision: 0 });
+      expect(await r.controller.reload()).toBe(true);
     }
-    settlement.resolve(status === "stale");
+    settlement.resolve(status !== "unsettled");
     expect(await result).toEqual({ status: "cancelled" });
     expect(imports).toBe(0);
-    expect(r.controller.state).toMatchObject({ media: null, cancelledMedia: "import", message: null });
+    expect(r.controller.state).toMatchObject({ media: null, cancelledMedia: status === "project replaced" ? null : "import", message: null });
   });
 
   it("keeps a native-published edit when cancellation loses the race", async () => {

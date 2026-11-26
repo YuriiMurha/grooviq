@@ -73,7 +73,9 @@ test.afterEach(async ({ mock }) => {
     (["channel_note", "test_tone", "channel_preview"].includes(cmd) && args.on === true))).toEqual([]);
 });
 
-test("cancels while reading and leaves the arrangement, history and selection intact", async ({ app, mock }) => {
+for (const moveFocus of [false, true]) test(moveFocus
+  ? "keeps focus on BPM when a keyboard-cancelled import settles"
+  : "cancels while reading and leaves the arrangement, history and selection intact", async ({ app, mock }) => {
   const { playlist, canvas, point, cancelImport, selection } = await openPlaylist(app, mock);
   const before = await arrangement(app);
   const view = await projectView(app);
@@ -87,9 +89,17 @@ test("cancels while reading and leaves the arrangement, history and selection in
   await cancelImport.press("Enter");
   await expect.poll(() => cancellationReplies(app)).toEqual([true]);
   await expect(playlist).toHaveAttribute("aria-busy", "true");
+  const focusTarget = moveFocus ? app.getByRole("textbox", { name: "BPM", exact: true }) : canvas;
+  if (moveFocus) {
+    await expect(focusTarget).toBeEnabled();
+    await focusTarget.focus();
+    await expect(focusTarget).toBeFocused();
+  }
   await mock.releaseAudioRead(audio);
   await expect(playlist).toHaveAttribute("aria-busy", "false");
-  await expect(canvas).toBeFocused();
+  // Let the post-settlement focus effect run before checking that focus stayed put.
+  await app.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(focusTarget).toBeFocused();
   await expect(playlist.getByRole("alert")).toHaveCount(0);
   await expect(selection).toHaveValue(selected);
   expect(await arrangement(app)).toEqual(before);
