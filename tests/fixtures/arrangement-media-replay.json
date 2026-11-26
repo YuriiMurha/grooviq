@@ -2912,6 +2912,19 @@
         "changed": false,
         "createdIds": [],
         "generation": 3,
+        "message": "Resize must preserve source, target and priority",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
         "message": "Unknown track 98",
         "reload": true,
         "request": null,
@@ -4873,6 +4886,14 @@
         "revision": 2
       },
       "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":8,\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":99,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":0}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
     },
     {
       "args": {

@@ -324,6 +324,10 @@ fn automation_steps() -> Vec<Value> {
         curve(3, 2, 8),
         edit(
             2,
+            vec![json!({"kind":"resize","clip":8,"startTick":0,"content":content})],
+        ),
+        edit(
+            2,
             vec![json!({"kind":"move","clip":99,"track":98,"startTick":0})],
         ),
         edit(

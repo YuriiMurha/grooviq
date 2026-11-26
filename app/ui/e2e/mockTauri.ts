@@ -1712,7 +1712,11 @@ export function installMockTauri(seed: MockSeed): void {
             source.startTick = startTick;
             source.content = { ...original, offsetTick: resized.offsetTick, lengthTicks: resized.lengthTicks };
           } else {
-            const resized = patternContent(op.content);
+            const content = op.content;
+            if (!content || typeof content !== "object" || !("type" in content) || content.type !== "pattern") {
+              throw "Resize must preserve source, target and priority";
+            }
+            const resized = patternContent(content);
             if (source.content.pattern !== resized.pattern) throw "Resize cannot retarget its source";
             const duration = sourcePattern(source.content.pattern)!.pattern.steps * STEP_TICKS;
             const phase = ((source.content.offsetTick + int(op.startTick) - source.startTick) % duration + duration) % duration;

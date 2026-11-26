@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { expect, test } from "@playwright/test";
-import type { AutomationContent } from "../src/api/arrangement";
+import type { ArrangementReply, AutomationContent } from "../src/api/arrangement";
 import { installMockTauri, type MockSeed } from "./mockTauri";
 
 const params = JSON.parse(readFileSync(new URL("../../../tests/fixtures/device-params.json", import.meta.url), "utf8")) as {
@@ -100,6 +100,7 @@ test("a seeded automation clip can resize with its decoded curve", async ({ page
         kind: "resize", clip: 3, startTick: 240, content: { ...content, offsetTick: 240, lengthTicks: 720 },
       }]),
     });
+    // Native refuses during decoding before the stamp check or any operation, unlike the mock.
     const oversized = await invoke("arrangement_edit", {
       ...stamp, revision: 1, editsJson: JSON.stringify([
         { kind: "createClip", track: 2, startTick: 960, name: "Oversized", muted: false,
@@ -107,10 +108,11 @@ test("a seeded automation clip can resize with its decoded curve", async ({ page
         // The input limit still applies when the oversized curve would leave no persisted clip.
         { kind: "deleteClip", clip: 5 },
       ]),
-    });
+    }) as ArrangementReply;
     return { curve, edit, oversized };
   }, content);
   expect(curve).toEqual({ generation: 0, revision: 0, clip: 3, points: [{ tick: 0, value: Math.fround(0.1), mode: "hold" }] });
   expect(edit).toMatchObject({ status: "applied", generation: 0, revision: 1, changed: true, createdIds: [] });
-  expect(oversized).toMatchObject({ status: "refused", revision: 1, changed: false, message: "arrangement list limit exceeded" });
+  expect(oversized).toMatchObject({ status: "refused", revision: 1, changed: false });
+  expect(oversized.message).toMatch(/^arrangement list limit exceeded/);
 });
