@@ -115,13 +115,80 @@ test.describe("unsaved changes on close (check 7, the UI's part)", () => {
     expect(await mock.eval<number>("(m) => m.state.exitCount")).toBe(0);
   });
 
-  test("Escape is Cancel", async ({ app, mock }) => {
-    await makeDirty(mock, app);
-    await mock.eval("(m) => m.requestClose()");
-    await expect(app.getByRole("dialog", { name: "Save changes?" })).toBeVisible();
-    await app.keyboard.press("Escape");
-    await expect(app.getByRole("dialog", { name: "Save changes?" })).toBeHidden();
-    expect(await mock.eval<number>("(m) => m.state.exitCount")).toBe(0);
+  test("Escape is Cancel", async ({ app, mock }, info) => {
+    const readProbe = await app.evaluateHandle(() => {
+      const start = performance.now();
+      const controller = new AbortController();
+      const findDialog = () =>
+        Array.from(document.querySelectorAll('[role="dialog"][aria-labelledby]')).find((element) => {
+          const label = element.getAttribute("aria-labelledby");
+          return label !== null && document.getElementById(label)?.textContent?.trim() === "Save changes?";
+        });
+      const describe = (target: EventTarget | null) => {
+        if (!(target instanceof Element)) return target === document ? "#document" : null;
+        return {
+          tag: target.localName,
+          id: target.id || undefined,
+          class: target.getAttribute("class")?.slice(0, 120),
+          role: target.getAttribute("role") ?? undefined,
+          label: target.getAttribute("aria-label") ?? undefined,
+          button: target.localName === "button" ? target.textContent?.trim().slice(0, 80) : undefined,
+        };
+      };
+      const snapshot = (dialog: Element | undefined) => {
+        const active = document.activeElement;
+        return {
+          hasFocus: document.hasFocus(),
+          dialogPresent: dialog !== undefined,
+          active: describe(active),
+          activeInDialog: dialog?.contains(active) ?? false,
+        };
+      };
+      const initial = snapshot(findDialog());
+      const events: Array<ReturnType<typeof snapshot> & {
+        ms: number;
+        type: string;
+        target: ReturnType<typeof describe>;
+        targetInDialog: boolean;
+        pathIncludesDialog: boolean;
+      }> = [];
+      let dropped = 0;
+      const record = (event: Event) => {
+        if (!event.isTrusted || (event instanceof KeyboardEvent && event.key !== "Escape")) return;
+        if (events.length === 32) {
+          dropped++;
+          return;
+        }
+        const ms = Math.round((performance.now() - start) * 10) / 10;
+        const dialog = findDialog();
+        events.push({
+          ms,
+          type: event.type,
+          target: describe(event.target),
+          targetInDialog: (event.target instanceof Node && dialog?.contains(event.target)) ?? false,
+          pathIncludesDialog: dialog !== undefined && event.composedPath().includes(dialog),
+          ...snapshot(dialog),
+        });
+      };
+      for (const type of ["focusin", "focusout", "keydown", "keyup"]) {
+        window.addEventListener(type, record, { capture: true, passive: true, signal: controller.signal });
+      }
+      return () => {
+        controller.abort();
+        return { initial, events, dropped, final: snapshot(findDialog()) };
+      };
+    });
+    try {
+      await makeDirty(mock, app);
+      await mock.eval("(m) => m.requestClose()");
+      await expect(app.getByRole("dialog", { name: "Save changes?" })).toBeVisible();
+      await app.keyboard.press("Escape");
+      await expect(app.getByRole("dialog", { name: "Save changes?" })).toBeHidden();
+      expect(await mock.eval<number>("(m) => m.state.exitCount")).toBe(0);
+    } finally {
+      const probe = await readProbe.evaluate((read) => read()).catch((error: unknown) => ({ error: String(error) }));
+      console.log("escape-probe", JSON.stringify({ repeat: info.repeatEachIndex, ...probe }));
+    }
   });
 
   test("Don't save quits without saving", async ({ app, mock }) => {
