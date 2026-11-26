@@ -2339,7 +2339,9 @@ export function installMockTauri(seed: MockSeed): void {
 
   // Argument types as serde reads them from the payload (the command signatures, `Edit`,
   // `ExportRequest`): a wrong type is refused before the command runs, as in the shell.
-  type Check<T = unknown> = ((v: unknown) => string | null) & { readonly checkedType?: T };
+  type RawCheck = (v: unknown) => string | null;
+  // Reject validators that are either stricter or looser than the generated field type.
+  type Check<T> = RawCheck & { readonly checkedType?: (value: T) => T };
   type Checks<T> = { [K in keyof T]-?: Check<T[K]> };
   type Checked<C> = C extends Check<infer T> ? T : never;
   const isInt = (v: unknown, max: number) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= max;
@@ -2352,7 +2354,7 @@ export function installMockTauri(seed: MockSeed): void {
   const f32: Check<number> = (v) => (typeof v === "number" && Number.isFinite(v) ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected f32`);
   const bool: Check<boolean> = (v) => (typeof v === "boolean" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a boolean`);
   const str: Check<string> = (v) => (typeof v === "string" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a string`);
-  const fields = <S extends Record<string, Check>>(spec: S): Check<{ [K in keyof S]: Checked<S[K]> }> => (v) => {
+  const fields = <S extends Record<string, RawCheck>>(spec: S): Check<{ [K in keyof S]: Checked<S[K]> }> => (v) => {
     if (typeof v !== "object" || v === null) return "expected a map";
     for (const [key, check] of Object.entries(spec)) {
       const why = check((v as Record<string, unknown>)[key]);
@@ -2379,7 +2381,7 @@ export function installMockTauri(seed: MockSeed): void {
   } satisfies { [K in Edit["kind"]]: Checks<Omit<Extract<Edit, { kind: K }>, "kind">> };
   const optional = <T>(check: Check<T>): Check<T | null | undefined> =>
     (v) => (v === null || v === undefined ? null : check(v));
-  const list = (check: Check): Check => (v) => {
+  const list = (check: RawCheck): RawCheck => (v) => {
     if (!Array.isArray(v)) return `invalid type: ${JSON.stringify(v ?? null)}, expected a sequence`;
     for (const item of v) {
       const why = check(item);
@@ -2388,7 +2390,7 @@ export function installMockTauri(seed: MockSeed): void {
     return null;
   };
   const newNote = fields({ channel: u32, tick: u32, length: u32, key: u8, velocity: f32, slide: bool });
-  const notesEditArg: Check = fields({
+  const notesEditArg: RawCheck = fields({
     generation: u64,
     patternId: u32,
     baseRevision: u32,
@@ -2399,9 +2401,9 @@ export function installMockTauri(seed: MockSeed): void {
   const edit: Check<Edit> = (v) => {
     const kind = (v as { kind?: unknown } | null)?.kind;
     const check = typeof kind === "string" && Object.hasOwn(EDITS, kind) ? EDITS[kind as Edit["kind"]] : undefined;
-    return check ? fields<Record<string, Check>>(check)(v) : `unknown variant ${JSON.stringify(kind ?? null)}`;
+    return check ? fields<Record<string, RawCheck>>(check)(v) : `unknown variant ${JSON.stringify(kind ?? null)}`;
   };
-  const exportOptions: Check = (v) =>
+  const exportOptions: RawCheck = (v) =>
     fields({ sampleRate: u32, loops: u32 })(v) ??
     (["pcm24", "float32"].includes((v as { format?: unknown }).format as string)
       ? null
@@ -2409,7 +2411,7 @@ export function installMockTauri(seed: MockSeed): void {
   type ArgChecks = {
     [K in keyof CommandMap as CommandMap[K]["args"] extends undefined ? never : K]:
       Checks<CommandMap[K]["args"]>;
-  } & Partial<Record<keyof DeferredCommands, Record<string, Check>>>;
+  } & Partial<Record<keyof DeferredCommands, Record<string, RawCheck>>>;
   const ARGS = {
     arrangement_view: { offset: u64, limit: u64 },
     arrangement_mode: { generation: u64, revision: u64, mode: (value) => value === "pattern" || value === "song" ? null : "expected pattern or song" },
@@ -2448,7 +2450,7 @@ export function installMockTauri(seed: MockSeed): void {
     project_save_as: { path: str },
     project_export: { path: str, options: exportOptions },
   } satisfies ArgChecks;
-  const ARGUMENT_CHECKS: Partial<Record<string, Record<string, Check>>> = ARGS;
+  const ARGUMENT_CHECKS: Partial<Record<string, Record<string, RawCheck>>> = ARGS;
 
   /** Commands the test holds back (`holdCommand`), each until `releaseCommand`. */
   const holds = new Map<string, { promise: Promise<void>; release: () => void }>();

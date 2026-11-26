@@ -12,7 +12,39 @@ async fn read(app: AppHandle, state: State<'_, Audio>, frame_count: Option<u32>)
 "#;
 
 fn fixture(registry: &str, command: &str) -> Result<Vec<Command<'static>>, String> {
-    commands(registry, &["sample::read"], &[], |_| Ok(command.to_owned()))
+    commands(
+        registry,
+        &["sample::read"],
+        &[],
+        &mut Declarations::default(),
+        |_| Ok(command.to_owned()),
+    )
+}
+
+#[test]
+fn a_command_reply_collects_its_dto_and_dependencies() {
+    let mut declarations = Declarations::default();
+    let source = COMMAND.replace(
+        "Result<(), String>",
+        "Result<Option<grooviq_project::session::OpenReport>, String>",
+    );
+    let commands = commands(REGISTRY, &["sample::read"], &[], &mut declarations, |_| {
+        Ok(source.clone())
+    })
+    .unwrap();
+    assert_eq!(
+        commands[0].signature.as_ref().unwrap().reply,
+        "OpenReport | null"
+    );
+    let mut output = String::new();
+    declarations.write(&mut output).unwrap();
+    for name in ["OpenReport", "ProjectView", "ChannelView", "TimeSignature"] {
+        assert!(
+            output.contains(&format!("export type {name} =")),
+            "{output}"
+        );
+    }
+    assert!(!output.contains("export type TrimView ="));
 }
 
 #[test]

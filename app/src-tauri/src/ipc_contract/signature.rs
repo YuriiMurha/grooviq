@@ -1,10 +1,10 @@
+use super::Declarations;
 use heck::{ToLowerCamelCase, ToSnakeCase};
 use std::collections::{BTreeMap, BTreeSet};
 use syn::{
     Expr, FnArg, GenericArgument, Item, ItemFn, Lit, Meta, Pat, Path, PathArguments, ReturnType,
     Token, Type, UseTree, ext::IdentExt, punctuated::Punctuated, visit::Visit,
 };
-use ts_rs::TS;
 
 pub(super) struct Command<'a> {
     pub name: String,
@@ -21,6 +21,7 @@ pub(super) fn commands<'a>(
     root: &str,
     migrated: &[&str],
     deferred: &[(&str, &'a str)],
+    declarations: &mut Declarations,
     read_module: impl Fn(&str) -> Result<String, String>,
 ) -> Result<Vec<Command<'a>>, String> {
     let root = syn::parse_file(root).map_err(|error| format!("lib.rs: {error}"))?;
@@ -90,7 +91,7 @@ pub(super) fn commands<'a>(
         }
         let signature = if reason.is_none() {
             Some(
-                signature(&path, item, items, snake_case)
+                signature(&path, item, items, snake_case, declarations)
                     .map_err(|error| format!("{path}: {error}"))?,
             )
         } else {
@@ -247,6 +248,7 @@ fn signature(
     item: &ItemFn,
     items: &[Item],
     snake_case: bool,
+    declarations: &mut Declarations,
 ) -> Result<Signature, String> {
     let imports = imports(items);
     let mut args = Vec::new();
@@ -289,7 +291,7 @@ fn signature(
                 | "project_cmds::channel_set_sample"
                 | "notes_cmds::channel_add_synth",
             ) => ("number".into(), "/** JSON range: 0 through 2^53 - 1. */ "),
-            _ => (ts_type(&name, &params, &imports)?, ""),
+            _ => (ts_type(&name, &params, &imports, declarations)?, ""),
         };
         args.push(format!("{range}{key}{optional}: {typescript}"));
     }
@@ -303,9 +305,9 @@ fn signature(
                     if error.name != "String" || !error.params.is_empty() {
                         return Err("expected Result<T, String> for an IPC reply".into());
                     }
-                    render_type(ok, &imports)?
+                    render_type(ok, &imports, declarations)?
                 }
-                _ => ts_type(&name, &params, &imports)?,
+                _ => ts_type(&name, &params, &imports, declarations)?,
             }
         }
     };
@@ -369,40 +371,49 @@ fn ty<'a>(value: &'a Type, imports: &BTreeMap<String, String>) -> Result<Ty<'a>,
     Ok(Ty { name, params })
 }
 
-fn render_type(value: &Type, imports: &BTreeMap<String, String>) -> Result<String, String> {
+fn render_type(
+    value: &Type,
+    imports: &BTreeMap<String, String>,
+    declarations: &mut Declarations,
+) -> Result<String, String> {
     let Ty { name, params } = ty(value, imports)?;
-    ts_type(&name, &params, imports)
+    ts_type(&name, &params, imports, declarations)
 }
 
 fn ts_type(
     name: &str,
     params: &[&Type],
     imports: &BTreeMap<String, String>,
+    declarations: &mut Declarations,
 ) -> Result<String, String> {
     match (name, params) {
         ("()", []) => Ok("null".into()),
         ("bool", []) => Ok("boolean".into()),
         ("String", []) => Ok("string".into()),
         ("u8" | "u16" | "u32" | "i8" | "i16" | "i32" | "f32" | "f64", []) => Ok("number".into()),
-        ("Option", [value]) => Ok(format!("{} | null", render_type(value, imports)?)),
-        ("Vec", [value]) => Ok(format!("Array<{}>", render_type(value, imports)?)),
-        ("grooviq_project::session::Edit", []) => Ok(dto::<grooviq_project::session::Edit>()),
+        ("Option", [value]) => Ok(format!(
+            "{} | null",
+            render_type(value, imports, declarations)?
+        )),
+        ("Vec", [value]) => Ok(format!(
+            "Array<{}>",
+            render_type(value, imports, declarations)?
+        )),
+        ("grooviq_project::session::Edit", []) => {
+            Ok(declarations.reference::<grooviq_project::session::Edit>())
+        }
         ("grooviq_project::session::PatternStamp", []) => {
-            Ok(dto::<grooviq_project::session::PatternStamp>())
+            Ok(declarations.reference::<grooviq_project::session::PatternStamp>())
         }
         ("grooviq_project::session::ProjectView", []) => {
-            Ok(dto::<grooviq_project::session::ProjectView>())
+            Ok(declarations.reference::<grooviq_project::session::ProjectView>())
         }
         ("grooviq_project::session::OpenReport", []) => {
-            Ok(dto::<grooviq_project::session::OpenReport>())
+            Ok(declarations.reference::<grooviq_project::session::OpenReport>())
         }
         ("grooviq_project::session::sampler_trim::TrimView", []) => {
-            Ok(dto::<grooviq_project::session::sampler_trim::TrimView>())
+            Ok(declarations.reference::<grooviq_project::session::sampler_trim::TrimView>())
         }
         _ => Err(format!("unknown IPC type {name}")),
     }
-}
-
-fn dto<T: TS>() -> String {
-    T::name(&ts_rs::Config::default())
 }

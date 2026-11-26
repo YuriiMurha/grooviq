@@ -117,7 +117,7 @@ beforeEach(() => {
   mocks.currentView = null;
   const patterns = () => {
     const view = mocks.currentView ?? VIEW;
-    return { generation: view.generation, revision: view.patternRevision ?? 0, selected: view.pattern.id,
+    return { generation: view.generation, revision: view.patternRevision, selected: view.pattern.id,
       arrangementRevision: 0, patterns: [{ id: view.pattern.id, name: view.pattern.name, revision: view.notesRevision, steps: view.pattern.steps }], view };
   };
   reply("pattern_list", patterns);
