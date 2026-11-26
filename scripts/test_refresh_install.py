@@ -165,6 +165,13 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(self.refresh.refresh()['status'], 'unchanged')
         self.assertEqual(len([x for x in self.calls if x[0] == 'build']), 1)
 
+    def test_keeps_tauri_signature_and_verifies_it_strictly(self):
+        # A plain ad-hoc re-sign drops the hardened runtime Tauri applies (#645).
+        # A rejected signature is covered by test_signature_failures_preserve_app_and_receipt.
+        self.refresh.refresh()
+        self.assertFalse(any(x[0] == 'codesign' and '--verify' not in x for x in self.calls))
+        self.assertIn(('codesign', '--verify', '--deep', '--strict', str(self.fixture)), self.calls)
+
     def test_unverifiable_prior_backup_does_not_fail_completed_install(self):
         legacy = self.ops / 'previous/legacy-Grooviq.app'
         self.make_app(legacy, b'legacy')
