@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 
+from merge_train import Batch
 from refresh_install import LockBusy, atomic_json, atomic_text, locked, safe_path
 
 LABEL = "io.github.yuriimurha.grooviq.merge-train"
@@ -130,6 +131,10 @@ class FetchFailed(RuntimeError):
     """The agent's read-only fetch did not complete."""
 
 
+class LandingLedgerFailed(RuntimeError):
+    """The pending tick must retain its transcript for ledger recovery."""
+
+
 def stamp():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -218,6 +223,8 @@ class Agent:
             return script is not None and script[2] in SNAPSHOT_FILES
         if len(args) == 3 and args[:2] == ("rev-parse", "--verify"):
             return OBJECT_REF.fullmatch(args[2]) is not None
+        if len(args) == 5 and args[:3] == ("show", "--no-patch", "--format=%B"):
+            return SHA.fullmatch(args[3]) is not None and args[4] == "--"
         if len(args) == len(FETCH) + 3 and args[:-1] == (*FETCH, "--refmap=", "origin"):
             return SHA.fullmatch(args[-1]) is not None
         if len(args) == len(ADD_WORKTREE) + 2 and args[:-2] == ADD_WORKTREE and SHA.fullmatch(args[-1]):
@@ -264,7 +271,7 @@ class Agent:
         # The tick's flock and mismatch file live in the shared Git directory.
         root = Path(tempfile.mkdtemp(prefix="tick-", dir=self.state))
         script, worktree = root / "merge_train.py", root / "checkout"
-        interrupted = False
+        keep_scratch = False
         added = False
         try:
             source = f"{revision}:scripts/merge_train.py"
@@ -278,12 +285,12 @@ class Agent:
             self.git(*ADD_WORKTREE, str(worktree), revision)
             added = True
             yield worktree, script
-        except KeyboardInterrupt:
-            # A foreground interrupt can leave the train running with our inherited lock.
-            interrupted = True
+        except (KeyboardInterrupt, LandingLedgerFailed):
+            # An interrupted child or an unsettled ledger still needs the scratch files.
+            keep_scratch = True
             raise
         finally:
-            if not interrupted:
+            if not keep_scratch:
                 if added:
                     # An empty index from --no-checkout looks dirty to Git.
                     self.git(*REMOVE_WORKTREE, str(worktree))
@@ -384,6 +391,9 @@ class Agent:
     def commit_tree(self, sha):
         return self.commit_object(sha, "^{tree}")
 
+    def commit_message(self, sha):
+        return self.git("show", "--no-patch", "--format=%B", sha, "--").decode("utf-8")
+
     def commit_object(self, sha, suffix):
         args = ("rev-parse", "--verify", sha + suffix)
         try:
@@ -417,6 +427,11 @@ class Agent:
                                   if (match := MERGED.fullmatch(line))):
             return stdout, stderr
         number, approved, parent = attempt.groups()
+        definite_rejection = re.search(
+            rf"(?m)^Merge train stopped: Stopped at #{number}: "
+            rf"(?:[^\n]*\bHTTP (?:405|409|422)\b|GitHub rejected the merge of #{number}:)",
+            stderr,
+        )
         try:
             result = subprocess.run(["gh", "api", "--method", "GET", f"repos/{REPO}/pulls/{number}"],
                                     cwd=self.repo, env=self.env, check=True, capture_output=True, timeout=30)
@@ -427,45 +442,84 @@ class Agent:
                 return "\n".join((*lines, f"Merged #{number} at {landed}", "")), stderr
             raise RuntimeError("GitHub did not yet confirm the approved squash and parent")
         except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            if definite_rejection:
+                return stdout, stderr
             return stdout, f"{stderr.rstrip()}\nUnconfirmed squash of #{number}: {error}.\n".lstrip()
 
+    def reconcile_tick_output(self, scratch, stdout, stderr):
+        confirmed, stderr = self.reconcile_landing(stdout, stderr)
+        if confirmed != stdout:
+            # Keep the confirmed squash available even if the next GitHub read fails.
+            try:
+                atomic_text(safe_path(scratch / "stdout"), confirmed)
+            except (OSError, RuntimeError) as error:
+                raise LandingLedgerFailed(f"Could not persist confirmed squash: {error}") from error
+        return confirmed, stderr
+
     def record_landing(self, record):
-        merges = [match for line in record["stdout"] if (match := MERGED.fullmatch(line))]
+        try:
+            self._record_landing(record)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise LandingLedgerFailed(f"Could not persist landing ledger: {error}") from error
+
+    def _record_landing(self, record):
+        tested, merges = None, []
+        for line in record["stdout"]:
+            if batch := TESTED_BATCH.fullmatch(line):
+                tested, merges = batch[1], []
+            elif match := MERGED.fullmatch(line):
+                merges.append([int(match[1]), match[2]])
         if not merges:
             return
-        batches = [match[1] for line in record["stdout"] if (match := TESTED_BATCH.fullmatch(line))]
-        tested = batches[-1] if batches else None
-        landed = merges[-1][2]
-        row = dict(recorded_utc=record["recorded_utc"], tested_batch=tested, landed_tip=landed,
-                   landed_prefix=[[int(match[1]), match[2]] for match in merges],
-                   landed_tree=None, tested_tree=None, match=None, ci_run_id=None, status="partial")
+
+        landed = merges[-1][1]
+        path = safe_path(self.landings)
+        lines = (read_text(path) or "").splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            previous = json.loads(line)
+            if (previous["tested_batch"], previous["landed_tip"]) == (tested, landed):
+                if previous["landed_prefix"] != merges:
+                    return
+                row = previous.copy()
+                break
+        else:
+            index, previous = len(lines), None
+            row = dict(recorded_utc=record["recorded_utc"], tested_batch=tested, landed_tip=landed,
+                       landed_prefix=merges,
+                       landed_tree=None, tested_tree=None, match=None, ci_run_id=None, status="partial")
+        # Git objects are immutable. Only retry evidence the previous read could not verify.
         for key, sha in (("landed_tree", landed), ("tested_tree", tested)):
-            if sha is not None:
+            if sha is not None and row[key] is None:
                 try:
                     row[key] = self.commit_tree(sha)
                 except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                     row[f"{key}_error"] = str(error)
-        if tested is not None:
+                else:
+                    row.pop(f"{key}_error", None)
+        if tested is not None and row["ci_run_id"] is None:
             try:
                 row["ci_run_id"] = self.ci_run_id(tested)
             except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                 row["ci_error"] = str(error)
-        if row["landed_tree"] and row["tested_tree"]:
+            else:
+                row.pop("ci_error", None)
+        # Older partial rows could record matching trees without verifying membership.
+        if row["status"] == "partial" and row["landed_tree"] and row["tested_tree"]:
             row["match"] = row["landed_tree"] == row["tested_tree"]
-            output = record["stdout"] + record["stderr"]
-            partial = record.get("recovered_pending") or record.get("timed_out") or record["exit_code"] < 0 or any(
-                "Stopped at #" in line or line.startswith(("Recovered landed prefix", "Unconfirmed squash"))
-                for line in output
-            )
-            if not partial:
-                if row["match"] and row["ci_run_id"] is not None:
-                    row["status"] = "complete"
-                elif not row["match"]:
-                    row["status"] = "mismatch"
-        with safe_path(self.landings).open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(row) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+            try:
+                members = Batch.parse(self.commit_message(tested)).members
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                row["tested_members_error"] = str(error)
+            else:
+                row.pop("tested_members_error", None)
+                if [number for number, _ in merges] == [number for number, _ in members]:
+                    row["status"] = "complete" if row["match"] else "mismatch"
+        if row != previous:
+            lines[index:index + 1] = [json.dumps(row) + "\n"]
+        elif not record.get("recovered_pending"):
+            return
+        # An interrupted write may be visible even if the directory sync did not complete.
+        atomic_text(path, "".join(lines))
 
     def append_tick(self, record):
         path = safe_path(self.ticks)
@@ -550,7 +604,8 @@ class Agent:
                         detail = detail.decode("utf-8", "replace")
                     reason = (detail or str(error)).splitlines()[-20:]
                     saved = read_text(self.stopped)
-                    if saved is None or json.loads(saved).get("pending"):
+                    if saved is None or (json.loads(saved).get("pending")
+                                         and not isinstance(error, LandingLedgerFailed)):
                         self.latch(record, detail or str(error), reason)
                     record.setdefault("recorded_utc", stamp())
                     record.setdefault("exit_code", getattr(error, "returncode", 1))
@@ -570,14 +625,14 @@ class Agent:
                 stdout, stderr = "", ""
                 scratch = saved.get("scratch")
                 if scratch and scratch.startswith("tick-") and Path(scratch).name == scratch:
-                    stdout, stderr = read_tick_output(self.state / scratch)
-                    stdout, stderr = self.reconcile_landing(stdout, stderr)
+                    root = self.state / scratch
+                    stdout, stderr = self.reconcile_tick_output(root, *read_tick_output(root))
                 reason = ["previous tick did not finish"]
-                self.latch(saved, saved["output"] + stdout + stderr, reason)
                 record.update(recorded_utc=stamp(), exit_code=1, status="stopped", network_streak=0,
                               reason=reason, recovered_pending=True,
                               stdout=stdout.splitlines(), stderr=stderr.splitlines())
                 self.record_landing(record)
+                self.latch(saved, saved["output"] + stdout + stderr, reason)
                 self.log_output("orphaned tick output", stdout + stderr)
             self.prune_checkouts()
             return {"status": "latched"}
@@ -617,7 +672,7 @@ class Agent:
                 result = self.run_tick(worktree, script, entries, batch, lock_fd=lock_fd)
             except subprocess.TimeoutExpired as error:
                 result = subprocess.CompletedProcess(error.cmd, 124, error.stdout, error.stderr)
-            stdout, stderr = self.reconcile_landing(result.stdout or "", result.stderr or "")
+            stdout, stderr = self.reconcile_tick_output(script.parent, result.stdout or "", result.stderr or "")
             if show_output:
                 print(stdout, end="", flush=True)
                 print(stderr, end="", file=sys.stderr, flush=True)
@@ -626,10 +681,12 @@ class Agent:
             network = (code == 1 and NETWORK_FAILURE.search(stdout + "\n" + stderr)
                        and not any(WRITE_OUTPUT.match(line) for line in stdout_lines + stderr_lines)
                        and not WRITE_ERROR.search(stderr))
+            # Keep the pending scratch recoverable until the landing is in the ledger.
+            record["stdout"] = stdout_lines
+            self.record_landing(record)
             status = self.record_result(record, f"source {revision}", code, stdout, stderr,
                                         network=network, timed_out=code == 124)
             self.record_tips(record, "after")
-            self.record_landing(record)
         return {"status": status, "exit_code": record["exit_code"], "log": str(self.log)}
 
     def record_result(self, record, source, code, stdout, stderr, *, network=False, timed_out=False):
