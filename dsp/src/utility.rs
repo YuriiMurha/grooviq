@@ -17,6 +17,9 @@ pub const SPEC: [(f32, f32, f32); 5] = [
     (0.0, 1.0, 0.0),    // 4 phase invert
 ];
 
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 5] = ["gain", "pan", "width", "mono_below", "phase_invert"];
+
 const CTRL: u32 = 16;
 
 pub struct Utility {

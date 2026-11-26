@@ -75,16 +75,30 @@ jobs:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      CARGO_NET_OFFLINE: 'true'
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
+        timeout-minutes: 3
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+        timeout-minutes: 2
       - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 3
         with:
           key: bench
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Dependency fetch controls
+        timeout-minutes: 1
+        run: python -m unittest discover -s scripts -p test_perf_fetch.py -v
+      - name: Fetch locked benchmark dependencies (infrastructure)
+        timeout-minutes: 4
+        run: python scripts/perf-fetch.py
       - name: Machine
         run: |
           case "$RUNNER_OS" in
@@ -100,12 +114,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           mkdir -p perf
       - name: Render speed and block times
-        run: cargo bench -p grooviq-golden --bench render
+        run: cargo bench --locked --offline -p grooviq-golden --bench render
         env:
           GROOVIQ_PERF_JSON: ${{ github.workspace }}/perf/render.json
       - name: DSP kernels
         run: |
-          cargo bench -p grooviq-dsp --bench kernels | tee perf/kernels.txt
+          cargo bench --locked --offline -p grooviq-dsp --bench kernels | tee perf/kernels.txt
           {
             echo "### DSP kernels (divan): one 64-frame block"
             echo
@@ -234,7 +248,7 @@ jobs:
           # (3 on a regression), not tee's.
           set -o pipefail
           status=0
-          cargo bench -p grooviq-golden --bench instructions -- $BASELINE 2>&1 | tee instructions.txt || status=$?
+          cargo bench -p grooviq-golden --bench instructions -- ${BASELINE:+"$BASELINE"} 2>&1 | tee instructions.txt || status=$?
           {
             echo "## Instruction counts (Callgrind)"
             echo

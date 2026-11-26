@@ -14,6 +14,18 @@ pub const SPEC: [(f32, f32, f32); 8] = [
     (0., 1., 0.),
     (0., 2., 1.),
 ];
+
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 8] = [
+    "magnitude",
+    "noise",
+    "wow_flutter",
+    "distortion",
+    "digital",
+    "space",
+    "dropouts",
+    "noise_selection",
+];
 pub const PRESETS: [&str; 3] = ["Paper Haze", "Bent Ribbon", "Small Hours"];
 pub fn preset(name: &str) -> Option<Vec<(u32, f32)>> {
     let p = match name {
@@ -40,11 +52,24 @@ struct Channel {
     held: f32,
     clock: f32,
 }
+fn channel_delays(sr: f32) -> [usize; 2] {
+    [(sr * 0.012) as usize + 8, (sr * 0.12) as usize + 8]
+}
+
+pub(crate) fn memory_payload(sr: f32) -> crate::insert_memory::Payload {
+    let mut payload = crate::insert_memory::Payload::boxed::<LofiColour>();
+    for delay in channel_delays(sr) {
+        payload.delay_lines(delay, 2);
+    }
+    payload
+}
+
 impl Channel {
     fn new(sr: f32, seed: u32) -> Self {
+        let [motion, space] = channel_delays(sr);
         Self {
-            motion: DelayLine::new((sr * 0.012) as usize + 8),
-            space: DelayLine::new((sr * 0.12) as usize + 8),
+            motion: DelayLine::new(motion),
+            space: DelayLine::new(space),
             noise: Rng(seed.max(1)),
             held: 0.,
             clock: 0.,

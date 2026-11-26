@@ -93,9 +93,13 @@ struct Network {
     #[cfg(test)]
     gain_updates: usize,
 }
+fn network_lengths(sr: f32, model: usize) -> [usize; 4] {
+    TIMES[model].map(|t| (t * sr).round() as usize)
+}
+
 impl Network {
     fn new(sr: f32, model: usize) -> Self {
-        let lengths = TIMES[model].map(|t| (t * sr).round() as usize);
+        let lengths = network_lengths(sr, model);
         Self {
             lines: std::array::from_fn(|i| DelayLine::new(lengths[i] + 2)),
             lengths,
@@ -182,6 +186,23 @@ pub struct AlgorithmicReverb {
     seed: u64,
     fresh: bool,
 }
+fn stereo_delays(sr: f32) -> [usize; 4] {
+    [0.251, 0.041, 1.0, 0.09].map(|seconds| (sr * seconds) as usize + 2)
+}
+
+pub(crate) fn memory_payload(sr: f32) -> crate::insert_memory::Payload {
+    let mut payload = crate::insert_memory::Payload::boxed::<AlgorithmicReverb>();
+    for delay in stereo_delays(sr) {
+        payload.delay_lines(delay, 2);
+    }
+    for model in 0..TIMES.len() {
+        for length in network_lengths(sr, model) {
+            payload.delay_lines(length + 2, 1);
+        }
+    }
+    payload
+}
+
 impl AlgorithmicReverb {
     pub fn new(sample_rate: f32) -> Self {
         Self::with_seed(sample_rate, 0xA17E_2026)
@@ -192,14 +213,15 @@ impl AlgorithmicReverb {
         } else {
             44100.
         };
+        let [pre, diffuse, nonlinear, wet] = stereo_delays(sr);
         Self {
             sr,
             controls: SPEC.map(|(_, _, v)| Smooth::new(v, 20., sr)),
-            pre: std::array::from_fn(|_| DelayLine::new((sr * 0.251) as usize + 2)),
-            diffuse: std::array::from_fn(|_| DelayLine::new((sr * 0.041) as usize + 2)),
+            pre: std::array::from_fn(|_| DelayLine::new(pre)),
+            diffuse: std::array::from_fn(|_| DelayLine::new(diffuse)),
             networks: std::array::from_fn(|i| Network::new(sr, i)),
-            nonlinear: std::array::from_fn(|_| DelayLine::new(sr as usize + 2)),
-            wet: std::array::from_fn(|_| DelayLine::new((sr * 0.09) as usize + 2)),
+            nonlinear: std::array::from_fn(|_| DelayLine::new(nonlinear)),
+            wet: std::array::from_fn(|_| DelayLine::new(wet)),
             low: [0.; 2],
             high: [0.; 2],
             phase: (seed % 65536) as f64 / 65536.,

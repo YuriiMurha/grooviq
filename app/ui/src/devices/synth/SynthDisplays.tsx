@@ -118,11 +118,15 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, group }: Fi
               [1000, "1k"],
               [10000, "10k"],
             ] as const
-          ).map(([f, s]) => (
-            <text key={f} className="dw-axis" x={fx(f) + 3} y={h - 4}>
-              {s}
-            </text>
-          ))}
+          ).map(([f, s]) => {
+            // Set the last tick inside its grid line at every graph width and font size.
+            const last = f === 10000;
+            return (
+              <text key={f} className={last ? "dw-axis end" : "dw-axis"} x={fx(f) + (last ? -3 : 3)} y={h - 4}>
+                {s}
+              </text>
+            );
+          })}
           <text className="dw-axis end" x={w - 4} y={y0 - 3}>
             0 dB
           </text>

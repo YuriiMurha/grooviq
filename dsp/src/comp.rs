@@ -22,6 +22,19 @@ pub const SPEC: [(f32, f32, f32); 9] = [
     (20.0, 500.0, 20.0),  // 8 sidechain HPF Hz
 ];
 
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 9] = [
+    "threshold",
+    "ratio",
+    "attack",
+    "release",
+    "knee",
+    "makeup",
+    "mix",
+    "external_sidechain",
+    "sidechain_hpf",
+];
+
 pub struct Comp {
     sr: f32,
     thr: f32,
