@@ -292,25 +292,39 @@ jobs:
         with:
           node-version: 24
       - uses: actions/download-artifact@v4
+        id: download-webkit-1
         timeout-minutes: 1
         with:
           name: e2e-accounting-webkit-1-of-2-${{ github.run_id }}-${{ github.run_attempt }}
           path: browser-accounting/webkit/1-of-2
       - uses: actions/download-artifact@v4
+        id: download-webkit-2
         timeout-minutes: 1
         with:
           name: e2e-accounting-webkit-2-of-2-${{ github.run_id }}-${{ github.run_attempt }}
           path: browser-accounting/webkit/2-of-2
       - uses: actions/download-artifact@v4
+        id: download-chromium-1
         timeout-minutes: 1
         with:
           name: e2e-accounting-chromium-1-of-2-${{ github.run_id }}-${{ github.run_attempt }}
           path: browser-accounting/chromium/1-of-2
       - uses: actions/download-artifact@v4
+        id: download-chromium-2
         timeout-minutes: 1
         with:
           name: e2e-accounting-chromium-2-of-2-${{ github.run_id }}-${{ github.run_attempt }}
           path: browser-accounting/chromium/2-of-2
+      - name: Explain browser receipt download recovery
+        if: >-
+          ${{ failure() &&
+            (steps.download-webkit-1.outcome == 'failure' ||
+             steps.download-webkit-2.outcome == 'failure' ||
+             steps.download-chromium-1.outcome == 'failure' ||
+             steps.download-chromium-2.outcome == 'failure') }}
+        timeout-minutes: 1
+        run: |
+          echo '::notice title=Browser receipt download failed::Rerun the changes job with its dependents or rerun all jobs so all four browser shards upload receipts for the same attempt.'
       - name: Require both complete successful browser projects
         timeout-minutes: 1
         env:
