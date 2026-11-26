@@ -43,6 +43,8 @@ mod metronome;
 mod offline;
 mod output;
 mod processor;
+#[cfg(feature = "profiling")]
+mod profiling;
 mod record;
 mod sample_file;
 mod sequencer;
