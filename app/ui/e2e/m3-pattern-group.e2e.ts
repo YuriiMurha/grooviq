@@ -62,7 +62,7 @@ test.describe("existing clip order", () => {
     expect(await mock.calls("arrangement_edit")).toHaveLength(1);
     await expect(canvas).toHaveAttribute("aria-disabled", "false");
     await app.mouse.click(box.x + 300, box.y + 40);
-    await expect(playlist.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("6");
+    await expect(playlist.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: Upper clip · Track 1 · 4800 ticks");
   });
 });
 
@@ -81,7 +81,7 @@ test("a loaded read-only clip does not join a pattern group preview", async ({ a
   const label = playlist.locator(".playlist-labels").getByText("Automation · automation", { exact: true });
   await expect(label).toHaveCSS("left", "534px");
   await app.mouse.click(box.x + 560, box.y + 40);
-  await expect(playlist.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("100");
+  await expect(playlist.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: Automation · Track 1 · 10560 ticks");
   await app.keyboard.down("Shift");
   await app.mouse.click(box.x + 140, box.y + 40);
   await app.mouse.click(box.x + 380, box.y + 40);
