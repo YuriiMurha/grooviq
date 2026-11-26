@@ -40,8 +40,8 @@ const STANDARD_RATE: RangeInclusive<f32> = 22050.0..=192000.0;
 const EXTENDED_RATE: RangeInclusive<f32> = 8000.0..=384000.0;
 type MemoryBound = fn(f32) -> Payload;
 
-/// Each effect's native sample-rate range and payload bound: the one table that admission
-/// (`max_memory_bytes`), construction (`create_insert`) and `max_latency_frames` share.
+/// Each effect's native sample-rate range and payload bound: the one table that
+/// `create_insert`, `max_memory_bytes`, `max_latency_frames` and `sample_rate_range` read.
 fn table(id: &str) -> Result<(RangeInclusive<f32>, MemoryBound), InsertError> {
     Ok(match id {
         "algorithmic_reverb" => (STANDARD_RATE, algorithmic_reverb::memory_payload),
@@ -77,6 +77,16 @@ pub(crate) fn check_rate(id: &str, sample_rate: f32) -> Result<(), InsertError> 
     } else {
         Err(InsertError::InvalidSampleRate)
     }
+}
+
+/// Returns a built-in effect's inclusive native sample-rate bounds `(min, max)` in Hz,
+/// or `None` for an unknown ID.
+///
+/// Refuse a session or export rate outside the intersection of the present inserts' ranges
+/// before publishing the new state or creating the export output file.
+pub fn sample_rate_range(id: &str) -> Option<(f32, f32)> {
+    let (range, _) = table(id).ok()?;
+    Some((*range.start(), *range.end()))
 }
 
 /// Bounds a built-in effect's device-owned payload before construction for any legal parameters.
