@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from "react";
 import { pickSound } from "../rack/audioFiles";
 import { errorText } from "../api/project";
-import { missingAudioAssets } from "./audio/media";
+import { dropNotice, missingAudioAssets } from "./audio/media";
 import { createWaveformLoader, packWaveforms, visibleWaveforms } from "./audio/waveforms";
 import { useAudioDrop } from "./audio/useAudioDrop";
 import { arrangementWaveform, type LoopRegion, type ArrangementStamp } from "../api/arrangement";
@@ -209,16 +209,11 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
         if (replacements !== projectGeneration()) return;
         const id = result.status === "applied" ? result.reply.createdIds.at(-1) : undefined;
         if (id !== undefined) setSelected({ generation: stamp.generation, ids: [id] });
-        if (result.status === "blocked" || result.status === "stale" || result.status === "unsettled") {
-          notifyAudioDrop("The playlist couldn’t accept audio. Try dropping it again.");
-        } else if (skipped > 0) {
-          // A refusal or an unconfirmed readback reports the first file itself (native may still
-          // have applied it), so this note only says the others were never tried.
-          const files = skipped === 1 ? "1 more file was skipped" : `${skipped} more files were skipped`;
-          notifyAudioDrop(result.status === "applied"
-            ? `Imported ${input.name}. ${files}. Drop one audio file at a time.`
-            : `${files}. Drop one audio file at a time.`);
-        }
+        const notice = dropNotice(result.status, skipped);
+        const files = skipped === 1 ? "1 more file was skipped" : `${skipped} more files were skipped`;
+        if (notice === "retry") notifyAudioDrop("The playlist couldn’t accept audio. Try dropping it again.");
+        else if (notice === "imported-and-skipped") notifyAudioDrop(`Imported ${input.name}. ${files}. Drop one audio file at a time.`);
+        else if (notice === "skipped-only") notifyAudioDrop(`${files}. Drop one audio file at a time.`);
       });
     },
   });

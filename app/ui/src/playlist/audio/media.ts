@@ -1,4 +1,5 @@
 import { isMac } from "../../project/shortcuts";
+import type { PlaylistResult } from "../store";
 import type { DropPlatform } from "./dropPosition";
 
 export type AudioImportInput = Readonly<{ track: number; startTick: number; name: string; path: string }>;
@@ -21,4 +22,14 @@ export function missingAudioAssets(warnings: readonly string[]): ReadonlySet<num
     if (match) missing.add(Number(match[1]));
   }
   return missing;
+}
+
+/** What to tell the user after a playlist drop settles. A refusal or an unconfirmed readback is
+ * reported by the playlist alert, and native may still have applied the first file, so then the
+ * notice only covers the files that were never tried. */
+export type DropNotice = "imported-and-skipped" | "skipped-only" | "retry" | null;
+export function dropNotice(status: PlaylistResult["status"], skipped: number): DropNotice {
+  if (status === "blocked" || status === "stale" || status === "unsettled") return "retry";
+  if (skipped <= 0) return null;
+  return status === "applied" ? "imported-and-skipped" : "skipped-only";
 }
