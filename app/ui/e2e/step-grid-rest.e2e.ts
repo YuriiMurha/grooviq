@@ -5,6 +5,7 @@ type GridProbe = {
   draws: number;
   frames: number;
   waitFrames: (count: number) => Promise<void>;
+  countPageCallbacks: () => Promise<number>;
   pixels: (points: { x: number; y: number }[]) => number[][];
 };
 declare global {
@@ -20,12 +21,30 @@ test.beforeEach(async ({ page }) => {
     const requestFrame = window.requestAnimationFrame.bind(window);
     const callbacks = new WeakSet<FrameRequestCallback>();
     let running: FrameRequestCallback | undefined;
+    let pageCallbacks: Map<number, number> | undefined;
     const probe: GridProbe = {
       draws: 0,
       frames: 0,
       async waitFrames(count) {
         for (let frame = 0; frame < count; frame++) {
           await new Promise((resolve) => requestFrame(resolve));
+        }
+      },
+      async countPageCallbacks() {
+        const counts = new Map<number, number>();
+        pageCallbacks = counts;
+        try {
+          let total = 0;
+          let time = await new Promise<number>(requestFrame);
+          for (let frame = 0; frame < 32; frame++) {
+            const next = await new Promise<number>(requestFrame);
+            // Count a frame only once it is over, regardless of our callback's order within it.
+            total += counts.get(time) ?? 0;
+            time = next;
+          }
+          return total;
+        } finally {
+          pageCallbacks = undefined;
         }
       },
       pixels(points) {
@@ -42,6 +61,7 @@ test.beforeEach(async ({ page }) => {
     };
     window.stepGridProbe = probe;
     window.requestAnimationFrame = (callback) => requestFrame((time) => {
+      if (pageCallbacks) pageCallbacks.set(time, (pageCallbacks.get(time) ?? 0) + 1);
       running = callback;
       try {
         callback(time);
@@ -96,6 +116,30 @@ test("the stopped grid runs zero callbacks over 32 quiet frames", async ({ app, 
   expect(counts).toEqual({ identified: true, quietCallbacks: 0 });
 });
 
+test("the stopped rack adds no page callbacks over 32 quiet frames", async ({ app, mock }) => {
+  await settledGrid(app);
+  expect(await mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(false);
+  const countCallbacks = () => app.evaluate(() => window.stepGridProbe.countPageCallbacks());
+  const withRack = await countCallbacks();
+
+  await app.keyboard.press("F6");
+  await expect(app.getByRole("region", { name: "Channel rack" })).toBeHidden();
+  await waitFrames(app, 8);
+  // The position readout and master meter run in both configurations.
+  await expect.poll(countCallbacks, { message: "page callbacks with the rack hidden match the count with it shown" })
+    .toBe(withRack);
+
+  // Mount and unmount the grid once more: a loop that outlives its grid would add callbacks here.
+  await app.keyboard.press("F6");
+  await expect(app.getByRole("region", { name: "Channel rack" })).toBeVisible();
+  await waitFrames(app, 8);
+  await app.keyboard.press("F6");
+  await expect(app.getByRole("region", { name: "Channel rack" })).toBeHidden();
+  await waitFrames(app, 8);
+  await expect.poll(countCallbacks, { message: "a remounted and hidden grid leaves no frame loop behind" })
+    .toBe(withRack);
+});
+
 test("live playback wakes the grid, follows the playhead and clears it in one draw", async ({ app, mock }) => {
   await settledGrid(app);
   const steps = [2, 9];
@@ -127,26 +171,56 @@ test("toggling a step repaints the stopped grid", async ({ app, mock }) => {
   await expect.poll(async () => colourDistance((await pixels(app, point))[0], off)).toBeGreaterThan(100);
 });
 
-test("a velocity drag repaints before committing a stopped step edit", async ({ app, mock }) => {
+async function dragVelocityPreview(app: Page) {
   await settledGrid(app);
-  const g = grid(app);
-  const box = await g.boundingBox();
+  const box = await grid(app).boundingBox();
   if (!box) throw new Error("No step grid bounds");
   const cell = cellPoint(0, 0);
   const point = [{ x: cell.x, y: cell.y - 11 }];
-  const [before] = await pixels(app, point);
+  const readPixel = async () => (await pixels(app, point))[0];
+  const before = await readPixel();
   await app.mouse.move(box.x + cell.x, box.y + cell.y);
   await app.mouse.down();
+  // Let the focus and press paint before moving, so they cannot mask a missing drag wake.
+  await waitFrames(app, 8);
+  await app.mouse.move(box.x + cell.x, box.y + cell.y - 30);
+  await expect.poll(async () => colourDistance(await readPixel(), before), { message: "velocity preview changes the step pixel" })
+    .toBeGreaterThan(100);
+  return { before, readPixel };
+}
+
+test("a velocity drag repaints before committing a stopped step edit", async ({ app, mock }) => {
   try {
-    // Let the focus and press paint before moving, so they cannot mask a missing drag wake.
-    await waitFrames(app, 8);
-    await app.mouse.move(box.x + cell.x, box.y + cell.y - 30);
-    await expect.poll(async () => colourDistance((await pixels(app, point))[0], before)).toBeGreaterThan(100);
+    await dragVelocityPreview(app);
     expect(await mock.calls("project_edit")).toHaveLength(0);
   } finally {
     await app.mouse.up();
   }
 });
+
+for (const cancellation of ["pointercancel", "cancelled Save As"] as const) {
+  test(`${cancellation} repaints the stopped step without committing the drag`, async ({ app, mock }) => {
+    expect(await mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(false);
+    const velocity = (await mock.view()).pattern.cells["1"][0];
+    try {
+      const { before, readPixel } = await dragVelocityPreview(app);
+      if (cancellation === "pointercancel") {
+        await grid(app).dispatchEvent("pointercancel", { pointerId: 1, bubbles: true });
+      } else {
+        await mock.eval("(m) => m.queueDialog(null)");
+        await app.keyboard.press("ControlOrMeta+Shift+s");
+        await expect.poll(async () => (await mock.calls("plugin:dialog|save")).length).toBe(1);
+        expect(await mock.calls("project_save_as")).toHaveLength(0);
+      }
+      await expect.poll(readPixel, { message: "cancelling restores the pre-drag pixel" }).toEqual(before);
+    } finally {
+      await app.mouse.up();
+    }
+    await waitFrames(app, 8);
+    expect(await mock.calls("project_edit")).toHaveLength(0);
+    expect((await mock.view()).pattern.cells["1"][0]).toBe(velocity);
+  });
+}
 
 test("a probe theme repaints the stopped grid", async ({ app }) => {
   await settledGrid(app);

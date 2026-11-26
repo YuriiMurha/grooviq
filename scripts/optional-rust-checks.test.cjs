@@ -309,3 +309,39 @@ test("RTSan rechecks the batch ref after the comparison", async () => {
   args.rest.git.getRef = async () => ({ data: { object: { sha } } });
   assert.equal(await shouldRun(args), true);
 });
+
+test("roll selects the UI timing inputs and unknown paths", async () => {
+  for (const path of [
+    "app/ui/src/App.tsx", "app/ui/src/roll/budgets.test.ts", "app/ui/package.json",
+    "app/ui/package-lock.json", "app/ui/vite.config.ts", "app/ui/tsconfig.node.json",
+    ".github/workflows/perf.yml", "Makefile", "scripts/optional-rust-checks.cjs",
+    "scripts/optional-rust-checks.test.cjs", "scripts/roll-timing.cjs", "scripts/roll-timing.test.cjs",
+    "app/ui/new-config", "scripts/new-script.cjs", "future/input", "tests/fixtures/new.json",
+  ]) {
+    assert.equal(await shouldRun(request("roll", [...docs, file(path)])), true, path);
+  }
+});
+
+test("roll skips Rust, docs and e2e inputs", async () => {
+  for (const path of [
+    "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml", "clippy.toml",
+    "engine/src/lib.rs", "dsp/src/lib.rs", "app/src-tauri/src/lib.rs", "tools/new-library/src/lib.rs",
+    ".github/workflows/rtsan.yml", "README.md", "docs/guide.md", "app/ui/e2e/roll.spec.ts",
+  ]) {
+    assert.equal(await shouldRun(request("roll", [file(path)])), false, path);
+  }
+});
+
+test("roll inspects both sides of renames and fails open on selector doubt", async () => {
+  const renamed = (filename, previous_filename) => ({ filename, previous_filename, status: "renamed" });
+  for (const entry of [
+    renamed("app/ui/e2e/old.ts", "app/ui/src/old.ts"),
+    renamed("app/ui/src/new.ts", "docs/old.md"),
+    renamed("docs/new.md", undefined),
+    file(""), file("docs/../Makefile"),
+  ]) assert.equal(await shouldRun(request("roll", [entry])), true);
+  assert.equal(await shouldRun(request("roll", [renamed("docs/new.md", "docs/old.md")])), false);
+  assert.equal(await shouldRun(request("roll", docs, { load: () => { throw Error("metadata"); } })), true);
+  assert.equal(await shouldRun(request("roll", docs, { paginate: async () => [] })), true);
+  assert.equal(await shouldRun(request("roll", docs, { eventName: "push", ref: "refs/heads/main" })), true);
+});

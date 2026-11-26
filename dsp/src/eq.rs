@@ -6,9 +6,11 @@
 //! grid is a global sample counter so results do not depend on block size). Switching a band on
 //! or off crossfades it in/out.
 //!
-//! Meters 0/1: 128 log-spaced bins (20 Hz..20 kHz), dB, pre/post EQ. Both spectra come from one
+//! Array meters 0/1: 128 log-spaced bins (20 Hz..20 kHz), dB, pre/post EQ. Both spectra come from one
 //! 2048-point complex FFT (pre in the real part, post in the imaginary part), Hann-windowed,
 //! ~30 updates per second, with peak-hold-and-fall smoothing.
+//! Scalar meters 2–9: effective frequencies in Hz for bands 1–8, in band order. Each reports
+//! the frequency used for the current coefficients, including control-rate smoothing.
 
 use crate::api::{Device, db_to_gain};
 use crate::fft::Fft;
@@ -110,6 +112,16 @@ pub(crate) fn is_stepped(index: u32) -> bool {
     index < OUTPUT && matches!(index % 6, 0 | 1 | 5)
 }
 
+/// Clamps a frequency in Hz to the EQ coefficient range at the device sample rate.
+/// Use the rate accepted by [`Eq::new`] after its 8–384 kHz clamp.
+/// Pass the smoothed frequency after conversion from log2 Hz to reproduce the active value.
+/// A requested frequency estimates the settled value only within `SPEC`'s 20–20,000 Hz: the
+/// device clamps requests to that range first and stores them in f32 log2 Hz, so editors
+/// showing a running device should read meters 2–9 instead.
+pub fn effective_band_hz(freq_hz: f64, sample_rate: f64) -> f64 {
+    freq_hz.clamp(10.0, 0.49 * sample_rate)
+}
+
 struct Band {
     on: bool,
     typ: u8,
@@ -118,6 +130,7 @@ struct Band {
     gain: Smooth, // dB
     q: Smooth,    // log2 Q
     wet: Smooth,  // 0..1, per sample
+    effective_hz: f32,
     c: [Coefs; 2],
     nsec: usize,
     st: [[Biquad; 2]; 2], // [channel][section]
@@ -135,6 +148,7 @@ impl Band {
             gain: Smooth::new(0.0, 12.0, ctrl_rate),
             q: Smooth::new(0.0, 12.0, ctrl_rate),
             wet: Smooth::new(0.0, 8.0, sr),
+            effective_hz: 0.0,
             c: [Coefs::IDENTITY; 2],
             nsec: 1,
             st: [[Biquad::default(); 2]; 2],
@@ -150,7 +164,8 @@ impl Band {
     }
 
     fn compute(&mut self, sr: f64) {
-        let f = (libm::exp2f(self.freq.cur) as f64).clamp(10.0, 0.49 * sr);
+        let f = effective_band_hz(libm::exp2f(self.freq.cur) as f64, sr);
+        self.effective_hz = f as f32;
         let g = self.gain.cur as f64;
         let q = (libm::exp2f(self.q.cur) as f64).clamp(0.1, 18.0);
         let qs = q / std::f64::consts::FRAC_1_SQRT_2;
@@ -488,6 +503,15 @@ impl Device for Eq {
         self.hop_ctr = 0;
         self.snap_all();
         self.fresh = true;
+    }
+
+    /// Scalar meters 2–9 report the current effective frequencies in Hz for bands 1–8.
+    /// Array meters 0/1 are the pre/post EQ spectra.
+    fn meter(&self, index: u32) -> f32 {
+        match index {
+            2..=9 => self.bands[(index - 2) as usize].effective_hz,
+            _ => 0.0,
+        }
     }
 
     fn meter_array(&self, index: u32, out: &mut [f32]) -> usize {
