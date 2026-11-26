@@ -51,8 +51,7 @@ for (const { id } of themes) {
       return Object.fromEntries(["--solo", "--mute", "--ok", "--warn"].map((name) => [name, style.getPropertyValue(name)]));
     });
     const bytes = (name: string) => themeRgb(values, name).map((channel) => 255 * channel);
-    const otherRoles = id === "slate-system" ? ["--mute", "--ok", "--warn"] : ["--mute", "--ok"];
-    for (const other of otherRoles) {
+    for (const other of ["--mute", "--ok", "--warn"]) {
       expect(colourDistance(bytes("--solo"), bytes(other)), `--solo versus ${other}`).toBeGreaterThanOrEqual(48);
     }
     const soloColor = `rgb(${bytes("--solo").map(Math.round).join(", ")})`;
