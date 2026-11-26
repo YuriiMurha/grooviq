@@ -21,9 +21,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Renders and data of the fixtures as the last version 3 build (90ec26d) produced them.
+// v1 and v2 play sampler voices above step 1.09, so their sound follows the sampler's
+// band-limited read (#542); with that read forced to Hermite they hash as before.
 const BASELINE: [(&str, u64, u64); 3] = [
-    ("v1", 0x0b4d_3305_2ae3_f1ae, 0x728d_f32f_82f0_4ddf),
-    ("v2", 0xc10f_35b6_d9fa_1725, 0xb3e3_e049_4b7a_3e6e),
+    ("v1", 0x7679_e6fa_3dda_c72a, 0x728d_f32f_82f0_4ddf),
+    ("v2", 0x9adb_f194_b066_58d9, 0xb3e3_e049_4b7a_3e6e),
     ("v3", 0x864b_0d92_c75b_b1ef, 0x6f47_398f_c689_746c),
 ];
 
