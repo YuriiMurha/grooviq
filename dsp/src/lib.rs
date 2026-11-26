@@ -28,6 +28,7 @@ pub mod drive;
 pub mod drum_shaper;
 pub mod eq;
 pub mod fattener;
+pub mod half_time;
 pub mod limiter;
 pub mod lofi_colour;
 pub mod ott;
