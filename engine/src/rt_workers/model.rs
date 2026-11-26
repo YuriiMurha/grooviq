@@ -1,91 +1,104 @@
-//! Small interleaving models of the mailbox and callback pin protocols.
+//! Run the production atomics and mailbox cell with Loom's checked primitives.
 
-use loom::cell::UnsafeCell;
-use loom::sync::Arc;
-use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
-use loom::thread;
+use super::*;
+use ::loom::cell::UnsafeCell;
+use ::loom::{model, thread};
+
+struct Payload {
+    input: UnsafeCell<u32>,
+    result: UnsafeCell<u32>,
+}
+
+// SAFETY: The callback writes input before the offer. Its sole claimant writes result;
+// the callback reads that result only after collecting completion with acquire ordering.
+unsafe impl Sync for Payload {}
+unsafe impl Jobs for Payload {
+    fn run(&self, _: JobId, _: WorkerSlot) {
+        let input = self.input.with(|value| unsafe { *value });
+        self.result.with_mut(|value| unsafe { *value = input });
+    }
+}
+
+impl Payload {
+    fn new() -> Self {
+        Self {
+            input: UnsafeCell::new(0),
+            result: UnsafeCell::new(0),
+        }
+    }
+}
 
 #[test]
-fn mailbox_cancel_or_claim_and_acquire_completion() {
-    loom::model(|| {
-        const OFFERED: usize = 1;
-        const CLAIMED: usize = 2;
-        const CANCELED: usize = 3;
-        let state = Arc::new(AtomicUsize::new(0));
-        let done = Arc::new(AtomicBool::new(false));
-        let input = Arc::new(UnsafeCell::new(0));
-        let output = Arc::new(UnsafeCell::new(0));
-        let worker = {
-            let (state, done, input, output) =
-                (state.clone(), done.clone(), input.clone(), output.clone());
-            thread::spawn(move || {
-                if state
-                    .compare_exchange(OFFERED, CLAIMED, Ordering::Acquire, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    let source = input.with(|p| unsafe { *p });
-                    output.with_mut(|p| unsafe { *p = source });
-                    done.store(true, Ordering::Release);
-                    true
-                } else {
-                    false
-                }
-            })
+fn production_mailbox_publication_claim_and_settlement() {
+    model(|| {
+        let config = PoolConfig {
+            workers: 1,
+            max_jobs: 1,
+            ..PoolConfig::default()
         };
-        input.with_mut(|p| unsafe { *p = 42 });
-        state.store(OFFERED, Ordering::Release);
-        let canceled = state
-            .compare_exchange(OFFERED, CANCELED, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok();
-        if canceled {
-            output.with_mut(|p| unsafe { *p = 42 });
-        } else {
-            while !done.load(Ordering::Acquire) {
-                thread::yield_now();
-            }
+        let mut pool = WorkerPool::prepare(config.clone()).unwrap();
+        let id = pool
+            .admit(Schedule::build(1, &[], &config).unwrap(), Payload::new())
+            .unwrap();
+        let shared = Arc::clone(&pool.shared);
+        let worker = thread::spawn(move || {
+            shared.workers[0].poll(
+                1,
+                #[cfg(feature = "profiling")]
+                None,
+            )
+        });
+
+        let pin = CallbackPin::new(&pool.shared, id).unwrap();
+        let admitted = pin.state();
+        // SAFETY: one model callback, and no job has been offered.
+        let payload = unsafe { &*admitted.jobs.get() };
+        payload.input.with_mut(|value| unsafe { *value = 42 });
+        let block = unsafe { &mut *admitted.block.get() };
+        offer_job(&pool.shared.workers[0], admitted, 0);
+        settle_timeout(&pool.shared, &mut [Some(0)], admitted, block);
+
+        if block.late.is_empty() {
+            // A canceled job ran inline, or settlement acquired the worker's completion.
+            // Read before joining, which would mask a weakened completion store.
+            assert_eq!(payload.result.with(|value| unsafe { *value }), 42);
+            payload.input.with_mut(|value| unsafe { *value = 43 });
         }
-        assert_eq!(output.with(|p| unsafe { *p }), 42);
-        input.with_mut(|p| unsafe { *p = 43 });
-        assert_eq!(worker.join().unwrap(), !canceled);
+        worker.join().unwrap();
+        assert_eq!(admitted.outstanding.load(Ordering::Acquire), 0);
     });
 }
 
 #[test]
-fn callback_pin_or_new_generation_and_outstanding_claim() {
-    loom::model(|| {
-        let active = Arc::new(AtomicUsize::new(1));
-        let pin = Arc::new(AtomicUsize::new(0));
-        let outstanding = Arc::new(AtomicUsize::new(0));
-        let memory = Arc::new(UnsafeCell::new(0));
-        let callback = {
-            let (active, pin, outstanding, memory) = (
-                active.clone(),
-                pin.clone(),
-                outstanding.clone(),
-                memory.clone(),
-            );
-            thread::spawn(move || {
-                let candidate = active.load(Ordering::Acquire);
-                pin.store(candidate, Ordering::Release);
-                fence(Ordering::SeqCst);
-                if active.load(Ordering::Acquire) == candidate && candidate == 1 {
-                    outstanding.fetch_add(1, Ordering::Relaxed);
-                    let worker = thread::spawn(move || {
-                        memory.with_mut(|p| unsafe { *p = 1 });
-                        outstanding.fetch_sub(1, Ordering::AcqRel);
-                    });
-                    pin.store(0, Ordering::Release);
-                    worker.join().unwrap();
-                } else {
-                    pin.store(0, Ordering::Release);
-                }
-            })
+fn production_callback_pin_excludes_reclamation() {
+    model(|| {
+        let config = PoolConfig {
+            workers: 0,
+            max_jobs: 1,
+            ..PoolConfig::default()
         };
-        active.store(2, Ordering::Release);
-        fence(Ordering::SeqCst);
-        // Like a worker that observed the new publication before an earlier callback dispatched.
-        if pin.load(Ordering::Acquire) != 1 && outstanding.load(Ordering::Acquire) == 0 {
-            memory.with_mut(|p| unsafe { *p = 2 });
+        let mut pool = WorkerPool::prepare(config.clone()).unwrap();
+        let id = pool
+            .admit(Schedule::build(1, &[], &config).unwrap(), Payload::new())
+            .unwrap();
+        // Keep the storage mapped so a mutant reports a Loom race instead of actually
+        // freeing bytes under a raw pointer. Only quiescence permits the control write below.
+        let retired = Arc::clone(&pool.admitted[&id]);
+        let mut callback = pool.take_runner().unwrap();
+        let callback = thread::spawn(move || {
+            if let Some(mut admitted) = callback.admitted(id) {
+                assert!(matches!(
+                    admitted.run_block(Mode::Serial, Duration::ZERO),
+                    BlockOutcome::Complete
+                ));
+            }
+        });
+
+        pool.admit(Schedule::build(0, &[], &config).unwrap(), Payload::new())
+            .unwrap();
+        if pool.quiescent(id) {
+            let payload = unsafe { &*retired.jobs.get() };
+            payload.result.with_mut(|value| unsafe { *value = 99 });
         }
         callback.join().unwrap();
     });

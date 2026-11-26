@@ -66,3 +66,6 @@ required-features = ["test-hooks"]
 [[test]]
 name = "note_identity"
 required-features = ["test-hooks"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

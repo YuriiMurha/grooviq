@@ -255,3 +255,7 @@ test-perf-fetch: ## Exercise bounded benchmark dependency setup without Cargo or
 .PHONY: bench-mixer
 bench-mixer: ## Static mixer kernel render timings at 64/128 frames (smoke only, no deadline claim)
 	$(CARGO) bench -p grooviq-engine --bench mixer_kernels
+
+.PHONY: bench-rt-workers
+bench-rt-workers: ## Worker pool block timings, wake latency or idle CPU (ARGS=--wake-latency or --idle-cpu=2)
+	$(CARGO) bench -p grooviq-engine --bench rt_workers -- $(ARGS)

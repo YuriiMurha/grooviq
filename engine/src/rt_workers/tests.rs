@@ -133,11 +133,15 @@ fn claimed_job_faults_with_transitive_successors_then_recovers() {
         [1, 1, 0, 0, 1, 1]
     );
     for mode in [Mode::Serial, Mode::Pool] {
-        assert!(matches!(
-            runner.run_block(generation, mode, budget),
-            BlockOutcome::Faulted { job: 1, .. }
-        ));
-        assert_eq!(calls[1].load(Ordering::Relaxed), 1);
+        let BlockOutcome::Faulted { job: 1, not_run } = runner.run_block(generation, mode, budget)
+        else {
+            panic!("the late claim must refuse the entire block");
+        };
+        assert_eq!(not_run.iter().collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            calls.each_ref().map(|n| n.load(Ordering::Relaxed)),
+            [1, 1, 0, 0, 1, 1]
+        );
     }
     gate.release();
     let until = Instant::now() + Duration::from_secs(3);
@@ -240,6 +244,17 @@ unsafe impl Jobs for Dag {
         let node = &self.nodes[job as usize];
         let epoch = self.source.load(Ordering::Relaxed);
         self.slot_mask.fetch_or(1 << slot, Ordering::Relaxed);
+        if epoch == 1 && job == 7 && slot == 0 {
+            // First callback job in the wide level. Let every worker take an offer
+            // even when the small-frame workload would otherwise finish while cold.
+            let expected = (1 << self.scratch_busy.len()) - 1;
+            let start = Instant::now();
+            while self.slot_mask.load(Ordering::Relaxed) != expected
+                && start.elapsed() < Duration::from_millis(500)
+            {
+                std::hint::spin_loop();
+            }
+        }
         if self.scratch_busy[slot].swap(true, Ordering::AcqRel) {
             self.errors.fetch_add(1, Ordering::Relaxed);
         }
@@ -473,10 +488,15 @@ fn an_offer_that_never_gets_claimed_falls_back_in_canonical_order() {
             Calls(AtomicU32::new(0), AtomicUsize::new(0)),
         )
         .unwrap();
+    let start = Instant::now();
     assert!(matches!(
-        runner.run_block(first, Mode::Pool, Duration::from_millis(10)),
+        runner.run_block(first, Mode::Pool, Duration::from_secs(2)),
         BlockOutcome::Complete
     ));
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "waited for the worker deadline"
+    );
     POLLING.store(true, Ordering::Release);
     pool.admit(
         Schedule::build(0, &[], &config).unwrap(),
@@ -656,4 +676,60 @@ fn jobs_mut_is_available_exactly_when_worker_borrows_have_ended() {
     ));
     assert!(admitted.jobs_mut().is_some());
     assert_eq!(seen.load(Ordering::Relaxed), 3);
+}
+
+#[test]
+fn deadline_settlement_never_reruns_an_already_completed_worker_job() {
+    static COMPLETED_POLL: AtomicBool = AtomicBool::new(false);
+
+    struct Calls(Arc<[AtomicUsize; 2]>);
+    // SAFETY: all shared test state is atomic and the artificial spin is bounded.
+    unsafe impl Jobs for Calls {
+        fn run(&self, job: JobId, _: WorkerSlot) {
+            self.0[job as usize].fetch_add(1, Ordering::Relaxed);
+            if job == 0 {
+                let start = Instant::now();
+                // Wait for the real poll to publish completion, then cross the deadline
+                // while still in callback-owned work so run_level cannot collect it.
+                while !COMPLETED_POLL.load(Ordering::Acquire)
+                    && start.elapsed() < Duration::from_secs(2)
+                {
+                    std::hint::spin_loop();
+                }
+                let delay = Instant::now();
+                while delay.elapsed() < Duration::from_millis(30) {
+                    std::hint::spin_loop();
+                }
+            }
+        }
+    }
+
+    let config = PoolConfig {
+        test_worker_context: Some(|poll| {
+            let completed = poll();
+            if completed {
+                COMPLETED_POLL.store(true, Ordering::Release);
+            }
+            completed
+        }),
+        ..config(1)
+    };
+    let mut pool = WorkerPool::start(config.clone()).unwrap();
+    let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let id = pool
+        .admit(
+            Schedule::build(2, &[], &config).unwrap(),
+            Calls(calls.clone()),
+        )
+        .unwrap();
+    let mut runner = pool.take_runner().unwrap();
+    assert!(matches!(
+        runner.run_block(id, Mode::Pool, Duration::from_millis(10)),
+        BlockOutcome::Complete
+    ));
+    assert!(
+        COMPLETED_POLL.load(Ordering::Acquire),
+        "worker did not claim job 1"
+    );
+    assert_eq!(calls.each_ref().map(|n| n.load(Ordering::Relaxed)), [1, 1]);
 }

@@ -7,11 +7,15 @@
 //!
 //! A `Faulted` return covers completed work only. A still-claimed job can keep accessing its
 //! node, slot scratch and generation-owned block inputs. `Admitted::jobs_mut` denies exclusive
-//! access while a worker can still borrow them. Recovery acquires completion and returns before any job runs, so
+//! access while a worker can still borrow them. A refusal block runs no jobs and reports all
+//! jobs as not run. Recovery acquires completion and returns before any job runs, so
 //! the caller can reset the affected node. A block with multiple late workers reports each
 //! recovered job on a separate call before execution resumes.
 
 mod schedule;
+mod sync;
+#[cfg(feature = "profiling")]
+mod trace;
 mod worker;
 
 pub use schedule::{Schedule, ScheduleError};
@@ -21,9 +25,9 @@ use std::collections::HashMap;
 use std::io;
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering, fence};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use sync::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering, fence};
 use worker::{Command, Worker};
 
 pub type JobId = u32;
@@ -36,8 +40,18 @@ pub type WorkerSlot = usize;
 /// Jobs must run without panic, allocation, deallocation, blocking or I/O. Each invocation
 /// may mutate only its own job state and scratch for its slot. It may read only immutable
 /// block inputs and outputs of its declared dependencies. Resources reachable from different
-/// generations must permit overlap if an old worker is late during a swap.
-pub unsafe trait Jobs: Sync {
+/// generations must permit overlap if an old worker is late during a swap. The callback
+/// runner can move between threads and grant exclusive access to the owned job state.
+///
+/// ```compile_fail
+/// use grooviq_engine::rt_workers::{JobId, Jobs, WorkerSlot};
+/// use std::sync::MutexGuard;
+/// struct ThreadBound(MutexGuard<'static, ()>);
+/// unsafe impl Jobs for ThreadBound {
+///     fn run(&self, _: JobId, _: WorkerSlot) {}
+/// }
+/// ```
+pub unsafe trait Jobs: Send + Sync {
     fn run(&self, job: JobId, slot: WorkerSlot);
 }
 
@@ -104,20 +118,30 @@ pub enum Mode {
 
 /// In canonical order. Includes each late job and all transitive successors.
 #[derive(Clone, Copy, Debug)]
-pub struct NotRun<'a> {
-    progress: &'a [Progress],
+pub struct NotRun<'a>(RefusedJobs<'a>);
+
+#[derive(Clone, Copy, Debug)]
+enum RefusedJobs<'a> {
+    All(usize),
+    Blocked(&'a [Progress]),
 }
 
 impl NotRun<'_> {
     pub fn contains(&self, job: JobId) -> bool {
-        self.progress.get(job as usize) == Some(&Progress::Blocked)
+        match self.0 {
+            RefusedJobs::All(jobs) => (job as usize) < jobs,
+            RefusedJobs::Blocked(progress) => {
+                progress.get(job as usize) == Some(&Progress::Blocked)
+            }
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = JobId> + '_ {
-        self.progress
-            .iter()
-            .enumerate()
-            .filter_map(|(job, &state)| (state == Progress::Blocked).then_some(job as JobId))
+        let jobs = match self.0 {
+            RefusedJobs::All(jobs) => jobs,
+            RefusedJobs::Blocked(progress) => progress.len(),
+        };
+        (0..jobs as JobId).filter(|&job| self.contains(job))
     }
 }
 
@@ -190,7 +214,23 @@ pub struct BlockRunner<J: Jobs> {
 
 impl<J: Jobs + 'static> WorkerPool<J> {
     pub fn start(config: PoolConfig) -> io::Result<Self> {
-        static NEXT_POOL: AtomicU64 = AtomicU64::new(1);
+        let mut pool = Self::prepare(config)?;
+        #[cfg(feature = "profiling")]
+        if pool.config.workers != 0 {
+            let _ = tracy_client::Client::start();
+        }
+        for index in 0..pool.config.workers {
+            pool.threads.push(worker::spawn(
+                Arc::clone(&pool.shared),
+                pool.config.clone(),
+                index,
+            )?);
+        }
+        Ok(pool)
+    }
+
+    fn prepare(config: PoolConfig) -> io::Result<Self> {
+        static NEXT_POOL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = NEXT_POOL
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| io::Error::other("worker pool IDs exhausted"))?;
@@ -202,12 +242,6 @@ impl<J: Jobs + 'static> WorkerPool<J> {
                 io::ErrorKind::InvalidInput,
                 "invalid worker pool configuration",
             ));
-        }
-        // Profiling builds can construct the pool before the processor enables its own
-        // timeline. Initialize the process-wide client before the workers open their zones.
-        #[cfg(feature = "profiling")]
-        if config.workers != 0 {
-            let _ = tracy_client::Client::start();
         }
         let shared = Arc::new(Shared {
             active: AtomicPtr::new(ptr::null_mut()),
@@ -222,7 +256,7 @@ impl<J: Jobs + 'static> WorkerPool<J> {
             report: filled(config.max_jobs, || Progress::Waiting).map_err(allocation_error)?,
         };
         let mut pool = Self {
-            config: config.clone(),
+            config,
             id,
             current: 0,
             shared,
@@ -231,15 +265,8 @@ impl<J: Jobs + 'static> WorkerPool<J> {
             threads: Vec::new(),
         };
         pool.threads
-            .try_reserve_exact(config.workers)
+            .try_reserve_exact(pool.config.workers)
             .map_err(|_| allocation_error(CapacityError::Allocation))?;
-        for index in 0..config.workers {
-            pool.threads.push(worker::spawn(
-                Arc::clone(&pool.shared),
-                config.clone(),
-                index,
-            )?);
-        }
         Ok(pool)
     }
 
@@ -461,7 +488,10 @@ fn execute_block<'a, J: Jobs>(
     let block = unsafe { &mut *admitted.block.get() };
     if let Some(&job) = block.late.get(block.recovery) {
         if has_late_claim(admitted, block) {
-            return fault(report, block, job);
+            return BlockOutcome::Faulted {
+                job,
+                not_run: NotRun(RefusedJobs::All(admitted.schedule.jobs())),
+            };
         }
         block.recovery += 1;
         return BlockOutcome::Recovered { job };
@@ -498,7 +528,7 @@ fn fault<'a>(report: &'a mut [Progress], block: &BlockState, job: JobId) -> Bloc
     report.copy_from_slice(&block.progress);
     BlockOutcome::Faulted {
         job,
-        not_run: NotRun { progress: report },
+        not_run: NotRun(RefusedJobs::Blocked(report)),
     }
 }
 
@@ -531,23 +561,23 @@ fn run_level<J: Jobs>(
         let callback = level.get(next).copied();
         next += usize::from(callback.is_some());
         for (worker, assignment) in shared.workers.iter().zip(assigned.iter_mut()) {
-            if let Some(job) = *assignment
-                && admitted.done[job as usize].load(Ordering::Acquire)
-            {
-                block.progress[job as usize] = Progress::Done;
-                *assignment = None;
+            if let Some(job) = *assignment {
+                if callback.is_none() && cancel_offer(worker, admitted) {
+                    // No callback work remains in this level. Take back pending offers
+                    // immediately so a sleeping worker cannot keep the callback waiting.
+                    run_inline(admitted, block, job);
+                    *assignment = None;
+                } else if admitted.done[job as usize].load(Ordering::Acquire) {
+                    block.progress[job as usize] = Progress::Done;
+                    *assignment = None;
+                }
             }
             if assignment.is_none()
                 && worker.is_idle()
                 && let Some(&job) = level.get(next)
                 && start.elapsed() < budget
             {
-                admitted.done[job as usize].store(false, Ordering::Relaxed);
-                admitted.outstanding.fetch_add(1, Ordering::Relaxed);
-                worker.offer(Command {
-                    generation: ptr::from_ref(admitted),
-                    job,
-                });
+                offer_job(worker, admitted, job);
                 *assignment = Some(job);
                 next += 1;
             }
@@ -563,6 +593,23 @@ fn run_level<J: Jobs>(
     }
 }
 
+fn offer_job<J: Jobs>(worker: &Worker<J>, admitted: &GenerationState<J>, job: JobId) {
+    admitted.done[job as usize].store(false, Ordering::Relaxed);
+    admitted.outstanding.fetch_add(1, Ordering::Relaxed);
+    worker.offer(Command {
+        generation: ptr::from_ref(admitted),
+        job,
+    });
+}
+
+fn cancel_offer<J: Jobs>(worker: &Worker<J>, admitted: &GenerationState<J>) -> bool {
+    if !worker.cancel() {
+        return false;
+    }
+    admitted.outstanding.fetch_sub(1, Ordering::AcqRel);
+    true
+}
+
 fn settle_timeout<J: Jobs>(
     shared: &Shared<J>,
     assigned: &mut [Option<JobId>],
@@ -575,9 +622,10 @@ fn settle_timeout<J: Jobs>(
     // declared late cannot make its successors eligible halfway through the fallback.
     for (worker, assignment) in shared.workers.iter().zip(assigned) {
         if let Some(job) = assignment.take() {
-            if worker.cancel() {
-                admitted.outstanding.fetch_sub(1, Ordering::AcqRel);
-            } else if admitted.done[job as usize].load(Ordering::Acquire) {
+            if cancel_offer(worker, admitted) {
+                continue;
+            }
+            if admitted.done[job as usize].load(Ordering::Acquire) {
                 block.progress[job as usize] = Progress::Done;
             } else {
                 block.progress[job as usize] = Progress::Blocked;
@@ -615,8 +663,9 @@ fn allocation_error(_: CapacityError) -> io::Error {
     io::Error::other("worker pool capacity allocation failed")
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests;
 
-#[cfg(test)]
-mod model;
+#[cfg(all(test, loom))]
+#[path = "model.rs"]
+mod loom;

@@ -11,10 +11,14 @@ const WAIT: Duration = Duration::from_millis(100);
 const WAKE_WAIT: Duration = Duration::from_millis(4);
 
 fn main() {
-    if std::env::args().any(|arg| arg == "--wake-latency") {
-        wake_latency();
-    } else {
-        divan::main();
+    match std::env::args().nth(1).as_deref() {
+        Some("--wake-latency") => {
+            wake_latency("paced", Duration::from_micros(1_333));
+            wake_latency("cold", Duration::from_millis(10));
+        }
+        Some("--idle-cpu=2") => idle_cpu(2),
+        Some("--idle-cpu=4") => idle_cpu(4),
+        _ => divan::main(),
     }
 }
 
@@ -104,15 +108,20 @@ struct WakeProbe {
 
 // SAFETY: the sole sampled worker writes only an atomic scalar.
 unsafe impl Jobs for WakeProbe {
-    fn run(&self, _: JobId, slot: WorkerSlot) {
-        if slot == 1 {
+    fn run(&self, job: JobId, slot: WorkerSlot) {
+        if job == 0 {
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_micros(100) {
+                std::hint::spin_loop();
+            }
+        } else if slot == 1 {
             self.entry
                 .store(self.clock.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
     }
 }
 
-fn wake_latency() {
+fn wake_latency(label: &str, gap: Duration) {
     let config = PoolConfig {
         workers: 1,
         ..PoolConfig::default()
@@ -131,9 +140,9 @@ fn wake_latency() {
         .unwrap();
     let mut runner = pool.take_runner().unwrap();
     let mut samples = Vec::new();
-    const SAMPLES: usize = 1_000;
+    const SAMPLES: usize = 500;
     for sample in 0..SAMPLES {
-        std::thread::sleep(Duration::from_micros(500 + sample as u64 % 29));
+        std::thread::sleep(gap + Duration::from_micros(sample as u64 % 29));
         entry.store(0, Ordering::Relaxed);
         let start = clock.elapsed().as_nanos() as u64;
         assert!(matches!(
@@ -145,12 +154,34 @@ fn wake_latency() {
         }
     }
     samples.sort_unstable();
-    assert!(!samples.is_empty(), "worker never claimed a job");
+    println!("{label}: {}/{} claimed by a worker", samples.len(), SAMPLES);
+    if samples.is_empty() {
+        return;
+    }
     for (label, percentile) in [("p50", 50), ("p95", 95), ("p99", 99), ("max", 100)] {
         println!(
             "{label} {:.1} us",
             samples[(samples.len() - 1) * percentile / 100] as f64 / 1000.0
         );
     }
-    println!("{}/{} claimed by a worker", samples.len(), SAMPLES);
+}
+
+/// Run the already-built benchmark under /usr/bin/time to collect process CPU time.
+fn idle_cpu(workers: usize) {
+    let config = PoolConfig {
+        workers,
+        ..PoolConfig::default()
+    };
+    let mut pool = WorkerPool::start(config.clone()).unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    pool.admit(
+        Schedule::build(0, &[], &config).unwrap(),
+        WakeProbe {
+            clock: Instant::now(),
+            entry: Arc::new(AtomicU64::new(0)),
+        },
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    pool.shutdown();
 }
