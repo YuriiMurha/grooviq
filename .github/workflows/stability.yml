@@ -173,6 +173,32 @@ jobs:
           path: candidate/app/ui/shard-receipts/*/receipt.json
           retention-days: 7
           if-no-files-found: error
+      - name: Bound failure diagnostics
+        id: diagnostics
+        if: failure() || cancelled()
+        working-directory: candidate/app/ui
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          mkdir -p failure-evidence/artifacts
+          for directory in e2e-results playwright-report; do
+            if [[ -d "$directory" && ! -L "$directory" ]]; then
+              mv -- "$directory" failure-evidence/artifacts/
+            fi
+          done
+          node --input-type=module -e '
+            import { capArtifacts } from "../../../harness/scripts/stability/run.mjs";
+            const report = {};
+            capArtifacts("failure-evidence", report);
+            console.log(JSON.stringify(report));
+          '
+      - uses: actions/upload-artifact@v4
+        if: (failure() || cancelled()) && steps.diagnostics.outcome == 'success'
+        timeout-minutes: 3
+        with:
+          name: ci-shard-diagnostics-${{ matrix.browser }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate/app/ui/failure-evidence/artifacts/
+          retention-days: 7
 
   ci-sharded-results:
     if: ${{ always() && inputs.mode == 'ci-sharded' }}
@@ -187,7 +213,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+      - name: Test stability accounting
+        run: node --test scripts/stability/*.test.mjs scripts/e2e-browser-results.test.mjs
       - uses: actions/download-artifact@v4
+        if: always()
         with:
           pattern: ci-sharded-*-of-2-${{ github.run_id }}-${{ github.run_attempt }}
           path: shard-receipts

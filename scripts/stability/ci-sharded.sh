@@ -39,4 +39,6 @@ for ((repetition = 1; repetition <= STABILITY_REPEATS; repetition++)); do
   if ((status != 0)); then
     exit "$status"
   fi
+  # Successful repetitions need only their receipts. A failed one leaves its traces and journal.
+  rm -rf -- e2e-results playwright-report
 done
