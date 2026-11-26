@@ -116,6 +116,9 @@ test("keyboard selection still applies with storage denied and the notice stays 
   await app.reload();
   await workspaceReady(app);
   const appearance = await openAppearance(app);
+  const notice = appearance.getByRole("status");
+  await expect(notice).toBeEmpty();
+  const liveRegion = await notice.elementHandle();
   const first = appearance.getByRole("radio", { name: themes[0].name });
   await expect(first).toBeChecked();
   await first.focus();
@@ -124,10 +127,11 @@ test("keyboard selection still applies with storage denied and the notice stays 
   const second = appearance.getByRole("radio", { name: themes[1].name });
   await expect(second).toBeFocused();
   await expect(second).toBeChecked();
-  await expect(appearance.getByRole("status")).toBeVisible();
+  await expect(notice).toBeVisible();
+  expect(await notice.evaluate((node, before) => node === before, liveRegion)).toBe(true);
 
   await app.keyboard.press("Escape");
   await openAppearance(app);
   await expect(second).toBeChecked();
-  await expect(appearance.getByRole("status")).toBeVisible();
+  await expect(notice).toBeVisible();
 });

@@ -51,7 +51,7 @@ import { rollEditsUnsettled } from "./roll/commitQueue";
 import { isTypingTarget, modalIsOpen, shortcutFor } from "./project/shortcuts";
 import { useProjectFlows } from "./project/useProjectFlows";
 import { useSession } from "./project/useSession";
-import { applyTheme } from "./theme/apply";
+import { applyTheme, type ThemeApplication } from "./theme/apply";
 import { resolveThemeId } from "./theme/preference";
 import { Toasts, type Toast } from "./toast/Toasts";
 import { KeyboardToggle } from "./transport/KeyboardToggle";
@@ -71,9 +71,9 @@ export function App() {
   const [guard, setGuard] = useState(true);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [open, setOpen] = useState(false);
-  const [appearance, setAppearance] = useState(() => ({
+  const [appearance, setAppearance] = useState<ThemeApplication>(() => ({
     theme: resolveThemeId(document.documentElement.dataset.theme),
-    persisted: true,
+    status: "applied",
   }));
   const [toasts, setToasts] = useState<Toast[]>([]);
   // From live frames, set only when they change.
@@ -492,8 +492,7 @@ export function App() {
                   chosen={chosen}
                   guard={guard}
                   log={log}
-                  theme={appearance.theme}
-                  themePersisted={appearance.persisted}
+                  appearance={appearance}
                   onTheme={(id) => setAppearance(applyTheme(id))}
                   onSelect={select}
                   onGuard={changeGuard}

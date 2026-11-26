@@ -1,8 +1,8 @@
 import { themeTokenProblems } from "./contract";
 import { DEFAULT_THEME, resolveThemeId, THEME_PREFERENCE_KEY, type ThemeId } from "./preference";
 
-/** Set the root used by CSS and canvas subscribers, then validate the resolved tokens once. */
-export function paintTheme(theme: ThemeId): ThemeId {
+/** Paint the theme, returning null if token validation caused a fallback to Riso. */
+export function paintTheme(theme: ThemeId): ThemeId | null {
   const root = document.documentElement;
   root.dataset.theme = theme;
   const style = getComputedStyle(root);
@@ -11,20 +11,22 @@ export function paintTheme(theme: ThemeId): ThemeId {
 
   root.dataset.theme = DEFAULT_THEME;
   console.warn("Theme has missing or incompatible tokens:", problems.map((problem) => problem.token).join(", "));
-  return DEFAULT_THEME;
+  return null;
 }
+
+export type ThemeApplication = { theme: ThemeId; status: "applied" | "session-only" | "unavailable" };
 
 export function applyTheme(
   requested: unknown,
   write: (theme: ThemeId) => void = (theme) => window.localStorage.setItem(THEME_PREFERENCE_KEY, theme),
-): { theme: ThemeId; persisted: boolean } {
+): ThemeApplication {
   const theme = paintTheme(resolveThemeId(requested));
-  if (theme !== requested) return { theme, persisted: false };
+  if (theme === null || theme !== requested) return { theme: theme ?? DEFAULT_THEME, status: "unavailable" };
 
   try {
     write(theme);
-    return { theme, persisted: true };
+    return { theme, status: "applied" };
   } catch {
-    return { theme, persisted: false };
+    return { theme, status: "session-only" };
   }
 }

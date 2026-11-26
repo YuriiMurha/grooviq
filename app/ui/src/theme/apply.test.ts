@@ -19,26 +19,27 @@ beforeEach(() => {
 
 afterEach(() => {
   root.removeAttribute("data-theme");
+  root.style.removeProperty("--ink-1");
   document.head.querySelector("style")?.remove();
   window.localStorage.clear();
   vi.restoreAllMocks();
 });
 
 test("applies and stores an available theme", () => {
-  expect(applyTheme("taste")).toEqual({ theme: "taste", persisted: true });
+  expect(applyTheme("taste")).toEqual({ theme: "taste", status: "applied" });
   expect(root.dataset.theme).toBe("taste");
   expect(window.localStorage.getItem(THEME_PREFERENCE_KEY)).toBe("taste");
 });
 
 test("a throwing writer leaves the chosen theme visible for this session", () => {
   const write = () => { throw new DOMException("Storage unavailable", "SecurityError"); };
-  expect(applyTheme("console", write)).toEqual({ theme: "console", persisted: false });
+  expect(applyTheme("console", write)).toEqual({ theme: "console", status: "session-only" });
   expect(root.dataset.theme).toBe("console");
 });
 
 test("an unknown theme falls back without overwriting the preference", () => {
   window.localStorage.setItem(THEME_PREFERENCE_KEY, "future-theme");
-  expect(applyTheme("future-theme")).toEqual({ theme: "riso", persisted: false });
+  expect(applyTheme("future-theme")).toEqual({ theme: "riso", status: "unavailable" });
   expect(root.dataset.theme).toBe("riso");
   expect(window.localStorage.getItem(THEME_PREFERENCE_KEY)).toBe("future-theme");
 });
@@ -47,9 +48,18 @@ test("incompatible tokens trigger one validation and a warned fallback without a
   const computedStyle = vi.spyOn(window, "getComputedStyle");
   const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   const write = vi.fn();
-  expect(applyTheme("luminous", write)).toEqual({ theme: "riso", persisted: false });
+  expect(applyTheme("luminous", write)).toEqual({ theme: "riso", status: "unavailable" });
   expect(root.dataset.theme).toBe("riso");
   expect(computedStyle).toHaveBeenCalledTimes(1);
   expect(warn).toHaveBeenCalledExactlyOnceWith("Theme has missing or incompatible tokens:", "--ink-1");
+  expect(write).not.toHaveBeenCalled();
+});
+
+test("invalid default tokens report unavailable even when the fallback id matches the request", () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  root.style.setProperty("--ink-1", "color-mix(in srgb, red, blue)");
+  const write = vi.fn();
+  expect(applyTheme("riso", write)).toEqual({ theme: "riso", status: "unavailable" });
+  expect(root.dataset.theme).toBe("riso");
   expect(write).not.toHaveBeenCalled();
 });

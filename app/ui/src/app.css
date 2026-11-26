@@ -217,6 +217,10 @@ input {
   color: var(--muted);
 }
 
+.theme-notice:empty {
+  padding-block: 0;
+}
+
 .guard {
   display: flex;
   align-items: center;
