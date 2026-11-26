@@ -335,8 +335,9 @@ impl Device for CharacterDelay {
             let wg = self.wet_g.next();
             let duck = 1.0 / (1.0 + 8.0 * c[2] * self.envelope);
             let output = libm::powf(10.0, c[5] / 20.0);
-            l[i] = (xl * dg + fl * wg * duck) * output;
-            r[i] = (xr * dg + fr * wg * duck) * output;
+            // The mix and output gain can create subnormals after the wet-path cast.
+            l[i] = flush_output_subnormal((xl * dg + fl * wg * duck) * output);
+            r[i] = flush_output_subnormal((xr * dg + fr * wg * duck) * output);
             self.out_m.update(l[i].abs().max(r[i].abs()), 1, self.sr);
         }
     }
@@ -533,6 +534,113 @@ mod review_regressions {
                 d.process(&mut a, &mut b, None, &[]);
                 fresh.process(&mut c, &mut e, None, &[]);
                 assert_eq!((a, b), (c, e));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod output_regressions {
+    use super::*;
+
+    // Pre-flush path with fixed controls and zero Character, Duck, and Modulation Depth.
+    // The wet path still differs by mode, but time, coefficients and gains stay settled.
+    fn static_reference(delay: &mut CharacterDelay, input: [f32; 2]) -> [f32; 2] {
+        let model = delay.colour[0].cur;
+        let tape = model.min(1.0) * (2.0 - model).min(1.0);
+        let analogue = (model - 1.0).max(0.0);
+        let pole = libm::expf(-std::f32::consts::TAU * 12000.0 / delay.sr);
+        let [fl, fr] = std::array::from_fn(|ch| {
+            let read = delay.buf[ch].read_frac(delay.ta - 1.0);
+            let low = delay.st_lo[ch].run(&delay.c_lo, read as f64);
+            let wet = delay.st_hi[ch].run(&delay.c_hi, low) as f32;
+            delay.dark[ch] = flush(wet + pole * (delay.dark[ch] - wet));
+            wet + tape * (fast_tanh(wet) - wet) + analogue * (delay.dark[ch] - wet)
+        });
+        let [xl, xr] = input;
+        let fb = delay.fb.cur;
+        let (wl, wr) = if delay.pingpong {
+            (mid(xl, xr) + fb * fr, fb * fl)
+        } else {
+            (xl + fb * fl, xr + fb * fr)
+        };
+        delay.buf[0].push(flush(soft_limit(wl)));
+        delay.buf[1].push(flush(soft_limit(wr)));
+        let gain = libm::powf(10.0, delay.colour[5].cur / 20.0);
+        [
+            (xl * delay.dry_g.cur + fl * delay.wet_g.cur) * gain,
+            (xr * delay.dry_g.cur + fr * delay.wet_g.cur) * gain,
+        ]
+    }
+
+    #[test]
+    fn static_output_preserves_every_non_subnormal_bit() {
+        for (low_cut, high_cut, mix, gain_db) in [
+            (20.0, 20_000.0, 0.25, 0.0),
+            (2000.0, 1000.0, 1.0, 0.0),
+            (2000.0, 1000.0, 1.0, -24.0),
+        ] {
+            for model in [0.0, 1.0, 2.0] {
+                for pingpong in [false, true] {
+                    let configured = || {
+                        let mut d = CharacterDelay::new(48_000.0);
+                        for (param, value) in [
+                            (0, 0.0),
+                            (2, 20.05),
+                            (3, 0.95),
+                            (4, f32::from(pingpong)),
+                            (5, low_cut),
+                            (6, high_cut),
+                            (7, mix),
+                            (9, model),
+                            (10, 0.0),
+                            (11, 0.0),
+                            (12, 0.0),
+                            (14, gain_db),
+                        ] {
+                            d.set_param(param, value);
+                        }
+                        d
+                    };
+                    let mut reference = configured();
+                    let mut delay = configured();
+                    for start in (0..8192).step_by(128) {
+                        let mut left = [0.0; 128];
+                        let mut right = [0.0; 128];
+                        if start == 0 {
+                            left[0] = 0.8;
+                            right[0] = -0.3;
+                            // Full wet leaves a small dry gain. These samples are normal
+                            // at the mix and become subnormal after the -24 dB output gain.
+                            left[1] = 1.0e-30;
+                            right[1] = -1.0e-30;
+                        }
+                        let expected: [[f32; 2]; 128] = std::array::from_fn(|i| {
+                            static_reference(&mut reference, [left[i], right[i]])
+                        });
+                        delay.process(&mut left, &mut right, None, &[]);
+                        for (i, ((l, r), prior)) in
+                            left.into_iter().zip(right).zip(expected).enumerate()
+                        {
+                            for (channel, (sample, prior)) in
+                                [l, r].into_iter().zip(prior).enumerate()
+                            {
+                                let expected = if prior.is_subnormal() {
+                                    0.0f32.copysign(prior)
+                                } else {
+                                    prior
+                                };
+                                assert_eq!(
+                                    sample.to_bits(),
+                                    expected.to_bits(),
+                                    "cuts={low_cut}/{high_cut}, mix={mix}, gain={gain_db}, model={model}, ping-pong={pingpong}, frame={}, channel={channel}, reference={:#010x}",
+                                    start + i,
+                                    prior.to_bits(),
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
     }
