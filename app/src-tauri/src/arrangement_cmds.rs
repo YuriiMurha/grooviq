@@ -305,6 +305,15 @@ mod tests {
             let s = lock(&session);
             (s.project().clone(), s.arrangement_view(), s.history_usage())
         };
+        // Any new worker submission for this import key would cancel the earlier request.
+        let previous_worker = (stage == Stage::Read).then(|| {
+            let intent = lock(&session)
+                .media_intent(stamp.generation, stamp.revision, import(track))
+                .unwrap();
+            assets
+                .submit(0, intent.key(), intent.request(), generated_file())
+                .unwrap()
+        });
         let (pending, cancelled, response) = thread::scope(|scope| {
             let (arrived, entered) = mpsc::channel();
             let (resume, proceed) = mpsc::channel();
@@ -338,6 +347,15 @@ mod tests {
             cancelled,
             "ticket must still be live while the import is held"
         );
+        if let Some(previous_worker) = previous_worker {
+            previous_worker
+                .receive()
+                .expect("cancelled import reached the worker and superseded the earlier request");
+            assert_eq!(
+                response.message.as_deref(),
+                Some("Older or cancelled media request")
+            );
+        }
         assert!(response.request.is_some());
         assert!(!response.changed);
         assert!(response.created_ids.is_empty());

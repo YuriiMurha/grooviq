@@ -188,48 +188,6 @@ pub async fn prepare_media(
     reply(&s, result, Some(intent.request()))
 }
 
-#[cfg(test)]
-pub(crate) mod media_test_gate {
-    use std::{cell::Cell, sync::mpsc, time::Duration};
-
-    pub const TIMEOUT: Duration = Duration::from_secs(30);
-
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    pub enum Stage {
-        Read,
-        Admitted,
-    }
-
-    pub struct Gate {
-        pub stage: Stage,
-        pub arrived: mpsc::Sender<()>,
-        pub proceed: mpsc::Receiver<()>,
-    }
-
-    thread_local! {
-        // The caller installs a one-shot gate before polling prepare_media on its own thread.
-        pub static GATE: Cell<Option<Gate>> = const { Cell::new(None) };
-    }
-
-    pub(super) fn take() -> (Option<Gate>, Option<Gate>) {
-        let gate = GATE.take();
-        match gate.as_ref().map(|gate| gate.stage) {
-            Some(Stage::Read) => (gate, None),
-            Some(Stage::Admitted) => (None, gate),
-            None => (None, None),
-        }
-    }
-
-    pub(super) fn hold(gate: Option<Gate>) {
-        if let Some(gate) = gate {
-            gate.arrived.send(()).expect("test stopped before gate");
-            gate.proceed
-                .recv_timeout(TIMEOUT)
-                .expect("test did not resume import");
-        }
-    }
-}
-
 pub fn audio_cancel(session: &Mutex<Session>, request: u64) -> bool {
     lock(session).cancel_media_request(request)
 }
@@ -273,4 +231,46 @@ pub async fn arrangement_waveform(
         return Err("Waveform source replaced; reload".into());
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+pub(crate) mod media_test_gate {
+    use std::{cell::Cell, sync::mpsc, time::Duration};
+
+    pub const TIMEOUT: Duration = Duration::from_secs(30);
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Stage {
+        Read,
+        Admitted,
+    }
+
+    pub struct Gate {
+        pub stage: Stage,
+        pub arrived: mpsc::Sender<()>,
+        pub proceed: mpsc::Receiver<()>,
+    }
+
+    thread_local! {
+        // The caller installs a one-shot gate before polling prepare_media on its own thread.
+        pub static GATE: Cell<Option<Gate>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn take() -> (Option<Gate>, Option<Gate>) {
+        let gate = GATE.take();
+        match gate.as_ref().map(|gate| gate.stage) {
+            Some(Stage::Read) => (gate, None),
+            Some(Stage::Admitted) => (None, gate),
+            None => (None, None),
+        }
+    }
+
+    pub(super) fn hold(gate: Option<Gate>) {
+        if let Some(gate) = gate {
+            gate.arrived.send(()).expect("test stopped before gate");
+            gate.proceed
+                .recv_timeout(TIMEOUT)
+                .expect("test did not resume import");
+        }
+    }
 }
