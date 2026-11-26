@@ -616,6 +616,9 @@ pub struct Session {
     /// The first structural change since the last autosave (or save).
     structural_since: Option<Instant>,
     autosaved_at: Option<u64>,
+    autosave_started: u64,
+    autosave_retired: u64,
+    autosave_cleanup: Option<u64>,
     /// Pairs recorded live notes into notes.
     recorder: Recorder,
     /// Recording is switched on (it takes notes while the transport plays).
@@ -786,6 +789,9 @@ impl Session {
             pending_since: None,
             structural_since: None,
             autosaved_at: None,
+            autosave_started: 0,
+            autosave_retired: 0,
+            autosave_cleanup: None,
             recorder: Recorder::new(),
             recording: false,
             recovery_stop_mark: None,
@@ -1844,11 +1850,18 @@ impl Session {
     fn changed(&mut self, structural: bool, now: Instant) {
         self.revision += 1;
         self.arrangement_revision += 1;
+        let was_dirty = self.dirty;
         self.dirty = self.saving
             || self
                 .saved
                 .as_ref()
                 .is_none_or(|saved| !self.matches_saved_state(saved));
+        if !self.dirty {
+            if was_dirty {
+                self.retire_autosaves();
+            }
+            return;
+        }
         self.pending_since.get_or_insert(now);
         if structural {
             self.structural_since.get_or_insert(now);
@@ -3204,9 +3217,7 @@ impl Session {
         self.trim_identities.clear();
         self.arrangement_revision = 0;
         self.pattern_note_floors.clear();
-        self.pending_since = None;
-        self.structural_since = None;
-        self.autosaved_at = None;
+        self.retire_autosaves();
         Ok(())
     }
 
@@ -3337,8 +3348,9 @@ impl Session {
         self.project.name = job.project.name.clone();
         if self.revision == job.revision {
             self.remember_saved_state();
-            self.pending_since = None;
-            self.structural_since = None;
+            if !self.dirty {
+                self.retire_autosaves();
+            }
         } else {
             // The old checkpoint is obsolete as soon as this save replaces its file.
             self.saved = None;
@@ -3489,6 +3501,41 @@ impl Session {
     /// together with [`Self::autosave_snapshot`] to know which project a snapshot is of.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    // The tick reserves its file number before releasing this lock, so a clean transition
+    // includes any write in progress. The cutoff survives cleanup and later dirty edits.
+    fn retire_autosaves(&mut self) {
+        if self.autosave_started > self.autosave_retired {
+            self.autosave_retired = self.autosave_started;
+            self.autosave_cleanup = Some(self.autosave_retired);
+        }
+        self.pending_since = None;
+        self.structural_since = None;
+        self.autosaved_at = None;
+    }
+
+    pub(crate) fn autosave_started(&mut self, sequence: u64) {
+        self.autosave_started = sequence;
+    }
+
+    pub(crate) fn autosave_is_current(&self, sequence: u64) -> bool {
+        sequence > self.autosave_retired
+    }
+
+    pub(crate) fn autosave_cleanup(&self) -> Option<u64> {
+        self.autosave_cleanup
+    }
+
+    /// Whether an autosave made obsolete by the session still needs disk cleanup.
+    pub fn autosave_cleanup_pending(&self) -> bool {
+        self.autosave_cleanup.is_some()
+    }
+
+    pub(crate) fn autosave_cleanup_finished(&mut self, through: u64) {
+        if self.autosave_cleanup == Some(through) {
+            self.autosave_cleanup = None;
+        }
     }
 
     /// Records that an autosave of the project at `generation` was written at `unix_seconds`.

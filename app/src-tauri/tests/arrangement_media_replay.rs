@@ -6,13 +6,77 @@ use grooviq_app::arrangement_core::{
 use grooviq_engine::{EngineConfig, engine};
 use grooviq_project::{
     audio_assets::AudioAssets,
-    session::{MediaTarget, Session, decode_samples_budgeted_checked},
+    autosave::{AutosaveTick, autosave_tick, clear_retired_autosaves},
+    load,
+    recovery::RecoveryDir,
+    session::{AUTOSAVE_PERIOD, MediaTarget, Session, decode_samples_budgeted_checked},
 };
 use serde_json::{Value, json};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
+    time::Instant,
 };
+
+#[test]
+fn native_arrangement_undo_and_redo_retire_the_autosave_at_the_saved_state() {
+    for undo in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let recovery_path = root.path().join("recovery");
+        let (dir, _) = RecoveryDir::start(&recovery_path).unwrap();
+        let recovery = Mutex::new(Some(dir));
+        let (controller, _processor) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        let session = Mutex::new(Session::new(Arc::new(Mutex::new(controller))));
+        let saved = root.path().join("song.grooviq");
+        let save = || {
+            session
+                .lock()
+                .unwrap()
+                .save(Some(&saved), root.path())
+                .unwrap()
+        };
+        let step = |undo| {
+            let stamp = session.lock().unwrap().arrangement_view();
+            let reply = arrangement_history(&session, stamp.generation, stamp.revision, undo);
+            assert_eq!(reply["status"], "applied", "{reply}");
+            clear_retired_autosaves(&session, &recovery).unwrap();
+        };
+        if undo {
+            save();
+        }
+        let stamp = session.lock().unwrap().arrangement_view();
+        let edit = arrangement_edit(
+            &session,
+            stamp.generation,
+            stamp.revision,
+            r#"[{"kind":"setLoop","region":{"startTick":0,"endTick":3840,"enabled":false}}]"#,
+        );
+        assert_eq!(serde_json::to_value(&edit).unwrap()["status"], "applied");
+        if !undo {
+            save();
+            step(true);
+        }
+        assert!(session.lock().unwrap().needs_confirmation());
+        assert!(matches!(
+            autosave_tick(&session, &recovery, Instant::now() + AUTOSAVE_PERIOD),
+            AutosaveTick::Written(_)
+        ));
+        step(undo);
+        {
+            let s = session.lock().unwrap();
+            assert!(!s.needs_confirmation());
+            assert_eq!(
+                serde_json::to_value(s.project()).unwrap(),
+                serde_json::to_value(load(&saved).unwrap().project).unwrap()
+            );
+        }
+        drop(recovery);
+        let (_restarted, pending) = RecoveryDir::start(&recovery_path).unwrap();
+        assert!(pending.is_empty(), "{pending:?}");
+    }
+}
 
 fn steps() -> Vec<Value> {
     let step = |command: &str, args: Value| json!({"command": command, "args": args});
