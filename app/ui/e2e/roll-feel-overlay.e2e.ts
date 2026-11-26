@@ -9,6 +9,7 @@ test.use({ seed: { project: seed } });
 const panel = (p: Page) => p.getByRole("group", { name: "Transform amounts" });
 const trigger = (p: Page) => p.getByText("Feel", { exact: true });
 const spread = (p: Page) => p.getByRole("slider", { name: "Strum spread", exact: true });
+const HELD_SPREAD = "46";
 
 async function ready(p: Page) {
   await workspaceReady(p);
@@ -27,7 +28,8 @@ async function held(p: Page, el: Locator) {
   await p.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
   await p.mouse.down();
   await p.mouse.move(b.x + b.width / 2, b.y + b.height / 2 - 24, { steps: 4 });
-  await expect(el).not.toHaveAttribute("aria-valuenow", "30");
+  // The 24 px drag raises spread from 30 to 46. WebKit can expose intermediate steps first.
+  await expect(el).toHaveAttribute("aria-valuenow", HELD_SPREAD);
 }
 async function unchanged(p: Page, mock: Mock, before: number[][], cause = "dismissal") {
   expect(await sessionNotes(mock)).toEqual(before);
@@ -87,15 +89,20 @@ for (const mode of ["native", "fallback"] as const) {
       await ready(app);
       const before = await sessionNotes(mock);
       await open(app);
-      await held(app, spread(app));
-      const value = await spread(app).getAttribute("aria-valuenow");
+      const slider = spread(app);
+      await held(app, slider);
+      await expect(slider).toHaveClass(/\bdragging\b/);
+      const top = await panel(app).evaluate((el) => el.getBoundingClientRect().top);
       await app.setViewportSize({ width: 1440, height: 900 });
       await settled(app);
-      await expect(spread(app)).toHaveAttribute("aria-valuenow", value!);
+      await expect.poll(() => panel(app).evaluate((el) => el.getBoundingClientRect().top)).not.toBe(top);
+      await expect(slider).toHaveClass(/\bdragging\b/);
+      await expect(slider).toHaveAttribute("aria-valuenow", HELD_SPREAD);
       await app.mouse.up();
+      await expect(slider).not.toHaveClass(/\bdragging\b/);
       await app.keyboard.press("Escape");
       await open(app);
-      await expect(spread(app)).toHaveAttribute("aria-valuenow", value!);
+      await expect(slider).toHaveAttribute("aria-valuenow", HELD_SPREAD);
       expect(await sessionNotes(mock)).toEqual(before);
       expect((await mock.view()).canUndo).toBe(false);
     });
