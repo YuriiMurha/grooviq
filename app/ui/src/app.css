@@ -968,6 +968,9 @@ input[type="checkbox"] {
 .save-state {
   color: var(--faint);
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .save-state.dirty {
@@ -1064,7 +1067,7 @@ input[type="checkbox"] {
 .transport-btn.record[aria-pressed="true"] {
   background: var(--rec);
   border-color: var(--rec);
-  color: var(--paper);
+  color: var(--on-rec);
 }
 
 .toggle-btn {
@@ -1324,12 +1327,12 @@ label.field {
 /* ---------------- a narrow window (down to 900 px) ---------------- */
 .tone,
 .chip-latency,
-.field-caption,
-.save-state {
+.field-caption {
   white-space: nowrap;
 }
 
-@media (max-width: 1000px) {
+/* Keep the compact playback controls in patterns/rail.css on the same breakpoint. */
+@media (max-width: 1120px) {
   .toolbar {
     gap: 8px;
   }

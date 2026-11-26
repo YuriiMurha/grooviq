@@ -32,6 +32,7 @@
   --paper: #f0f3f6;
   --well: #171c23; /* the inset slate shade composited over the canvas */
   --rec: #e36b65;
+  --on-rec: var(--bg);
   --hair: rgba(48, 55, 64, 0.64);
   --step-a: #323a43;
   --step-b: #2e363e;

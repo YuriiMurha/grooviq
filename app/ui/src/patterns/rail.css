@@ -26,8 +26,7 @@
 .pattern-playlist-shell h2 { color: var(--text); font-size: 14px; margin: 0 0 8px; }
 .pattern-playlist-shell p { margin: 0; font-size: 12px; }
 @media (max-width: 960px) { .pattern-rail, .mx-workspace-rail { flex-basis: 150px; } .pattern-rail { padding: 8px; } .pattern-current { max-width: 72px; } }
-@media (max-width: 1000px) {
-  .toolbar:has(.pattern-mode-controls) .save-state { overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 1120px) {
   .transport:has(.pattern-mode-controls) { gap: 4px; }
   .pattern-mode-controls { flex: 0 0 72px; flex-direction: column; align-items: stretch; gap: 0; width: 72px; }
   .pattern-mode-field { gap: 0; }
