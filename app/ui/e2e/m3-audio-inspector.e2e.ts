@@ -158,6 +158,7 @@ test("a pointer drag on Gain previews locally and commits once on release", asyn
   const { inspector } = await openInspector(app);
   const gain = inspector.getByRole("slider", { name: "Gain", exact: true });
   const edits = async () => (await mock.calls("arrangement_edit")).map(({ args }) => JSON.parse(String(args.editsJson)) as unknown);
+  const { clips: [clip] } = await arrangement(app);
   const box = await gain.boundingBox();
   if (!box) throw new Error("Missing gain slider");
   const y = box.y + box.height / 2;
@@ -165,10 +166,13 @@ test("a pointer drag on Gain previews locally and commits once on release", asyn
   await app.mouse.down();
   await app.mouse.move(box.x + box.width - 1, y, { steps: 5 });
   await expect(gain).toHaveValue("2");
-  expect(await edits()).toEqual([]);
+  // Leaving the slider while the button is held must not commit either.
   await app.mouse.move(box.x + box.width + 15, y - box.height);
+  expect(await edits()).toEqual([]);
   await app.mouse.up();
-  await expect.poll(edits).toEqual([[expect.objectContaining({ kind: "resize", content: expect.objectContaining({ gain: 2 }) })]]);
+  await expect.poll(edits).toEqual([[
+    { kind: "resize", clip: 5, startTick: 960, content: { ...clip.content, gain: 2 } },
+  ]]);
 });
 
 test("Escape discards a keyboard draft before Tab can commit it", async ({ app, mock }) => {
