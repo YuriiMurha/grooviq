@@ -19,6 +19,8 @@ from refresh_install import LockBusy, atomic_json, atomic_text, locked, safe_pat
 LABEL = "io.github.yuriimurha.grooviq.merge-train"
 INTERVAL = 180
 LOG_LINES = 2000
+TICK_HISTORY = 2000
+REPO = "YuriiMurha/grooviq"
 SNAPSHOT_FILES = ("merge_train_agent.py", "refresh_install.py")
 ORIGINS = (
     "https://github.com/YuriiMurha/grooviq.git",
@@ -26,7 +28,13 @@ ORIGINS = (
     "git@github.com:YuriiMurha/grooviq.git",
 )
 MAIN = "refs/remotes/origin/main"
+MAIN_REF = "refs/heads/main"
+BATCH_BRANCH = "merge-train/batch"
+BATCH_REF = f"refs/heads/{BATCH_BRANCH}"
+SHA = re.compile(r"[a-f0-9]{40}")
 ENTRY = re.compile(r"([1-9][0-9]*)=[a-f0-9]{40}")
+BATCH = re.compile(r"batch=([1-9]|10)")
+MERGED = re.compile(r"Merged #([1-9][0-9]*) at [a-f0-9]{40}")
 
 
 def stamp():
@@ -40,9 +48,16 @@ def require_runtime():
 
 def parse_order(raw):
     entries, seen = [], set()
+    batch = None
     for number, line in enumerate(raw.splitlines(), 1):
         entry = line.partition("#")[0].strip()
         if not entry:
+            continue
+        if entry.startswith("batch="):
+            match = BATCH.fullmatch(entry)
+            if match is None or batch is not None:
+                raise ValueError(f"Order line {number}: expected at most one batch=<1..10>.")
+            batch = int(match[1])
             continue
         match = ENTRY.fullmatch(entry)
         if match is None:
@@ -52,7 +67,7 @@ def parse_order(raw):
             raise ValueError(f"Order line {number}: PR #{pr} is listed twice.")
         seen.add(pr)
         entries.append(entry)
-    return entries
+    return entries, 4 if batch is None else batch
 
 
 def read_text(path):
@@ -71,6 +86,7 @@ class Agent:
         self.order = self.state / "order"
         self.stopped = self.state / "stopped"
         self.log = self.state / "tick.log"
+        self.ticks = self.state / "ticks.jsonl"
         self.disabled = self.state / "disabled"
         self.tick_lock = self.state / "tick.lock"
         self.control_lock = self.state / "control.lock"
@@ -96,9 +112,9 @@ class Agent:
         if fetch not in self.origins or not push or any(url not in self.origins for url in push):
             raise RuntimeError("Automatic merge train requires the canonical Grooviq origin.")
         self.git("fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
-                 "origin", f"+refs/heads/main:{MAIN}")
+                 "origin", f"+{MAIN_REF}:{MAIN}")
         revision = self.git("rev-parse", "--verify", f"{MAIN}^{{commit}}").decode().strip()
-        if not re.fullmatch("[0-9a-f]{40}", revision):
+        if not SHA.fullmatch(revision):
             raise RuntimeError("Invalid fetched origin/main SHA.")
         return revision
 
@@ -117,18 +133,18 @@ class Agent:
             finally:
                 self.git("worktree", "remove", str(worktree))
 
-    def run_tick(self, worktree, script, entries):
-        return subprocess.run([self.python, "-S", "-B", str(script), "--order", *entries, "--batch", "4"],
+    def run_tick(self, worktree, script, entries, batch):
+        return subprocess.run([self.python, "-S", "-B", str(script), "--order", *entries, "--batch", str(batch)],
                               cwd=worktree, env=self.env, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               encoding="utf-8", errors="replace")
 
     def set_order(self, raw):
-        entries = parse_order(raw)
+        entries, batch = parse_order(raw)
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         with locked(self.control_lock):
             atomic_text(safe_path(self.order), raw)
-        return {"status": "order saved", "entries": len(entries)}
+        return {"status": "order saved", "entries": len(entries), "batch": batch}
 
     def status(self):
         stop = read_text(self.stopped)
@@ -153,6 +169,85 @@ class Agent:
         lines.extend(line[:4096] for line in output.splitlines())
         atomic_text(log, "\n".join(lines) + "\n")
 
+    def remote_tips(self):
+        lines = self.git("ls-remote", "--refs", "origin", MAIN_REF, BATCH_REF).decode().splitlines()
+        refs = {ref: sha for sha, ref in map(str.split, lines)}
+        main, batch = refs.get(MAIN_REF), refs.get(BATCH_REF)
+        if not SHA.fullmatch(main or "") or (batch is not None and not SHA.fullmatch(batch)):
+            raise RuntimeError("Invalid remote merge-train refs.")
+        return {"main": main, "batch": batch}
+
+    def commit_tree(self, sha):
+        args = ("rev-parse", "--verify", f"{sha}^{{tree}}")
+        try:
+            return self.git(*args).decode().strip()
+        except subprocess.CalledProcessError:
+            self.git("fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+                     "--refmap=", "origin", sha)
+            return self.git(*args).decode().strip()
+
+    def ci_run_id(self, sha):
+        result = subprocess.run(
+            ["gh", "run", "list", "--repo", REPO, "--branch", BATCH_BRANCH,
+             "--workflow", "ci.yml", "--limit", "100", "--json", "databaseId,headSha"],
+            cwd=self.repo, env=self.env, check=True, capture_output=True, timeout=30,
+        )
+        for run in json.loads(result.stdout):
+            if run["headSha"] == sha:
+                return run["databaseId"]
+        raise RuntimeError(f"No ci run found for tested batch {sha}.")
+
+    def record_tips(self, record, phase):
+        record[phase] = None
+        try:
+            record[phase] = self.remote_tips()
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            record[f"{phase}_error"] = str(error)
+
+    def record_landing(self, record):
+        before, after = record["before"], record["after"]
+        if before is None or after is None or before["main"] == after["main"]:
+            return
+        prs = [match[1] for line in record["stdout"] if (match := MERGED.fullmatch(line))]
+        if not prs:
+            return
+        tested = before["batch"]
+        record.update(tested_batch=tested, landed_main=after["main"], prs=prs,
+                      tree=None, tree_matches_tested_batch=None, ci_run_id=None)
+        try:
+            record["tree"] = self.commit_tree(after["main"])
+            if tested is None:
+                raise RuntimeError("No batch ref was visible before the tick.")
+            record["tree_matches_tested_batch"] = record["tree"] == self.commit_tree(tested)
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            record["tree_error"] = str(error)
+        if tested is not None:
+            try:
+                record["ci_run_id"] = self.ci_run_id(tested)
+            except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                record["ci_error"] = str(error)
+
+    def append_tick(self, record):
+        path = safe_path(self.ticks)
+        lines = deque(maxlen=TICK_HISTORY)
+        if path.exists():
+            with path.open(encoding="utf-8") as stream:
+                lines.extend(stream)
+        lines.append(json.dumps(record) + "\n")
+        atomic_text(path, "".join(lines))
+
+    def ledger(self):
+        rows = []
+        for line in (read_text(self.ticks) or "").splitlines():
+            record = json.loads(line)
+            if "landed_main" in record:
+                run = record["ci_run_id"]
+                url = f"https://github.com/{REPO}/actions/runs/{run}" if run else "—"
+                prs = ", ".join(f"#{pr}" for pr in record["prs"])
+                rows.append(f"| {record['tested_batch'] or '—'} | {url} | {record['landed_main']} | "
+                            f"{record['tree'] or '—'} | {prs} |")
+        return rows
+
     def tick(self):
         require_runtime()
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -175,18 +270,24 @@ class Agent:
         if safe_path(self.stopped).exists():
             return {"status": "latched"}
         raw = read_text(self.order)
-        entries = parse_order(raw or "")
+        entries, batch = parse_order(raw or "")
         if not entries:
             return {"status": "no order"}
         revision = self.refresh_main()
         with self.checkout(revision) as (worktree, script):
-            result = self.run_tick(worktree, script, entries)
+            record = {"recorded_utc": stamp()}
+            self.record_tips(record, "before")
+            result = self.run_tick(worktree, script, entries, batch)
             status = {0: "completed", 1: "stopped", os.EX_TEMPFAIL: "skipped: busy"}.get(
                 result.returncode, "error"
             )
             if result.returncode == 1:
                 atomic_json(safe_path(self.stopped), {"recorded_utc": stamp(), "output": result.stdout,
                             "order_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()})
+            record.update(exit_code=result.returncode, stdout=result.stdout.splitlines())
+            self.record_tips(record, "after")
+            self.record_landing(record)
+            self.append_tick(record)
             self.log_output(f"source {revision}, tick exit {result.returncode} ({status})", result.stdout)
         return {"status": status, "exit_code": result.returncode, "log": str(self.log)}
 
@@ -252,10 +353,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("enable", "disable", "status", "resume", "tick"):
+    for command in ("enable", "disable", "status", "resume", "tick", "ledger"):
         commands.add_parser(command)
     order = commands.add_parser("set-order", help="read approved PR heads from stdin, one per line")
     order.add_argument("--make-order", help="read the whitespace-separated Make ORDER value instead")
+    order.add_argument("--batch", help="write the Make BATCH value with --make-order")
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("local merge-train agent requires macOS")
@@ -263,14 +365,22 @@ def main():
         require_runtime()
         agent = Agent(args.repo)
         if args.command == "set-order":
-            raw = sys.stdin.read() if args.make_order is None else "".join(
-                entry + "\n" for entry in args.make_order.split()
-            )
+            if args.make_order is None:
+                raw = sys.stdin.read()
+            else:
+                if args.batch is not None and not BATCH.fullmatch(f"batch={args.batch}"):
+                    raise ValueError("Expected BATCH in 1..10.")
+                raw = f"batch={args.batch}\n" if args.batch is not None else ""
+                raw += "".join(entry + "\n" for entry in args.make_order.split())
             value = agent.set_order(raw)
         else:
             value = getattr(agent, args.command)()
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Merge-train agent: {error}\n")
+    if args.command == "ledger":
+        for row in value:
+            print(row)
+        return 0
     print(json.dumps(value, indent=2))
     return int(value.get("status") in ("stopped", "error"))
 

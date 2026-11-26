@@ -23,7 +23,7 @@ merge-train: ## Quality only: advance a tested batch (ORDER="12=<approved SHA> 3
 test-merge-train: ## Test ordered protected merges without calling GitHub
 	python3 -B -m unittest discover -s scripts -p test_merge_train.py -v
 
-.PHONY: merge-train-agent-enable merge-train-agent-disable merge-train-agent-status merge-train-agent-resume merge-train-agent-tick merge-train-order test-merge-train-agent
+.PHONY: merge-train-agent-enable merge-train-agent-disable merge-train-agent-status merge-train-agent-resume merge-train-agent-tick merge-train-agent-ledger merge-train-order test-merge-train-agent
 merge-train-agent-enable: ## Enable optional three-minute merge-train ticks from merged main
 	$(REFRESH_PYTHON) -B scripts/merge_train_agent.py enable
 
@@ -39,8 +39,12 @@ merge-train-agent-resume: ## Clear the agent stop record after investigating it
 merge-train-agent-tick: ## Run the same guarded tick that launchd runs
 	$(REFRESH_PYTHON) -B scripts/merge_train_agent.py tick
 
-merge-train-order: ## Save Quality's approved order (ORDER="12=<approved SHA> 34=<approved SHA>")
-	$(REFRESH_PYTHON) -B scripts/merge_train_agent.py set-order --make-order="$$ORDER"
+merge-train-agent-ledger: ## Print landed merge-train batches as Markdown rows
+	@$(REFRESH_PYTHON) -B scripts/merge_train_agent.py ledger
+
+merge-train-order: export BATCH := $(BATCH)
+merge-train-order: ## Save Quality's approved order (ORDER="12=<approved SHA> 34=<approved SHA>", BATCH=4)
+	$(REFRESH_PYTHON) -B scripts/merge_train_agent.py set-order --make-order="$$ORDER" --batch="$$BATCH"
 
 test-merge-train-agent: ## Exercise the merge-train agent with fake launchd and local Git fixtures
 	$(REFRESH_PYTHON) -B -m unittest discover -s scripts -p test_merge_train_agent.py -v

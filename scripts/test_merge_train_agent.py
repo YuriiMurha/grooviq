@@ -18,6 +18,10 @@ except ModuleNotFoundError as error:
     agent_module = None
 
 HEAD = "a" * 40
+TESTED = "b" * 40
+LANDED = "c" * 40
+TREE = "d" * 40
+NEXT = "e" * 40
 ORDER = f"12={HEAD}\n"
 CHECKOUT = Path(__file__).resolve().parent
 
@@ -33,12 +37,13 @@ class AgentTests(unittest.TestCase):
                                         launchctl=self.run_launchctl)
         # Never use a real repo or run the actual train in these tests.
         self.agent.refresh_main = Mock(return_value=HEAD)
+        self.agent.remote_tips = Mock(return_value={"main": HEAD, "batch": None})
         self.agent.run_tick = Mock(return_value=subprocess.CompletedProcess([], 0, "waiting\n"))
         self.agent.checkout = Mock(return_value=nullcontext((self.root / "checkout", self.root / "train.py")))
 
     def test_order_preserves_priority_comments_and_blank_lines(self):
         raw = f" # priority\n\n34={'b' * 40} # reviewed\n {ORDER}"
-        self.assertEqual(agent_module.parse_order(raw), [f"34={'b' * 40}", f"12={HEAD}"])
+        self.assertEqual(agent_module.parse_order(raw), ([f"34={'b' * 40}", f"12={HEAD}"], 4))
         self.agent.set_order(raw)
         self.assertEqual(self.agent.status()["order"], raw)
 
@@ -73,13 +78,27 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.agent.order.read_text(), new)
 
     def test_missing_empty_and_comment_only_orders_skip_without_fetch(self):
-        for order in (None, "", "# no approvals\n\n"):
+        for order in (None, "", "# no approvals\n\n", "batch=3\n"):
             with self.subTest(order=order):
                 if order is not None:
                     self.agent.set_order(order)
                 self.assertEqual(self.agent.tick()["status"], "no order")
         self.agent.refresh_main.assert_not_called()
         self.agent.run_tick.assert_not_called()
+
+    def test_batch_line_sets_tick_size_and_preserves_priority(self):
+        raw = f"batch=10 # group size\n{ORDER}13={HEAD}\n"
+        self.agent.set_order(raw)
+        self.assertEqual(self.agent.status()["order"], raw)
+        self.assertEqual(self.agent.tick()["status"], "completed")
+        self.assertEqual(self.agent.run_tick.call_args.args[2:], ([f"12={HEAD}", f"13={HEAD}"], 10))
+
+    def test_bad_batch_line_preserves_the_previous_order(self):
+        self.agent.set_order(ORDER)
+        for invalid in ("batch=0", "batch=11", "batch=-1", "batch=4.0", "batch=", "batch=1\nbatch=2"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.agent.set_order(ORDER + invalid + "\n")
+            self.assertEqual(self.agent.order.read_text(), ORDER)
 
     def test_malformed_order_on_disk_never_reaches_train(self):
         self.agent.set_order(ORDER)
@@ -141,6 +160,98 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn("first-0", lines)
         self.assertIn("first-2499", lines)
         self.assertIn("last marker", lines)
+
+    def landed_tick(self, *, landed_tree=TREE, run_id=123):
+        self.agent.set_order(ORDER)
+        self.agent.remote_tips.side_effect = [
+            {"main": HEAD, "batch": TESTED}, {"main": LANDED, "batch": NEXT},
+        ]
+        self.agent.commit_tree = Mock(side_effect=lambda sha: TREE if sha == TESTED else landed_tree)
+        self.agent.ci_run_id = Mock(return_value=run_id)
+        self.agent.run_tick.return_value = subprocess.CompletedProcess(
+            [], 1, f"Merged #12 at {LANDED}\nHeld #13: checks pending\nMerged #14 at {LANDED}\n"
+        )
+
+    def test_tick_log_records_refs_and_landed_evidence_using_the_pre_tick_batch(self):
+        self.landed_tick()
+        self.assertEqual(self.agent.tick()["status"], "stopped")
+        record = json.loads(self.agent.ticks.read_text())
+        self.assertRegex(record["recorded_utc"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertEqual(record["exit_code"], 1)
+        self.assertEqual(record["before"], {"main": HEAD, "batch": TESTED})
+        self.assertEqual(record["after"], {"main": LANDED, "batch": NEXT})
+        self.assertEqual(record["stdout"], self.agent.run_tick.return_value.stdout.splitlines())
+        self.assertEqual(record["tested_batch"], TESTED)
+        self.assertEqual(record["landed_main"], LANDED)
+        self.assertEqual(record["tree"], TREE)
+        self.assertTrue(record["tree_matches_tested_batch"])
+        self.assertEqual(record["ci_run_id"], 123)
+        self.agent.ci_run_id.assert_called_once_with(TESTED)
+        self.assertEqual(self.agent.ledger(), [
+            f"| {TESTED} | https://github.com/YuriiMurha/grooviq/actions/runs/123 | {LANDED} | {TREE} | #12, #14 |"
+        ])
+
+    def test_tree_mismatch_and_ci_failure_remain_visible_after_merge(self):
+        self.landed_tick(landed_tree=NEXT)
+        self.agent.ci_run_id.side_effect = RuntimeError("run lookup failed")
+        self.assertEqual(self.agent.tick()["status"], "stopped")
+        record = json.loads(self.agent.ticks.read_text())
+        self.assertFalse(record["tree_matches_tested_batch"])
+        self.assertIn("run lookup failed", record["ci_error"])
+        self.assertEqual(self.agent.ledger(), [
+            f"| {TESTED} | — | {LANDED} | {NEXT} | #12, #14 |"
+        ])
+
+    def test_unrelated_main_move_and_unchanged_main_produce_no_ledger_row(self):
+        self.agent.set_order(ORDER)
+        self.agent.ci_run_id = Mock(return_value=123)
+        self.agent.commit_tree = Mock(return_value=TREE)
+        self.agent.remote_tips.side_effect = [
+            {"main": HEAD, "batch": TESTED}, {"main": LANDED, "batch": TESTED},
+            {"main": LANDED, "batch": TESTED}, {"main": LANDED, "batch": TESTED},
+        ]
+        self.agent.run_tick.side_effect = [
+            subprocess.CompletedProcess([], 0, f"Skipped: Merged #12 at {LANDED}\n"),
+            subprocess.CompletedProcess([], 0, f"Merged #12 at {LANDED}\n"),
+        ]
+        self.agent.tick()
+        self.agent.tick()
+        self.agent.ci_run_id.assert_not_called()
+        self.assertEqual(self.agent.ledger(), [])
+        self.assertEqual(len(self.agent.ticks.read_text().splitlines()), 2)
+
+    def test_tick_log_rotates_and_keeps_latest_records(self):
+        self.agent.set_order(ORDER)
+        with patch.object(agent_module, "TICK_HISTORY", 2):
+            for code in (0, 75, 1):
+                self.agent.run_tick.return_value = subprocess.CompletedProcess([], code, "")
+                self.agent.tick()
+        records = [json.loads(line) for line in self.agent.ticks.read_text().splitlines()]
+        self.assertEqual([record["exit_code"] for record in records], [75, 1])
+
+    def test_failed_post_tick_ref_lookup_preserves_the_stop(self):
+        self.agent.set_order(ORDER)
+        self.agent.remote_tips.side_effect = [
+            {"main": HEAD, "batch": TESTED}, RuntimeError("connection unavailable"),
+        ]
+        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, "partial merge\n")
+        self.assertEqual(self.agent.tick()["status"], "stopped")
+        self.assertTrue(self.agent.stopped.exists())
+        record = json.loads(self.agent.ticks.read_text())
+        self.assertIsNone(record["after"])
+        self.assertIn("connection unavailable", record["after_error"])
+
+    def test_ci_run_lookup_selects_the_exact_commit(self):
+        runs = json.dumps([
+            {"databaseId": 999, "headSha": NEXT}, {"databaseId": 123, "headSha": TESTED},
+        ]).encode()
+        with patch.object(agent_module.subprocess, "run", return_value=subprocess.CompletedProcess(
+            [], 0, runs
+        )) as runner:
+            self.assertEqual(self.agent.ci_run_id(TESTED), 123)
+            self.assertIn("ci.yml", runner.call_args.args[0])
+            with self.assertRaisesRegex(RuntimeError, "No ci run"):
+                self.agent.ci_run_id(HEAD)
 
     def test_disable_does_not_bootout_during_tick(self):
         self.agent.set_order(ORDER)
@@ -206,6 +317,7 @@ print(json.dumps({'marker': MARKER, 'argv': sys.argv[1:], 'cwd': os.getcwd(),
         lane = self.root / "lane"
         self.git(self.repo, "worktree", "add", "--detach", lane, stale)
         current = self.publish({"merge_train.py": "MARKER = 'protected'\n" + fixture})
+        self.git(self.repo, "push", "origin", f"{stale}:refs/heads/merge-train/batch")
         self.git(self.repo, "update-ref", "refs/remotes/origin/main", stale)
         self.script.write_text("raise SystemExit('dirty shared checkout executed')")
         (lane / "scripts/merge_train.py").write_text("raise SystemExit('dirty lane executed')")
@@ -216,6 +328,7 @@ print(json.dumps({'marker': MARKER, 'argv': sys.argv[1:], 'cwd': os.getcwd(),
         data = json.loads(next(line for line in agent.log.read_text().splitlines() if line.startswith("{")))
         self.assertEqual(data["marker"], "protected")
         self.assertEqual(data["argv"], ["--order", f"12={HEAD}", "--batch", "4"])
+        self.assertEqual(json.loads(agent.ticks.read_text())["before"], {"main": current, "batch": stale})
         self.assertEqual(data["rev"], current)
         self.assertEqual(data["status"], "")
         self.assertEqual(Path(data["common"]), self.repo / ".git")
