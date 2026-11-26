@@ -1068,7 +1068,7 @@ input[type="checkbox"] {
 .transport-btn.record[aria-pressed="true"] {
   background: var(--rec);
   border-color: var(--rec);
-  color: var(--paper);
+  color: var(--on-rec);
 }
 
 .toggle-btn {

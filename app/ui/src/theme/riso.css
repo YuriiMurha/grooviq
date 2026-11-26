@@ -42,6 +42,7 @@
   --grid-focus: var(--select);    /* the step grid's keyboard focus ring */
   --grid-playhead: var(--accent); /* the playhead column in the step grid */
   --rec: #f0504a;           /* Riso Bright Red: the record button while it records */
+  --on-rec: var(--paper);
   --knob-track: #2a3062;
   --knob-gap: var(--bg);
   --reg-x: 2px;             /* the one misregistration vector, used everywhere */

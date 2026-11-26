@@ -163,6 +163,21 @@ for (const { id } of themes) {
       const play = app.getByRole("button", { name: "Play", exact: true });
       const [playFill] = await pixelsAt(app, play, [{ x: 8, y: 18 }]);
       expect(colourDistance(playFill, bytes("--play")), "Play button fill").toBeLessThan(8);
+      if (renderer === "webgl2") {
+        const record = app.getByRole("button", { name: "Record", exact: true });
+        await record.click();
+        await expect(record).toHaveAttribute("aria-pressed", "true");
+        // Wait for the pressed background transition before measuring either color.
+        await expect(record).toHaveCSS("background-color", `rgb(${bytes("--rec").map(Math.round).join(", ")})`);
+        const recordColors = {
+          glyph: await record.locator("svg circle").evaluate((dot) => getComputedStyle(dot).fill),
+          background: await record.evaluate((button) => getComputedStyle(button).backgroundColor),
+        };
+        expect(contrastRatio(themeRgb(recordColors, "glyph"), themeRgb(recordColors, "background")),
+          "pressed Record glyph contrast").toBeGreaterThanOrEqual(3);
+        await record.click();
+        await expect(record).toHaveAttribute("aria-pressed", "false");
+      }
       for (const text of ["--text", "--muted", "--faint", "--error", "--warn"]) {
         for (const surface of ["--bg", "--panel", "--raised"]) {
           // Riso retains its existing Bright Red at 4.40:1 on raised controls. See #634.

@@ -5,7 +5,7 @@ import { parseColor } from "../rack/palette";
 export const THEME_COLOR_TOKENS = [
   "--bg", "--panel", "--raised", "--line", "--line-soft", "--text", "--muted", "--faint",
   "--accent", "--on-accent", "--play", "--on-play", "--select", "--ok", "--mute", "--warn", "--error",
-  "--paper", "--well", "--rec", "--hair",
+  "--paper", "--well", "--rec", "--on-rec", "--hair",
   "--ink-1", "--ink-1b", "--ink-2", "--ink-2b", "--ink-3", "--ink-3b",
   "--ink-4", "--ink-4b", "--ink-5", "--ink-5b", "--ink-6", "--ink-6b",
   "--step-a", "--step-b", "--step-lit", "--grid-focus", "--grid-playhead", "--knob-track", "--knob-gap",
