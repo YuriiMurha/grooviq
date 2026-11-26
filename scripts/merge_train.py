@@ -28,8 +28,9 @@ MAIN_REF = "refs/heads/main"
 BATCH_REF = "refs/heads/merge-train/batch"
 AGENT_LABEL = "io.github.yuriimurha.grooviq.merge-train"
 ATTENDED_TRAIN = ("Run make merge-train-agent-disable, then make merge-train ORDER=… with approved heads, "
-                  "then make merge-train-agent-enable to restore unattended ticks.")
-FAILED_TRAIN_GUIDANCE = ATTENDED_TRAIN + " To drop suspects from the order, use make merge-train-order."
+                  "then make merge-train-agent-enable and make merge-train-agent-resume.")
+FAILED_TRAIN_GUIDANCE = (ATTENDED_TRAIN + " To drop suspects from the order, use make merge-train-order, "
+                         "then make merge-train-agent-resume.")
 
 
 class TickDeadline(RuntimeError):

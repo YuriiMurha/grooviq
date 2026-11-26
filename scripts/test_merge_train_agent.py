@@ -729,6 +729,15 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(actual, stdout)
         self.assertIn("Unconfirmed squash of #12", stderr)
 
+    def test_reconcile_landing_refuses_different_approved_head(self):
+        stdout = f"Tested batch {TESTED}\nSquash attempt #12 {HEAD} after {NEXT}\n"
+        pull = {"merged": True, "merge_commit_sha": LANDED, "head": {"sha": TREE}, "base": {"ref": "main"}}
+        self.agent.commit_object = Mock(return_value=NEXT)
+        with patch.object(agent_module.subprocess, "run", return_value=Mock(stdout=json.dumps(pull))):
+            actual, stderr = self.agent.reconcile_landing(stdout, "")
+        self.assertEqual(actual, stdout)
+        self.assertIn("Unconfirmed squash of #12", stderr)
+
     def test_non_timeout_child_stop_reconciles_dangling_attempt(self):
         self.agent.set_order(ORDER)
         stdout = f"Tested batch {TESTED}\nSquash attempt #12 {HEAD} after {NEXT}\n"
@@ -789,6 +798,8 @@ class AgentTests(unittest.TestCase):
                 ("push", "remote", "get-url", "origin"),
                 (*fetch, "--refmap=", "origin", "--upload-pack=x"),
                 (*fetch, "--refmap=", "origin", "+refs/heads/x:refs/heads/main"),
+                (*fetch, "--refmap=", "origin", "--upload-pack=x", HEAD),
+                (*fetch, "--refmap=", "origin", HEAD, HEAD),
                 (*add, "/tmp/tick-x/checkout", HEAD),
                 ("show", f"{HEAD}:scripts/other.py"),
             ):
@@ -914,6 +925,50 @@ class SourceTests(unittest.TestCase):
         self.launchctl.assert_not_called()
         self.assertEqual(self.agent.plist.read_text(), "existing plist")
         self.assertEqual(self.agent.disabled.read_text(), "original marker")
+
+    def test_enable_waits_for_manual_train_lock(self):
+        self.publish(self.reviewed_sources())
+        train_lock = self.repo / ".git" / "merge-train.lock"
+        with agent_module.locked(train_lock):
+            with self.assertRaises(agent_module.LockBusy) as error:
+                self.agent.enable()
+        self.assertEqual(error.exception.path, train_lock)
+        self.launchctl.assert_not_called()
+        self.assertFalse(self.agent.plist.exists())
+
+    def test_reenable_reports_latch_and_explicit_resume_runs_next_tick(self):
+        self.publish(self.reviewed_sources())
+        self.agent.enable()
+        self.agent.set_order(ORDER)
+        self.agent.run_tick = Mock(return_value=subprocess.CompletedProcess([], 1, "", "failed batch"))
+        self.assertEqual(self.agent.tick()["status"], "stopped", self.agent.log.read_text())
+        self.agent.run_tick.reset_mock()
+
+        self.agent.disable()
+        outcome = self.agent.enable()
+        self.assertEqual(outcome["status"], "enabled")
+        self.assertIn("make merge-train-agent-resume", outcome.get("next_step", ""))
+        self.assertEqual(self.agent.tick()["status"], "latched")
+        self.agent.run_tick.assert_not_called()
+
+        self.assertEqual(self.agent.resume()["status"], "resumed")
+        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 0, "waiting")
+        self.assertEqual(self.agent.tick()["status"], "completed")
+        self.agent.run_tick.assert_called_once()
+
+    def test_enable_reports_pending_tick_recovery_before_resume(self):
+        self.publish(self.reviewed_sources())
+        self.agent.set_order(ORDER)
+        self.agent.latch({}, "", ["tick in progress"], pending=True)
+        outcome = self.agent.enable()
+        recovery = outcome.get("next_step", "")
+        self.assertIn("make merge-train-agent-tick", recovery)
+        self.assertIn("make merge-train-agent-resume", recovery)
+        self.assertLess(recovery.index("make merge-train-agent-tick"), recovery.index("make merge-train-agent-resume"))
+        with self.assertRaisesRegex(RuntimeError, "pending"):
+            self.agent.resume()
+        self.assertEqual(self.agent.tick()["status"], "latched")
+        self.assertEqual(self.agent.resume()["status"], "resumed")
 
     def test_reenable_clears_launchd_override_before_bootstrap(self):
         self.publish(self.reviewed_sources())
@@ -1047,14 +1102,16 @@ print(json.dumps({'marker': MARKER, 'argv': sys.argv[1:], 'cwd': os.getcwd(),
 
     def test_child_environment_admits_only_the_documented_keys(self):
         inherited = {"HOME": "/wrong", "TMPDIR": str(self.root), "LANG": "en_US.UTF-8",
-                     "USER": "fixture", "GH_TOKEN": "test-only", "DYLD_INSERT_LIBRARIES": "blocked",
+                     "USER": "fixture", "GH_TOKEN": "test-only", "SSH_AUTH_SOCK": str(self.root / "ssh.sock"),
+                     "DYLD_INSERT_LIBRARIES": "blocked",
                      "GIT_ASKPASS": "blocked", "BASH_ENV": "blocked", "PYTHONPATH": "blocked",
                      "UNRELATED_SECRET": "blocked"}
         with patch.dict(os.environ, inherited, clear=True):
             agent = agent_module.Agent(self.repo, home=self.home, launchctl=self.launchctl)
         self.assertEqual(agent.env, {
             "HOME": str(self.home), "TMPDIR": str(self.root), "LANG": "en_US.UTF-8", "USER": "fixture",
-            "GH_TOKEN": "test-only", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools",
+            "GH_TOKEN": "test-only", "SSH_AUTH_SOCK": str(self.root / "ssh.sock"),
+            "DEVELOPER_DIR": "/Library/Developer/CommandLineTools",
             "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "GIT_TERMINAL_PROMPT": "0",
         })
 

@@ -204,7 +204,7 @@ class Agent:
         self.python = str(executable if any(executable.is_relative_to(root) for root in HOMEBREW_OPT)
                           else executable.resolve())
         self.env = {name: value for name, value in os.environ.items()
-                    if name in ("TMPDIR", "LANG", "USER") or name.startswith("GH_")}
+                    if name in ("TMPDIR", "LANG", "USER", "SSH_AUTH_SOCK") or name.startswith("GH_")}
         self.env.update(HOME=str(self.home), DEVELOPER_DIR="/Library/Developer/CommandLineTools",
                         PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                         GIT_TERMINAL_PROMPT="0")
@@ -692,7 +692,16 @@ class Agent:
             raise RuntimeError("Automatic merge train requires a stable shared repository.")
         stable_repo = safe_path(common.parent)
         with locked(self.control_lock), locked(self.tick_lock), locked(common / "merge-train.lock"):
+            stop = read_text(self.stopped)
             revision = self.refresh_main()
+            outcome = {"status": "enabled", "interval_seconds": INTERVAL, "source_sha": revision}
+            if stop is not None:
+                if json.loads(stop).get("pending"):
+                    outcome["next_step"] = ("Run make merge-train-agent-tick to recover the pending tick. "
+                                            "Investigate the stop, then run make merge-train-agent-resume.")
+                else:
+                    outcome["next_step"] = ("The agent is still latched. Investigate the stop, "
+                                            "then run make merge-train-agent-resume.")
             payloads = {}
             for name in SNAPSHOT_FILES:
                 path = safe_path(Path(__file__).with_name(name))
@@ -738,7 +747,7 @@ class Agent:
             self.launch("enable", f"{self.domain}/{LABEL}")
             self.launch("bootstrap", self.domain, str(self.plist))
             self.disabled.unlink()
-        return {"status": "enabled", "interval_seconds": INTERVAL, "source_sha": revision}
+        return outcome
 
     def disable(self):
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)

@@ -418,7 +418,8 @@ class MergeTrainTests(unittest.TestCase):
                     **GREEN, "ui": ("failure", ""), REQUIRED[0]: ("in_progress", ""),
                 }
                 with self.assertRaisesRegex(
-                    RuntimeError, "failed required checks.*ui.*make merge-train ORDER=.*make merge-train-order",
+                    RuntimeError, "failed required checks.*ui.*make merge-train ORDER=.*make merge-train-agent-resume"
+                    ".*make merge-train-order.*make merge-train-agent-resume",
                 ):
                     self.run_tick(agent_deadline=float("inf"))
                 self.assertFalse(self.git.writes)
@@ -530,6 +531,25 @@ class MergeTrainTests(unittest.TestCase):
                 self.run_tick(agent_deadline=2)
         self.assertEqual(self.repo.merged, [(10, sha(10))])
         self.assertEqual(self.output.getvalue().count(f"Merged #10 at {sha(310)}"), 1)
+        self.assertFalse(self.git.writes)
+
+    def test_agent_deadline_stops_rebuild_after_final_squash(self):
+        self.git.batch([10])
+        merge = self.repo.merge
+        now = 1
+
+        def squash_before_expiry(number, head):
+            nonlocal now
+            result = merge(number, head)
+            now = 3
+            return result
+
+        self.repo.merge = squash_before_expiry
+        with patch.object(train.time, "monotonic", side_effect=lambda: now):
+            with self.assertRaisesRegex(train.TickDeadline, "before rebuilding the batch after landing"):
+                self.run_tick((10, 20), agent_deadline=2)
+        self.assertEqual(self.repo.merged, [(10, sha(10))])
+        self.assertIn(f"Merged #10 at {sha(310)}", self.output.getvalue())
         self.assertFalse(self.git.writes)
 
     def test_ambiguous_merge_errors_recover_the_landed_squash_and_continue(self):
@@ -924,7 +944,7 @@ class CliTests(unittest.TestCase):
                 self.assertIn("make merge-train-order", stderr.getvalue())
                 self.assertIn("make merge-train-agent-disable", stderr.getvalue())
                 self.assertIn("make merge-train ORDER=", stderr.getvalue())
-                self.assertIn("make merge-train-agent-enable", stderr.getvalue())
+                self.assertRegex(stderr.getvalue(), "make merge-train-agent-enable.*make merge-train-agent-resume")
                 tick.assert_not_called()
                 disabled.touch()
                 self.assertEqual(train.main(), 0)
@@ -978,7 +998,7 @@ class CliTests(unittest.TestCase):
                 code = train.main()
             self.assertIn("Held #10", stderr.getvalue())
             self.assertIn("make merge-train ORDER=", stderr.getvalue())
-            self.assertIn("make merge-train-order", stderr.getvalue())
+            self.assertRegex(stderr.getvalue(), "make merge-train-order.*make merge-train-agent-resume")
             self.assertEqual(code, 1)
             self.assertTrue(api_calls)
             self.assertEqual(set(api_calls), {"GET"})
@@ -1174,6 +1194,18 @@ class GitHubTests(unittest.TestCase):
         repo.api = lambda *args, **kwargs: {"merged": True}
         with self.assertRaisesRegex(RuntimeError, "squash SHA"):
             repo.merge(10, sha(10))
+
+
+class GitTests(unittest.TestCase):
+    def test_publish_does_not_push_after_deadline(self):
+        git = train.Git(agent_deadline=2)
+        with (patch.object(train.time, "monotonic", return_value=2),
+              patch.object(train.subprocess, "run") as run,
+              redirect_stderr(io.StringIO()) as stderr):
+            with self.assertRaisesRegex(train.TickDeadline, "before publishing the batch"):
+                git.publish(sha(10), ACTIVE)
+        run.assert_not_called()
+        self.assertEqual(stderr.getvalue(), "")
 
 
 class GitIntegrationTest(unittest.TestCase):
