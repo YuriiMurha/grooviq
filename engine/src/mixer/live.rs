@@ -7,6 +7,8 @@
 //! Declared bounds still govern admission. No pan law, mute or solo beyond the fixed
 //! track coefficients.
 
+use super::compile::{ROUTING_BYTES_PER_ITEM, admit};
+use super::memory::{MixerMemory, Reservation};
 use super::{
     Budget, InsertId, InsertIdentity, Mixer, MixerTrackId, PrepareConfig, PreparedInsert,
     PreparedMixer, Source, SourceBuffers, SourceId, TrackGain, compile,
@@ -25,8 +27,8 @@ pub fn insert_kinds() -> &'static [&'static str] {
 /// Limiter lookahead grows by the same conversion. The native upper rate therefore bounds
 /// these payloads and latencies for every admitted rate and parameter bank.
 ///
-/// This charges one prepared graph for device payloads, including constructor scratch. It
-/// does not measure allocator overhead or simultaneous live, queued and retiring graphs.
+/// The controller charges this registry bound, including constructor scratch, to each
+/// prepared device for its entire lifetime. Allocator overhead is outside the payload bound.
 pub fn describe_builtin_insert(insert: InsertId, kind: &str) -> Option<super::Insert> {
     let (_, highest_rate) = grooviq_dsp::sample_rate_range(kind)?;
     Some(super::Insert {
@@ -87,31 +89,59 @@ pub struct InsertDevice {
 }
 
 impl RoutedMix {
-    /// The checked form: devices sorted by insert, params clamped and padded.
-    fn checked(&self) -> Result<(Vec<InsertDevice>, Vec<u32>), ControlError> {
-        let mut devices = self.devices.clone();
-        devices.sort_by_key(|d| d.insert);
-        if devices.windows(2).any(|w| w[0].insert == w[1].insert) {
+    // Checked size of the normalized copies, independent of caller Vec capacities and
+    // ignored trailing parameters. Reject excess device entries before allocating.
+    fn normalized_bytes(&self) -> Result<u64, ControlError> {
+        let inserts = self.mixer.tracks.iter().try_fold(0usize, |n, t| {
+            n.checked_add(t.inserts.len()).ok_or(ControlError::Rejected)
+        })?;
+        if inserts != self.devices.len() || self.gains.len() > self.mixer.tracks.len() {
             return Err(ControlError::Rejected);
         }
-        let mut kinds = Vec::with_capacity(devices.len());
-        for d in &mut devices {
+        self.devices.iter().try_fold(0, |bytes, d| {
+            let spec = grooviq_dsp::param_spec(&d.kind).ok_or(ControlError::Rejected)?;
+            sum([
+                bytes,
+                size_of::<InsertDevice>() as u64,
+                size_of::<u32>() as u64,
+                d.kind.len() as u64,
+                product(spec.len() as u64, size_of::<f32>() as u64)?,
+            ])
+        })
+    }
+
+    /// The checked form: devices sorted by insert, params clamped and padded.
+    fn checked(&self) -> Result<(Vec<InsertDevice>, Vec<u32>), ControlError> {
+        let mut devices = Vec::with_capacity(self.devices.len());
+        for d in &self.devices {
             let kind = insert_kinds()
                 .iter()
-                .position(|k| *k == d.kind)
+                .copied()
+                .find(|&k| k == d.kind)
                 .ok_or(ControlError::Rejected)?;
-            let spec =
-                grooviq_dsp::param_spec(insert_kinds()[kind]).ok_or(ControlError::Rejected)?;
+            let spec = grooviq_dsp::param_spec(kind).ok_or(ControlError::Rejected)?;
             if d.params.iter().take(spec.len()).any(|v| !v.is_finite()) {
                 return Err(ControlError::Rejected);
             }
-            d.params = spec
-                .iter()
-                .enumerate()
-                .map(|(i, &(min, max, def))| d.params.get(i).map_or(def, |v| v.clamp(min, max)))
-                .collect();
-            kinds.push(kind as u32);
+            devices.push(InsertDevice {
+                insert: d.insert,
+                kind: kind.into(),
+                seed: d.seed,
+                params: spec
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(min, max, def))| d.params.get(i).map_or(def, |v| v.clamp(min, max)))
+                    .collect(),
+            });
         }
+        devices.sort_unstable_by_key(|d| d.insert);
+        if devices.windows(2).any(|w| w[0].insert == w[1].insert) {
+            return Err(ControlError::Rejected);
+        }
+        let kinds = devices
+            .iter()
+            .map(|d| insert_kinds().iter().position(|k| *k == d.kind).unwrap() as u32)
+            .collect();
         let mut declared = 0;
         for t in &self.mixer.tracks {
             for i in &t.inserts {
@@ -166,13 +196,6 @@ impl MixSetup {
 
     /// [`Self::validate`] plus the fade routes a graph built for `channels` adds (one per
     /// routed channel), so a state admitted here also builds: compile budgets included.
-    pub(crate) fn validate_for(
-        &self,
-        channels: &[crate::ChannelSetup],
-    ) -> Result<(), ControlError> {
-        self.validate_for_channels(channels.iter().map(|c| c.id))
-    }
-
     /// Checks a logical mix and reserves one route per channel for its eventual fade.
     /// Construction and verification of actual devices still happen on live preparation.
     pub fn validate_for_channels(
@@ -180,6 +203,7 @@ impl MixSetup {
         channels: impl IntoIterator<Item = crate::ChannelId>,
     ) -> Result<(), ControlError> {
         if let Self::Routed(mix) = self {
+            mix.normalized_bytes()?;
             mix.checked()?;
             let mut mixer = mix.mixer.clone();
             for (alias, c) in (0u64..).zip(channels) {
@@ -223,15 +247,6 @@ impl MixSetup {
     pub(crate) fn has_track(&self, track: MixerTrackId) -> bool {
         matches!(self, Self::Routed(mix) if mix.mixer.tracks.iter().any(|t| t.id == track))
     }
-
-    /// Topology and device descriptions only; constructs no device.
-    pub(crate) fn validate(&self) -> Result<(), ControlError> {
-        if let Self::Routed(mix) = self {
-            mix.checked()?;
-            compile(&mix.mixer, budget()).map_err(|_| ControlError::Rejected)?;
-        }
-        Ok(())
-    }
 }
 
 fn budget() -> Budget {
@@ -246,12 +261,12 @@ fn construct(device: &InsertDevice, rate: f32) -> Result<Box<dyn Device>, Contro
         .map_err(|_| ControlError::Rejected)
 }
 
-/// A prepared routed mix: the kernel, its pulled source buffers, and the checked device
-/// descriptions it was built from (to plan the next transfer). Dropping it frees devices:
-/// off the audio thread only.
+/// The routed kernel, pulled inputs and their shared memory charge. The charge is last
+/// so Rust drops it after the allocations. The callback only moves this owning box.
 pub(crate) struct LiveMix {
     pub(crate) kernel: PreparedMixer,
     pub(crate) sources: SourceBuffers,
+    _charge: Reservation,
 }
 
 /// One owning queue transaction: install `live` (or go back to LegacyDirect with `None`)
@@ -262,11 +277,7 @@ pub(crate) struct MixInstall {
     pub(crate) base: u64,
     pub(crate) revision: u64,
     pub(crate) live: Option<Box<LiveMix>>,
-    /// Surviving inserts, strictly increasing.
-    pub(crate) transfers: Vec<InsertId>,
-    /// Survivor parameters that differ from the previous setup, applied after the swap:
-    /// `(insert, index, value)`. Unchanged survivors receive nothing, so nothing resets.
-    pub(crate) params: Vec<ParamDelta>,
+    pub(crate) changes: MixChanges,
     pub(crate) installed: bool,
 }
 
@@ -277,7 +288,8 @@ pub(crate) struct MixInstall {
 pub(crate) fn prepare(
     setup: &MixSetup,
     rate: f32,
-    aliases: &[(u64, MixerTrackId)],
+    aliases: impl Iterator<Item = (u64, MixerTrackId)> + Clone,
+    memory: &MixerMemory,
 ) -> Result<Option<Box<LiveMix>>, ControlError> {
     let MixSetup::Routed(mix) = setup else {
         return Ok(None);
@@ -285,11 +297,13 @@ pub(crate) fn prepare(
     setup
         .check_sample_rate(rate)
         .map_err(|_| ControlError::Rejected)?;
+    let (peak, device_bytes) = preparation_bound(mix, aliases.clone().count() as u64)?;
+    let mut charge = memory.reserve(peak)?;
     let (devices, kinds) = mix.checked()?;
     let mut mixer = mix.mixer.clone();
     mixer
         .sources
-        .extend(aliases.iter().map(|&(instance, destination)| Source {
+        .extend(aliases.map(|(instance, destination)| Source {
             id: SourceId::Instance(instance),
             destination,
         }));
@@ -317,11 +331,81 @@ pub(crate) fn prepare(
     let sources = kernel
         .source_buffers()
         .map_err(|_| ControlError::BuildFailed)?;
-    Ok(Some(Box::new(LiveMix { kernel, sources })))
+    let retained = sum([
+        device_bytes,
+        kernel.resources().audio_bytes,
+        kernel.resources().table_bytes,
+        sources
+            .storage_bytes()
+            .map_err(|_| ControlError::Rejected)?,
+        size_of::<LiveMix>() as u64,
+    ])?;
+    drop((mixer, devices));
+    charge.shrink(retained);
+    Ok(Some(Box::new(LiveMix {
+        kernel,
+        sources,
+        _charge: charge,
+    })))
+}
+
+// The compiler allowance covers topology copies, adjacency, sort scratch and the
+// conservative delay/audio bound. Reserve another routing-table allowance for the
+// simultaneous compiled topology, planner work/descriptors and kernel maps/tables.
+// Count normalized banks, pulled storage and the fixed stereo scratch separately.
+// This bounds requested payload, not allocator bookkeeping or caller-owned sessions,
+// channel devices, graph/timeline shells or fixed-size queue slots.
+fn preparation_bound(mix: &RoutedMix, aliases: u64) -> Result<(u64, u64), ControlError> {
+    let normalized = mix.normalized_bytes()?;
+    let device_bytes = mix.devices.iter().try_fold(0, |total, d| {
+        let (_, highest) = grooviq_dsp::sample_rate_range(&d.kind).ok_or(ControlError::Rejected)?;
+        let bytes =
+            grooviq_dsp::max_memory_bytes(&d.kind, highest).map_err(|_| ControlError::Rejected)?;
+        sum([total, bytes])
+    })?;
+    let topology =
+        admit(&mix.mixer, budget(), aliases, device_bytes).map_err(|_| ControlError::Rejected)?;
+    let routing_tables = product(
+        sum([topology.nodes, topology.edges])?,
+        ROUTING_BYTES_PER_ITEM,
+    )?;
+    let source_count = sum([mix.mixer.sources.len() as u64, aliases])?;
+    let stereo_block = (2 * BLOCK * size_of::<f32>()) as u64;
+    let pulls = product(
+        source_count,
+        sum([stereo_block, size_of::<SourceId>() as u64])?,
+    )?;
+    let peak = sum([
+        topology.memory_bytes,
+        routing_tables,
+        normalized,
+        pulls,
+        2 * stereo_block,
+        size_of::<LiveMix>() as u64,
+    ])?;
+    Ok((peak, device_bytes))
+}
+
+fn sum(values: impl IntoIterator<Item = u64>) -> Result<u64, ControlError> {
+    values
+        .into_iter()
+        .try_fold(0u64, |a, b| a.checked_add(b).ok_or(ControlError::Rejected))
+}
+
+fn product(a: u64, b: u64) -> Result<u64, ControlError> {
+    a.checked_mul(b).ok_or(ControlError::Rejected)
 }
 
 /// A survivor parameter that differs from the previous setup: `(insert, index, value)`.
-pub(crate) type ParamDelta = (InsertId, u32, f32);
+type ParamDelta = (InsertId, u32, f32);
+
+#[derive(Default)]
+pub(crate) struct MixChanges {
+    // Both lists are ordered by insert ID.
+    transfers: Vec<InsertId>,
+    params: Vec<ParamDelta>,
+    _charge: Option<Reservation>,
+}
 
 /// Plans which devices of `old` (the mirrored previous setup) survive into `new`: same
 /// insert, kind and seed (the rate and the actual identities are checked again on install),
@@ -329,14 +413,26 @@ pub(crate) type ParamDelta = (InsertId, u32, f32);
 pub(crate) fn plan(
     old: &MixSetup,
     new: &MixSetup,
-) -> Result<(Vec<InsertId>, Vec<ParamDelta>), ControlError> {
+    memory: &MixerMemory,
+) -> Result<MixChanges, ControlError> {
     let (MixSetup::Routed(old), MixSetup::Routed(new)) = (old, new) else {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(MixChanges::default());
     };
+    let inserts = new.devices.len();
+    let max_params = new.devices.iter().try_fold(0usize, |total, d| {
+        let spec = grooviq_dsp::param_spec(&d.kind).ok_or(ControlError::Rejected)?;
+        total.checked_add(spec.len()).ok_or(ControlError::Rejected)
+    })?;
+    let mut charge = memory.reserve(sum([
+        old.normalized_bytes()?,
+        new.normalized_bytes()?,
+        product(inserts as u64, size_of::<InsertId>() as u64)?,
+        product(max_params as u64, size_of::<ParamDelta>() as u64)?,
+    ])?)?;
     let (old_devices, _) = old.checked()?;
     let (new_devices, _) = new.checked()?;
-    let mut transfers = Vec::new();
-    let mut params = Vec::new();
+    let mut transfers = Vec::with_capacity(inserts);
+    let mut params = Vec::with_capacity(max_params);
     // Both sorted by insert, so `transfers` is strictly increasing.
     for d in &new_devices {
         let Ok(at) = old_devices.binary_search_by_key(&d.insert, |o| o.insert) else {
@@ -353,21 +449,27 @@ pub(crate) fn plan(
             }
         }
     }
-    Ok((transfers, params))
+    drop((old_devices, new_devices));
+    charge.shrink(sum([
+        product(transfers.capacity() as u64, size_of::<InsertId>() as u64)?,
+        product(params.capacity() as u64, size_of::<ParamDelta>() as u64)?,
+    ])?);
+    Ok(MixChanges {
+        transfers,
+        params,
+        _charge: Some(charge),
+    })
 }
 
 impl LiveMix {
     /// Takes compatible device and delay histories out of `old`, applying parameter deltas
     /// only to transferred devices. The other inserts use their prepared parameter banks.
     /// Real-time safe.
-    pub(crate) fn adopt(
-        &mut self,
-        old: &mut LiveMix,
-        transfers: &[InsertId],
-        params: &[ParamDelta],
-    ) {
+    pub(crate) fn adopt(&mut self, old: &mut LiveMix, changes: &MixChanges) {
+        // Same kind and sample rate imply the same registry payload bound. Only those
+        // devices, and histories of equal capacity, can trade places with the old mix.
         self.kernel
-            .adopt_prepared(&mut old.kernel, transfers, params);
+            .adopt_prepared(&mut old.kernel, &changes.transfers, &changes.params);
     }
 }
 

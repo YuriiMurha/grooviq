@@ -6,6 +6,7 @@ use crate::channel::ChannelNode;
 use crate::command::{Command, Msg, Trash, rebuilt_queue};
 use crate::graph::{Graph, ramp_len};
 use crate::live::{LiveShared, LiveSnapshot};
+use crate::mixer::memory::MixerMemory;
 use crate::processor::AudioProcessor;
 use crate::record::RecordEvent;
 use crate::state::{
@@ -89,6 +90,7 @@ impl std::fmt::Display for ReconfigureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InsertRate(error) => error.fmt(f),
+            Self::MixRefused(ControlError::Full) => f.write_str("routed mixer memory is busy"),
             Self::MixRefused(error) => write!(
                 f,
                 "mixer preparation at the new output rate failed: {error}"
@@ -160,6 +162,7 @@ pub struct Controller {
     recorded: Consumer<RecordEvent>,
     live: Arc<LiveShared>,
     sample_rate: f32,
+    mixer_memory: MixerMemory,
     /// The state the queued commands lead to, to rebuild the graph from.
     tone: ToneState,
     synth: Vec<f32>,
@@ -201,6 +204,11 @@ pub struct Controller {
 
 impl Controller {
     #[cfg(test)]
+    pub(crate) fn set_mixer_memory_limit(&mut self, limit: u64) {
+        self.mixer_memory.set_limit(limit);
+    }
+
+    #[cfg(test)]
     pub(crate) fn fail_replays(&self, count: u32) {
         self.replay_panics.set(count);
     }
@@ -217,6 +225,7 @@ impl Controller {
             recorded,
             live,
             sample_rate,
+            mixer_memory: MixerMemory::default(),
             tone: ToneState::default(),
             synth: synth_defaults(),
             state,
@@ -530,24 +539,25 @@ impl Controller {
     /// boundary as one queue message. An insert that keeps its ID, kind, seed and latency
     /// keeps its live device and only receives the parameters that changed.
     /// Refused as a whole (`Rejected` for an invalid mix, `BuildFailed` if a device panics,
-    /// `Full` with no queue room): then nothing changes. Returns the new revision.
+    /// `Full` when the command queue or shared mixer allowance is occupied): then nothing
+    /// changes. Returns the new revision.
     pub fn set_mix(&mut self, mix: crate::mixer::MixSetup) -> Result<u64, ControlError> {
         use crate::mixer::live;
-        mix.validate()?;
         mix.covers(&self.state.channels, &self.state.song)?;
         let aliases = aliases(&mix, &self.instances, &self.fades)?;
         let rate = self.sample_rate;
-        let prepared = catch_unwind(AssertUnwindSafe(|| live::prepare(&mix, rate, &aliases)))
-            .map_err(|_| ControlError::BuildFailed)??;
-        let (transfers, params) = live::plan(&self.state.mix, &mix)?;
+        let prepared = catch_unwind(AssertUnwindSafe(|| {
+            live::prepare(&mix, rate, aliases, &self.mixer_memory)
+        }))
+        .map_err(|_| ControlError::BuildFailed)??;
+        let changes = live::plan(&self.state.mix, &mix, &self.mixer_memory)?;
         let revision = self.mix_revision + 1;
         self.push(Msg::SetMix(Box::new(live::MixInstall {
             generation: self.generation,
             base: self.mix_revision,
             revision,
             live: prepared,
-            transfers,
-            params,
+            changes,
             installed: false,
         })))?;
         self.mix_revision = revision;
@@ -644,13 +654,13 @@ impl Controller {
         if !song.valid_loop(region) {
             return Err(ControlError::Rejected);
         }
-        mix.validate()?;
         mix.covers(&channels, &song)?;
         let aliases = aliases(&mix, &instances, &fades)?;
         let rate = self.sample_rate;
         let ramp = ramp_len(rate);
         let any_solo = channels.iter().any(|c| c.mix.solo);
         let built = catch_unwind(AssertUnwindSafe(|| {
+            let live = live::prepare(&mix, rate, aliases, &self.mixer_memory)?;
             let nodes: Vec<_> = added
                 .iter()
                 .map(|(setup, instance)| {
@@ -659,11 +669,11 @@ impl Controller {
                     Some(node)
                 })
                 .collect();
-            live::prepare(&mix, rate, &aliases).map(|live| (nodes, live))
+            Ok::<_, ControlError>((nodes, live))
         }))
         .map_err(|_| ControlError::BuildFailed)??;
         let (adds, prepared) = built;
-        let (transfers, params) = live::plan(&self.state.mix, &mix)?;
+        let changes = live::plan(&self.state.mix, &mix, &self.mixer_memory)?;
         let revision = self.mix_revision + 1;
         let removed = Vec::with_capacity(remove.len());
         let transaction = crate::command::SourceTransaction {
@@ -689,8 +699,7 @@ impl Controller {
                 base: self.mix_revision,
                 revision,
                 live: prepared,
-                transfers,
-                params,
+                changes,
                 installed: false,
             },
             applied: false,
@@ -753,22 +762,37 @@ impl Controller {
         if self.commands.slots() < 5 {
             return Err(ControlError::Full);
         }
-        // The old state (and the samples only it held) is freed here, on this thread.
+        let mut next_instance = self.next_instance;
+        let instances = state
+            .channels
+            .iter()
+            .map(|channel| {
+                next_instance += 1;
+                (channel.id, next_instance)
+            })
+            .collect();
+        let aliases = aliases(&state.mix, &instances, &[])?;
+        let mix = catch_unwind(AssertUnwindSafe(|| {
+            crate::mixer::live::prepare(&state.mix, self.sample_rate, aliases, &self.mixer_memory)
+        }))
+        .map_err(|_| ControlError::BuildFailed)??;
         let old = std::mem::replace(&mut self.state, state);
+        let old_instances = std::mem::replace(&mut self.instances, instances);
         self.mix_revision += 1;
-        let graph = match self.try_build_graph() {
-            Some(graph) => graph,
-            None => {
+        let graph = match self.try_replay_with_mix(mix) {
+            Ok(graph) => graph,
+            Err(error) => {
                 self.state = old;
+                self.instances = old_instances;
                 self.mix_revision -= 1;
-                return Err(ControlError::BuildFailed);
+                return Err(error);
             }
         };
+        self.next_instance = next_instance;
         if self.state.playback_mode == crate::PlaybackMode::Song {
             self.recording_armed = false;
         }
 
-        self.renew_instances();
         self.reset_recovery();
         self.seen_faults = self.live.recovery().0;
         // Only this thread pushes, and the queue had room for all five.
@@ -963,18 +987,23 @@ impl Controller {
                 self.flush_recovery_stop();
                 events.push(HealthEvent::Stopped { faults });
             } else if self.commands.slots() > 0 {
-                self.attempts += 1;
-                // Immediate first attempt; then 250, 500 and 1000 ms before another decision.
-                self.retry_at = Some(now + Duration::from_millis(250 << (self.attempts - 1)));
-                // The processor stays silent until it gets a fresh graph. If the queue is full,
-                // the next call tries again.
-                if let Some(graph) = self.try_build_graph() {
-                    if self.commands.push(Msg::ReplaceGraph(graph)).is_ok() {
-                        self.seen_faults = faults;
-                        self.restart_owed = true;
+                // Queue and mixer memory backpressure can clear when the callback hands
+                // back its owned payloads. It does not spend the panic retry budget.
+                match self.try_build_graph() {
+                    Err(ControlError::Full) => {}
+                    result => {
+                        self.attempts += 1;
+                        self.retry_at =
+                            Some(now + Duration::from_millis(250 << (self.attempts - 1)));
+                        if let Ok(graph) = result {
+                            if self.commands.push(Msg::ReplaceGraph(graph)).is_ok() {
+                                self.seen_faults = faults;
+                                self.restart_owed = true;
+                            }
+                        } else {
+                            events.push(HealthEvent::RecoveryFailed { faults });
+                        }
                     }
-                } else {
-                    events.push(HealthEvent::RecoveryFailed { faults });
                 }
             }
         }
@@ -997,6 +1026,7 @@ impl Controller {
 
     /// Called only while the output coordinator exclusively owns the detached processor.
     pub(crate) fn settle_recovery_stop(&mut self, processor: &mut AudioProcessor) {
+        self.reclaim_detached_trash(processor);
         processor.flush_recording_boundaries();
         if self.stop_owed {
             // Make room in FIFO order until the original transaction can be admitted.
@@ -1043,6 +1073,7 @@ impl Controller {
             .mix
             .check_sample_rate(rate)
             .map_err(ReconfigureError::InsertRate)?;
+        self.reclaim_detached_trash(processor);
         // A refusal to prepare the mixer at the new rate leaves the running graph and its
         // histories alone, including queued updates. Build the rest only after admission.
         let mix = catch_unwind(AssertUnwindSafe(|| self.prepare_replay_mix(rate)))
@@ -1060,8 +1091,7 @@ impl Controller {
         let old_rate = self.sample_rate;
         self.sample_rate = rate;
         self.generation += 1;
-        self.graph_epoch += 1;
-        let Ok(graph) = catch_unwind(AssertUnwindSafe(|| self.replay_with_mix(mix))) else {
+        let Ok(graph) = self.try_replay_with_mix(mix) else {
             self.sample_rate = old_rate;
             self.generation -= 1;
             processor.stop_after_failed_rebuild();
@@ -1089,15 +1119,27 @@ impl Controller {
         Ok(())
     }
 
-    /// Construction is transactional: a panic never changes the mirrored project or identities.
-    fn try_build_graph(&mut self) -> Option<Box<Graph>> {
+    fn try_build_graph(&mut self) -> Result<Box<Graph>, ControlError> {
+        let mix = catch_unwind(AssertUnwindSafe(|| {
+            self.prepare_replay_mix(self.sample_rate)
+        }))
+        .map_err(|_| ControlError::BuildFailed)??;
+        self.try_replay_with_mix(mix)
+    }
+
+    fn try_replay_with_mix(
+        &mut self,
+        mix: Option<Box<crate::mixer::live::LiveMix>>,
+    ) -> Result<Box<Graph>, ControlError> {
         self.graph_epoch += 1;
-        catch_unwind(AssertUnwindSafe(|| self.replay())).ok()
+        catch_unwind(AssertUnwindSafe(|| self.replay_with_mix(mix))).map_err(|_| {
+            self.graph_epoch -= 1;
+            ControlError::BuildFailed
+        })
     }
 
     pub(crate) fn build_graph(&mut self) -> Box<Graph> {
-        self.graph_epoch += 1;
-        self.replay()
+        self.try_build_graph().expect("the mirrored graph prepares")
     }
 
     fn prepare_replay_mix(
@@ -1106,14 +1148,7 @@ impl Controller {
     ) -> Result<Option<Box<crate::mixer::live::LiveMix>>, ControlError> {
         // A fresh graph has no fading channels, only the current channel instances.
         let aliases = aliases(&self.state.mix, &self.instances, &[])?;
-        crate::mixer::live::prepare(&self.state.mix, rate, &aliases)
-    }
-
-    fn replay(&self) -> Box<Graph> {
-        let mix = self
-            .prepare_replay_mix(self.sample_rate)
-            .expect("the mirrored mix prepares");
-        self.replay_with_mix(mix)
+        crate::mixer::live::prepare(&self.state.mix, rate, aliases, &self.mixer_memory)
     }
 
     fn replay_with_mix(&self, mix: Option<Box<crate::mixer::live::LiveMix>>) -> Box<Graph> {
@@ -1236,6 +1271,12 @@ impl Controller {
         }
     }
 
+    fn reclaim_detached_trash(&mut self, processor: &mut AudioProcessor) {
+        self.free_trash();
+        processor.return_detached_trash();
+        self.free_trash();
+    }
+
     /// Every queued command has reached the processor.
     pub(crate) fn commands_drained(&self) -> bool {
         self.commands.slots() == QUEUE_CAPACITY
@@ -1255,33 +1296,24 @@ impl Controller {
 /// instance the mix routes (in case it is removed while this mix runs) and one per recorded
 /// fade, on its own track. A different output mode or a missing fading track is `Busy`:
 /// refuse the edit until retirement rather than move or drop the fade.
-fn aliases(
-    mix: &crate::mixer::MixSetup,
-    instances: &BTreeMap<ChannelId, u64>,
-    fades: &[Fade],
-) -> Result<Vec<(u64, crate::mixer::MixerTrackId)>, ControlError> {
+fn aliases<'a>(
+    mix: &'a crate::mixer::MixSetup,
+    instances: &'a BTreeMap<ChannelId, u64>,
+    fades: &'a [Fade],
+) -> Result<impl Iterator<Item = (u64, crate::mixer::MixerTrackId)> + Clone + 'a, ControlError> {
     use crate::mixer::{MixSetup, SourceId};
-    if let MixSetup::LegacyDirect = mix {
-        return if fades.iter().all(|f| f.track.is_none()) {
-            Ok(Vec::new())
-        } else {
-            Err(ControlError::Busy)
-        };
+    if fades.iter().any(|f| match mix {
+        MixSetup::LegacyDirect => f.track.is_some(),
+        MixSetup::Routed(_) => f.track.is_none_or(|track| !mix.has_track(track)),
+    }) {
+        return Err(ControlError::Busy);
     }
-    let mut out = Vec::with_capacity(instances.len() + fades.len());
-    for f in fades {
-        let track = f.track.ok_or(ControlError::Busy)?;
-        if !mix.has_track(track) {
-            return Err(ControlError::Busy);
-        }
-        out.push((f.instance, track));
-    }
-    for (id, &instance) in instances {
-        if let Some(track) = mix.destination(SourceId::Channel(u64::from(id.0))) {
-            out.push((instance, track));
-        }
-    }
-    Ok(out)
+    let fading = fades.iter().filter_map(|f| Some((f.instance, f.track?)));
+    let current = instances.iter().filter_map(move |(id, &instance)| {
+        let track = mix.destination(SourceId::Channel(u64::from(id.0)))?;
+        Some((instance, track))
+    });
+    Ok(fading.chain(current))
 }
 
 #[cfg(test)]

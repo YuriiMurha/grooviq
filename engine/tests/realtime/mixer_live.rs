@@ -360,7 +360,16 @@ fn full_fading_room_returns_removed_nodes_under_guard() {
 /// returns every owned node in its envelope.
 #[test]
 fn faulted_graph_returns_refused_sources_under_guard() {
+    let mut initial = mix(0);
+    let MixSetup::Routed(routed) = &mut initial else {
+        unreachable!()
+    };
+    routed.mixer.sources.push(Source {
+        id: SourceId::Channel(1),
+        destination: MixerTrackId(1),
+    });
     let state = EngineState {
+        mix: initial.clone(),
         channels: vec![synth(1)],
         ..EngineState::default()
     };
@@ -376,8 +385,16 @@ fn faulted_graph_returns_refused_sources_under_guard() {
     // The panic itself allocates its payload: outside the guard, as a fault is.
     p.process(&mut out, 2);
     // The controller has not collected the fault yet: it admits the edit.
-    c.set_sources_and_mix(edit(vec![1], vec![1, 2, 3])).unwrap();
-    c.set_mix(MixSetup::LegacyDirect).unwrap();
+    let mut update = edit(vec![1], vec![1, 2, 3]);
+    let MixSetup::Routed(routed) = &mut initial else {
+        unreachable!()
+    };
+    routed.mixer.sources.push(Source {
+        id: SourceId::Channel(2),
+        destination: MixerTrackId(2),
+    });
+    update.mix = initial;
+    c.set_sources_and_mix(update).unwrap();
     super::realtime(|| p.process(&mut out, 2));
     super::realtime(|| p.process(&mut out, 2));
     let events = c.check_health();

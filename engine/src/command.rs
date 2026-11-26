@@ -471,6 +471,7 @@ pub(crate) enum Trash {
     Song(Box<crate::SongData>),
     Timeline(Box<TimelineUpdate>, Option<Box<ChannelNode>>),
     Mix(Box<crate::mixer::live::MixInstall>),
+    FaultedMix(Box<crate::mixer::live::LiveMix>),
     Sources(Box<SourceTransaction>),
 }
 

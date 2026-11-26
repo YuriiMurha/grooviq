@@ -153,7 +153,11 @@ impl DelayBank {
             while candidates.peek().is_some_and(|(other, _)| *other < key) {
                 candidates.next();
             }
-            if let Some(&(_, other)) = candidates.next_if(|(other, _)| *other == key) {
+            // The retained charges belong to their kernels, so allocations may only
+            // trade places if their charged capacities agree.
+            if let Some(&(_, other)) = candidates.next_if(|(other, _)| *other == key)
+                && self.rings[index].audio.capacity() == old.rings[other].audio.capacity()
+            {
                 std::mem::swap(&mut self.rings[index], &mut old.rings[other]);
             }
         }

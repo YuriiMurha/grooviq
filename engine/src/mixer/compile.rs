@@ -54,11 +54,19 @@ fn limit(resource: Limit, required: u64, limit: u64) -> Result<(), CompileError>
         Ok(())
     }
 }
-fn admit(m: &Mixer, b: Budget) -> Result<Resources, CompileError> {
+pub(super) const ROUTING_BYTES_PER_ITEM: u64 = 1024;
+
+pub(super) fn admit(
+    m: &Mixer,
+    b: Budget,
+    aliases: u64,
+    registry_bytes: u64,
+) -> Result<Resources, CompileError> {
     if b.block_frames == 0 {
         return Err(CompileError::InvalidBlockSize);
     }
-    let mut nodes = add(m.tracks.len() as u64, m.sources.len() as u64)?;
+    let sources = add(m.sources.len() as u64, aliases)?;
+    let mut nodes = add(m.tracks.len() as u64, sources)?;
     // Count implied main edges without building them.
     let mut edges = add(m.sends.len() as u64, m.sidechains.len() as u64)?;
     let mut latency = 0;
@@ -71,18 +79,23 @@ fn admit(m: &Mixer, b: Budget) -> Result<Resources, CompileError> {
             devices = add(devices, i.memory_bytes)?;
         }
     }
-    edges = add(edges, m.sources.len() as u64)?;
+    edges = add(edges, sources)?;
     limit(Limit::Nodes, nodes, b.nodes)?;
     limit(Limit::Edges, edges, b.edges)?;
     limit(Limit::Latency, latency, b.latency_frames)?;
     // Three stereo work buffers per node plus one per edge; no reuse assumed.
     let buffers = add(mul(nodes, 3)?, edges)?;
     limit(Limit::Buffers, buffers, b.buffers)?;
-    // Every edge could require the full latency sum in compensation storage.
+    // Every edge could require the full latency sum in compensation storage. A stage
+    // delay uses an uncharged edge's allowance: at least one detector sets the stage
+    // arrival and needs no delay of its own.
     // 1024 bytes per node/edge conservatively reserves compiler maps, adjacency,
     // levels, descriptor copies and input records, including allocation overhead.
     let memory = add(
-        add(devices, mul(add(nodes, edges)?, 1024)?)?,
+        add(
+            devices.max(registry_bytes),
+            mul(add(nodes, edges)?, ROUTING_BYTES_PER_ITEM)?,
+        )?,
         add(
             mul(mul(buffers, u64::from(b.block_frames))?, 8)?,
             mul(mul(edges, latency)?, 8)?,
@@ -100,7 +113,7 @@ fn admit(m: &Mixer, b: Budget) -> Result<Resources, CompileError> {
 /// Iterative Kahn compilation: O((nodes + edges) log(nodes + edges)), bounded
 /// by admission before allocating graph storage; no recursive untrusted traversal.
 pub fn compile(m: &Mixer, budget: Budget) -> Result<CompiledMixer, CompileError> {
-    let resources = admit(m, budget)?;
+    let resources = admit(m, budget, 0, 0)?;
     let mut tracks = BTreeMap::new();
     let mut inserts = BTreeMap::new();
     for t in &m.tracks {

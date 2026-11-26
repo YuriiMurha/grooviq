@@ -974,6 +974,12 @@ pub struct SourceBuffers {
 }
 
 impl SourceBuffers {
+    pub(super) fn storage_bytes(&self) -> Result<u64, PrepareError> {
+        bytes(&self.ids)?
+            .checked_add(bytes(&self.data)?)
+            .ok_or(PrepareError::Overflow)
+    }
+
     pub fn ids(&self) -> &[SourceId] {
         &self.ids
     }
