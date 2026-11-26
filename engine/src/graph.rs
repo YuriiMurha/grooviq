@@ -125,7 +125,6 @@ impl Graph {
         self.mix_revision = revision;
     }
 
-    #[cfg(test)]
     pub(crate) fn mix_revision(&self) -> u64 {
         self.mix_revision
     }
@@ -152,6 +151,10 @@ impl Graph {
         std::mem::swap(&mut self.mix, &mut install.live);
         self.mix_revision = install.revision;
         install.installed = true;
+    }
+
+    pub(crate) fn mixer_kernel(&self) -> Option<&crate::mixer::PreparedMixer> {
+        Some(&self.mix.as_ref()?.kernel)
     }
 
     pub(crate) fn take_faulted_mix(&mut self) -> Option<Box<crate::mixer::live::LiveMix>> {
@@ -555,12 +558,13 @@ impl Graph {
 
     /// Renders one block into the master bus `l`/`r` (overwritten); `events` are sorted by
     /// offset. Returns how many nodes the NaN guard silenced.
+    /// Returns the guard hit count and whether this render filled the routed taps.
     pub(crate) fn render(
         &mut self,
         l: &mut [f32; BLOCK],
         r: &mut [f32; BLOCK],
         events: &[NoteEvent],
-    ) -> u32 {
+    ) -> (u32, bool) {
         if self.mix.is_some() {
             return self.render_routed(l, r, events);
         }
@@ -610,7 +614,7 @@ impl Graph {
             }
             mix_in(l, r, &self.audio_l, &self.audio_r);
         }
-        silenced
+        (silenced, false)
     }
 }
 
@@ -624,7 +628,7 @@ impl Graph {
         l: &mut [f32; BLOCK],
         r: &mut [f32; BLOCK],
         events: &[NoteEvent],
-    ) -> u32 {
+    ) -> (u32, bool) {
         use crate::mixer::{SourceId, SystemSource};
         let Self {
             tone,
@@ -639,7 +643,7 @@ impl Graph {
             ..
         } = self;
         let Some(mix) = mix.as_mut() else {
-            return 0;
+            return (0, false);
         };
         let mut silenced = 0;
 
@@ -694,13 +698,13 @@ impl Graph {
         }
         let transport = host.unwrap_or_else(|| idle_host(mix.kernel.sample_rate()));
         match mix.kernel.render_pulled(&transport, &mix.sources, l, r) {
-            Ok(report) => silenced += report.silenced,
+            Ok(report) => (silenced + report.silenced, report.frames as usize == BLOCK),
             Err(_) => {
                 l.fill(0.0);
                 r.fill(0.0);
+                (silenced, false)
             }
         }
-        silenced
     }
 }
 

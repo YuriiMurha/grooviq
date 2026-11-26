@@ -412,3 +412,51 @@ fn faulted_graph_returns_refused_sources_under_guard() {
     assert_eq!(c.state().channels.len(), 3);
     assert!(out.iter().all(|x| x.is_finite()));
 }
+
+#[test]
+fn mixer_meter_full_lease_and_invalidation_never_allocate() {
+    let tracks: Vec<_> = (1..=MIXER_METER_MAX_TRACKS as u64)
+        .map(MixerTrackId)
+        .collect();
+    let setup = MixSetup::Routed(RoutedMix {
+        mixer: Mixer {
+            tracks: std::iter::once(track(0, None, &[]))
+                .chain(tracks.iter().map(|id| track(id.0, Some(0), &[])))
+                .collect(),
+            sends: vec![],
+            sidechains: vec![],
+            sources: vec![Source {
+                id: SourceId::System(SystemSource::Tone),
+                destination: tracks[0],
+            }],
+        },
+        gains: vec![],
+        devices: vec![],
+    });
+    let (mut c, mut p) = engine_with(
+        EngineConfig {
+            sample_rate: 48_000.0,
+        },
+        EngineState {
+            mix: setup,
+            ..EngineState::default()
+        },
+    );
+    let mut out = [0.0; 2 * BLOCK];
+    c.send(Command::TestTone {
+        on: true,
+        hz: 440.0,
+        gain_db: -6.0,
+    })
+    .unwrap();
+    assert!(c.mixer_meter(&tracks).is_none());
+    for _ in 0..4 {
+        realtime_process(&mut p, &mut out);
+    }
+    let snapshot = c.mixer_meter(&tracks).unwrap();
+    assert_eq!(snapshot.tracks.len(), MIXER_METER_MAX_TRACKS);
+    assert!(snapshot.tracks[0].peak[0] > 0.0);
+    c.set_mix(MixSetup::LegacyDirect).unwrap();
+    realtime_process(&mut p, &mut out);
+    assert!(c.mixer_meter(&tracks).is_none());
+}
