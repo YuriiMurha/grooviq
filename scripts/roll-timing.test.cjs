@@ -1,6 +1,10 @@
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
+const { mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { cpus, platform, tmpdir } = require("node:os");
+const { delimiter, join } = require("node:path");
 const { test } = require("node:test");
-const { assessAttempt, runTiming } = require("./roll-timing.cjs");
+const { assessAttempt, exitCodeFor, runTiming } = require("./roll-timing.cjs");
 
 const makeAttempt = ({ timingFailure = false, status = timingFailure ? 2 : 0 } = {}) => {
   const samples = [0.1, 0.2, timingFailure ? 8 : 0.3, 9, 10];
@@ -94,3 +98,57 @@ test("a limit failure gets one rerun and only a clean rerun is contended", () =>
     assert.equal(result.outcome, outcome);
   }
 });
+
+for (const [outcome, expectedCode, attempts] of [
+  ["passed", 0, [makeAttempt()]],
+  ["contended", 0, [makeAttempt({ timingFailure: true }), makeAttempt()]],
+  ["regression", 1, [makeAttempt({ timingFailure: true }), makeAttempt({ timingFailure: true })]],
+  ["error", 1, [{ ...makeAttempt(), status: 2, report: null }]],
+]) {
+  test(`CLI returns ${expectedCode} for ${outcome} and publishes every attempt`, t => {
+    const dir = mkdtempSync(join(tmpdir(), "grooviq-roll-test-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const fixturePath = join(dir, "fixture.json");
+    const summaryPath = join(dir, "summary.md");
+    const outputDir = join(dir, "evidence");
+    writeFileSync(fixturePath, JSON.stringify(attempts));
+    writeFileSync(join(dir, "make"), `#!/usr/bin/env node
+const { readFileSync, writeFileSync } = require("node:fs");
+const path = process.env.ROLL_TIMING_REPORT;
+const attemptNumber = Number(/(\\d+)\\.json$/.exec(path)[1]);
+const attempt = JSON.parse(readFileSync(process.env.ROLL_FIXTURE, "utf8"))[attemptNumber - 1];
+if (attempt.report) writeFileSync(path, JSON.stringify(attempt.report));
+process.stdout.write(attempt.stdout);
+process.stderr.write(attempt.stderr);
+process.exitCode = attempt.status;
+`, { mode: 0o700 });
+
+    const child = spawnSync(process.execPath, [require.resolve("./roll-timing.cjs"), outputDir], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: [dir, process.env.PATH].join(delimiter),
+        GITHUB_STEP_SUMMARY: summaryPath,
+        ROLL_FIXTURE: fixturePath,
+      },
+    });
+
+    assert.ifError(child.error);
+    assert.equal(child.status, expectedCode, child.stderr || child.stdout);
+    assert.equal(exitCodeFor(outcome), expectedCode);
+    const evidence = JSON.parse(readFileSync(join(outputDir, "samples.json"), "utf8"));
+    const hostCpus = cpus();
+    assert.deepEqual(evidence, {
+      machine: { cpu: hostCpus[0]?.model ?? "unknown", logicalCores: hostCpus.length, os: platform() },
+      outcome,
+      attempts: attempts.map(assessAttempt),
+    });
+    const summary = readFileSync(summaryPath, "utf8");
+    assert.ok(summary.includes(evidence.machine.cpu));
+    assert.ok(summary.includes(String(evidence.machine.logicalCores)));
+    for (const attempt of evidence.attempts) {
+      const samples = attempt.budgets?.[0].samplesMs ?? attempt.samplesMs[0];
+      for (const sample of samples) assert.ok(summary.includes(String(sample)));
+    }
+  });
+}

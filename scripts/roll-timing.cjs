@@ -5,6 +5,12 @@ const { join, resolve } = require("node:path");
 
 const BUDGET_COUNT = 6;
 const SAMPLE_COUNT = 5;
+const OUTCOME_MESSAGES = {
+  passed: "passed: all six timing budgets met",
+  contended: "contended: first run failed, rerun passed",
+  regression: "regression: timing limits failed on both attempts",
+  error: "error: timing run did not complete cleanly",
+};
 
 function parseSamples(stdout) {
   return [...stdout.matchAll(/roll timing samples \(ms\)\s*(\[[^\]]*\])/g)].map(([, raw]) => {
@@ -91,21 +97,16 @@ function runBenchmark(path) {
   return { status: result.error ? null : result.status, stdout, stderr, report };
 }
 
-function main(outputDir) {
-  mkdirSync(outputDir, { recursive: true });
-  const hostCpus = cpus();
-  const machine = { cpu: hostCpus[0]?.model ?? "unknown", logicalCores: hostCpus.length, os: platform() };
-  const result = runTiming(attempt => runBenchmark(join(outputDir, `vitest-attempt-${attempt}.json`)));
-  writeFileSync(join(outputDir, "samples.json"), JSON.stringify({ machine, ...result }, null, 2) + "\n");
+function exitCodeFor(outcome) {
+  return outcome === "passed" || outcome === "contended" ? 0 : 1;
+}
 
-  const status = {
-    passed: "passed: all six timing budgets met",
-    contended: "contended: first run failed, rerun passed",
-    regression: "regression: timing limits failed on both attempts",
-    error: "error: timing run did not complete cleanly",
-  }[result.outcome];
+function writeEvidence(outputDir, summaryPath, machine, result) {
+  writeFileSync(join(outputDir, "samples.json"), JSON.stringify({ machine, ...result }, null, 2) + "\n");
+  if (!summaryPath) return;
+
   const lines = [
-    "## Piano-roll timing", "", status, "",
+    "## Piano-roll timing", "", OUTCOME_MESSAGES[result.outcome], "",
     "| CPU model | Logical cores |",
     "| --- | ---: |",
     `| ${machine.cpu} | ${machine.logicalCores} |`, "",
@@ -124,12 +125,21 @@ function main(outputDir) {
   for (const attempt of result.attempts) {
     if (attempt.detail) lines.push("", attempt.detail);
   }
-  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+  appendFileSync(summaryPath, lines.join("\n") + "\n");
+}
 
+function main(outputDir) {
+  mkdirSync(outputDir, { recursive: true });
+  const hostCpus = cpus();
+  const machine = { cpu: hostCpus[0]?.model ?? "unknown", logicalCores: hostCpus.length, os: platform() };
+  const result = runTiming(attempt => runBenchmark(join(outputDir, `vitest-attempt-${attempt}.json`)));
+  writeEvidence(outputDir, process.env.GITHUB_STEP_SUMMARY, machine, result);
+
+  const status = OUTCOME_MESSAGES[result.outcome];
   console.log(`Runner: ${machine.cpu}; ${machine.logicalCores} logical cores`);
   if (result.outcome === "contended") console.log(`::warning::${status}`);
   else console.log(status);
-  if (result.outcome === "regression" || result.outcome === "error") process.exitCode = 1;
+  process.exitCode = exitCodeFor(result.outcome);
 }
 
 if (require.main === module) {
@@ -137,4 +147,4 @@ if (require.main === module) {
   main(resolve(process.argv[2]));
 }
 
-module.exports = { assessAttempt, runTiming };
+module.exports = { assessAttempt, exitCodeFor, runTiming, writeEvidence };
