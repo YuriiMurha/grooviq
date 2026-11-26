@@ -3,6 +3,8 @@ name: release
 on:
   push:
     tags: ['v*']
+  # Manual runs build CI artifacts only; they never create a tag or release.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,7 +31,12 @@ jobs:
           python - <<'PYTHON'
           import json, os, pathlib, re, tomllib
           tag = os.environ["RELEASE_TAG"]
-          if os.environ["GITHUB_REF_TYPE"] != "tag" or not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag, re.ASCII):
+          event = os.environ["GITHUB_EVENT_NAME"]
+          if event == "workflow_dispatch":
+              tag = "v" + json.loads(pathlib.Path("app/src-tauri/tauri.conf.json").read_text())["version"]
+          elif event != "push" or os.environ["GITHUB_REF_TYPE"] != "tag":
+              raise SystemExit("Expected tag push or artifact-only manual run")
+          if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag, re.ASCII):
               raise SystemExit("Expected stable vMAJOR.MINOR.PATCH tag")
           version = tag[1:]
           if any(int(part) > 65535 for part in version.split(".")):
@@ -92,6 +99,7 @@ jobs:
           retention-days: 7
 
   publish:
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
     needs: [validate, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10

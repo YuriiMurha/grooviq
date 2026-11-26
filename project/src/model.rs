@@ -14,7 +14,7 @@ use std::path::PathBuf;
 /// `project.json`'s `format` value.
 pub const FORMAT: &str = "grooviq-project";
 /// The file format version this build writes and reads.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 /// A project file's extension, without the dot.
 pub const EXTENSION: &str = "grooviq";
 /// Velocity of a hit added with a click.
@@ -105,6 +105,10 @@ pub struct Project {
     /// The key the piano roll highlights and snaps to; `None` for no key.
     #[serde(default, deserialize_with = "crate::reading::named_option")]
     pub key: Option<ProjectKey>,
+    /// Required from version 4; an older file's `mixer`, whatever it holds, is not read
+    /// (see [`crate::mixer`]).
+    #[serde(default, deserialize_with = "crate::reading::mixer")]
+    pub mixer: crate::mixer::Mixer,
 }
 
 /// A project's key: a root note and a scale.
@@ -333,6 +337,7 @@ impl Project {
             current_pattern: 0,
             next_id: 1,
             key: None,
+            mixer: Default::default(),
         }
     }
 

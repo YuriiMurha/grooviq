@@ -38,29 +38,81 @@ struct Bank {
     ends: Vec<f64>,
     leaves: usize,
 }
+/// The immutable bank plus a playlist-track route per entry, kept outside the bank: a
+/// track-only move replaces the routes and keeps the bank (and so every voice's progress).
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct AudioSchedule(Arc<Bank>);
+pub struct AudioSchedule {
+    bank: Arc<Bank>,
+    /// Aligned to the bank's entries, or empty: no clip has a track.
+    routes: Arc<Vec<Option<u64>>>,
+}
 impl AudioSchedule {
     /// Whether clones retain the same immutable runtime bank.
     pub fn shares_bank(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.bank, &other.bank)
     }
 
     /// Future onsets are excluded from a region export; existing sources retain fixed seconds.
     pub(crate) fn before_tick(&self, end: u64) -> Result<Self, ControlError> {
         Self::build(
-            self.0.assets.clone(),
-            self.0
+            self.bank.assets.clone(),
+            self.bank
                 .entries
                 .iter()
                 .filter(|e| e.clip.start_tick < end)
                 .map(|e| e.clip)
                 .collect(),
         )
-        .map(|(schedule, _)| schedule)
+        .and_then(|(schedule, _)| schedule.with_tracks(&self.tracks()))
+    }
+
+    /// The same bank (shared, not copied) with each clip routed to the playlist track
+    /// `tracks` names for its ID; clips it does not name have no route (unheard when routed;
+    /// LegacyDirect ignores routes). Two entries for one clip are `Rejected`. Off-thread.
+    pub fn with_tracks(&self, tracks: &[(u32, u64)]) -> Result<Self, ControlError> {
+        let mut sorted = tracks.to_vec();
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|w| w[0].0 == w[1].0) {
+            return Err(ControlError::Rejected);
+        }
+        let routes = self
+            .bank
+            .entries
+            .iter()
+            .map(|e| {
+                sorted
+                    .binary_search_by_key(&e.clip.id, |t| t.0)
+                    .ok()
+                    .map(|at| sorted[at].1)
+            })
+            .collect();
+        Ok(Self {
+            bank: Arc::clone(&self.bank),
+            routes: Arc::new(routes),
+        })
+    }
+
+    /// `(clip, track)` for every routed clip, in entry order.
+    pub fn tracks(&self) -> Vec<(u32, u64)> {
+        self.bank
+            .entries
+            .iter()
+            .zip(self.routes.iter())
+            .filter_map(|(e, t)| t.map(|t| (e.clip.id, t)))
+            .collect()
+    }
+
+    /// Each entry's playlist track, in entry order.
+    pub(crate) fn entry_routes(&self) -> impl Iterator<Item = Option<u64>> + '_ {
+        (0..self.bank.entries.len()).map(|entry| self.route(entry))
+    }
+
+    /// The playlist track of entry `entry`, if routed. Real-time safe.
+    pub(crate) fn route(&self, entry: usize) -> Option<u64> {
+        self.routes.get(entry).copied().flatten()
     }
     pub fn is_empty(&self) -> bool {
-        self.0.entries.is_empty()
+        self.bank.entries.is_empty()
     }
     pub fn build(
         mut assets: Vec<AudioAsset>,
@@ -162,7 +214,10 @@ impl AudioSchedule {
         for i in (1..bank.leaves).rev() {
             bank.ends[i] = bank.ends[i * 2].max(bank.ends[i * 2 + 1]);
         }
-        let schedule = Self(Arc::new(bank));
+        let schedule = Self {
+            bank: Arc::new(bank),
+            routes: Arc::default(),
+        };
         schedule.validate_loop(None)?;
         Ok((schedule, warnings))
     }
@@ -172,12 +227,12 @@ impl AudioSchedule {
         if region.is_some_and(|r| r.start_tick >= r.end_tick || r.end_tick > MAX_SONG_TICKS) {
             return Err(ControlError::Rejected);
         }
-        let mut events = Vec::with_capacity(self.0.entries.len() * 2);
+        let mut events = Vec::with_capacity(self.bank.entries.len() * 2);
         let mut carry = 0usize;
-        for e in &self.0.entries {
+        for e in &self.bank.entries {
             let c = e.clip;
             let duration = (c.source_end - c.source_start) as f64
-                / f64::from(self.0.assets[e.asset].source_rate);
+                / f64::from(self.bank.assets[e.asset].source_rate);
             events.push((c.start_tick as f64, 1i32));
             // One frame at the lowest admitted rate covers onset/end quantization.
             events.push((c.start_tick as f64 + (duration + 1.0 / 8000.0) * 6400.0, -1));
@@ -206,20 +261,20 @@ impl AudioSchedule {
         }
     }
     pub(crate) fn valid_horizon(&self, end_tick: u64) -> bool {
-        self.0
+        self.bank
             .entries
             .last()
             .is_none_or(|e| e.clip.start_tick < end_tick)
     }
     pub fn end_frame(&self, bpm: f32, rate: f32) -> u64 {
-        self.0
+        self.bank
             .entries
             .iter()
             .map(|e| {
                 let c = e.clip;
                 crate::ticks_to_frames(c.start_tick as f64, bpm, rate)
                     + ((c.source_end - c.source_start) as f64 * f64::from(rate)
-                        / f64::from(self.0.assets[e.asset].source_rate))
+                        / f64::from(self.bank.assets[e.asset].source_rate))
                     .ceil() as u64
             })
             .max()
@@ -262,7 +317,7 @@ impl AudioRuntime {
         self.voices.iter().any(|v| v.active)
     }
     pub(crate) fn compatible(a: &AudioSchedule, b: &AudioSchedule) -> bool {
-        Arc::ptr_eq(&a.0, &b.0)
+        Arc::ptr_eq(&a.bank, &b.bank)
     }
     pub(crate) fn render(
         &mut self,
@@ -270,13 +325,12 @@ impl AudioRuntime {
         region: Option<SongLoop>,
         clock: &crate::transport::TransportClock,
         f0: u64,
-        l: &mut [f32; crate::BLOCK],
-        r: &mut [f32; crate::BLOCK],
+        out: &mut impl AudioOut,
     ) {
         if !clock.playing() {
             return;
         }
-        let entries = &s.0.entries;
+        let entries = &s.bank.entries;
         if entries.is_empty() {
             return;
         }
@@ -302,7 +356,7 @@ impl AudioRuntime {
             for v in &mut self.voices {
                 if v.active {
                     let e = &entries[v.entry];
-                    let a = &s.0.assets[e.asset];
+                    let a = &s.bank.assets[e.asset];
                     let elapsed = v.seconds
                         + if v.rate > 0.0 {
                             v.frames as f64 / f64::from(v.rate)
@@ -362,7 +416,7 @@ impl AudioRuntime {
                 }
                 let e = &entries[v.entry];
                 let c = e.clip;
-                let a = &s.0.assets[e.asset];
+                let a = &s.bank.assets[e.asset];
                 if v.rate != clock.sample_rate() {
                     if v.rate > 0.0 {
                         v.seconds += v.frames as f64 / f64::from(v.rate);
@@ -397,8 +451,12 @@ impl AudioRuntime {
                     let pos = source * f64::from(b.rate) / f64::from(a.source_rate);
                     let lo = c.source_start as f64 * f64::from(b.rate) / f64::from(a.source_rate);
                     let hi = c.source_end as f64 * f64::from(b.rate) / f64::from(a.source_rate);
-                    l[offset] += read(&b.l, pos, lo, hi) * gain;
-                    r[offset] += read(&b.r, pos, lo, hi) * gain;
+                    out.add(
+                        v.entry,
+                        offset,
+                        read(&b.l, pos, lo, hi) * gain,
+                        read(&b.r, pos, lo, hi) * gain,
+                    );
                 }
                 v.frames += 1;
             }
@@ -436,7 +494,7 @@ impl AudioRuntime {
             }
         }
         if !s.is_empty() {
-            visit(self, &s.0, 1, (0, s.0.leaves), tick, bpm);
+            visit(self, &s.bank, 1, (0, s.bank.leaves), tick, bpm);
         }
     }
     fn start(&mut self, entry: usize, seconds: f64) {
@@ -453,6 +511,46 @@ impl AudioRuntime {
         }
     }
 }
+/// Where the one ordered voice loop accumulates each voice's frame. Real-time safe.
+pub(crate) trait AudioOut {
+    fn add(&mut self, entry: usize, offset: usize, l: f32, r: f32);
+}
+
+/// The LegacyDirect sum: every voice into one block, in voice order.
+pub(crate) struct Direct<'a>(
+    pub(crate) &'a mut [f32; crate::BLOCK],
+    pub(crate) &'a mut [f32; crate::BLOCK],
+);
+impl AudioOut for Direct<'_> {
+    fn add(&mut self, _: usize, offset: usize, l: f32, r: f32) {
+        self.0[offset] += l;
+        self.1[offset] += r;
+    }
+}
+
+/// Each voice into its clip's playlist-track source, in the same voice order; a clip
+/// without a route, or a track the mixer does not name, is not heard.
+pub(crate) struct Routed<'a> {
+    pub(crate) schedule: &'a AudioSchedule,
+    pub(crate) sources: &'a mut crate::mixer::SourceBuffers,
+}
+impl AudioOut for Routed<'_> {
+    fn add(&mut self, entry: usize, offset: usize, l: f32, r: f32) {
+        let Some(track) = self.schedule.route(entry) else {
+            return;
+        };
+        let Some(index) = self
+            .sources
+            .index(crate::mixer::SourceId::AudioTrack(track))
+        else {
+            return;
+        };
+        let (bl, br) = self.sources.block_mut(index);
+        bl[offset] += l;
+        br[offset] += r;
+    }
+}
+
 fn read(data: &[f32], pos: f64, lo: f64, hi: f64) -> f32 {
     if pos <= -1.0 || pos >= data.len() as f64 {
         return 0.0;

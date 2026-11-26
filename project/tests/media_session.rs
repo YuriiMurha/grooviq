@@ -468,7 +468,7 @@ fn combined_live_channel_and_asset_quota_cannot_be_evaded_by_new_project() {
     s.publish_media(&intent, prepared, Instant::now()).unwrap();
     let budget = s.media_budget();
     assert!(budget.used() > charged);
-    let snapshot = s.export_state();
+    let snapshot = s.export_state().unwrap();
     s.new_project().unwrap();
     assert!(budget.used() > 0);
     drop(snapshot);

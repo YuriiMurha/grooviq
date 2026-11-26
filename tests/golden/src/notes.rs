@@ -206,6 +206,7 @@ pub fn notes_m2_project(samples_dir: &Path) -> (Project, SampleFiles) {
     let project = Project {
         play_mode: Default::default(),
         arrangement: Default::default(),
+        mixer: Default::default(),
         name: "Notes M2".into(),
         bpm: 140.0,
         time_signature: TimeSignature { beats: 4, unit: 4 },

@@ -13,6 +13,7 @@ name = "grooviq_engine"
 [features]
 # Commands that make the synth output NaN or panic, for the audio-health tests. Never on in the app.
 test-hooks = []
+profiling = ["dep:tracy-client"]
 
 [dependencies]
 # `realtime` promotes the WASAPI output thread (MMCSS "Audio", else time-critical priority).
@@ -20,6 +21,7 @@ test-hooks = []
 cpal = { version = "0.18.2", features = ["realtime"] }
 grooviq-dsp = { path = "../dsp" }
 rtrb = "0.3"
+tracy-client = { version = "0.19", optional = true, default-features = false, features = ["enable", "manual-lifetime", "only-localhost"] }
 # Pure-Rust maths: the same bits on every platform (clippy.toml bans the std methods).
 libm = "0.2"
 getrandom = "0.4"

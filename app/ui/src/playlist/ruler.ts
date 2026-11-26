@@ -50,3 +50,14 @@ export class LoopGesture {
     return [{ kind: "setLoop", region: this.region }];
   }
 }
+
+/** Targets stay transport-only; native owns Song extent and active-loop clamping. */
+export function seekTarget(tick: number, quantum: number): number {
+  return snapTick(tick, quantum);
+}
+export function keyboardSeek(key: string, position: number | null, quantum: number): number | null {
+  if (key === "Home") return 0;
+  if (position === null || !Number.isSafeInteger(position) || position < 0) return null;
+  const direction = key === "ArrowLeft" || key === "ArrowDown" ? -1 : key === "ArrowRight" || key === "ArrowUp" ? 1 : 0;
+  return direction ? Math.max(0, Math.min(MAX_SONG_TICKS, position + direction * quantum)) : null;
+}

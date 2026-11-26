@@ -53,6 +53,63 @@ const fn eq_spec() -> [(f32, f32, f32); 49] {
 /// `(min, max, default)` per parameter index (band n uses n*6+k, 48 = output).
 pub const SPEC: [(f32, f32, f32); 49] = eq_spec();
 
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 49] = [
+    "band_1_on",
+    "band_1_type",
+    "band_1_frequency",
+    "band_1_gain",
+    "band_1_q",
+    "band_1_channel",
+    "band_2_on",
+    "band_2_type",
+    "band_2_frequency",
+    "band_2_gain",
+    "band_2_q",
+    "band_2_channel",
+    "band_3_on",
+    "band_3_type",
+    "band_3_frequency",
+    "band_3_gain",
+    "band_3_q",
+    "band_3_channel",
+    "band_4_on",
+    "band_4_type",
+    "band_4_frequency",
+    "band_4_gain",
+    "band_4_q",
+    "band_4_channel",
+    "band_5_on",
+    "band_5_type",
+    "band_5_frequency",
+    "band_5_gain",
+    "band_5_q",
+    "band_5_channel",
+    "band_6_on",
+    "band_6_type",
+    "band_6_frequency",
+    "band_6_gain",
+    "band_6_q",
+    "band_6_channel",
+    "band_7_on",
+    "band_7_type",
+    "band_7_frequency",
+    "band_7_gain",
+    "band_7_q",
+    "band_7_channel",
+    "band_8_on",
+    "band_8_type",
+    "band_8_frequency",
+    "band_8_gain",
+    "band_8_q",
+    "band_8_channel",
+    "output",
+];
+
+pub(crate) fn is_stepped(index: u32) -> bool {
+    index < OUTPUT && matches!(index % 6, 0 | 1 | 5)
+}
+
 struct Band {
     on: bool,
     typ: u8,
@@ -200,6 +257,16 @@ pub struct Eq {
     bin_map: Vec<(f64, usize, usize, bool)>,
     spec_in: [f32; BINS],
     spec_out: [f32; BINS],
+}
+
+pub(crate) fn memory_payload() -> crate::insert_memory::Payload {
+    let mut payload = crate::insert_memory::Payload::boxed::<Eq>();
+    Fft::add_payload(FFT_N, &mut payload);
+    payload.array::<f32>(FFT_N, 2); // Input and output rings.
+    payload.array::<f64>(FFT_N, 3); // Window, real and imaginary FFT components.
+    payload.array::<f64>(FFT_N / 2 + 1, 2); // Power spectra.
+    payload.array::<(f64, usize, usize, bool)>(BINS, 1);
+    payload
 }
 
 impl Eq {

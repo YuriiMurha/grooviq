@@ -220,7 +220,7 @@ mod drums_4ch {
         let loaded = load(&project_path).expect("load the project");
         assert_eq!(loaded.warnings, Vec::<String>::new());
         assert_eq!(loaded.samples.len(), 4, "every sample is embedded");
-        let state = engine_state(&loaded.project, &decode_samples(&loaded.samples));
+        let state = engine_state(&loaded.project, &decode_samples(&loaded.samples)).unwrap();
 
         let wav = out.join("drums_4ch.wav");
         let options = ExportOptions {
@@ -309,7 +309,7 @@ mod drums_4ch {
     #[test]
     fn drums_4ch_is_identical_at_callback_sizes_37_64_512() {
         let (project, files) = drums_4ch_project(&kit_dir());
-        let state = engine_state(&project, &decode_samples(&files));
+        let state = engine_state(&project, &decode_samples(&files)).unwrap();
         let config = EngineConfig {
             sample_rate: SAMPLE_RATE as f32,
         };
@@ -373,7 +373,7 @@ mod notes_m2 {
             "the file round trip changed the project"
         );
         assert_eq!(loaded.samples.len(), 3, "every sample is embedded");
-        let state = engine_state(&loaded.project, &decode_samples(&loaded.samples));
+        let state = engine_state(&loaded.project, &decode_samples(&loaded.samples)).unwrap();
 
         let wav = out.join("notes_m2.wav");
         let options = ExportOptions {
@@ -427,7 +427,7 @@ mod notes_m2 {
     #[test]
     fn notes_m2_is_identical_at_callback_sizes_37_64_512() {
         let (project, files) = notes_m2_project(&kit_dir());
-        let state = engine_state(&project, &decode_samples(&files));
+        let state = engine_state(&project, &decode_samples(&files)).unwrap();
         let reference = render(state.clone(), 64);
         assert!(reference.iter().any(|x| x.abs() > 0.1), "silent render");
         for callback in [37, 512] {
@@ -467,7 +467,7 @@ mod notes_m2 {
 
         // Muting any one channel changes the render: every channel is heard.
         let samples = decode_samples(&files);
-        let all = render(engine_state(&project, &samples), 512);
+        let all = render(engine_state(&project, &samples).unwrap(), 512);
         for (id, name) in [
             (SYNTH_808, "808"),
             (KEYS, "Keys"),
@@ -478,7 +478,7 @@ mod notes_m2 {
         ] {
             let mut muted = project.clone();
             muted.channels.iter_mut().find(|c| c.id == id).unwrap().mute = true;
-            let without = render(engine_state(&muted, &samples), 512);
+            let without = render(engine_state(&muted, &samples).unwrap(), 512);
             assert!(
                 without.iter().zip(&all).any(|(a, b)| (a - b).abs() > 1e-3),
                 "muting {name} changes nothing: it is not heard"
@@ -505,7 +505,7 @@ mod nested_notes {
         let out = golden_dir().join("out");
         std::fs::create_dir_all(&out).unwrap();
         let (project, files) = nested_notes_project(&kit_dir());
-        let state = engine_state(&project, &decode_samples(&files));
+        let state = engine_state(&project, &decode_samples(&files)).unwrap();
         let wav = out.join("nested_notes.wav");
         let options = ExportOptions {
             sample_rate: SAMPLE_RATE,
@@ -549,7 +549,7 @@ mod nested_notes {
     #[test]
     fn nested_notes_are_identical_at_callback_sizes_37_64_512() {
         let (project, files) = nested_notes_project(&kit_dir());
-        let state = engine_state(&project, &decode_samples(&files));
+        let state = engine_state(&project, &decode_samples(&files)).unwrap();
         let render = |callback| {
             let config = EngineConfig {
                 sample_rate: SAMPLE_RATE as f32,

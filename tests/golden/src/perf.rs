@@ -11,6 +11,8 @@ use grooviq_project::{SampleFiles, engine_state};
 
 use crate::{SAMPLE_RATE, decode_samples, drums_4ch_project, kit_dir};
 
+pub mod report;
+
 /// A scene to time: an engine state, and the commands sent before the first block.
 pub struct PerfScene {
     pub name: &'static str,
@@ -36,7 +38,7 @@ pub fn perf_scenes() -> Vec<PerfScene> {
     let (project, files) = drums_4ch_project(&kit_dir());
     let drums = PerfScene {
         name: "drums_4ch",
-        state: engine_state(&project, &decode_samples(&files)),
+        state: engine_state(&project, &decode_samples(&files)).unwrap(),
         start: vec![Command::Play],
     };
 
@@ -78,7 +80,7 @@ pub fn perf_scenes() -> Vec<PerfScene> {
     start.push(Command::Play);
     let beat = PerfScene {
         name: "beat_16ch",
-        state: engine_state(&big, &decode_samples(&samples)),
+        state: engine_state(&big, &decode_samples(&samples)).unwrap(),
         start,
     };
     vec![drums, beat]
@@ -116,6 +118,23 @@ pub fn measure(
     frames: usize,
     reps: usize,
 ) -> Result<Measurement, String> {
+    measure_with_timed_loop(scene, block, frames, reps, |render| render())
+}
+
+/// Like [`measure`], with a caller-supplied runner for each timed repetition's block loop.
+/// The runner calls the loop once and returns after it finishes.
+///
+/// # Errors
+/// If two repetitions rendered different bits.
+/// # Panics
+/// If `frames` is not a whole number of blocks, or the start commands do not fit the queue.
+pub fn measure_with_timed_loop(
+    scene: &PerfScene,
+    block: usize,
+    frames: usize,
+    reps: usize,
+    mut run_timed: impl FnMut(&mut (dyn FnMut() + Send)),
+) -> Result<Measurement, String> {
     assert!(
         block > 0 && frames.is_multiple_of(block),
         "{frames} frames is not a whole number of {block}-frame blocks"
@@ -138,15 +157,22 @@ pub fn measure(
         let timed = rep > 0;
         let mut hash = Fnv::new();
         let mut total = 0u64;
-        for _ in 0..blocks {
-            let t = Instant::now();
-            processor.process(&mut buf, 2);
-            let ns = u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            total += ns;
-            if timed {
-                block_ns.push(ns);
+        let mut render = || {
+            for _ in 0..blocks {
+                let t = Instant::now();
+                processor.process(&mut buf, 2);
+                let ns = u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                total += ns;
+                if timed {
+                    block_ns.push(ns);
+                }
+                hash.write(&buf);
             }
-            hash.write(&buf);
+        };
+        if timed {
+            run_timed(&mut render);
+        } else {
+            render();
         }
         // Frees whatever the processor handed back; nothing is expected while it plays.
         controller.check_health();
@@ -192,7 +218,20 @@ pub struct Summary {
     pub p99_ns: u64,
     pub p999_ns: u64,
     pub max_ns: u64,
+    pub preemption_count: usize,
     pub hash: u64,
+}
+
+pub const B2_TARGET_PCT: f64 = 50.0;
+
+impl Summary {
+    pub fn deadline_pct(&self, ns: u64) -> f64 {
+        ns as f64 / self.deadline_ns * 100.0
+    }
+
+    pub fn under_b2_target(&self) -> Option<bool> {
+        (self.block == 128).then(|| self.deadline_pct(self.max_ns) < B2_TARGET_PCT)
+    }
 }
 
 impl Measurement {
@@ -201,16 +240,22 @@ impl Measurement {
         times.sort_unstable();
         let mut speed = self.speed.clone();
         speed.sort_by(f64::total_cmp);
+        let p50_ns = percentile(&times, 0.5);
+        // Count blocks strictly above 10× p50 so a cluster of slow blocks won't raise a tail cutoff.
+        let preemption_cutoff_ns = p50_ns.saturating_mul(10);
+        let preemption_count =
+            times.len() - times.partition_point(|&ns| ns <= preemption_cutoff_ns);
         Summary {
             scene: self.scene,
             block: self.block,
             deadline_ns: self.block as f64 / f64::from(SAMPLE_RATE) * 1e9,
             speed_median: median(&speed),
             speed_worst: speed.first().copied().unwrap_or(0.0),
-            p50_ns: percentile(&times, 0.5),
+            p50_ns,
             p99_ns: percentile(&times, 0.99),
             p999_ns: percentile(&times, 0.999),
             max_ns: times.last().copied().unwrap_or(0),
+            preemption_count,
             hash: self.hash,
         }
     }

@@ -13,6 +13,9 @@ pub const SPEC: [(f32, f32, f32); 6] = [
     (0.0, 1.0, 0.0),
     (0.0, 1.0, 1.0),
 ];
+
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 6] = ["bits", "period", "filter", "jitter", "dither", "mix"];
 pub const PRESETS: [&str; 3] = ["Clean Steps", "Filtered Dust", "Loose Grain"];
 pub fn preset(name: &str) -> Option<Vec<(u32, f32)>> {
     let values = match name {
