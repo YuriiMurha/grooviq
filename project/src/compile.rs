@@ -1,6 +1,7 @@
 //! From a project to what the engine plays: instrument parameter lists, a pattern with swing
 //! applied, and the whole [`EngineState`].
 
+use crate::mixer::MixerError;
 use crate::model::{
     BPM, Channel, DEFAULT_STEPS, DEFAULT_VELOCITY, MAX_STEPS, Pattern, Project, TimeSignature,
     VOLUME,
@@ -84,8 +85,15 @@ pub fn compile_pattern(project: &Project, pattern: &Pattern) -> PatternData {
 /// decoded sample by channel id; a sampler without one stays silent, and a synth channel never
 /// takes one. Values are clamped so the engine never refuses the state, even for a project
 /// nobody validated.
-pub fn engine_state(project: &Project, samples: &HashMap<u32, Arc<SampleBuf>>) -> EngineState {
-    let channels = compile_channels(project, samples);
+///
+/// Refuses a mixer the engine does not play yet (see
+/// [`crate::mixer::require_runtime_support`]) instead of rendering it dry.
+pub fn engine_state(
+    project: &Project,
+    samples: &HashMap<u32, Arc<SampleBuf>>,
+) -> Result<EngineState, MixerError> {
+    crate::mixer::require_runtime_support(project)?;
+    let channels = channel_setups(project, samples);
 
     let pattern = project
         .patterns
@@ -100,17 +108,27 @@ pub fn engine_state(project: &Project, samples: &HashMap<u32, Arc<SampleBuf>>) -
             |p| compile_pattern(project, p),
         );
 
-    EngineState {
+    Ok(EngineState {
         bpm: finite_or(project.bpm, BPM.2).clamp(BPM.0, BPM.1),
         channels,
         pattern,
         time_signature: time_signature(project),
         ..EngineState::default()
-    }
+    })
 }
 
-/// Channel-only adapter; deliberately does not compile or call the song adapter.
+/// Channel-only adapter; deliberately does not compile or call the song adapter. Refuses like
+/// [`engine_state`].
 pub fn compile_channels(
+    project: &Project,
+    samples: &HashMap<u32, Arc<SampleBuf>>,
+) -> Result<Vec<ChannelSetup>, MixerError> {
+    crate::mixer::require_runtime_support(project)?;
+    Ok(channel_setups(project, samples))
+}
+
+/// [`compile_channels`] for callers that already ran the mixer guard.
+pub(crate) fn channel_setups(
     project: &Project,
     samples: &HashMap<u32, Arc<SampleBuf>>,
 ) -> Vec<ChannelSetup> {

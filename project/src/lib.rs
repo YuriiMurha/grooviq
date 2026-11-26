@@ -22,6 +22,7 @@ pub mod backup;
 pub mod compile;
 pub mod compile_song;
 pub mod file;
+pub mod mixer;
 pub mod model;
 pub mod notes;
 mod outline;

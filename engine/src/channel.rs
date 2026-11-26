@@ -136,6 +136,8 @@ impl ChannelNode {
         };
         let mut meter = crate::SynthMeter {
             instance: self.instance,
+            frames: 0, // Stamped by the processor at capture.
+            motion: std::array::from_fn(|i| synth.meter(7 + i as u32)),
             levels: std::array::from_fn(|i| synth.meter(i as u32)),
             scope: [0.0; crate::SYNTH_SCOPE_LEN],
         };

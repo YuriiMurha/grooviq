@@ -18,10 +18,16 @@ pub(crate) struct ExitState {
 
 impl ExitState {
     /// Whether a window close or a quit must wait for the person: there are unsaved changes,
-    /// and they have not chosen (through `app_exit`) to quit anyway.
-    pub(crate) fn hold(&self, session: &Mutex<Session>) -> bool {
-        !self.confirmed.load(Ordering::Acquire) && lock(session).needs_confirmation()
+    /// and neither an explicit forced shutdown nor `app_exit` overrides the prompt.
+    pub(crate) fn hold(&self, session: &Mutex<Session>, forced: bool) -> bool {
+        should_hold(forced, self.confirmed.load(Ordering::Acquire), || {
+            lock(session).needs_confirmation()
+        })
     }
+}
+
+fn should_hold(forced: bool, confirmed: bool, needs_confirmation: impl FnOnce() -> bool) -> bool {
+    !forced && !confirmed && needs_confirmation()
 }
 
 /// Removes the autosave and the lock: the next launch offers nothing. Once only; later calls
@@ -51,7 +57,7 @@ pub(crate) fn end_session(
     session: &Mutex<Session>,
     recovery: &Mutex<Option<RecoveryDir>>,
 ) -> io::Result<()> {
-    if !exit.hold(session) {
+    if !exit.hold(session, false) {
         return clean_exit(recovery);
     }
     let snapshot = lock(session).autosave_snapshot(Instant::now());
@@ -106,18 +112,33 @@ mod tests {
     }
 
     #[test]
+    fn quit_waits_only_for_unconfirmed_unsaved_changes() {
+        for (forced, confirmed, dirty, expected) in [
+            (false, false, false, false),
+            (false, false, true, true),
+            (false, true, true, false),
+            (true, false, true, false),
+        ] {
+            assert_eq!(should_hold(forced, confirmed, || dirty), expected);
+        }
+    }
+
+    #[test]
     fn closing_without_unsaved_changes_is_not_held() {
         let exit = ExitState::default();
-        assert!(!exit.hold(&session(false)));
+        assert!(!exit.hold(&session(false), false));
     }
 
     #[test]
     fn closing_with_unsaved_changes_waits_for_the_person() {
         let exit = ExitState::default();
         let session = session(true);
-        assert!(exit.hold(&session), "window close and quit are both held");
         assert!(
-            exit.hold(&session),
+            exit.hold(&session, false),
+            "window close and quit are both held"
+        );
+        assert!(
+            exit.hold(&session, false),
             "and stay held until the person chooses"
         );
     }
@@ -135,7 +156,7 @@ mod tests {
             .unwrap();
         confirm_exit(&exit, &recovery).unwrap();
         assert!(
-            !exit.hold(&session),
+            !exit.hold(&session, false),
             "the quit app_exit asks for goes through"
         );
         assert!(lock(&recovery).is_none());
@@ -180,12 +201,15 @@ mod tests {
         // `hold`: asked while dirty, let through when clean or once `app_exit` confirmed.
         let root = tempfile::tempdir().unwrap();
         let exit = ExitState::default();
-        assert!(!exit.hold(&session(false)), "nothing unsaved: Cmd+Q quits");
+        assert!(
+            !exit.hold(&session(false), false),
+            "nothing unsaved: Cmd+Q quits"
+        );
         let dirty = session(true);
-        assert!(exit.hold(&dirty), "unsaved: Cmd+Q asks first");
+        assert!(exit.hold(&dirty, false), "unsaved: Cmd+Q asks first");
         confirm_exit(&exit, &recovery(root.path())).unwrap();
         assert!(
-            !exit.hold(&dirty),
+            !exit.hold(&dirty, false),
             "the app.exit(0) after app_exit goes through"
         );
     }

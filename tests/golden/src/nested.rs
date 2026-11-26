@@ -115,6 +115,7 @@ pub fn nested_notes_project(samples_dir: &Path) -> (Project, SampleFiles) {
     let project = Project {
         play_mode: Default::default(),
         arrangement: Default::default(),
+        mixer: Default::default(),
         name: "Nested notes".into(),
         bpm: 120.0,
         time_signature: TimeSignature { beats: 4, unit: 4 },

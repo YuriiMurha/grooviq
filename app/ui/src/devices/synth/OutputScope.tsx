@@ -1,6 +1,9 @@
 import { useEffect, useRef } from "react";
-import { decodeSynthMeter, readSynthMeter } from "../../api/synthMeter";
+import { decodeSynthMeter, readSynthMeter, type SynthMeter } from "../../api/synthMeter";
 import { isProjectReplacing, onProjectReplacing } from "../../project/replacement";
+
+import { envelopeMeter, lfoMeter } from "./meterGeometry";
+import "./meterMotion.css";
 
 const SILENT_SCOPE = Array<number>(256).fill(0);
 const SILENT_LEVELS = Array<number>(6).fill(0);
@@ -18,7 +21,8 @@ export function OutputScope({ channel, active, generation }: { channel: number; 
     let lastClock = -1;
     let scope = SILENT_SCOPE;
     let levels = SILENT_LEVELS;
-    const clear = () => { scope = SILENT_SCOPE; levels = SILENT_LEVELS; };
+    let motion: SynthMeter["motion"] = null;
+    const clear = () => { scope = SILENT_SCOPE; levels = SILENT_LEVELS; motion = null; };
     const unsubscribe = onProjectReplacing(clear);
     const draw = (now: number) => {
       const visible = active && !document.hidden && !isProjectReplacing();
@@ -36,6 +40,7 @@ export function OutputScope({ channel, active, generation }: { channel: number; 
             instance = meter.instance;
             scope = meter.scope;
             levels = meter.levels;
+            motion = meter.motion;
             lastReply = performance.now();
           }, clear);
         }
@@ -56,11 +61,29 @@ export function OutputScope({ channel, active, generation }: { channel: number; 
       }
       canvas.current?.closest('[role="dialog"]')?.querySelectorAll<SVGEllipseElement>("[data-synth-meter]").forEach((dot) => {
         const kind = dot.dataset.synthMeter;
-        const value = kind === "amp" ? levels[4] : kind === "flt" ? levels[5] : (levels[3] + 1) / 2;
-        const top = Number(dot.dataset.meterTop);
-        const bottom = Number(dot.dataset.meterBottom);
-        dot.setAttribute("cy", String(bottom - Math.max(0, Math.min(1, value)) * (bottom - top)));
-        dot.style.visibility = levels[2] > 0 ? "visible" : "hidden";
+        const box = {
+          left: Number(dot.dataset.meterLeft), right: Number(dot.dataset.meterRight),
+          top: Number(dot.dataset.meterTop), bottom: Number(dot.dataset.meterBottom),
+        };
+        const live = levels[2] > 0 && motion !== null;
+        const point = kind === "lfo"
+          ? lfoMeter(motion?.lfoPhase ?? 0, levels[3], Number(dot.dataset.meterAmount), box, live)
+          : envelopeMeter((kind === "amp" ? motion?.ampStage : motion?.filterStage) ?? "idle", kind === "amp" ? levels[4] : levels[5], {
+            ...box, attack: Number(dot.dataset.meterAttack), decay: Number(dot.dataset.meterDecay), sustain: Number(dot.dataset.meterSustain),
+          }, live);
+        if (point) {
+          dot.setAttribute("cx", String(point.x));
+          dot.setAttribute("cy", String(point.y));
+        }
+        dot.style.visibility = point ? "visible" : "hidden";
+        const highlight = dot.parentElement?.querySelector<SVGRectElement>(`[data-synth-stage="${kind}"]`);
+        if (highlight) {
+          highlight.style.visibility = point ? "visible" : "hidden";
+          if (point && "left" in point && "width" in point) {
+            highlight.setAttribute("x", String(point.left));
+            highlight.setAttribute("width", String(point.width));
+          }
+        }
       });
       if (status.current) status.current.textContent = `${Math.round(levels[2])} ${levels[2] === 1 ? "voice" : "voices"} · Peak ${Math.max(levels[0], levels[1]).toFixed(2)}`;
       if (active) frame = requestAnimationFrame(draw);

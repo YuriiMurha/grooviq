@@ -43,6 +43,18 @@ fn presets_live_controls_and_reset_are_realtime_safe() {
                     }
                     l.copy_from_slice(&source_l);
                     r.copy_from_slice(&source_r);
+                    // Exercise hostile input under RTSan as well as the allocation guard.
+                    match n % 3 {
+                        0 => {
+                            l[0] = f32::MAX;
+                            r[0] = f32::NAN;
+                        }
+                        1 => {
+                            l[0] = f32::NEG_INFINITY;
+                            r[0] = -f32::MAX;
+                        }
+                        _ => {}
+                    }
                     device.process(&mut l[..block], &mut r[..block], None, &[]);
                     for &sample in l[..block].iter().chain(&r[..block]) {
                         finite &= sample.is_finite();

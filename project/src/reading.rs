@@ -85,6 +85,8 @@ struct Context {
     channels: HashSet<u32>,
     drops: Vec<NoteDrops>,
     automation_points: usize,
+    /// Whether a `mixer` was read (version 4 on).
+    mixer: bool,
 }
 
 thread_local! {
@@ -98,6 +100,16 @@ pub(crate) fn with_context<T>(
     channels: HashSet<u32>,
     read: impl FnOnce() -> T,
 ) -> (T, Vec<NoteDrops>) {
+    let (out, drops, _) = with_context_mixer(version, channels, read);
+    (out, drops)
+}
+
+/// [`with_context`], also telling whether the document had a `mixer` the read took.
+pub(crate) fn with_context_mixer<T>(
+    version: u32,
+    channels: HashSet<u32>,
+    read: impl FnOnce() -> T,
+) -> (T, Vec<NoteDrops>, bool) {
     /// Clears the context however `read` ends, a panic included.
     struct Clear;
     impl Drop for Clear {
@@ -111,22 +123,40 @@ pub(crate) fn with_context<T>(
             channels,
             drops: Vec::new(),
             automation_points: 0,
+            mixer: false,
         });
     });
     let _clear = Clear;
     let out = read();
-    let drops = CONTEXT.with(|c| {
+    let (drops, mixer) = CONTEXT.with(|c| {
         c.borrow_mut()
             .as_mut()
-            .map(|c| std::mem::take(&mut c.drops))
+            .map(|c| (std::mem::take(&mut c.drops), c.mixer))
             .unwrap_or_default()
     });
-    (out, drops)
+    (out, drops, mixer)
 }
 
 /// Whether the file being read is version 1, whose migration supplies the field.
 pub(crate) fn supplied_by_migration() -> bool {
     CONTEXT.with(|c| c.borrow().as_ref().is_some_and(|c| c.version == 1))
+}
+
+/// The project's `mixer`. Before version 4 it was an unknown field, so whatever it holds is
+/// skipped unread (as an unknown field always was) and the legacy identity stands. Kept apart
+/// from [`supplied_by_migration`], which is version 1 only.
+pub(crate) fn mixer<'de, D: Deserializer<'de>>(d: D) -> Result<crate::mixer::Mixer, D::Error> {
+    let version = CONTEXT.with(|c| c.borrow().as_ref().map(|c| c.version));
+    if version.is_some_and(|v| v < 4) {
+        return crate::mixer::skip(d);
+    }
+    let mixer = crate::mixer::Mixer::deserialize(d)?;
+    CONTEXT.with(|c| {
+        if let Some(c) = c.borrow_mut().as_mut() {
+            c.mixer = true;
+        }
+    });
+    Ok(mixer)
 }
 
 /// `Some(known)` while a file is read, `None` otherwise.

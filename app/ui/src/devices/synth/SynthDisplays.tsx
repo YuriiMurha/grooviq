@@ -118,11 +118,15 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, group }: Fi
               [1000, "1k"],
               [10000, "10k"],
             ] as const
-          ).map(([f, s]) => (
-            <text key={f} className="dw-axis" x={fx(f) + 3} y={h - 4}>
-              {s}
-            </text>
-          ))}
+          ).map(([f, s]) => {
+            // Set the last tick inside its grid line at every graph width and font size.
+            const last = f === 10000;
+            return (
+              <text key={f} className={last ? "dw-axis end" : "dw-axis"} x={fx(f) + (last ? -3 : 3)} y={h - 4}>
+                {s}
+              </text>
+            );
+          })}
           <text className="dw-axis end" x={w - 4} y={y0 - 3}>
             0 dB
           </text>
@@ -175,7 +179,7 @@ export function LfoDisplay({ shape, rate, amountParam, amount, control }: LfoPro
         <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} role="img" aria-label="LFO">
           <line className="dw-grid" x1={0} x2={w} y1={Math.round(mid) + 0.5} y2={Math.round(mid) + 0.5} />
           <path className="dw-line" d={path(pts)} style={{ opacity: amount > 0.001 ? 1 : 0.4 }} />
-          <ellipse className="dw-node" data-synth-meter="lfo" data-meter-top={pad} data-meter-bottom={h - pad} cx={w - 8} cy={mid} rx={3} ry={3} style={{ visibility: "hidden" }} />
+          <ellipse className="dw-node" data-synth-meter="lfo" data-meter-left={pad} data-meter-right={w - pad} data-meter-amount={amount} data-meter-top={pad} data-meter-bottom={h - pad} cx={w - 8} cy={mid} rx={3} ry={3} style={{ visibility: "hidden" }} />
           <text className="dw-axis end" x={w - 5} y={h - 5}>
             {`${rate < 10 ? rate.toFixed(2) : rate.toFixed(1)} Hz`}
           </text>

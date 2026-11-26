@@ -50,15 +50,17 @@ Read the code; it is the documentation. `make help` lists the supported commands
 - Commit through the hook (`make hooks` enables it). Never `--no-verify`.
 - End every commit message with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - `Closes #N` only for the complete result; `Refs #N` otherwise.
-- Squash-merge after the three required checks pass:
-  `rust (macos-latest)`, `rust (windows-latest)`, `ui`.
+- Enrol a PR by adding the `merge-train` label once it has an approving cross-family review and the
+  three required checks (`rust (macos-latest)`, `rust (windows-latest)`, `ui`) pass on its head.
+  Send Quality the full approved head SHA.
+- Only Quality's merge train merges to main. Never merge, use `--admin`, arm GitHub auto-merge,
+  or update an enrolled branch yourself.
 
-CI quirks:
-
-- `rust (macos-latest)` is sometimes cancelled at about 15 minutes with zero steps (no runner).
-  Re-run it with `gh run rerun <run-id> --failed`.
-- Branch protection is strict. After another merge, run `gh pr update-branch <n>`.
-- Auto-merge sometimes stalls at CLEAN. Then merge with `gh pr merge <n> --squash`.
+CI quirk: `rerun-no-runner.yml` automatically re-runs `rust (macos-latest)` once on the current head after a
+zero-step runner acquisition cancellation. If it is still cancelled with zero steps after that workflow ran
+(no attempt 2, or attempt 2 cancelled the same way) and the run's commit is still the head of your own
+unenrolled PR, run `gh run rerun <run-id> --failed`; the train handles enrolled PRs. A stale commit needs
+no rerun: the new head has its own run.
 
 ## Verify
 

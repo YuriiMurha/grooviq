@@ -30,6 +30,8 @@ it("represents loaded audio and automation read-only without hiding their extent
   expect(clips.map(c => [c.id, c.kind, c.lengthTicks])).toEqual([[10, "pattern", 1920], [11, "audio", 1920], [12, "automation", 960]]);
   expect(clips.every(c => c.trackIndex === 0 && c.ink === 2)).toBe(true);
   expect(projectClips(page, 60)[1].lengthTicks).toBe(960);
+  // The native project stores 120.000001 as f32 120: f64-only maths adds a tick.
+  expect(projectClips(page, 120.000001)[1].lengthTicks).toBe(1920);
   const v = viewport(800, 200, 0, 0, 192, 3840);
   expect(extent(clips, 1, v, 3840)).toEqual({ width: 3216, height: 200 });
   expect(page.clips[0].content).toEqual({ type: "pattern", pattern: 1, offsetTick: 480, lengthTicks: 1920 });

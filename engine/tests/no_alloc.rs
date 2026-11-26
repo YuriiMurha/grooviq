@@ -31,8 +31,12 @@ mod algorithmic_reverb;
 mod bitcrusher;
 #[path = "realtime/character_delay.rs"]
 mod character_delay;
+#[path = "realtime/delay.rs"]
+mod delay;
 #[path = "realtime/fattener.rs"]
 mod fattener;
+#[path = "realtime/mixer_live.rs"]
+mod mixer_live;
 #[path = "realtime/mixer_runtime.rs"]
 mod mixer_runtime;
 #[path = "realtime/saturation.rs"]
@@ -108,6 +112,45 @@ fn realtime<T>(f: impl FnOnce() -> T) -> T {
         rtsan_standalone::realtime_exit();
         out
     })
+}
+
+#[cfg(feature = "profiling")]
+#[test]
+fn profiling_first_callback_is_realtime_safe() {
+    const PRODUCERS: usize = 32;
+    let client = tracy_client::Client::start();
+    let (controller, mut processor) = engine(EngineConfig { sample_rate: SR });
+    processor.enable_profiling().unwrap();
+    let rendezvous = std::sync::Barrier::new(PRODUCERS + 1);
+    thread::scope(|scope| {
+        for _ in 0..PRODUCERS {
+            scope.spawn(|| {
+                client.plot(tracy_client::plot_name!("Test producer"), 1.0);
+                rendezvous.wait();
+                rendezvous.wait();
+            });
+        }
+        // Keep every producer alive so a direct callback call cannot recycle one of their
+        // already allocated producers and hide the first-use mapping from RealtimeSanitizer.
+        rendezvous.wait();
+        let result = scope
+            .spawn(move || {
+                let mut output = [0.0; 4 * grooviq_engine::BLOCK * 2];
+                realtime(|| processor.process(&mut output, 2));
+                processor.with_stalled_profiling_for_test(6, |processor| {
+                    // The first callback fits exactly. The second has to take the drop path.
+                    realtime(|| processor.process(&mut output, 2));
+                    realtime(|| processor.process(&mut output, 2));
+                });
+            })
+            .join();
+        rendezvous.wait();
+        result.unwrap();
+    });
+    assert_eq!(
+        controller.live().frames,
+        3 * 4 * grooviq_engine::BLOCK as u64
+    );
 }
 
 /// One fake output that keeps the slot it is opened with.

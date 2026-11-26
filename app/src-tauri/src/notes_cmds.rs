@@ -284,6 +284,27 @@ mod tests {
     use grooviq_engine::{EngineConfig, engine};
 
     #[test]
+    fn synth_meter_wire_uses_capture_frame_and_appends_motion() {
+        assert_eq!(encode_synth_meter(7, 9000, None), vec![7.0, 9000.0]);
+        let encoded = encode_synth_meter(
+            7,
+            9000,
+            Some(grooviq_engine::SynthMeter {
+                instance: 7,
+                frames: 1024,
+                levels: [0.25; 6],
+                scope: [0.5; 256],
+                motion: [1.0, 4.0, 0.75],
+            }),
+        );
+        assert_eq!(encoded.len(), 267);
+        assert_eq!(&encoded[..2], &[7.0, 1024.0]);
+        assert_eq!(&encoded[2..8], &[0.25; 6]);
+        assert_eq!(&encoded[8..264], &[0.5; 256]);
+        assert_eq!(&encoded[264..], &[1.0, 4.0, 0.75]);
+    }
+
+    #[test]
     fn notes_are_encoded_without_the_session_lock() {
         let (controller, _processor) = engine(EngineConfig {
             sample_rate: 48_000.0,
@@ -321,16 +342,30 @@ pub async fn synth_meter(
     }
     let live = controller.live_shared();
     let meter = live.synth_meter(current);
+    Ok(Some(encode_synth_meter(
+        current,
+        controller.live().frames,
+        meter,
+    )))
+}
+
+fn encode_synth_meter(
+    current: u64,
+    pending_frames: u64,
+    meter: Option<grooviq_engine::SynthMeter>,
+) -> Vec<f64> {
     // Identity is returned even before the audio thread has answered the first request.
-    let mut result = vec![current as f64, controller.live().frames as f64];
+    let mut result = vec![current as f64, pending_frames as f64];
     if let Some(meter) = meter {
+        result[1] = meter.frames as f64;
         result.extend(
             meter
                 .levels
                 .iter()
                 .chain(meter.scope.iter())
+                .chain(meter.motion.iter())
                 .map(|v| f64::from(*v)),
         );
     }
-    Ok(Some(result))
+    result
 }

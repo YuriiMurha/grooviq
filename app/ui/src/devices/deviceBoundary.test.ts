@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "vitest";
+import { afterAll, beforeAll, expect, test } from "vitest";
 import { ESLint } from "eslint";
 import ts from "typescript";
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync, symlinkSync, unlinkSync, rmdirSync } from "node:fs";
@@ -12,6 +12,12 @@ const context = path.join(root, "src/project/context.ts");
 const relay = path.join(temp, "relay.ts");
 writeFileSync(relay, `export { useProject } from ${JSON.stringify(context)};`);
 const eslint = new ESLint({ cwd: root });
+
+beforeAll(async () => {
+  const [result] = await eslint.lintText("export {};", { filePath: "src/devices/BoundaryProbe.ts" });
+  expect(result?.messages).toEqual([]);
+});
+
 for (const [name, code] of Object.entries({
   direct: 'import { useProject } from "../project/context";',
   extension: 'import { useProject } from "../project/context.ts";',
@@ -215,7 +221,9 @@ test.each(["file:///uninspectable/relay.js", "#conditional-entry", "/src/unresol
   expect(result.messages.some((m) => m.ruleId === "device-boundary/guarded-edits")).toBe(true);
 });
 
-test("raw apply cannot be assigned or passed as a guarded send prop", () => {
+let capability: { program: ts.Program; probe: ts.SourceFile };
+
+beforeAll(() => {
   const file = path.join(temp, "capability.ts");
   writeFileSync(file, `import type { GuardedEdit } from ${JSON.stringify(path.join(root, "src/devices/paramSink.ts"))};
 import type { ProjectContextValue } from ${JSON.stringify(context)};
@@ -224,8 +232,25 @@ const assigned: GuardedEdit = raw;
 declare function editor(props: Pick<ReturnType<typeof import(${JSON.stringify(path.join(root, "src/devices/useDeviceParams.ts"))}).useDeviceParams>, 'send'>): void;
 editor({ send: raw });
 void assigned;`);
-  const program = ts.createProgram([file], { strict: true, noEmit: true, skipLibCheck: true, jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler, allowImportingTsExtensions: true, target: ts.ScriptTarget.ES2022 });
-  const diagnostics = ts.getPreEmitDiagnostics(program).filter((d) => d.file?.fileName === file);
+  const program = ts.createProgram([file], {
+    strict: true,
+    noEmit: true,
+    skipLibCheck: true,
+    jsx: ts.JsxEmit.ReactJSX,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    allowImportingTsExtensions: true,
+    target: ts.ScriptTarget.ES2022,
+  });
+  const probe = program.getSourceFile(file);
+  if (!probe) throw new Error(`Missing TypeScript probe: ${file}`);
+  program.getTypeChecker();
+  capability = { program, probe };
+});
+
+test("raw apply cannot be assigned or passed as a guarded send prop", () => {
+  const { program, probe } = capability;
+  const diagnostics = [...program.getSyntacticDiagnostics(probe), ...program.getSemanticDiagnostics(probe)];
   expect(diagnostics.map((d) => d.code)).toEqual([2322, 2322]);
 });
 

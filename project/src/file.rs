@@ -415,6 +415,8 @@ fn stage_save_with_limits(
     limits: Limits,
     disk: &mut impl Disk,
 ) -> io::Result<Staged> {
+    // Unsupported routing refuses before even the legacy stale-save cleanup runs.
+    crate::mixer::require_runtime_support(project).map_err(|e| too_big(e.to_string()))?;
     // Temp files of saves that died (and only those: see `leftover`); best effort.
     let _ = grooviq_engine::remove_stale_owned(path, ".tmp");
     // Everything that can be refused is refused before the first byte is written.
@@ -446,6 +448,11 @@ fn plan_with_missing(
     limits: Limits,
     allow_missing: bool,
 ) -> io::Result<(Project, Vec<Entry>)> {
+    // Nothing writes a mixer the runtime does not play yet (#477, #506), nor an invalid one.
+    crate::mixer::require_runtime_support(project).map_err(|e| too_big(e.to_string()))?;
+    project
+        .validate_mixer()
+        .map_err(|e| too_big(e.to_string()))?;
     if let Some(p) = project
         .patterns
         .iter()
@@ -755,12 +762,15 @@ fn load_inner(
         return Err(LoadError::NotAProject);
     }
     let version = checked_version(outline.version)?;
-    let (project, drops) = reading::with_context(version, outline.channels, || {
+    let (project, drops, mixer) = reading::with_context_mixer(version, outline.channels, || {
         serde_json::from_reader::<_, reading::Named<Project>>(project_json(&mut zip, limits.json)?)
             .map(|named| named.0)
             .map_err(does_not_fit)
     });
     let mut project = project?;
+    if version >= 4 && !mixer {
+        return Err(LoadError::Corrupt(format!("{PROJECT_JSON} has no mixer")));
+    }
     migrate(&mut project, version)?;
 
     // What each pattern lost while it was read, by pattern. The typed pass read the `notes` of
@@ -784,6 +794,10 @@ fn load_inner(
         .ok_or_else(|| LoadError::Corrupt(format!("{PROJECT_JSON} reads differently twice")))?;
     let mut warnings = project.validate_read(&read);
     project.validate_arrangement().map_err(LoadError::Corrupt)?;
+    // Strict, and after the legacy channel repairs: sources name the channels that are kept.
+    project
+        .validate_mixer()
+        .map_err(|e| LoadError::Corrupt(e.to_string()))?;
     let mut samples = SampleFiles::new();
     let mut entries: HashMap<String, EntryRead> = HashMap::new();
     // Channels whose embedded sample is too big: their entry name stays.
@@ -920,6 +934,8 @@ fn checked_version(version: Option<u64>) -> Result<u32, LoadError> {
 ///
 /// * 1 → 2: every channel is a sampler, and each pattern's notes get the ids `1..=n` in stored
 ///   order, with `next_note_id` n + 1.
+/// * 2 → 3: Pattern play mode and an empty arrangement.
+/// * 3 → 4: the legacy direct mixer, which plays exactly as before.
 ///
 /// A version above [`VERSION`] is [`LoadError::NewerVersion`], 0 is [`LoadError::Corrupt`].
 pub fn migrate(project: &mut Project, version: u32) -> Result<(), LoadError> {
@@ -927,6 +943,9 @@ pub fn migrate(project: &mut Project, version: u32) -> Result<(), LoadError> {
     if version < 3 {
         project.play_mode = crate::PlayMode::Pattern;
         project.arrangement = crate::Arrangement::default();
+    }
+    if version < 4 {
+        project.mixer = crate::mixer::Mixer::default();
     }
     if version == 1 {
         for channel in &mut project.channels {
@@ -1737,6 +1756,37 @@ mod tests {
         assert!(!dead_path.exists(), "dead and old: removed");
         assert!(live.path.exists(), "a live writer's file was removed");
         assert!(young_path.exists(), "young: kept");
+    }
+
+    #[test]
+    fn an_unsupported_mixer_refusal_does_not_clean_a_dead_save_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.grooviq");
+        let (mut project, samples) = with_sizes(&[6]);
+        project.mixer.mode = crate::mixer::Mode::Routed;
+        project.mixer.tracks[0].level = crate::mixer::Level::Silence;
+        project.validate_mixer().unwrap();
+
+        let dead = grooviq_engine::create_owned_temp(&path, ".tmp").unwrap();
+        age(&dead.path, 11 * 60);
+        let dead_path = dead.path.clone();
+        drop(dead.file);
+
+        save(&project, &samples, &path).unwrap_err();
+        assert!(
+            dead_path.exists(),
+            "unsupported routing must refuse before cleanup"
+        );
+        assert!(
+            !path.exists(),
+            "unsupported routing must not create a project file"
+        );
+
+        // Supported legacy saves still perform their existing stale-temp cleanup.
+        project.mixer = crate::mixer::Mixer::default();
+        save(&project, &samples, &path).unwrap();
+        assert!(!dead_path.exists());
+        assert!(path.exists());
     }
 
     #[test]
