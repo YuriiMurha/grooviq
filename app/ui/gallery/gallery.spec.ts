@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { test as base, expect, type Browser, type Locator, type Page, type TestInfo } from "@playwright/test";
+import { parseColor } from "../src/rack/palette";
+import { themeTokenProblems } from "../src/theme/contract";
+import { DEFAULT_THEME, type ThemeId } from "../src/theme/preference";
 import { captureContext } from "./captureContext";
 import { references } from "./contract";
 import { referencePolicy } from "./catalog";
 
-const test = base.extend<{ galleryErrors: string[] }>({
+const test = base.extend<{ themeId: ThemeId; galleryErrors: string[] }>({
+  themeId: [DEFAULT_THEME, { option: true }],
   galleryErrors: [async ({ page }, runTest) => {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -18,15 +22,61 @@ const test = base.extend<{ galleryErrors: string[] }>({
 });
 const source = captureContext();
 
-test.beforeEach(async ({ page }) => {
+async function readResolvedTheme(page: Page) {
+  return page.locator("html").evaluate((root) => {
+    const style = getComputedStyle(root);
+    const names = Array.from(style).filter((name) => name.startsWith("--")).sort();
+    return {
+      id: root.getAttribute("data-theme"),
+      tokens: Object.fromEntries(names.map((name) => [name, style.getPropertyValue(name).trim()])),
+    };
+  });
+}
+
+test.beforeEach(async ({ page, themeId }) => {
   await page.goto("/");
+  await page.getByRole("combobox", { name: "Theme", exact: true }).selectOption(themeId);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", themeId);
   await page.evaluate(() => document.fonts.ready);
   await expect(page.locator(".gallery-reference")).toHaveCount(references.length);
   expect(await page.evaluate(() => document.fonts.check("13px 'Manrope Variable'"))).toBe(true);
+  const { tokens } = await readResolvedTheme(page);
+  expect(themeTokenProblems((name) => tokens[name] ?? ""), `${themeId} resolves the theme contract`).toEqual([]);
 });
 
 test.afterEach(async ({ galleryErrors }, info) => {
   await info.attach("gallery-errors", { body: JSON.stringify(galleryErrors), contentType: "application/json" });
+});
+
+test("active theme resolves and paints the Record ink", async ({ page, themeId }, info) => {
+  const { tokens } = await readResolvedTheme(page);
+  if (themeId !== DEFAULT_THEME) {
+    await page.getByRole("combobox", { name: "Theme", exact: true }).selectOption(DEFAULT_THEME);
+    const fallback = await readResolvedTheme(page);
+    expect(tokens, `${themeId} changes the resolved tokens from Riso fallback`).not.toEqual(fallback.tokens);
+    await page.getByRole("combobox", { name: "Theme", exact: true }).selectOption(themeId);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", themeId);
+  }
+
+  const ink = parseColor(tokens["--rec"]);
+  if (!ink) throw new Error(`${themeId} has no readable Record ink`);
+  const expected = ink.map((channel) => Math.round(channel * 255));
+  const dot = page.getByRole("button", { name: "Record", exact: true }).locator("svg");
+  const png = await dot.screenshot({ animations: "disabled", scale: "css" });
+  const actual = await page.evaluate(async (data) => {
+    const image = new Image();
+    image.src = `data:image/png;base64,${data}`;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Record ink needs a 2D pixel reader");
+    context.drawImage(image, 0, 0);
+    return [...context.getImageData(Math.floor(image.width / 2), Math.floor(image.height / 2), 1, 1).data];
+  }, png.toString("base64"));
+  await info.attach("record-ink", { body: JSON.stringify({ themeId, expected, actual }), contentType: "application/json" });
+  expect(actual, `${themeId} Record dot matches --rec`).toEqual(expected);
 });
 
 async function tabTo(page: Page, target: Locator) {
@@ -72,21 +122,24 @@ async function capture(page: Page, browser: Browser, info: TestInfo,
   if (state === "hover") expect(context.hovered).toBe(true);
   expect(context.cssViewport).toEqual(page.viewportSize());
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const { id: themeId, tokens } = await readResolvedTheme(page);
+  const resolvedTokensSha256 = createHash("sha256").update(JSON.stringify(tokens)).digest("hex");
   const png = await frame.screenshot({ animations: "disabled", scale: "css" });
   const name = `${reference.id}.${state}`;
   const capturePhase = process.env.GROOVIQ_GALLERY_CASE_PHASE ?? "candidate";
   const path = info.outputPath(`${name}.png`);
   writeFileSync(path, png, { flag: "wx" });
   const manifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     captureId: `${capturePhase}.${info.project.name}.${reference.id}.${state}.${context.cssViewport.width}x${context.cssViewport.height}`,
     capturePhase,
     semanticId: reference.id, semanticFamily: reference.family, sourceComponent: reference.source, state,
     approvedPixelReference: referencePolicy.approvedPixelReference,
     variant: reference.id === "device.parameter.field" ? "field" : reference.id === "device.parameter.knob" ? "knob" : "default",
     support: "actual imported component", source,
+    theme: { id: themeId, resolvedTokensSha256 },
     errorsObservedBeforeCapture: [...errors], completeCaseErrorAttachment: "gallery-errors",
-    browser: { project: info.project.name, version: browser.version() }, ...context, cropBounds,
+    browser: { project: info.project.name, engine: browser.browserType().name(), version: browser.version() }, ...context, cropBounds,
     viewportState: context.cssViewport.width === 900 ? "compact" : "desktop",
     renderer: "existing DOM/SVG controls; no canvas, native engine or audio fixture",
     png: { path, bytes: png.length, sha256: createHash("sha256").update(png).digest("hex"),

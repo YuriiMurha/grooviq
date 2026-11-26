@@ -1,5 +1,6 @@
 import { defineConfig } from "@playwright/test";
 import { fileURLToPath } from "node:url";
+import { themes, type ThemeId } from "../src/theme/preference";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const baseURL = process.env.GROOVIQ_GALLERY_URL;
@@ -11,16 +12,15 @@ if (!baseURL || !/^http:\/\/127\.0\.0\.1:\d+\/?$/.test(baseURL)) {
 if (process.argv.some((arg) => arg === "-u" || arg.startsWith("--update-snapshots"))) {
   throw new Error("Gallery baseline updates require separate reference approval");
 }
-export default defineConfig({
+export default defineConfig<{ themeId: ThemeId }>({
   testDir: root, testMatch: "gallery.spec.ts", workers: 1, fullyParallel: false,
   retries: 0, timeout: 30_000, updateSnapshots: "none",
   outputDir: `${root}/.runtime/results`,
   snapshotPathTemplate: `${root}/approved/{projectName}/{arg}{ext}`,
   reporter: [["list"], ["json", { outputFile: `${root}/.runtime/report.json` }]],
   use: { baseURL, viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1, reducedMotion: "reduce" },
-  projects: [
-    { name: "chromium", use: { browserName: "chromium" } },
-    { name: "webkit", use: { browserName: "webkit" } },
-  ],
+  projects: (["chromium", "webkit"] as const).flatMap((browserName) => themes.map(({ id }) => ({
+    name: `${browserName}-${id}`, use: { browserName, themeId: id },
+  }))),
   webServer: [],
 });

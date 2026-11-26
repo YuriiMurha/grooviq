@@ -6,7 +6,7 @@ import { expect, test, type Mock } from "./fixture";
 
 const openPopover = async (page: Page) => {
   await page.getByRole("button", { name: /Silent \(QA mode\)/ }).click();
-  await expect(page.getByRole("dialog", { name: "Audio output" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
 };
 const keyboard = (page: Page, name: string) => page.getByRole("switch", { name });
 const disabled = (mock: Mock) => mock.eval<string[]>("(m) => m.midiDisabled()");
@@ -36,7 +36,7 @@ test.describe("MIDI keyboards", () => {
     // The choice is the shell's: closing and reopening the popover shows it again, and an
     // unplugged keyboard that was switched off comes back off.
     await app.keyboard.press("Escape");
-    await expect(app.getByRole("dialog", { name: "Audio output" })).toHaveCount(0);
+    await expect(app.getByRole("dialog", { name: "Settings" })).toHaveCount(0);
     await app.evaluate("window.__grooviqMock.midiPlug('KeyStep 37')");
     await openPopover(app);
     await expect(keyboard(app, "KeyStep 37")).not.toBeChecked();
