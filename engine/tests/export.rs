@@ -950,3 +950,127 @@ fn the_real_adapter_reports_a_sync_the_os_refuses() {
     let result = grooviq_engine::RealFiles.sync(&file, &dir.path().join("mix.wav.part"));
     assert!(result.is_err(), "the real adapter did not sync");
 }
+
+fn routed_export_fixture(kind: &str) -> EngineState {
+    use grooviq_engine::mixer::*;
+    let insert = InsertId(1);
+    EngineState {
+        pattern: PatternData {
+            length: STEP_TICKS,
+            notes: vec![],
+        },
+        mix: MixSetup::Routed(RoutedMix {
+            mixer: Mixer {
+                tracks: vec![Track {
+                    id: MASTER,
+                    output: None,
+                    inserts: vec![Insert {
+                        id: insert,
+                        latency_frames: 0,
+                        memory_bytes: 0,
+                    }],
+                }],
+                ..Default::default()
+            },
+            devices: vec![InsertDevice {
+                insert,
+                kind: kind.into(),
+                seed: 123,
+                params: Vec::new(),
+            }],
+            gains: Vec::new(),
+        }),
+        ..EngineState::default()
+    }
+}
+
+#[test]
+fn unsupported_insert_rate_refuses_before_export_touches_files_or_reports_progress() {
+    use std::fs::{self, File, FileTimes};
+    use std::time::{Duration, SystemTime};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("export.wav");
+    let stale = dir
+        .path()
+        .join(".export.wav.grooviq-1-1234567890abcdef.part");
+    fs::write(&path, b"old export").unwrap();
+    fs::write(&stale, b"old partial").unwrap();
+    File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(1200)))
+        .unwrap();
+    let list = || {
+        let mut names = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    let before = list();
+    for sample_rate in [8_000, 384_000] {
+        let options = ExportOptions {
+            sample_rate,
+            max_tail_seconds: 0.0,
+            ..Default::default()
+        };
+        let mut progress = Vec::new();
+        let error = export_wav(
+            routed_export_fixture("bitcrusher"),
+            &options,
+            &path,
+            &mut |p| progress.push(p),
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert!(matches!(&error, ExportError::InsertRate(_)), "{error}");
+        assert!(error.to_string().contains("bitcrusher"), "{error}");
+        assert!(progress.is_empty());
+        assert_eq!(fs::read(&path).unwrap(), b"old export");
+        assert_eq!(fs::read(&stale).unwrap(), b"old partial");
+        assert_eq!(list(), before);
+        assert!(matches!(
+            export_wav(
+                routed_export_fixture("bitcrusher"),
+                &options,
+                &path,
+                &mut |_| panic!("cancelled export reported progress"),
+                &AtomicBool::new(true)
+            ),
+            Err(ExportError::Cancelled)
+        ));
+    }
+}
+
+#[test]
+fn exports_accept_the_inclusive_endpoints_of_each_native_rate_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("export.wav");
+    for (state, rates) in [
+        (EngineState::default(), [8_000, 384_000]),
+        (routed_export_fixture("utility"), [8_000, 384_000]),
+        (routed_export_fixture("bitcrusher"), [22_050, 192_000]),
+    ] {
+        for sample_rate in rates {
+            let options = ExportOptions {
+                sample_rate,
+                max_tail_seconds: 0.0,
+                ..Default::default()
+            };
+            export_wav(
+                state.clone(),
+                &options,
+                &path,
+                &mut |_| {},
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(
+                hound::WavReader::open(&path).unwrap().spec().sample_rate,
+                sample_rate
+            );
+        }
+    }
+}
