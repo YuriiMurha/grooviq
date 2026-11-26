@@ -357,6 +357,36 @@ for (const refused of [false, true]) test(`T9 mode transition fences new gesture
   expect((await patterns(app)).view.pattern.cells["1"][4]).not.toBeNull();
   expect(await mock.calls("transport_play")).toHaveLength(0);
 });
+test("a mode switch refuses new rack edits until the final project readback", async ({ app, mock }) => {
+  const nativeMode = app.getByRole("combobox", { name: "Playback mode", exact: true });
+  const pickerMode = app.getByRole("button", { name: /^Playback mode:/ });
+  const mode = nativeMode.or(pickerMode);
+  const before = (await mock.calls("project_edit")).length;
+  const views = (await mock.calls("project_view")).length;
+
+  await mock.eval("(m) => m.holdCommand('project_view')");
+  try {
+    if (await nativeMode.count()) {
+      await nativeMode.selectOption("song");
+    } else {
+      await pickerMode.click();
+      await app.getByRole("listbox", { name: "Playback mode", exact: true }).getByRole("option", { name: "Song", exact: true }).click();
+    }
+    await expect.poll(async () => (await mock.calls("project_view")).length).toBeGreaterThan(views);
+    expect((await arrangement(app)).playMode).toBe("song");
+    await expect(mode).toBeDisabled();
+    await clickCell(app, 0, 4);
+  } finally {
+    await mock.eval("(m) => m.releaseCommand('project_view')");
+  }
+
+  await expect(mode).toBeEnabled();
+  await clickCell(app, 0, 5);
+  await expect.poll(async () => (await patterns(app)).view.pattern.cells["1"][5]).not.toBeNull();
+  expect(await mock.calls("project_edit")).toHaveLength(before + 1);
+  expect((await patterns(app)).view.pattern.cells["1"][4]).toBeNull();
+});
+
 test("T9 reduced: dedicated/global inverses retain optional values, order and identity relations", async ({ app }) => {
   const before = await ipc<TrimState>(app, "sampler_trim_view", { channel: 2 });
   const resetReply = await reset(app); expect(resetReply.status).toBe("applied"); if (resetReply.status !== "applied") throw new Error(resetReply.message);
