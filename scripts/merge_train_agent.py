@@ -267,6 +267,9 @@ class Agent:
     def resume(self):
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         with locked(self.tick_lock):
+            stop = read_text(self.stopped)
+            if stop is not None and json.loads(stop).get("pending"):
+                raise RuntimeError("Previous tick is pending; run a tick to latch it first.")
             safe_path(self.stopped).unlink(missing_ok=True)
         return {"status": "resumed"}
 
@@ -378,7 +381,8 @@ class Agent:
         return 1
 
     def latch(self, record, output, reason, *, pending=False, scratch=None):
-        stop = {"recorded_utc": stamp(), "output": output,
+        tail = "".join(output.splitlines(keepends=True)[-200:]).encode("utf-8")[-65_536:]
+        stop = {"recorded_utc": stamp(), "output": tail.decode("utf-8", errors="ignore"),
                 "order_sha256": record.get("order_sha256"), "reason": reason, "pending": pending}
         if scratch is not None:
             stop["scratch"] = scratch
@@ -444,6 +448,8 @@ class Agent:
                 self.latch(saved, saved["output"] + stdout + stderr, reason)
                 record.update(recorded_utc=stamp(), exit_code=1, status="stopped", network_streak=0,
                               reason=reason, stdout=stdout.splitlines(), stderr=stderr.splitlines())
+                self.record_landing(record)
+                self.log_output("orphaned tick output", stdout + stderr)
             self.prune_checkouts()
             return {"status": "latched"}
         self.prune_checkouts()
@@ -549,7 +555,7 @@ class Agent:
             script = ("#!/bin/sh\n"
                       f"log={shlex.quote(str(log))}\n"
                       'if [ -L "$log" ]; then echo "Refusing symlinked launchd log." >&2; exit 1; fi\n'
-                      'size=$(/usr/bin/stat -f %z "$log" 2>/dev/null) || size=0\n'
+                      'size=$(/usr/bin/wc -c 2>/dev/null < "$log") || size=0\n'
                       f'if [ "$size" -ge {LAUNCHD_LOG_BYTES} ]; then : > "$log"; fi\n'
                       f"if [ ! -f {shlex.quote(self.python)} ] || [ ! -x {shlex.quote(self.python)} ]; then\n"
                       '  echo "Grooviq merge train needs its pinned Python 3.12+; reinstall Python and re-enable." >&2\n'

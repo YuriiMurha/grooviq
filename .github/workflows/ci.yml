@@ -163,6 +163,9 @@ jobs:
       - name: Merge train safety tests
         working-directory: .
         run: make test-merge-train
+      - name: Merge train agent safety tests
+        working-directory: .
+        run: make test-merge-train-agent
       - name: Instruction capture safety tests
         working-directory: .
         timeout-minutes: 2

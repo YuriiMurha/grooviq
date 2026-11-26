@@ -47,7 +47,7 @@ merge-train-order: ## Save Quality's approved order (ORDER="12=<approved SHA> 34
 	$(REFRESH_PYTHON) -E -s -S -B scripts/merge_train_agent.py set-order --make-order="$$ORDER" --batch="$$BATCH"
 
 test-merge-train-agent: ## Exercise the merge-train agent with fake launchd and local Git fixtures
-	$(REFRESH_PYTHON) -B -m unittest discover -s scripts -p test_merge_train_agent.py -v
+	$(REFRESH_PYTHON) -B scripts/test_merge_train_agent.py -v
 
 .PHONY: test-pre-commit
 test-pre-commit: ## Exercise staged conflict checks in disposable Git repositories
@@ -69,7 +69,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: test-instruction-profiles test-merge-train test-pre-commit test-qa-driver ci-paths-test e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles test-merge-train test-merge-train-agent test-pre-commit test-qa-driver ci-paths-test e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run

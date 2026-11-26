@@ -133,6 +133,20 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.agent.tick()["status"], "completed")
         self.assertEqual(self.agent.run_tick.call_count, 2)
 
+    def test_latch_keeps_only_the_last_two_hundred_output_lines(self):
+        self.agent.set_order(ORDER)
+        lines = [f"line {number}\n" for number in range(250)]
+        self.agent.latch({}, "".join(lines), ["fixture"])
+        self.assertEqual(json.loads(self.agent.stopped.read_text())["output"], "".join(lines[-200:]))
+
+    def test_latch_caps_output_bytes_without_splitting_utf8(self):
+        self.agent.set_order(ORDER)
+        self.agent.latch({}, "😀" * 20_000 + "end", ["fixture"])
+        output = json.loads(self.agent.stopped.read_text())["output"]
+        self.assertLessEqual(len(output.encode("utf-8")), 65_536)
+        self.assertTrue(output.endswith("😀end"))
+        self.assertTrue(all(char == "😀" for char in output[:-3]))
+
     def test_exit_zero_outcomes_keep_running(self):
         self.agent.set_order(ORDER)
         for outcome in ("waiting", "pushed batch", "merged", "held"):
@@ -463,6 +477,16 @@ class AgentTests(unittest.TestCase):
         self.assertIn("previous tick did not finish", stopped["reason"])
         self.agent.run_tick.assert_not_called()
 
+    def test_resume_requires_recovering_the_pending_tick_first(self):
+        self.agent.set_order(ORDER)
+        self.agent.latch({}, "", ["tick in progress"], pending=True)
+        pending = self.agent.stopped.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "run a tick to latch it first"):
+            self.agent.resume()
+        self.assertEqual(self.agent.stopped.read_bytes(), pending)
+        self.assertEqual(self.agent.tick()["status"], "latched")
+        self.assertEqual(self.agent.resume()["status"], "resumed")
+
     def test_resume_cannot_clear_the_stop_record_during_a_tick(self):
         self.agent.set_order(ORDER)
         self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, "tree mismatch")
@@ -714,24 +738,28 @@ print(json.dumps({'marker': MARKER, 'argv': sys.argv[1:], 'cwd': os.getcwd(),
         self.assertEqual(self.git(self.repo, "worktree", "list", "--porcelain"), before_worktrees)
 
     def check_orphan_finishes(self, interrupt):
-        self.publish({"merge_train.py": """from pathlib import Path
+        stdout = [f"Tested batch {TESTED}", f"Merged #12 at {HEAD}", f"Merged #14 at {LANDED}"]
+        self.publish({"merge_train.py": f"""from pathlib import Path
 import sys
 import time
 
 root = Path(__file__).parent
-print("merged-1")
+print({stdout[0]!r})
+print({stdout[1]!r})
 (root / "merged-1").touch()
 deadline = time.monotonic() + 10
 while not (root / "continue").exists():
     if time.monotonic() >= deadline:
         sys.exit("fixture did not receive permission to continue")
     time.sleep(0.01)
-print("merged-2")
+print({stdout[2]!r})
 print("finished", file=sys.stderr)
 (root / "finished").touch()
 """})
         self.agent.set_order(ORDER)
         before = self.git(self.repo, "worktree", "list", "--porcelain")
+        self.agent.commit_tree = Mock(return_value=TREE)
+        self.agent.ci_run_id = Mock(return_value=123)
         supervisor_source = f"""import sys
 sys.path.insert(0, {str(CHECKOUT)!r})
 from merge_train_agent import Agent
@@ -766,7 +794,20 @@ Agent({str(self.repo)!r}, home={str(self.home)!r}, origins=({str(self.origin)!r}
                 stopped = json.loads(self.agent.stopped.read_text())
                 self.assertEqual(stopped["reason"], ["previous tick did not finish"])
                 self.assertFalse(stopped["pending"])
-                self.assertEqual(stopped["output"].splitlines(), ["merged-1", "merged-2", "finished"])
+                self.assertEqual(stopped["output"].splitlines(), [*stdout, "finished"])
+                row = json.loads(self.agent.landings.read_text())
+                self.assertEqual(row["tested_batch"], TESTED)
+                self.assertEqual(row["landed_tip"], LANDED)
+                self.assertEqual((row["tested_tree"], row["landed_tree"]), (TREE, TREE))
+                self.assertEqual(row["ci_run_id"], 123)
+                self.assertTrue(row["match"])
+                self.agent.ci_run_id.assert_called_once_with(TESTED)
+                self.agent.commit_tree.assert_any_call(LANDED)
+                self.agent.commit_tree.assert_any_call(TESTED)
+                log = self.agent.log.read_text()
+                self.assertIn("orphaned tick output", log)
+                self.assertIn(stdout[2], log)
+                self.assertIn("finished", log)
                 self.assertFalse(scratch.exists())
                 self.assertEqual(self.git(self.repo, "worktree", "list", "--porcelain"), before)
             finally:
@@ -853,4 +894,6 @@ Agent({str(self.repo)!r}, home={str(self.home)!r}, origins=({str(self.origin)!r}
 
 
 if __name__ == "__main__":
-    unittest.main()
+    result = unittest.main(exit=False).result
+    print(f"Agent suite ran {result.testsRun} tests, skipped {len(result.skipped)}", flush=True)
+    sys.exit(not (result.wasSuccessful() and result.testsRun and not result.skipped))
