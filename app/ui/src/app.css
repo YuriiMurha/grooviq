@@ -797,8 +797,8 @@ input[type="checkbox"] {
 }
 
 .solo[aria-pressed="true"] {
-  background: var(--ink-3);
-  border-color: var(--ink-3);
+  background: var(--solo);
+  border-color: var(--solo);
   color: var(--bg);
 }
 
@@ -1152,19 +1152,28 @@ input[type="checkbox"] {
   line-height: 1.25;
 }
 
-.tempo-caption select {
+.signature-choice {
+  display: flex;
+}
+
+.tempo-caption .signature-trigger {
+  justify-content: center;
+  min-width: 2ch;
+  min-height: 0;
   padding: 0;
   background: none;
   border: 0;
   color: var(--muted);
   font: inherit;
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
 }
 
-.tempo-caption select:hover {
+.tempo-caption .signature-trigger:hover,
+.tempo-caption .signature-trigger[aria-expanded="true"] {
   color: var(--text);
+}
+
+.signature-trigger .list-picker-chevron {
+  display: none;
 }
 
 /* ---------------- hint bar ---------------- */

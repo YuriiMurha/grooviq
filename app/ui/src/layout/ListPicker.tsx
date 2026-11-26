@@ -14,7 +14,8 @@ type Props = {
   align?: ListPickerAlign;
 };
 
-const openingKeys = ["Enter", " ", "ArrowDown", "ArrowUp"];
+// Leave Space to the app's playback shortcut while the listbox is closed.
+const openingKeys = ["Enter", "ArrowDown", "ArrowUp"];
 
 function listAction(event: KeyboardEvent<HTMLDivElement>): ListPickerAction | undefined {
   switch (event.key) {

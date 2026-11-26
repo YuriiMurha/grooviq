@@ -57,17 +57,6 @@ const XFADE_MS: f32 = 50.0;
 /// Longest delay: a half note at 20 BPM. The constructor adds the interpolation margin.
 const MAX_MS: f32 = 6000.0;
 
-#[inline]
-fn flush_output_subnormal(sample: f32) -> f32 {
-    let bits = sample.to_bits();
-    if bits & 0x7f80_0000 == 0 {
-        // Exponent zero covers subnormals and signed zero. Keep the sign bit.
-        f32::from_bits(bits & 0x8000_0000)
-    } else {
-        sample
-    }
-}
-
 pub struct Delay {
     sr: f32,
     buf: [DelayLine; 2],

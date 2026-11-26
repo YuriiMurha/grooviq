@@ -6,6 +6,13 @@ on:
         description: 'Exact 40-character candidate commit SHA'
         required: true
         type: string
+      mode:
+        description: 'Container proof or four independent CI browser shards'
+        type: choice
+        options:
+          - container
+          - ci-sharded
+        default: container
       runner:
         description: 'GitHub-hosted Linux runner'
         type: choice
@@ -39,6 +46,7 @@ permissions:
   contents: read
 jobs:
   stability:
+    if: ${{ inputs.mode == 'container' }}
     runs-on: ${{ inputs.runner == 'ubuntu-24.04-arm' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     # Twenty complete two-worker suites can exceed three hours. Leave time for evidence upload.
     timeout-minutes: 360
@@ -93,5 +101,136 @@ jobs:
         with:
           name: ${{ steps.evidence.outputs.name }}
           path: candidate/docs/evidence/stability/${{ inputs.candidate }}-proof/
+          retention-days: 7
+          if-no-files-found: error
+
+  ci-shard:
+    if: ${{ inputs.mode == 'ci-sharded' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [webkit, chromium]
+        shard: [1, 2]
+    runs-on: ubuntu-latest
+    # Twenty 9-minute suites plus setup, termination grace and artifact upload.
+    timeout-minutes: 210
+    container:
+      # Match ci.yml's e2e-browser job and the Playwright version in app/ui/package-lock.json.
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --init --ipc=host
+    steps:
+      - name: Validate CI-sharded inputs
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+          STABILITY_RUNNER: ${{ inputs.runner }}
+          STABILITY_PROJECT: ${{ inputs.project }}
+          STABILITY_REPEATS: ${{ inputs.repeats }}
+          STABILITY_SPECS: ${{ inputs.specs }}
+          STABILITY_REPEAT_EACH: ${{ inputs.repeat_each }}
+        shell: bash
+        run: |
+          [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]] || { echo 'A full candidate SHA is required'; exit 1; }
+          [[ "$STABILITY_REPEATS" =~ ^([1-9]|1[0-9]|20)$ ]] || { echo 'Expected 1–20 repetitions'; exit 1; }
+          [[ "$STABILITY_RUNNER" == ubuntu-latest && "$RUNNER_ARCH" == X64 && "$STABILITY_PROJECT" == both &&
+             -z "$STABILITY_SPECS" && "$STABILITY_REPEAT_EACH" == 1 ]] ||
+            { echo 'CI-sharded mode requires ubuntu-latest x64, both projects, no specs filter, and repeat_each=1'; exit 1; }
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.candidate }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: candidate/app/ui/package-lock.json
+      - run: npm ci
+        working-directory: candidate/app/ui
+        timeout-minutes: 2
+      - name: Run this shard once per repetition
+        working-directory: candidate/app/ui
+        timeout-minutes: 195
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+          STABILITY_REPEATS: ${{ inputs.repeats }}
+          STABILITY_GREP: ${{ inputs.grep }}
+          BROWSER: ${{ matrix.browser }}
+          SHARD: ${{ matrix.shard }}
+        shell: bash
+        run: |
+          harness="$PWD/../../../harness"
+          bash "$harness/scripts/stability/ci-sharded.sh" "$harness/scripts/e2e-browser-results.mjs" "$PWD/shard-receipts" "$BROWSER" "$SHARD"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        timeout-minutes: 3
+        with:
+          name: ci-sharded-${{ matrix.browser }}-${{ matrix.shard }}-of-2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate/app/ui/shard-receipts/*/receipt.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Bound failure diagnostics
+        id: diagnostics
+        if: failure() || cancelled()
+        working-directory: candidate/app/ui
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          mkdir -p failure-evidence/artifacts
+          for directory in e2e-results playwright-report; do
+            if [[ -d "$directory" && ! -L "$directory" ]]; then
+              mv -- "$directory" failure-evidence/artifacts/
+            fi
+          done
+          node --input-type=module -e '
+            import { capArtifacts } from "../../../harness/scripts/stability/run.mjs";
+            const report = {};
+            capArtifacts("failure-evidence", report);
+            console.log(JSON.stringify(report));
+          '
+      - uses: actions/upload-artifact@v4
+        if: (failure() || cancelled()) && steps.diagnostics.outcome == 'success'
+        timeout-minutes: 3
+        with:
+          name: ci-shard-diagnostics-${{ matrix.browser }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate/app/ui/failure-evidence/artifacts/
+          retention-days: 7
+
+  ci-sharded-results:
+    if: ${{ always() && inputs.mode == 'ci-sharded' }}
+    needs: ci-shard
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Test stability accounting
+        run: node --test scripts/stability/*.test.mjs scripts/e2e-browser-results.test.mjs
+      - uses: actions/download-artifact@v4
+        if: always()
+        with:
+          pattern: ci-sharded-*-of-2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: shard-receipts
+      - name: Account for each repetition
+        if: always()
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+          STABILITY_REPEATS: ${{ inputs.repeats }}
+          BROWSER_RESULT: ${{ needs.ci-shard.result }}
+        run: node scripts/stability/ci-sharded.mjs shard-receipts ci-sharded-summary.md
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-sharded-summary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-sharded-summary.md
           retention-days: 7
           if-no-files-found: error

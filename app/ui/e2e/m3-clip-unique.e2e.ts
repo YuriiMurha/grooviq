@@ -49,8 +49,9 @@ async function selected(app: Page) {
   const canvas = panel.getByRole("application", { name: "Playlist clips" });
   await expect(canvas).toHaveAttribute("aria-disabled", "false");
   await expect(panel.getByRole("status")).toHaveText("2 clips");
-  await panel.getByRole("combobox", { name: "Selected playlist clip" }).selectOption("4");
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("4");
+  await panel.getByRole("button", { name: /^Selected playlist clip:/ }).click();
+  await panel.getByRole("listbox", { name: "Selected playlist clip" }).getByRole("option", { name: "Original instance · Track 1 · 960 ticks", exact: true }).click();
+  await expect(panel.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: Original instance · Track 1 · 960 ticks");
   expect((await state(app)).clips).toEqual(seed.arrangement?.clips);
   expect((await list(app)).patterns.map(pattern => [pattern.id, pattern.steps])).toEqual([[0, 16], [3, 4]]);
   expect((await view(app)).pattern.id).toBe(3); expect((await view(app)).dirty).toBe(false);
@@ -60,7 +61,7 @@ async function currentClone(app: Page, panel: Locator) {
   await expect.poll(async () => (await view(app)).pattern.id).toBe(6);
   await expect(panel.getByRole("application", { name: "Playlist clips" })).toHaveAttribute("aria-disabled", "false");
   await expect(app.getByRole("complementary", { name: "Patterns" }).locator('button[data-pattern="6"]')).toHaveAttribute("aria-current", "true");
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("4");
+  await expect(panel.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: Original instance · Track 1 · 960 ticks");
 }
 
 test("Make unique selects the actual cloned source and preserves the eight-stage global inverse trace", async ({ app, mock }) => {
@@ -269,7 +270,7 @@ test("true New removes the unique source and cannot revive its previous clip sel
   await app.getByRole("button", { name: "Don't save", exact: true }).click();
   await expect.poll(async () => (await state(app)).generation).toBeGreaterThan(before.generation);
   await expect(panel.getByRole("status")).toHaveText("0 clips");
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("");
+  await expect(panel.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: None");
   expect((await list(app)).patterns.map(pattern => pattern.id)).toEqual([0]); expect((await view(app)).pattern.id).toBe(0);
   expect(await mock.calls("arrangement_edit")).toHaveLength(1); expect(await mock.calls("transport_play")).toHaveLength(0);
 });

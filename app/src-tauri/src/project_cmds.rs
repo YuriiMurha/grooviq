@@ -351,8 +351,9 @@ pub async fn project_open(
         let budget = session(&audio).media_budget();
         move || {
             let loaded =
-                grooviq_project::load_budgeted(&path, &budget).map_err(|e| e.to_string())?;
-            let decoded = grooviq_project::decode_samples_budgeted_checked(&loaded, &budget)?;
+                grooviq_project::file::load_for_open(&path, &budget).map_err(|e| e.to_string())?;
+            let decoded =
+                grooviq_project::decode_samples_budgeted_checked(loaded.loaded(), &budget)?;
             Ok((loaded, decoded))
         }
     })

@@ -396,6 +396,27 @@ test("ListPicker closes when the host disables it and opens fresh when enabled",
   expect(await log(page)).toEqual([]);
 });
 
+test("closed mixer ListPicker leaves Space for the window shortcut", async ({ fixture }) => {
+  const page = await fixture();
+  const trigger = strip(page, "Snare").getByRole("button", { name: "Main output for Snare" });
+  await trigger.focus();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  const keydowns = await page.evaluateHandle(() => {
+    const events: { key: string; defaultPrevented: boolean }[] = [];
+    window.addEventListener("keydown", (event) => {
+      if (event.key === " ") events.push({ key: event.key, defaultPrevented: event.defaultPrevented });
+    });
+    // The app suppresses Space's native button click on keyup. The mixer fixture has no app shell.
+    window.addEventListener("keyup", (event) => {
+      if (event.key === " ") event.preventDefault();
+    }, { once: true });
+    return events;
+  });
+  await page.keyboard.press("Space");
+  expect(await keydowns.jsonValue()).toEqual([{ key: " ", defaultPrevented: false }]);
+  await expect(page.getByRole("listbox")).toBeHidden();
+});
+
 test("ListPicker uses listbox focus and skips disabled options in the provider-free gallery", async ({ page }) => {
   await page.addInitScript(forbidAudio);
   await page.goto("/gallery/index.html");
@@ -404,7 +425,7 @@ test("ListPicker uses listbox focus and skips disabled options in the provider-f
   await expect(trigger).toHaveAccessibleName(/Gallery route.*Main/);
   await expect(trigger).toHaveAttribute("aria-haspopup", "listbox");
   await expect(trigger).toHaveAttribute("aria-expanded", "false");
-  await trigger.press("Space");
+  await trigger.press("Enter");
   const list = page.getByRole("listbox", { name: "Gallery route" });
   await expect(trigger).toHaveAttribute("aria-expanded", "true");
   const listId = await list.getAttribute("id");

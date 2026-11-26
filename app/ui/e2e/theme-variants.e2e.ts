@@ -25,6 +25,13 @@ type RenderProbe = Window & { themeTestRenderers?: WeakMap<HTMLCanvasElement, Re
 
 const quietNoteStrength = 0.45;
 
+function themeRgb(values: Record<string, string>, name: string) {
+  const color = parseColor(values[name] ?? "");
+  if (!color || color[3] !== 1) throw new Error(`Expected an opaque color for ${name}: ${values[name]}`);
+  const [red, green, blue] = color;
+  return [red, green, blue] as const;
+}
+
 function nearestVelocityShadeDistance(primary: number[], slide: number[]) {
   // Both renderers scale the primary RGB from 45% to 100%. Project onto that segment.
   const lengthSquared = primary.reduce((sum, channel) => sum + channel * channel, 0);
@@ -34,6 +41,55 @@ function nearestVelocityShadeDistance(primary: number[], slide: number[]) {
 }
 
 for (const { id } of themes) {
+  test(`${id} paints Solo consistently in the rack and mixer`, async ({ app }) => {
+    await app.evaluate(({ key, id }) => localStorage.setItem(key, id), { key: THEME_PREFERENCE_KEY, id });
+    await app.reload();
+    await workspaceReady(app);
+    await expect(app.locator("html")).toHaveAttribute("data-theme", id);
+
+    const values = await app.locator("html").evaluate((root) => {
+      const style = getComputedStyle(root);
+      return Object.fromEntries(["--solo", "--mute", "--ok", "--warn"].map((name) => [name, style.getPropertyValue(name)]));
+    });
+    const bytes = (name: string) => themeRgb(values, name).map((channel) => 255 * channel);
+    const otherRoles = id === "slate-system" ? ["--mute", "--ok", "--warn"] : ["--mute", "--ok"];
+    for (const other of otherRoles) {
+      expect(colourDistance(bytes("--solo"), bytes(other)), `--solo versus ${other}`).toBeGreaterThanOrEqual(48);
+    }
+    const soloColor = `rgb(${bytes("--solo").map(Math.round).join(", ")})`;
+
+    const rackSolo = app.getByRole("button", { name: "Solo Kick", exact: true });
+    await rackSolo.click();
+    await expect(rackSolo).toHaveAttribute("aria-pressed", "true");
+    await expect(rackSolo).toHaveCSS("border-top-color", soloColor);
+    await expect(rackSolo).toHaveCSS("background-color", soloColor);
+
+    await app.goto("/mixer-fixture.html");
+    await expect(app.locator("html")).toHaveAttribute("data-theme", id);
+    const mixerSolo = app.getByRole("button", { name: "Solo Kick", exact: true });
+    await mixerSolo.click();
+    await expect(mixerSolo).toHaveAttribute("aria-pressed", "true");
+    await expect(mixerSolo).toHaveCSS("border-top-color", soloColor);
+    // Let each browser serialize the sRGB mix used for the mixer button's tinted fill.
+    const tintedFill = await app.evaluate((solo) => {
+      const probe = document.createElement("span");
+      probe.style.backgroundColor = `color-mix(in srgb, ${solo} 17%, var(--raised))`;
+      document.body.append(probe);
+      const fill = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return fill;
+    }, soloColor);
+    await expect(mixerSolo).toHaveCSS("background-color", tintedFill);
+
+    const mixerMute = app.getByRole("button", { name: "Mute Kick", exact: true });
+    const muteColor = `rgb(${bytes("--mute").map(Math.round).join(", ")})`;
+    await mixerMute.hover();
+    await expect(mixerMute).not.toHaveCSS("border-top-color", muteColor);
+    await mixerMute.click();
+    await expect(mixerMute).toHaveAttribute("aria-pressed", "true");
+    await expect(mixerMute).toHaveCSS("border-top-color", muteColor);
+  });
+
   for (const renderer of ["webgl2", "canvas2d"] as const) {
     test(`${id} paints the rack and roll on ${renderer} after a preference reload`, async ({ app, mock }, info) => {
       await app.addInitScript((force2d) => {
@@ -73,12 +129,7 @@ for (const { id } of themes) {
       expect(missingOverrides, `${id} supplies every non-alias token`).toEqual([]);
       expect(themeTokenProblems((name) => values[name] ?? ""), "all live theme tokens resolve").toEqual([]);
 
-      const rgb = (name: string) => {
-        const color = parseColor(values[name] ?? "");
-        if (!color || color[3] !== 1) throw new Error(`Expected an opaque color for ${name}: ${values[name]}`);
-        const [red, green, blue] = color;
-        return [red, green, blue] as const;
-      };
+      const rgb = (name: string) => themeRgb(values, name);
       const bytes = (name: string) => rgb(name).map((channel) => 255 * channel);
       const inks = THEME_COLOR_TOKENS.filter((name) => name.startsWith("--ink-"));
       for (const ink of inks.filter((name) => name.endsWith("b"))) {
@@ -101,11 +152,13 @@ for (const { id } of themes) {
         expect(colourDistance(bytes("--play"), bytes("--accent")), "Console Play versus primary accent").toBeGreaterThanOrEqual(48);
       }
       const sectionInks = ["--dev-osc1", "--dev-osc2", "--dev-filter", "--dev-amp", "--dev-lfo", "--dev-mix", "--dev-voice"];
+      const cardColor = rgb("--dev-card");
       for (const [index, ink] of sectionInks.entries()) {
+        // Slate System's existing cobalt Voice caption falls below 4.5:1. See #792.
+        if (id !== "slate-system" || ink !== "--dev-voice") {
+          expect(contrastRatio(rgb(ink), cardColor), `${ink} caption over --dev-card`).toBeGreaterThanOrEqual(4.5);
+        }
         for (const other of sectionInks.slice(index + 1)) {
-          // These two shipped pairs fail both thresholds. See #767.
-          if (ink === "--dev-amp" && ((id === "riso" && other === "--dev-voice") ||
-            (id === "slate-system" && other === "--dev-lfo"))) continue;
           const distance = colourDistance(bytes(ink), bytes(other));
           const deltaE = oklabDeltaE(rgb(ink), rgb(other));
           expect(distance >= 48 || deltaE >= 0.10,
@@ -125,7 +178,7 @@ for (const { id } of themes) {
       for (const surface of ["--well", "--line-soft"]) {
         expect(contrastRatio(rgb("--error"), rgb(surface)), `meter clip indicator over ${surface}`).toBeGreaterThanOrEqual(3);
       }
-      expect(colourDistance(bytes("--mute"), bytes("--ok")), "mute versus solo").toBeGreaterThanOrEqual(48);
+      expect(colourDistance(bytes("--mute"), bytes("--ok")), "mute versus on").toBeGreaterThanOrEqual(48);
       for (const status of ["--ok", "--error", "--select"]) {
         expect(colourDistance(bytes("--warn"), bytes(status)), `--warn versus ${status}`).toBeGreaterThanOrEqual(48);
       }

@@ -486,3 +486,62 @@ fn correlated_heads_do_not_raise_wet_gain_during_fade() {
         );
     }
 }
+
+#[test]
+fn overlapping_cuts_tail_has_no_subnormals() {
+    const BLOCK: usize = 128;
+    let mut failures = Vec::new();
+    for (mode, model) in [("Digital", 0.0), ("Tape", 1.0), ("Analogue", 2.0)] {
+        for sr in [44_100.0, 48_000.0, 96_000.0] {
+            for (time_ms, pingpong) in [(20.0, false), (1.0, false), (20.0, true), (1.0, true)] {
+                let mut d = patch(sr, model);
+                for (param, value) in [
+                    (2, time_ms),
+                    (3, 0.95),
+                    (4, f32::from(pingpong)),
+                    (5, 2000.0),
+                    (6, 1000.0),
+                    (10, 0.0),
+                    (11, 0.0),
+                    (12, 0.0),
+                    (14, 0.0),
+                ] {
+                    d.set_param(param, value);
+                }
+                let mut counts = [0; 2];
+                let mut first = [None; 2];
+                let mut echo_peak = 0.0f32;
+                let frames = sr as usize;
+                for start in (0..frames).step_by(BLOCK) {
+                    let n = BLOCK.min(frames - start);
+                    let mut left = [0.0; BLOCK];
+                    let mut right = [0.0; BLOCK];
+                    if start == 0 {
+                        left[0] = 0.8;
+                    }
+                    d.process(&mut left[..n], &mut right[..n], None, &[]);
+                    for (channel, samples) in [left, right].iter().enumerate() {
+                        for (offset, sample) in samples[..n].iter().enumerate() {
+                            let frame = start + offset;
+                            if sample.is_subnormal() {
+                                counts[channel] += 1;
+                                first[channel].get_or_insert(frame);
+                            }
+                            if frame > 0 {
+                                echo_peak = echo_peak.max(sample.abs());
+                            }
+                        }
+                    }
+                }
+                let case = format!("{mode}, {sr} Hz, {time_ms} ms, ping-pong={pingpong}");
+                assert!(echo_peak > 0.001, "{case}: expected an echo");
+                if counts != [0, 0] {
+                    failures.push(format!(
+                        "{case}: subnormals L/R={counts:?}, first L/R={first:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
