@@ -1,7 +1,7 @@
 //! Multiband upward/downward compressor (`ott` module): level behaviour, flat band split, gains,
 //! silence and denormals, parameter sweeps (no NaN, no clicks) and allocation freedom.
 
-use grooviq_dsp::ott::{PARAM_IDS, PRESETS, SPEC, preset};
+use grooviq_dsp::ott::{PARAM_IDS, PRESETS, SPEC, effective_splits, preset};
 use grooviq_dsp::{Device, create};
 
 #[global_allocator]
@@ -64,6 +64,146 @@ fn gain_for(params: &[(u32, f32)], freq: f32, amp_db: f32) -> f32 {
     run(&mut *with(params), &mut l, &mut r, 128);
     let tail = n - SR as usize / 2..;
     rms_db(&l[tail.clone()]) - rms_db(&x[tail])
+}
+
+fn settled_crossovers(rate: f32, low: f32, high: f32) -> Box<dyn Device> {
+    let mut d = create("ott", rate).unwrap();
+    // Start processing before setting the splits to exercise smoothing instead of the fresh snap.
+    d.process(&mut [0.0], &mut [0.0], None, &[]);
+    d.set_param(7, low);
+    d.set_param(8, high);
+    for _ in 0..(rate as usize).div_ceil(128) {
+        d.process(&mut [0.0; 128], &mut [0.0; 128], None, &[]);
+    }
+    d
+}
+
+fn assert_crossover_hz(actual: f32, expected: f32) {
+    // The existing f32 log2 and exp2 round trip can shift a frequency by a few ulps.
+    assert!(
+        (actual - expected).abs() < 0.01,
+        "{actual} Hz vs {expected} Hz"
+    );
+}
+
+/// Meters 6/7 report the snapped splits with no processing: after construction, after
+/// parameters are set before the first block (project load), and after `reset()`.
+#[test]
+fn crossover_meters_follow_the_fresh_snap_and_reset() {
+    let rate = 22_050.0f32;
+    let expect = |low: f32, high: f32| effective_splits(low as f64, high as f64, rate as f64);
+    let check = |d: &dyn Device, (low, high): (f64, f64)| {
+        assert_crossover_hz(d.meter(6), low as f32);
+        assert_crossover_hz(d.meter(7), high as f32);
+    };
+    let mut d = create("ott", rate).unwrap();
+    check(&*d, expect(SPEC[7].2, SPEC[8].2));
+    d.set_param(7, 1000.0);
+    d.set_param(8, 1000.0);
+    check(&*d, expect(1000.0, 1000.0));
+    d.set_param(8, 12_000.0);
+    check(&*d, expect(1000.0, 12_000.0));
+    // Once processing has started a change glides; reset() snaps it, and the meters follow.
+    d.process(&mut [0.0; 128], &mut [0.0; 128], None, &[]);
+    d.set_param(7, 300.0);
+    d.set_param(8, 4000.0);
+    d.reset();
+    check(&*d, expect(300.0, 4000.0));
+}
+
+#[test]
+fn crossover_meters_report_spacing_without_moving_the_low_split() {
+    for (low, high, effective_high) in [
+        (1000.0, 1000.0, 1500.0),
+        (800.0, 1000.0, 1200.0),
+        (350.0, 3000.0, 3000.0),
+    ] {
+        let d = settled_crossovers(SR, low, high);
+        assert_crossover_hz(d.meter(6), low);
+        assert_crossover_hz(d.meter(7), effective_high);
+        let (expected_low, expected_high) = effective_splits(low.into(), high.into(), SR.into());
+        assert_crossover_hz(d.meter(6), expected_low as f32);
+        assert_crossover_hz(d.meter(7), expected_high as f32);
+    }
+}
+
+#[test]
+fn crossover_meters_report_the_sample_rate_cap() {
+    for (rate, effective_high) in [(22_050.0, 9922.5), (44_100.0, 12_000.0), (SR, 12_000.0)] {
+        let d = settled_crossovers(rate, 350.0, 12_000.0);
+        assert_crossover_hz(d.meter(6), 350.0);
+        assert_crossover_hz(d.meter(7), effective_high);
+        let (_, expected_high) = effective_splits(350.0, 12_000.0, rate.into());
+        assert_crossover_hz(d.meter(7), expected_high as f32);
+    }
+}
+
+#[test]
+fn crossover_targets_preserve_clamp_order_and_precision() {
+    assert_eq!(
+        effective_splits(350.0, 12_000.0, 22_051.0),
+        (350.0, 9922.95)
+    );
+    // An out-of-range low request exposes the original order: cap low, then space high above it.
+    assert_eq!(effective_splits(5000.0, 12_000.0, 8000.0), (3600.0, 5400.0));
+}
+
+#[test]
+fn crossover_meters_follow_the_active_smoothed_state() {
+    let mut d = settled_crossovers(SR, 350.0, 3000.0);
+    let before = (d.meter(6), d.meter(7));
+    d.set_param(7, 800.0);
+    d.set_param(8, 5000.0);
+    assert_eq!((d.meter(6), d.meter(7)), before);
+    d.process(&mut [0.0; 16], &mut [0.0; 16], None, &[]);
+    assert!(d.meter(6) > before.0 && d.meter(6) < 800.0);
+    assert!(d.meter(7) > before.1 && d.meter(7) < 5000.0);
+}
+
+#[test]
+fn crossover_requests_with_the_same_effective_split_render_bit_identically() {
+    for (rate, low, high, equivalent_high) in [
+        // A request of 1500 Hz itself rounds slightly above the spacing floor after log2/exp2.
+        (SR, 1000.0, 1000.0, 1499.0),
+        (22_050.0, 350.0, 12_000.0, 10_000.0),
+    ] {
+        let mut device = settled_crossovers(rate, low, high);
+        let mut equivalent = settled_crossovers(rate, low, equivalent_high);
+        let mut l = sine(1300.0, 4096, 0.2);
+        let mut r = sine(1700.0, 4096, 0.1);
+        let (mut expected_l, mut expected_r) = (l.clone(), r.clone());
+        run(&mut *device, &mut l, &mut r, 128);
+        run(&mut *equivalent, &mut expected_l, &mut expected_r, 128);
+        for (actual, expected) in l.iter().chain(&r).zip(expected_l.iter().chain(&expected_r)) {
+            assert_eq!(actual.to_bits(), expected.to_bits(), "{rate} Hz, {high} Hz");
+        }
+    }
+}
+
+#[test]
+fn crossover_meters_match_the_audible_band_boundaries() {
+    let mut d = settled_crossovers(SR, 1000.0, 1000.0);
+    let mut l = sine(d.meter(6), SR as usize / 4, 0.3);
+    let mut r = l.clone();
+    run(&mut *d, &mut l, &mut r, 128);
+    // At the low crossover the low-pass contributes half the input amplitude, with unity
+    // magnitude through the following allpass.
+    let low = d.meter(0);
+    assert!(
+        (low - 20.0 * libm::log10f(0.15)).abs() < 0.1,
+        "low {low} dB"
+    );
+
+    let mut l = sine(d.meter(7), SR as usize / 4, 0.3);
+    let mut r = l.clone();
+    run(&mut *d, &mut l, &mut r, 128);
+    // The two Linkwitz-Riley branches split the same signal equally at the high crossover.
+    let mid = d.meter(1);
+    let high = d.meter(2);
+    assert!(
+        mid > -30.0 && (mid - high).abs() < 0.1,
+        "mid {mid} dB, high {high} dB"
+    );
 }
 
 #[test]

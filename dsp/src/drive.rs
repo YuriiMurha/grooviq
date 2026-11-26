@@ -23,10 +23,14 @@ pub const SPEC: [(f32, f32, f32); 6] = [
     (0.0, 2.0, 1.0),   // 5 oversampling
 ];
 
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 6] = ["mode", "drive", "tone", "mix", "output", "oversampling"];
+
 const KA: usize = 22; // stage A: 4K-1 = 87 taps
 const KB: usize = 6; // stage B: 23 taps
 const LAT_2X: usize = 2 * KA - 1; // 43
 const LAT_4X: usize = 2 * KA - 1 + KB; // 43 + 5.5 + 0.5 (one 2x-rate sample) = 49
+pub(crate) const MAX_LATENCY_FRAMES: u32 = LAT_4X as u32;
 
 use crate::oversampling::{Down, Up};
 
@@ -135,6 +139,15 @@ pub struct Drive {
     fresh: bool,
     in_m: PeakMeter,
     out_m: PeakMeter,
+}
+
+pub(crate) fn memory_payload() -> crate::insert_memory::Payload {
+    let mut payload = crate::insert_memory::Payload::boxed::<Drive>();
+    for k in [KA, KB] {
+        crate::oversampling::add_stereo_stage_payload(k, &mut payload);
+    }
+    payload.delay_lines(LAT_4X + 1, 2);
+    payload
 }
 
 impl Drive {

@@ -1,5 +1,5 @@
 # Repeatable commands. `make help` lists them. macOS or Linux shell.
-.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan bench bench-roll-operations bench-instructions profile build-app install-app qa-ui qa-app
+.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan bench bench-roll-operations bench-instructions profile profile-tracy build-app install-app qa-ui qa-app
 
 # rustup installs cargo into ~/.cargo/bin, which is often not on PATH.
 export PATH := $(HOME)/.cargo/bin:$(PATH)
@@ -33,7 +33,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: test-instruction-profiles test-merge-train ci-paths-test e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles test-merge-train test-pre-commit test-qa-driver ci-paths-test e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
@@ -61,14 +61,14 @@ check-changed: ## Only the checks the changes against origin/main need (ARGS=--p
 	node scripts/check-changed.mjs $(ARGS)
 
 .PHONY: replay replay-update
-replay: ui-install ## Compare the real offline Session and both browser mocks against the shared command transcript
+replay: ## Compare the real offline Session and MIDI hub against both browser mocks
+replay-update: ## Regenerate the real Session and MIDI transcripts intentionally, then verify both browser mocks
+replay replay-update: ui-install
+	npm --prefix $(UI) run build
+	$(if $(filter replay-update,$@),GROOVIQ_UPDATE_REPLAY=1 node scripts/semantic-replay.mjs)
 	node scripts/semantic-replay.mjs
 	npm --prefix $(UI) exec -- playwright install chromium webkit
 	npm --prefix $(UI) run e2e -- --config playwright.replay.config.ts
-
-replay-update: ## Regenerate the real-Session transcript intentionally, then verify both browser mocks
-	GROOVIQ_UPDATE_REPLAY=1 node scripts/semantic-replay.mjs
-	$(MAKE) replay
 
 qa-ui: ui-install ## Playwright on the web build with the mock engine (WebKit and Chromium); shots in app/ui/e2e-results
 	cd $(UI) && npx playwright install chromium webkit && npm run e2e
@@ -113,6 +113,9 @@ profile: ## Profile the render benchmark with samply (cargo install --locked sam
 	@mkdir -p target
 	CARGO_PROFILE_BENCH_DEBUG=line-tables-only $(CARGO) bench -p grooviq-golden --bench render --no-run > target/render-build.log 2>&1 || { cat target/render-build.log; exit 1; }
 	$(SAMPLY) -o target/render-profile.json.gz -- "$$(sed -n 's/^ *Executable .*(\(.*\))$$/\1/p' target/render-build.log)" $(ARGS)
+
+profile-tracy: ui-install ## Build an optimised profiling bundle in target/profiling
+	CARGO_TARGET_DIR="$(CURDIR)/target/profiling" npm --prefix $(UI) run tauri build -- --bundles app --features profiling
 
 build-app: ui-install ## Build the release Grooviq.app (no .dmg) into target/release/bundle/macos
 	npm --prefix $(UI) run tauri build -- --bundles app

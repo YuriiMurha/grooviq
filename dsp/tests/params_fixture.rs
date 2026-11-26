@@ -1,12 +1,13 @@
-//! `tests/fixtures/device-params.json`: the one parameter table the UI editors check themselves
-//! against, and `tests/fixtures/synth-presets.json`: every synth factory preset's 40 values. Both
-//! are generated from the `dsp` tables; refresh them on purpose with
+//! The UI parameter and preset fixtures under `tests/fixtures` are generated from the DSP
+//! tables. Refresh them on purpose with
 //! `GOLDEN_UPDATE=1 cargo test -p grooviq-dsp --test params_fixture`.
 
-use grooviq_dsp::{sampler, synth};
+use grooviq_dsp::{
+    EFFECTS, is_stepped, param_ids, param_spec, preset, presets as effect_presets, sampler, synth,
+};
 
-/// One row per parameter; `stepped` says the device rounds it to a whole number on set.
-fn table(ids: &[&str], spec: &[(f32, f32, f32)], stepped: fn(usize) -> bool) -> String {
+/// One row per parameter, with `stepped` for switches and discrete choices.
+fn table(ids: &[&str], spec: &[(f32, f32, f32)], stepped: impl Fn(usize) -> bool) -> String {
     assert_eq!(ids.len(), spec.len(), "ids and SPEC differ in length");
     let rows: Vec<String> = ids
         .iter()
@@ -76,4 +77,51 @@ fn the_device_params_fixture_matches_the_spec_tables() {
 #[test]
 fn the_synth_presets_fixture_matches_the_factory_presets() {
     check_fixture("synth-presets.json", &presets());
+}
+
+#[test]
+fn effect_params_fixture_matches_the_registry() {
+    let effects: Vec<String> = EFFECTS
+        .iter()
+        .map(|&id| {
+            let rows = table(param_ids(id).unwrap(), param_spec(id).unwrap(), |i| {
+                is_stepped(id, i as u32).unwrap()
+            });
+            format!("  \"{id}\": [\n{rows}\n  ]")
+        })
+        .collect();
+    check_fixture(
+        "effect-params.json",
+        &format!("{{\n{}\n}}\n", effects.join(",\n")),
+    );
+}
+
+#[test]
+fn effect_presets_fixture_matches_the_registry() {
+    let effects: Vec<String> = EFFECTS
+        .iter()
+        .map(|&id| {
+            let names = effect_presets(id);
+            if names.is_empty() {
+                return format!("  \"{id}\": {{}}");
+            }
+            let spec = param_spec(id).unwrap();
+            let rows: Vec<String> = names
+                .iter()
+                .map(|name| {
+                    let mut values: Vec<_> = spec.iter().map(|s| s.2).collect();
+                    for (index, value) in preset(id, name).unwrap() {
+                        values[index as usize] = value;
+                    }
+                    let list: Vec<_> = values.iter().map(|v| v.to_string()).collect();
+                    format!(r#"    "{name}": [{}]"#, list.join(", "))
+                })
+                .collect();
+            format!("  \"{id}\": {{\n{}\n  }}", rows.join(",\n"))
+        })
+        .collect();
+    check_fixture(
+        "effect-presets.json",
+        &format!("{{\n{}\n}}\n", effects.join(",\n")),
+    );
 }

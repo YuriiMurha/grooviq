@@ -15,6 +15,7 @@ export const SYNTH_PARAMS = DEVICE_PARAMS.synth!;
 export const SYNTH_PRESETS = JSON.parse(
   readFileSync(new URL("../../../tests/fixtures/synth-presets.json", import.meta.url), "utf8"),
 ) as Record<string, number[]>;
+const DEVICE_SEED = { samplerParams: SAMPLER_PARAMS, synthParams: SYNTH_PARAMS, synthPresets: SYNTH_PRESETS };
 /** A preset's values by parameter id. */
 export const presetValues = (name: string): Record<string, number> =>
   Object.fromEntries(SYNTH_PARAMS.map((p, i) => [p.id, SYNTH_PRESETS[name][i]]));
@@ -132,9 +133,18 @@ export async function workspaceReady(page: Page) {
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
 }
 
+// Match the CI browser stand-ins, independently of the host running Playwright.
+const browserPlatform = (browserName: string): NonNullable<MockSeed["platform"]> =>
+  browserName === "chromium" ? "windows" : "macos";
+
 /** The page with the mock shell loaded and every console error and page error collected. */
-export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; app: Page; mock: Mock }>({
+export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; app: Page; mock: Mock; mockPage: Page }>({
   seed: [{}, { option: true }],
+  // Direct IPC checks can use the same seed without mounting the UI.
+  mockPage: async ({ page, seed, browserName }, use) => {
+    await page.evaluate(installMockTauri, { ...DEVICE_SEED, platform: browserPlatform(browserName), ...seed });
+    await use(page);
+  },
   // Retain WebGL frames (see webglProbe.ts). Off only where the shipping buffer lifetime is the subject.
   keepFrames: [true, { option: true }],
   app: async ({ page, seed, keepFrames, browserName }, use) => {
@@ -147,9 +157,7 @@ export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; app: Page
     });
     page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
     if (keepFrames) await page.addInitScript(keepWebglFrames);
-    // Match the CI browser stand-ins, independently of the host running Playwright.
-    const platform: MockSeed["platform"] = browserName === "chromium" ? "windows" : "macos";
-    await page.addInitScript(installMockTauri, { platform, samplerParams: SAMPLER_PARAMS, synthParams: SYNTH_PARAMS, synthPresets: SYNTH_PRESETS, ...seed });
+    await page.addInitScript(installMockTauri, { ...DEVICE_SEED, platform: browserPlatform(browserName), ...seed });
     await page.goto("/");
     await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
     await workspaceReady(page);

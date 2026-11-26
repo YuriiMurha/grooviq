@@ -13,6 +13,8 @@
   --accent: #ff48b0;        /* Riso Fluorescent Pink: transport, playhead, primary */
   --select: #f3eee4;        /* registration white: selection never collides with an ink */
   --ok: #82d8d5;            /* Riso Mint: power, meters */
+  --warn: var(--ink-3);     /* warning notices and unsaved changes */
+  --error: #f0504a;         /* error notices and meter clipping */
   --ink-1: #ff48b0; --ink-1b: #2f7bd8;   /* Fluorescent Pink / Blue */
   --ink-2: #62a8e5; --ink-2b: #e2459f;   /* Cornflower / Pink */
   --ink-3: #ffb511; --ink-3b: #f0504a;   /* Sunflower / Bright Red */
@@ -52,6 +54,7 @@
   --roll-key-white: #d9d3c6;
   --roll-key-black: #20254c;
   --roll-key-held: var(--accent);
+  --roll-key-scale: var(--accent);
   --hair: rgba(243, 238, 228, 0.06);
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   --z-overlay: 20;

@@ -425,8 +425,12 @@ test.describe("Save while a queued roll edit is refused (#191)", () => {
   }
 });
 
-/** The warning toasts showing now. */
-const warnings = (app: Page) => app.getByRole("status", { name: "Messages" }).locator(".toast.warn");
+async function expectRefusedSaveWarnings(app: Page, reason: string) {
+  const warnings = app.getByRole("status", { name: "Messages" }).locator(".toast.warn");
+  await expect(warnings.getByText(reason, { exact: true })).toBeVisible();
+  await expect(warnings.getByText(/^Your latest note edits could not be applied, so the project was not saved\./)).toBeVisible();
+  await expect(warnings.filter({ hasNotText: /^Silent QA mode/ })).toHaveCount(2);
+}
 
 test.describe("after a refused flush (pre-merge)", () => {
   test.use({
@@ -461,12 +465,11 @@ test.describe("after a refused flush (pre-merge)", () => {
       }
       await expect.poll(async () => (await mock.calls(cmd)).length).toBe(sent + 1);
       if (kind === "undo" || kind === "redo") expect((await mock.calls(cmd)).at(-1)?.args.undo).toBe(kind === "undo");
-      const before = await warnings(app).count();
       await app.keyboard.press("ControlOrMeta+s");
       await nextFrame(app);
       await release(mock, cmd);
       // The refusal, and the save that did not happen.
-      await expect(warnings(app)).toHaveCount(before + 2);
+      await expectRefusedSaveWarnings(app, why);
       expect(await mock.calls("project_save")).toEqual([]);
       expect(await mock.view().then((v) => v.dirty)).toBe(true);
 
@@ -500,12 +503,12 @@ test.describe("after a refused flush (pre-merge)", () => {
         await app.mouse.click(p.x, p.y);
       }
       // The second edit is refused while Save waits for it: nothing saved, a warning.
-      await mock.eval(`(m) => { m.refuseNext("notes_edit", "Refused for the test."); m.queueDialog("/qa/A.grooviq"); }`);
-      const before = await warnings(app).count();
+      const why = "Refused for the test.";
+      await mock.eval(`(m) => { m.refuseNext("notes_edit", "${why}"); m.queueDialog("/qa/A.grooviq"); }`);
       await app.keyboard.press("ControlOrMeta+s");
       await nextFrame(app);
       await app.evaluate(() => (window as unknown as { releaseAck: () => void }).releaseAck());
-      await expect(warnings(app)).toHaveCount(before + 2);
+      await expectRefusedSaveWarnings(app, why);
       // Open B: the prompt answers as it always does.
       await mock.eval(`(m) => m.queueDialog("${B}")`);
       await app.keyboard.press("ControlOrMeta+o");

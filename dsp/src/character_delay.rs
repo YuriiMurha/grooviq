@@ -22,6 +22,25 @@ pub const SPEC: [(f32, f32, f32); 15] = [
     (-24.0, 6.0, 0.0),         // 14 output dB
 ];
 
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 15] = [
+    "sync",
+    "division",
+    "time_ms",
+    "feedback",
+    "ping_pong",
+    "low_cut",
+    "high_cut",
+    "mix",
+    "bpm",
+    "mode",
+    "character",
+    "duck",
+    "modulation_depth",
+    "modulation_hz",
+    "output",
+];
+
 /// Division lengths in quarter-note beats, `SPEC` index order.
 pub const DIVISION_BEATS: [f32; 9] = [
     0.125,
@@ -75,6 +94,16 @@ pub struct CharacterDelay {
     out_m: PeakMeter,
 }
 
+fn buffer_delay(sr: f32) -> usize {
+    (MAX_MS * 0.001 * sr) as usize + 8
+}
+
+pub(crate) fn memory_payload(sr: f32) -> crate::insert_memory::Payload {
+    let mut payload = crate::insert_memory::Payload::boxed::<CharacterDelay>();
+    payload.delay_lines(buffer_delay(sr), 2);
+    payload
+}
+
 impl CharacterDelay {
     pub fn new(sample_rate: f32) -> Self {
         Self::with_seed(sample_rate, 0x748f_21a9_370c_d165)
@@ -86,7 +115,7 @@ impl CharacterDelay {
         } else {
             48000.0
         };
-        let max = (MAX_MS * 0.001 * sr) as usize + 8;
+        let max = buffer_delay(sr);
         let ctrl_rate = sr / CTRL as f32;
         let mut d = Self {
             sr,
