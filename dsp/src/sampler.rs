@@ -218,8 +218,6 @@ struct Voice {
     pitch: f32,
     target: f32,
     glide_step: f32,
-    /// Whether the pitch still differs from the glide target.
-    gliding: bool,
     /// Frames until a glide recomputes the rate (0: this frame).
     gctl: u8,
     /// Fading out: frames left (0: not fading).
@@ -273,7 +271,6 @@ impl Voice {
         pitch: 0.0,
         target: 0.0,
         glide_step: 0.0,
-        gliding: false,
         gctl: 0,
         fade: 0,
         start: 0.0,
@@ -322,7 +319,6 @@ impl Voice {
             self.glide_step = (key - self.pitch).abs() / (ms * 0.001 * sr).max(1.0);
             self.gctl = 0;
         }
-        self.gliding = self.pitch != self.target;
     }
 
     /// One frame of a glide: the pitch moves one step; the rate follows at control rate, counted
@@ -333,11 +329,9 @@ impl Voice {
         if self.glide_step <= 0.0 || d.abs() <= self.glide_step {
             self.pitch = self.target;
             self.step = self.rate(self.pitch);
-            self.gliding = false;
             return;
         }
         self.pitch += self.glide_step.copysign(d);
-        self.gliding = self.pitch != self.target;
         if self.gctl == 0 {
             let reach = GLIDE_AHEAD * self.glide_step;
             let ahead = (self.target - self.pitch).min(reach).max(-reach);
@@ -949,6 +943,18 @@ fn coefs(p: &[f32; PARAMS], sr: f32) -> Coefs {
     }
 }
 
+// Keep both divisions out of the usual path, far from the sample edge.
+#[cold]
+#[inline(never)]
+fn declick_edge(amp: f32, to_edge: f64, step: f64, fade_out: f64) -> f32 {
+    let frames_left = to_edge / step;
+    if frames_left < fade_out {
+        amp * (frames_left / fade_out).max(0.0) as f32
+    } else {
+        amp
+    }
+}
+
 /// Cubic Hermite read of one channel at `pos`, sample index `k` read from `index(k)` (frames
 /// outside the sample read as zero). At an integer position it returns that sample itself.
 #[inline]
@@ -1027,8 +1033,12 @@ impl Sampler {
         } else {
             VOICES
         };
-        // With no events, a block that starts without tails cannot add any.
-        if !EAGER && events.is_empty() && span == VOICES {
+        // No events can add tails, and an equal finite gain always takes the snap branch.
+        if !EAGER
+            && events.is_empty()
+            && span == VOICES
+            && self.out.map(f32::to_bits) == self.c.out.map(f32::to_bits)
+        {
             self.render_block::<EAGER, true, false>(l, r, events, span);
         } else {
             self.render_block::<EAGER, false, false>(l, r, events, span);
@@ -1074,9 +1084,6 @@ impl Sampler {
         let filter_on = kind != 0;
         let (env_amount, flt_sustain) = (p[FILTER_ENV], p[FLT_SUSTAIN]);
         let mut ev = events.iter().peekable();
-        let fade_frames = voices.fade as f32;
-        // An equal finite target takes the snap branch on every frame.
-        let settled_out = !REFERENCE && out.map(f32::to_bits) == c.out.map(f32::to_bits);
         if !EAGER {
             if filter_on && *filter_bypassed {
                 // A parameter change between ticks must use the previous tick's inputs until
@@ -1101,6 +1108,7 @@ impl Sampler {
                     span = voices.span();
                 }
             }
+            let fade_frames = voices.fade;
             let sustain = sustain.next();
             let log2_cutoff = cutoff.next();
             let (mut sl, mut sr_) = (0.0f32, 0.0f32);
@@ -1118,7 +1126,7 @@ impl Sampler {
                         *v = Voice::OFF;
                         continue;
                     }
-                    fade = Some(v.fade as f32 / fade_frames);
+                    fade = Some(v.fade as f32 / fade_frames as f32);
                 }
                 match v.stage {
                     Stage::Off => continue,
@@ -1188,11 +1196,7 @@ impl Sampler {
                     v.ctl = CONTROL_FRAMES;
                 }
                 v.ctl -= 1;
-                if if REFERENCE {
-                    v.pitch != v.target
-                } else {
-                    v.gliding
-                } {
+                if v.pitch != v.target {
                     v.glide();
                 }
                 let mut amp = v.env * v.vel;
@@ -1211,9 +1215,16 @@ impl Sampler {
                         } else {
                             v.pos - v.start
                         };
-                        let frames_left = to_edge / v.step.abs();
-                        if frames_left < *fade_out {
-                            amp *= (frames_left / *fade_out).max(0.0) as f32;
+                        let step = v.step.abs();
+                        if REFERENCE {
+                            let frames_left = to_edge / step;
+                            if frames_left < *fade_out {
+                                amp *= (frames_left / *fade_out).max(0.0) as f32;
+                            }
+                        } else if to_edge <= step * *fade_out {
+                            // A distance strictly above the rounded product is above the exact
+                            // product too. At equality, keep the original rounded divisions.
+                            amp = declick_edge(amp, to_edge, step, *fade_out);
                         }
                     }
                 }
@@ -1250,7 +1261,7 @@ impl Sampler {
                     *v = Voice::OFF;
                 }
             }
-            if !settled_out {
+            if !NOTES_ONLY {
                 for ch in 0..2 {
                     let d = c.out[ch] - out[ch];
                     out[ch] = if d.abs() < 1e-6 {

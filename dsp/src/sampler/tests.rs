@@ -67,11 +67,6 @@ impl RenderPair {
             same!(
                 stage, key, track, gctl, fade, age, order, id, down, looping, wrapped, fstage, ctl
             );
-            assert_eq!(
-                actual.gliding,
-                expected.pitch != expected.target,
-                "{context}, slot {slot}, gliding"
-            );
             same_bits!(
                 pos, step, base, root, tune, fine, pitch, target, glide_step, start, end, env, vel,
                 lo, hi, len, fenv, vel_oct, k,
