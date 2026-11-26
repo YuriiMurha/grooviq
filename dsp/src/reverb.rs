@@ -385,3 +385,28 @@ impl Device for Reverb {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn longest_pre_delay_and_diffuser_taps_fit_at_native_rate_limits() {
+        for sr in [8_000.0, 384_000.0] {
+            let mut reverb = Reverb::new(sr);
+            reverb.set_param(2, SPEC[2].1);
+            reverb.process(&mut [0.25], &mut [-0.25], None, &[]);
+        }
+    }
+
+    #[test]
+    fn largest_modulated_fdn_taps_fit_at_native_rate_limits() {
+        for sr in [8_000.0, 384_000.0] {
+            let mut reverb = Reverb::new(sr);
+            reverb.set_param(0, SPEC[0].1);
+            // Evaluate the longest tap on every line by placing each LFO at its crest.
+            reverb.mod_ph = reverb.mod_inc.map(|increment| 0.25 - increment);
+            reverb.process(&mut [0.25], &mut [-0.25], None, &[]);
+        }
+    }
+}

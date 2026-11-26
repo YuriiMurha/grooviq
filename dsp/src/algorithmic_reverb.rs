@@ -339,6 +339,22 @@ impl Device for AlgorithmicReverb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn longest_linear_and_network_taps_fit_at_native_rate_limits() {
+        for sr in [22_050.0, 192_000.0] {
+            let mut reverb = AlgorithmicReverb::new(sr);
+            for index in [2, 4, 5, 6, 12] {
+                reverb.set_param(index as u32, SPEC[index].1);
+            }
+            // Each sample reads all networks. Peak the wet modulation on each channel in turn.
+            for phase in [0.25, 1.25 - 0.37] {
+                reverb.phase = phase;
+                reverb.process(&mut [0.25], &mut [-0.25], None, &[]);
+            }
+        }
+    }
+
     #[test]
     fn settled_gains_reuse_and_every_exact_key_change_recomputes() {
         let mut n = Network::new(48000., 0);

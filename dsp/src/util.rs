@@ -315,7 +315,7 @@ impl DelayLine {
             pos: 0,
         }
     }
-    /// Largest delay that can be read safely.
+    /// The requested delay capacity, excluding the interpolation margin.
     pub fn max_delay(&self) -> usize {
         self.buf.len() - Self::INTERPOLATION_MARGIN
     }
@@ -329,6 +329,10 @@ impl DelayLine {
     }
     #[inline(always)]
     fn read_index(&self, delay: usize) -> usize {
+        debug_assert!(
+            delay < self.buf.len(),
+            "integer delay {delay} exceeds ring history"
+        );
         // Both positions are bounded by the ring length, so the signed difference fits.
         let offset = self.pos as isize - delay as isize;
         if offset < 0 {
@@ -337,14 +341,18 @@ impl DelayLine {
             offset as usize
         }
     }
-    /// Reads an integer offset within the stored history, including the interpolation margin.
+    /// Reads an integer offset up to `max_delay() + 3`, the oldest stored sample.
     #[inline(always)]
     pub fn read_int(&self, d: usize) -> f32 {
         self.buf[self.read_index(d)]
     }
-    /// Reads two adjacent taps. Away from the wrap, both come from the same slice.
+    /// Reads taps at `d` and `d + 1`. The first offset must be at most `max_delay() + 2`.
     #[inline(always)]
     pub(crate) fn read_pair(&self, d: usize) -> [f32; 2] {
+        debug_assert!(
+            d < self.buf.len() - 1,
+            "paired delay {d} exceeds ring history"
+        );
         let index = self.read_index(d);
         if index == 0 {
             [self.buf[0], self.buf[self.buf.len() - 1]]
@@ -353,10 +361,13 @@ impl DelayLine {
             [newer, older]
         }
     }
-    /// Fractional read: Hermite for d >= 1, linear between the two newest samples below that.
+    /// Reads a fractional offset up to `max_delay() - 1` on a line with at least one
+    /// requested frame. Uses Hermite at offsets of one frame or more and linear below that.
     #[inline(always)]
     pub fn read_frac(&self, d: f32) -> f32 {
-        let d = d.clamp(0.0, self.max_delay() as f32 - 1.0);
+        let max = self.max_delay() as f32 - 1.0;
+        debug_assert!(d <= max, "fractional delay {d} exceeds {max}");
+        let d = d.clamp(0.0, max);
         let i = d as usize;
         let t = d - i as f32;
         let x0 = self.read_int(i);
@@ -515,11 +526,36 @@ mod tests {
                     assert_eq!(line.read_frac(i as f32 + t).to_bits(), expected.to_bits());
                 }
                 assert_eq!(
-                    line.read_frac(max_delay as f32).to_bits(),
+                    line.read_frac((max_delay - 1) as f32).to_bits(),
                     history[max_delay - 1].to_bits()
                 );
             }
         }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "integer delay")]
+    fn delay_line_rejects_integer_reads_past_history() {
+        let mut line = DelayLine::new(3);
+        line.push(1.0);
+        line.read_int(7);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "paired delay")]
+    fn delay_line_rejects_pairs_with_an_out_of_range_older_tap() {
+        let mut line = DelayLine::new(3);
+        line.push(1.0);
+        line.read_pair(6);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "fractional delay")]
+    fn delay_line_rejects_fractional_reads_that_would_clamp() {
+        DelayLine::new(3).read_frac(2.25);
     }
 
     #[test]

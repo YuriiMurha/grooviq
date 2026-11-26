@@ -288,3 +288,26 @@ impl Device for Delay {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn longest_synced_delay_fits_at_native_rate_limits() {
+        for sr in [8_000.0, 384_000.0] {
+            let mut delay = Delay::new(sr);
+            delay.set_param(0, SPEC[0].0);
+            delay.set_param(2, SPEC[2].1);
+            delay.process(&mut [0.25], &mut [-0.25], None, &[]);
+
+            // Switching to sync exercises the longer tap on the crossfade's second head.
+            delay.set_param(0, SPEC[0].1);
+            delay.set_param(1, SPEC[1].1);
+            delay.set_tempo(SPEC[8].0);
+            // The ring also limits the target before the interpolation read.
+            assert_eq!(delay.target, 6.0 * sr, "synced target at {sr} Hz");
+            delay.process(&mut [0.25], &mut [-0.25], None, &[]);
+        }
+    }
+}

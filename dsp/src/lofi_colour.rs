@@ -210,6 +210,19 @@ impl Device for LofiColour {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn longest_motion_and_space_taps_fit_at_native_rate_limits() {
+        for sr in [22_050.0, 192_000.0] {
+            let mut device = LofiColour::new(sr);
+            for index in [0, 2, 5] {
+                device.set_param(index as u32, SPEC[index].1);
+            }
+            device.phase = [0.25, 0.25, 0.0];
+            tick(&mut device, 0.25);
+        }
+    }
+
     fn tick(device: &mut LofiColour, value: f32) -> [f32; 2] {
         let mut l = [value];
         let mut r = l;
