@@ -52,6 +52,29 @@ test('accounts for the two browsers separately in each repetition', t => {
   }
 });
 
+test('counts the allowlisted WebKit skip as skipped, not passed', t => {
+  const allowlisted = spec => Object.assign(spec, { file: 'm2-panels.e2e.ts', title: 'a_dpr_change_redraws_sharp' });
+  const root = fixture(t, receipt => {
+    const changed = structuredClone(receipt);
+    // The inventory lists both browsers; its first suite is WebKit's.
+    allowlisted(changed.inventory.suites[0].specs[0]);
+    if (changed.project === 'webkit' && changed.shard.index === 1) {
+      const spec = allowlisted(changed.report.suites[0].specs[0]);
+      Object.assign(spec.tests[0], {
+        expectedStatus: 'skipped', status: 'skipped',
+        annotations: [{ type: 'skip', description: 'changes the ratio through the Chrome DevTools Protocol' }],
+        results: [{ status: 'skipped', retry: 0 }],
+      });
+    }
+    return changed;
+  });
+  const result = aggregate(root, meta, 2, 'success');
+  assert.equal(result.ok, true, renderSummary(result, meta));
+  for (const repetition of [1, 2]) {
+    assert.ok(renderSummary(result, meta).includes(`| ${repetition} | webkit | 4 | 3 | 1 | 0 |`));
+  }
+});
+
 test('rejects a missing case in repetition 2 despite complete coverage in repetition 1', t => {
   const root = fixture(t, (receipt, repetition) => {
     if (repetition === 2 && receipt.project === 'webkit' && receipt.shard.index === 2) {

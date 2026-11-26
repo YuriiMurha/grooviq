@@ -13,6 +13,9 @@ for ((repetition = 1; repetition <= STABILITY_REPEATS; repetition++)); do
   receipt="$evidence/$repetition"
   mkdir "$receipt"
   tmp=$(mktemp -d)
+  # CI starts every suite on a fresh VM. A private home keeps per-user caches (fontconfig,
+  # the GStreamer registry, shader caches) from warming later repetitions.
+  mkdir -p "$tmp/home/.cache"
   args=(--project="$browser" --shard="$shard/2" --workers=2)
   # A filtered control still has to cover the full, unfiltered inventory.
   if [[ -n "$STABILITY_GREP" ]]; then
@@ -21,7 +24,7 @@ for ((repetition = 1; repetition <= STABILITY_REPEATS; repetition++)); do
   status=0
   # The inner shell receives the inventory path and Playwright arguments positionally.
   # shellcheck disable=SC2016
-  TMPDIR="$tmp" GROOVIQ_E2E_JSON="$receipt/report.json" timeout --kill-after=15s 9m bash -e -c '
+  HOME="$tmp/home" XDG_CACHE_HOME="$tmp/home/.cache" TMPDIR="$tmp" GROOVIQ_E2E_JSON="$receipt/report.json" timeout --kill-after=15s 9m bash -e -c '
     inventory=$1
     shift
     npm run --silent e2e -- --list --project=webkit --project=chromium --reporter=json > "$inventory"
