@@ -1,6 +1,7 @@
 import type { PatternStamp } from "./patterns";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invokeCommand } from "./ipc";
 import type { ProjectView } from "./project";
 
 // The pattern's notes and the live keyboard (app/src-tauri project_cmds.rs, Task 7). Notes come
@@ -129,7 +130,7 @@ export const notesUndo = (stamp: PatternStamp) => invoke<NotesAck | null>("notes
 export const notesRedo = (stamp: PatternStamp) => invoke<NotesAck | null>("notes_redo", { stamp });
 /** Adds a synth channel named after the preset. */
 export const channelAddSynth = (preset: string, generation: number) =>
-  invoke<ProjectView>("channel_add_synth", { preset, generation });
+  invokeCommand("channel_add_synth", { preset, generation });
 /** Starts a note on a channel now (typing keyboard, roll keys, a synth row's preview): the press,
  * which its release names. Only from a key or a click. */
 export const channelNoteOn = (channel: number, key: number, velocity: number) =>

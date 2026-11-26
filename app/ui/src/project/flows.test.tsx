@@ -64,6 +64,9 @@ const VIEW: ProjectView = {
   recording: false,
   canUndo: false,
   canRedo: false,
+  projectCanUndo: false,
+  projectCanRedo: false,
+  patternRevision: 0,
 };
 const CLEAN: ProjectView = { ...VIEW, dirty: false };
 const UNTITLED: ProjectView = { ...VIEW, name: "Untitled", path: null };
@@ -114,7 +117,7 @@ beforeEach(() => {
   mocks.currentView = null;
   const patterns = () => {
     const view = mocks.currentView ?? VIEW;
-    return { generation: view.generation, revision: view.patternRevision ?? 0, selected: view.pattern.id,
+    return { generation: view.generation, revision: view.patternRevision, selected: view.pattern.id,
       arrangementRevision: 0, patterns: [{ id: view.pattern.id, name: view.pattern.name, revision: view.notesRevision, steps: view.pattern.steps }], view };
   };
   reply("pattern_list", patterns);
@@ -708,7 +711,7 @@ describe("transport", () => {
     await waitFor(() => expect(called("transport_play")).toHaveLength(1));
   });
 
-  it("Space plays while the swing slider or a time-signature select has focus, and only plays", async () => {
+  it("Space plays while the swing slider or the closed time-signature picker has focus", async () => {
     const user = await start(CLEAN);
     reply("transport_play", null);
     const swing = screen.getByRole("slider", { name: "Swing" }) as HTMLInputElement;
@@ -716,13 +719,12 @@ describe("transport", () => {
     await user.keyboard(" ");
     await waitFor(() => expect(called("transport_play")).toHaveLength(1));
     await waitFor(() => expect(screen.getByRole("button", { name: "Play" }).getAttribute("aria-pressed")).toBe("true"));
-    const beats = screen.getByRole("combobox", { name: "Beats per bar" }) as HTMLSelectElement;
+    const beats = screen.getByRole("button", { name: "Beats per bar: 4" });
     act(() => beats.focus());
     await user.keyboard(" ");
     await waitFor(() => expect(called("transport_stop")).toHaveLength(1));
-    // Neither control took the key as its own.
     expect(swing.value).toBe("0");
-    expect(beats.value).toBe("4");
+    expect(beats.getAttribute("aria-expanded")).toBe("false");
     expect(called("project_edit")).toHaveLength(0);
   });
 

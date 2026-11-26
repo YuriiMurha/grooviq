@@ -352,8 +352,9 @@ impl Device for Reverb {
             ptail = ptail.max(wl.abs()).max(wr.abs());
             let dg = self.dry_g.next();
             let wg = self.wet_g.next();
-            l[i] = xl * dg + wl * wg;
-            r[i] = xr * dg + wr * wg;
+            // The f64 filter output can narrow to subnormal f32, and the gains can create more.
+            l[i] = flush_output_subnormal(xl * dg + wl * wg);
+            r[i] = flush_output_subnormal(xr * dg + wr * wg);
         }
         self.in_m.update(pin, n, self.sr);
         self.out_m

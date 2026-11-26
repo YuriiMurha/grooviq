@@ -406,13 +406,9 @@ input[type="checkbox"] {
   color: var(--muted);
 }
 
-.roll-snap select {
-  padding: 3px 6px;
+.roll-snap .list-picker {
+  gap: 4px;
   background: var(--raised);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-s);
-  color: var(--text);
-  font: inherit;
   font-weight: 700;
 }
 
@@ -972,6 +968,9 @@ input[type="checkbox"] {
 .save-state {
   color: var(--faint);
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .save-state.dirty {
@@ -1068,7 +1067,7 @@ input[type="checkbox"] {
 .transport-btn.record[aria-pressed="true"] {
   background: var(--rec);
   border-color: var(--rec);
-  color: var(--paper);
+  color: var(--on-rec);
 }
 
 .toggle-btn {
@@ -1156,19 +1155,28 @@ input[type="checkbox"] {
   line-height: 1.25;
 }
 
-.tempo-caption select {
+.signature-choice {
+  display: flex;
+}
+
+.tempo-caption .signature-trigger {
+  justify-content: center;
+  min-width: 2ch;
+  min-height: 0;
   padding: 0;
   background: none;
   border: 0;
   color: var(--muted);
   font: inherit;
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
 }
 
-.tempo-caption select:hover {
+.tempo-caption .signature-trigger:hover,
+.tempo-caption .signature-trigger[aria-expanded="true"] {
   color: var(--text);
+}
+
+.signature-trigger .list-picker-chevron {
+  display: none;
 }
 
 /* ---------------- hint bar ---------------- */
@@ -1319,12 +1327,12 @@ label.field {
 /* ---------------- a narrow window (down to 900 px) ---------------- */
 .tone,
 .chip-latency,
-.field-caption,
-.save-state {
+.field-caption {
   white-space: nowrap;
 }
 
-@media (max-width: 1000px) {
+/* Keep the compact playback controls in patterns/rail.css on the same breakpoint. */
+@media (max-width: 1120px) {
   .toolbar {
     gap: 8px;
   }

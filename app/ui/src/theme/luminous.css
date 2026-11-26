@@ -12,6 +12,7 @@
   --accent: #f6f3ec;
   --select: #008cff; /* cool blue, distinct from the aqua and periwinkle inks */
   --ok: #5fe3b8;
+  --warn: var(--ink-3b);
   --error: #ff787f;
   --ink-1: #ff8b78; --ink-1b: #f0476d;
   --ink-2: #93a7ff; --ink-2b: #6a5cf5;
@@ -28,6 +29,7 @@
   --paper: #f3f4f8;
   --well: #0a0b0d; /* 26% black over the graphite stage, baked for the canvases */
   --rec: #ff6b61;
+  --on-rec: var(--bg);
   --hair: rgba(255, 255, 255, 0.07);
   --step-a: #14151b;
   --step-b: #0f1015;
@@ -48,6 +50,7 @@
   --roll-key-held: #147bbd;
   --roll-key-scale: var(--roll-key-held);
 
+  --dev-amp: var(--ink-1);
   --dev-card: #222329; /* lit glass over the graphite panel */
   --dev-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10), 0 0 0 1px var(--line),
     0 24px 60px -22px rgba(0, 0, 0, 0.75);

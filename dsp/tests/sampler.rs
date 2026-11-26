@@ -43,49 +43,110 @@ fn sine(rate: f32, hz: f64, len: usize) -> Vec<f32> {
         .collect()
 }
 
+fn measure_tone(rate: f32, key: u8, source_hz: f64, output_hz: f64) -> [f64; 2] {
+    // Keep enough source audio for the full measurement, including at high playback steps.
+    let frames = (34_000.0_f32 * (rate / SR).max(1.0)) as usize;
+    let mut s = sampler(SR, buf(rate, sine(rate, source_hz, frames)));
+    let (l, r) = render(&mut s, 4_080, &[on(0, key, 1.0)]);
+    [&l, &r].map(|x| {
+        // Skip the onset. The window holds a whole number of cycles at each probe frequency.
+        let window = &x[240..];
+        let (re, im) = window
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(re, im), (i, &x)| {
+                let phase = std::f64::consts::TAU * output_hz * i as f64 / SR as f64;
+                (
+                    re + x as f64 * libm::cos(phase),
+                    im + x as f64 * libm::sin(phase),
+                )
+            });
+        20.0 * libm::log10(2.0 * libm::hypot(re, im) / window.len() as f64)
+    })
+}
+
+#[test]
+fn extreme_steps_reject_folds_and_keep_the_passband() {
+    let mut failures = Vec::new();
+    for (rate, max_fold) in [(192_000.0, -93.0), (384_000.0, -69.0)] {
+        let fold = measure_tone(rate, 84, 9_000.0, 12_000.0);
+        eprintln!("{rate} Hz, +24 st: 12 kHz fold {fold:.2?} dBFS");
+        if !fold.into_iter().all(|db| db <= max_fold) {
+            failures.push((rate, 12_000.0, fold));
+        }
+        for hz in [2_000.0, 4_000.0, 8_000.0] {
+            let pass = measure_tone(rate, 84, hz / 4.0, hz);
+            eprintln!("{rate} Hz, +24 st: wanted {hz} Hz {pass:.2?} dBFS");
+            if !pass.into_iter().all(|db| db.abs() <= 0.25) {
+                failures.push((rate, hz, pass));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "outside fold/passband bounds: {failures:?}"
+    );
+}
+
+#[test]
+fn large_pitch_ups_keep_the_upper_passband() {
+    let mut failures = Vec::new();
+    for (step, key, output_hz, max_loss) in [
+        (2.0, 72, 8_000.0, None),
+        (2.0, 72, 12_000.0, None),
+        (2.0, 72, 16_000.0, None),
+        (2.0, 72, 20_000.0, None),
+        (4.0, 84, 8_000.0, None),
+        (4.0, 84, 12_000.0, None),
+        (4.0, 84, 16_000.0, Some(1.0)),
+        (4.0, 84, 18_000.0, None),
+        (4.0, 84, 20_000.0, None),
+        (8.0, 96, 8_000.0, Some(1.0)),
+        (8.0, 96, 12_000.0, None),
+        (8.0, 96, 16_000.0, None),
+        (8.0, 96, 20_000.0, None),
+    ] {
+        let level = measure_tone(SR, key, output_hz / step, output_hz);
+        eprintln!("step {step}, {output_hz} Hz: {level:.3?} dBFS");
+        if let Some(max_loss) = max_loss
+            && !level.into_iter().all(|db| db.abs() <= max_loss)
+        {
+            failures.push((step, output_hz, level));
+        }
+    }
+    assert!(failures.is_empty(), "outside ±1 dB: {failures:?}");
+}
+
 #[test]
 fn faster_reads_reject_folded_tones() {
     let mut levels = Vec::new();
-    for (rate, key, source_hz, alias_hz, pass_source_hz, pass_output_hz) in [
-        (192_000.0, 60, 89_000.0, 7_000.0, 1_000.0, 1_000.0),
-        (48_000.0, 72, 21_000.0, 6_000.0, 1_000.0, 2_000.0),
-        (48_000.0, 84, 21_000.0, 12_000.0, 1_000.0, 4_000.0),
-        (72_000.0, 60, 31_500.0, 16_500.0, 1_000.0, 1_000.0),
-        (98_400.0, 60, 43_000.0, 5_000.0, 16_000.0, 16_000.0),
+    for (rate, key, source_hz, alias_hz, pass_source_hz, pass_output_hz, max_alias_dbfs) in [
+        (192_000.0, 60, 89_000.0, 7_000.0, 1_000.0, 1_000.0, -60.0),
+        (48_000.0, 72, 21_000.0, 6_000.0, 1_000.0, 2_000.0, -60.0),
+        (48_000.0, 84, 21_000.0, 12_000.0, 1_000.0, 4_000.0, -60.0),
+        (48_000.0, 84, 7_250.0, 19_000.0, 1_000.0, 4_000.0, -60.0),
+        // Closer to Nyquist, enough of a cutoff increase will lift this fold first.
+        (48_000.0, 84, 6_750.0, 21_000.0, 1_000.0, 4_000.0, -50.0),
+        // Step 3 interpolates partly widened rows, where taps outside the window must be zero.
+        (144_000.0, 60, 31_000.0, 17_000.0, 1_000.0, 1_000.0, -70.0),
+        // Near Nyquist at step 3, extra cutoff boost in the partly widened bands lifts this first.
+        (144_000.0, 60, 27_000.0, 21_000.0, 1_000.0, 1_000.0, -48.0),
+        (72_000.0, 60, 31_500.0, 16_500.0, 1_000.0, 1_000.0, -60.0),
+        (98_400.0, 60, 43_000.0, 5_000.0, 16_000.0, 16_000.0, -60.0),
     ] {
-        let measure = |source_hz, output_hz| {
-            let mut s = sampler(SR, buf(rate, sine(rate, source_hz, 20_000)));
-            let (l, r) = render(&mut s, 5_000, &[on(0, key, 1.0)]);
-            // Skip the onset. This window contains an integer number of cycles at every
-            // measured frequency, so the two quadratures give the peak tone amplitude.
-            let amplitude = |x: &[f32]| {
-                let window = &x[240..4_080];
-                let (re, im) = window
-                    .iter()
-                    .enumerate()
-                    .fold((0.0, 0.0), |(re, im), (i, &x)| {
-                        let phase = std::f64::consts::TAU * output_hz * i as f64 / SR as f64;
-                        (
-                            re + x as f64 * libm::cos(phase),
-                            im + x as f64 * libm::sin(phase),
-                        )
-                    });
-                20.0 * libm::log10(2.0 * libm::hypot(re, im) / window.len() as f64)
-            };
-            [amplitude(&l), amplitude(&r)]
-        };
-        let alias = measure(source_hz, alias_hz);
-        let pass = measure(pass_source_hz, pass_output_hz);
-        eprintln!("{rate} Hz, key {key}: alias {alias:.2?} dBFS, passband {pass:.2?} dBFS");
-        levels.push((rate, key, alias, pass));
-    }
-    for (rate, key, alias, pass) in levels {
-        // A full-scale sinusoid should fold to at most 0.1% amplitude. The passband
-        // control must stay within 0.25 dB of full scale, so silence cannot pass.
-        assert!(
-            alias.into_iter().all(|db| db <= -60.0),
-            "{rate} Hz key {key}: {alias:?} dBFS"
+        let alias = measure_tone(rate, key, source_hz, alias_hz);
+        let pass = measure_tone(rate, key, pass_source_hz, pass_output_hz);
+        eprintln!(
+            "{rate} Hz, key {key}: {alias_hz} Hz alias {alias:.2?} dBFS, passband {pass:.2?} dBFS"
         );
+        levels.push((rate, key, alias_hz, alias, pass, max_alias_dbfs));
+    }
+    for (rate, key, alias_hz, alias, pass, max_alias_dbfs) in levels {
+        assert!(
+            alias.into_iter().all(|db| db <= max_alias_dbfs),
+            "{rate} Hz key {key}, {alias_hz} Hz fold: {alias:?} dBFS exceeds {max_alias_dbfs} dBFS"
+        );
+        // The passband control keeps silence from passing the fold check.
         assert!(
             pass.into_iter().all(|db| db.abs() < 0.25),
             "{rate} Hz key {key}: {pass:?} dBFS"
@@ -99,32 +160,40 @@ fn faster_reads_keep_trimmed_stereo_edges_isolated() {
     let mut r = vec![-1.0; 512];
     l[128..384].fill(-0.75);
     r[128..384].fill(0.5);
-    let source = Arc::new(SampleBuf { rate: SR, l, r });
-    for reverse in [0.0, 1.0] {
-        let mut s = sampler(SR, Arc::clone(&source));
-        s.set_param(p("start"), 0.25);
-        s.set_param(p("end"), 0.75);
-        s.set_param(p("reverse"), reverse);
-        let (l, r) = render(&mut s, 128, &[on(0, 84, 1.0)]);
-        // The selected 256 frames play in 64 output frames. Padding the FIR with
-        // adjacent material would leak the opposite-polarity samples into the edges.
-        assert!(l[..64].iter().all(|&x| (x + 0.75).abs() < 1e-6));
-        assert!(r[..64].iter().all(|&x| (x - 0.5).abs() < 1e-6));
-        assert!(l[64..].iter().chain(&r[64..]).all(|&x| x == 0.0));
+    for ratio in [1, 4, 8] {
+        let source = Arc::new(SampleBuf {
+            rate: SR * ratio as f32,
+            l: l.clone(),
+            r: r.clone(),
+        });
+        let frames = 64 / ratio;
+        for reverse in [0.0, 1.0] {
+            let mut s = sampler(SR, Arc::clone(&source));
+            s.set_param(p("start"), 0.25);
+            s.set_param(p("end"), 0.75);
+            s.set_param(p("reverse"), reverse);
+            let (l, r) = render(&mut s, 128, &[on(0, 84, 1.0)]);
+            // Padding the FIR with adjacent material would leak opposite-polarity samples.
+            assert!(l[..frames].iter().all(|&x| (x + 0.75).abs() < 1e-6));
+            assert!(r[..frames].iter().all(|&x| (x - 0.5).abs() < 1e-6));
+            assert!(l[frames..].iter().chain(&r[frames..]).all(|&x| x == 0.0));
+        }
     }
 }
 
 #[test]
 fn fir_loop_matches_unrolled_audio_in_both_directions() {
     let source = noise(512);
-    for rate in [72_000.0, 192_000.0] {
+    for rate in [72_000.0, 192_000.0, 792_000.0, 1_536_000.0] {
+        let read_frames = (rate / SR * 1_024.0) as usize + 256;
         for loop_frames in [32, 128] {
             for reverse in [false, true] {
                 let mut unrolled = source.clone();
                 if reverse {
                     unrolled.reverse();
                 }
-                let repeated = unrolled[512 - loop_frames..].repeat(160);
+                let repeated =
+                    unrolled[512 - loop_frames..].repeat(read_frames.div_ceil(loop_frames));
                 unrolled.extend(repeated);
                 if reverse {
                     unrolled.reverse();
@@ -150,6 +219,38 @@ fn fir_loop_matches_unrolled_audio_in_both_directions() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn extreme_step_trimmed_loops_are_block_independent() {
+    // Key 84 at 198 kHz advances 16.5 frames, stepping through fractional phases.
+    let source = buf(198_000.0, noise(512));
+    let note = [on(0, 84, 1.0)];
+    for reverse in [0.0, 1.0] {
+        let play = |block| {
+            let mut s = sampler(SR, Arc::clone(&source));
+            s.set_param(p("start"), 0.125);
+            s.set_param(p("end"), 0.875);
+            s.set_param(p("loop"), 1.0);
+            s.set_param(p("loop_start"), 0.75);
+            s.set_param(p("reverse"), reverse);
+            let mut l = vec![0.0; 1024];
+            let mut r = vec![0.0; 1024];
+            for (i, (l, r)) in l.chunks_mut(block).zip(r.chunks_mut(block)).enumerate() {
+                let events = if i == 0 { &note[..] } else { &[] };
+                assert_no_alloc(|| s.process(l, r, None, events));
+            }
+            (l, r)
+        };
+        let reference = play(1);
+        assert!(peak(&reference.0[512..]) > 0.01);
+        for block in [37, 64, 128, 512] {
+            assert!(
+                same_bits(&play(block), &reference),
+                "reverse {reverse}, block {block}"
+            );
         }
     }
 }
@@ -1288,6 +1389,8 @@ fn block_splitting_never_changes_the_output() {
         on(500, 67, 0.6),
         off(2_000, 55),
         on(2_100, 60, 0.8),
+        on(4_600, 88, 0.7),
+        off(8_000, 88),
         off(9_000, 67),
         off(12_000, 60),
     ];

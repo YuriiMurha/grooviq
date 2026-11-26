@@ -33,8 +33,9 @@ async function selected(app: Page) {
   const canvas = panel.getByRole("application", { name: "Playlist clips" });
   await expect(canvas).toHaveAttribute("aria-disabled", "false");
   await expect(panel.getByRole("status")).toHaveText("2 clips");
-  await panel.getByRole("combobox", { name: "Selected playlist clip" }).selectOption("4");
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("4");
+  await panel.getByRole("button", { name: /^Selected playlist clip:/ }).click();
+  await panel.getByRole("listbox", { name: "Selected playlist clip" }).getByRole("option", { name: "Original instance · Track 1 · 960 ticks", exact: true }).click();
+  await expect(panel.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: Original instance · Track 1 · 960 ticks");
   expect((await state(app)).clips).toEqual(seed.arrangement?.clips);
   expect((await view(app)).pattern.id).toBe(3);
   const patterns = await ipc<PatternsView>(app, "pattern_list");
@@ -91,7 +92,7 @@ test("Slice releases one snapped linked split, retains left selection and global
   expect(JSON.parse(String(sent[0].args.editsJson))).toEqual([{ kind: "slice", clip: 4, tick: 2880, audioFirstFrames: null }]);
   expect((await state(app)).tracks).toEqual(before.tracks);
   expect(await mock.eval("m => m.state.project.patterns")).toEqual(patterns);
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("4");
+  await expect(panel.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: Original instance · Track 1 · 960 ticks");
   expect(await mock.eval<number>("m => m.state.project.nextId")).toBe(7);
   trace.push({ stage: "sliced", value: await observe() });
   await app.keyboard.press("ControlOrMeta+z");
@@ -102,7 +103,7 @@ test("Slice releases one snapped linked split, retains left selection and global
   await app.keyboard.press("ControlOrMeta+Shift+z");
   await expect.poll(async () => (await state(app)).clips).toEqual(expected);
   trace.push({ stage: "redone", value: await observe() });
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("4");
+  await expect(panel.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: Original instance · Track 1 · 960 ticks");
   expect(await mock.calls("transport_play")).toHaveLength(0);
   await test.info().attach("m3-clip-slice-trace", { body: JSON.stringify(trace), contentType: "application/json" });
   for (const viewport of [{ width: 1280, height: 800 }, { width: 900, height: 560 }]) {
@@ -123,7 +124,7 @@ for (const cut of [
   await expect.poll(async () => (await state(app)).clips).toEqual(splitAt(before, cut.tick, cut.left, cut.phase, cut.right));
   expect((await view(app)).pattern.id).toBe(3);
   expect(await mock.calls("arrangement_edit")).toHaveLength(1);
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("4");
+  await expect(panel.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: Original instance · Track 1 · 960 ticks");
 });
 
 test("Slice endpoints and empty space neither resize nor draw, including Alt at an edge", async ({ app, mock }) => {
@@ -179,7 +180,7 @@ test("Save waits for an admitted Slice and persists both exact fragments", async
   const saved = await mock.eval<{ project: { arrangement: { clips: unknown[]; tracks: unknown[] }; nextId: number } }>(`m => m.file('${path}')`);
   expect(saved.project.arrangement.clips).toEqual(splitAt(before, 2880, 1920, 2400, 5760));
   expect(saved.project.arrangement.tracks).toEqual(before.tracks); expect(saved.project.nextId).toBe(7);
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("4");
+  await expect(panel.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: Original instance · Track 1 · 960 ticks");
 });
 
 test("refused Slice preserves identity, allocator and history and blocks the waiting Save", async ({ app, mock }) => {
@@ -196,7 +197,7 @@ test("refused Slice preserves identity, allocator and history and blocks the wai
   expect(await mock.eval<number>("m => m.state.project.nextId")).toBe(6);
   expect(await view(app)).toMatchObject({ generation: initial.generation, dirty: false,
     projectCanUndo: initial.projectCanUndo, projectCanRedo: initial.projectCanRedo });
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("4");
+  await expect(panel.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: Original instance · Track 1 · 960 ticks");
   expect(await mock.calls("project_save_as")).toHaveLength(0);
 });
 
@@ -243,7 +244,7 @@ test("true New during an unsubmitted cut retires the original pointer and select
   await expect.poll(async () => (await state(app)).generation).toBeGreaterThan(before.generation);
   await app.mouse.up();
   await expect(panel.getByRole("status")).toHaveText("0 clips");
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("");
+  await expect(panel.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: None");
   expect((await state(app)).clips).toEqual([]);
   expect(await mock.calls("arrangement_edit")).toHaveLength(0);
   expect(await mock.calls("project_new")).toHaveLength(1);

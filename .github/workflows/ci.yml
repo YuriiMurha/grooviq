@@ -58,6 +58,9 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
     runs-on: macos-latest
     timeout-minutes: 30
+    env: &rust_env
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps: &rust_steps
       - uses: actions/checkout@v5
       # rust-cache keys on Cargo.toml dependency sections only, so a [profile] change would reuse
@@ -90,8 +93,17 @@ jobs:
       - name: Run workspace tests
         id: nextest
         run: cargo nextest run --workspace --all-features --profile ci
+      # App and project dev-dependencies enable grooviq-engine/test-hooks in --workspace builds.
+      # Add a separate -p lint for any crate that gains a test-only feature.
+      - name: Default-feature engine test lint
+        if: runner.os == 'macOS'
+        run: cargo clippy -p grooviq-engine --tests --locked -- -D warnings
+      - name: Default-feature no_alloc run
+        if: runner.os == 'macOS'
+        id: default_no_alloc
+        run: rm -f target/nextest/ci/junit.xml && cargo nextest run -p grooviq-engine --locked --test no_alloc --profile ci
       - name: Upload failed Rust test results
-        if: failure() && steps.nextest.outcome == 'failure'
+        if: failure() && (steps.default_no_alloc.outcome == 'failure' || steps.nextest.outcome == 'failure')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rust-junit-${{ runner.os }}-${{ github.run_attempt }}
@@ -115,6 +127,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 30
+    env: *rust_env
     steps: *rust_steps
 
   # The DSP crate is meant to also run in a browser; this keeps it compiling for the web.
@@ -134,10 +147,13 @@ jobs:
       - run: cargo build -p grooviq-dsp --target wasm32-unknown-unknown
 
   ui:
-    runs-on: ubuntu-latest
+    # Keep the host make binary compatible with the container's Ubuntu release.
+    runs-on: ubuntu-24.04
     container:
       image: mcr.microsoft.com/playwright:v1.64.1-noble
       options: --init --ipc=host
+      volumes:
+        - /usr/bin/make:/usr/local/bin/make:ro
     timeout-minutes: 15
     defaults:
       run:
@@ -149,11 +165,15 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: app/ui/package-lock.json
-      - name: Install Make for safety tests
-        timeout-minutes: 2
+      - name: Verify runner Make for safety tests
+        timeout-minutes: 1
         run: |
-          apt-get -o Acquire::Retries=3 update -qq &&
-          apt-get -o Acquire::Retries=3 install -y --no-install-recommends make
+          if [ "$(command -v make)" != /usr/local/bin/make ] || ! make --version; then
+            echo '::error::Cannot run the Ubuntu runner Make mounted at /usr/local/bin/make.'
+            exit 1
+          fi
+          command -v make
+          ldd /usr/local/bin/make
       - name: Local refresh safety tests
         working-directory: .
         run: make test-refresh-app
@@ -276,25 +296,39 @@ jobs:
         with:
           node-version: 24
       - uses: actions/download-artifact@v4
+        id: download-webkit-1
         timeout-minutes: 1
         with:
           name: e2e-accounting-webkit-1-of-2-${{ github.run_id }}-${{ github.run_attempt }}
           path: browser-accounting/webkit/1-of-2
       - uses: actions/download-artifact@v4
+        id: download-webkit-2
         timeout-minutes: 1
         with:
           name: e2e-accounting-webkit-2-of-2-${{ github.run_id }}-${{ github.run_attempt }}
           path: browser-accounting/webkit/2-of-2
       - uses: actions/download-artifact@v4
+        id: download-chromium-1
         timeout-minutes: 1
         with:
           name: e2e-accounting-chromium-1-of-2-${{ github.run_id }}-${{ github.run_attempt }}
           path: browser-accounting/chromium/1-of-2
       - uses: actions/download-artifact@v4
+        id: download-chromium-2
         timeout-minutes: 1
         with:
           name: e2e-accounting-chromium-2-of-2-${{ github.run_id }}-${{ github.run_attempt }}
           path: browser-accounting/chromium/2-of-2
+      - name: Explain browser receipt download recovery
+        if: >-
+          ${{ failure() &&
+            (steps.download-webkit-1.outcome == 'failure' ||
+             steps.download-webkit-2.outcome == 'failure' ||
+             steps.download-chromium-1.outcome == 'failure' ||
+             steps.download-chromium-2.outcome == 'failure') }}
+        timeout-minutes: 1
+        run: |
+          echo '::notice title=Browser receipt download failed::Rerun the changes job with its dependents or rerun all jobs so all four browser shards upload receipts for the same attempt.'
       - name: Require both complete successful browser projects
         timeout-minutes: 1
         env:

@@ -49,6 +49,10 @@ merge-train-order: ## Save Quality's approved order (ORDER="12=<approved SHA> 34
 test-merge-train-agent: ## Exercise the merge-train agent with fake launchd and local Git fixtures
 	$(REFRESH_PYTHON) -B scripts/test_merge_train_agent.py -v
 
+.PHONY: test-loom
+test-loom: ## Model the real-time worker protocol with Loom
+	RUSTFLAGS="--cfg loom" CARGO_TARGET_DIR=target/loom $(CARGO) test -p grooviq-engine --lib rt_workers::loom -- --test-threads=1
+
 .PHONY: test-pre-commit
 test-pre-commit: ## Exercise staged conflict checks in disposable Git repositories
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_pre_commit.py -v
@@ -96,6 +100,17 @@ notes-edit-budget: ## Optimized 10,000-note edit budget, including undo bookkeep
 check-changed: ## Only the checks the changes against origin/main need (ARGS=--plan prints the plan)
 	node scripts/check-changed.mjs $(ARGS)
 
+.PHONY: ipc-contract-update ipc-contract-check ipc-contract-ui
+ipc-contract-ui:
+	@test -f $(UI)/dist/index.html || $(MAKE) ui-install
+	@test -f $(UI)/dist/index.html || npm --prefix $(UI) run build
+
+ipc-contract-update: ipc-contract-ui ## Regenerate the TypeScript IPC contract
+	$(CARGO) run -p grooviq-app --features ipc-contract --example ipc-contract -- update
+
+ipc-contract-check: ipc-contract-ui ## Verify the generated TypeScript IPC contract
+	$(CARGO) run -p grooviq-app --features ipc-contract --example ipc-contract -- check
+
 .PHONY: replay replay-update
 replay: ## Compare the real offline Session and MIDI hub against both browser mocks
 replay-update: ## Regenerate the real Session and MIDI transcripts (REPLAY_UPDATE_ONLY=1 skips browser checks)
@@ -142,6 +157,10 @@ rtsan: ## The no_alloc tests under RealtimeSanitizer (macOS/Linux; downloads LLV
 bench: ## Render speed, block times and determinism of the reference scenes, then DSP kernel timings
 	$(CARGO) bench -p grooviq-golden --bench render
 	$(CARGO) bench -p grooviq-dsp --bench kernels
+
+.PHONY: bench-song
+bench-song: ## Five warmed production exports of the M3 golden song (run on a quiet host)
+	$(CARGO) bench -p grooviq-golden --bench song_export
 
 bench-roll-operations: ## The six piano-roll timing budgets, without work counters (run on a quiet host)
 	@set --; \
@@ -293,3 +312,7 @@ test-perf-fetch: ## Exercise bounded benchmark dependency setup without Cargo or
 .PHONY: bench-mixer
 bench-mixer: ## Static mixer kernel render timings at 64/128 frames (smoke only, no deadline claim)
 	$(CARGO) bench -p grooviq-engine --bench mixer_kernels
+
+.PHONY: bench-rt-workers
+bench-rt-workers: ## Worker pool block timings, wake latency or idle CPU (ARGS=--wake-latency or --idle-cpu=2)
+	$(CARGO) bench -p grooviq-engine --bench rt_workers -- $(ARGS)

@@ -35,10 +35,15 @@ mod character_delay;
 mod delay;
 #[path = "realtime/fattener.rs"]
 mod fattener;
+#[path = "realtime/half_time.rs"]
+mod half_time;
 #[path = "realtime/mixer_live.rs"]
 mod mixer_live;
 #[path = "realtime/mixer_runtime.rs"]
 mod mixer_runtime;
+#[cfg(feature = "test-hooks")]
+#[path = "realtime/rt_workers.rs"]
+mod rt_workers;
 #[path = "realtime/saturation.rs"]
 mod saturation;
 
@@ -1203,26 +1208,29 @@ fn compound_timeline_retirement_and_fault_refusal_are_realtime_safe() {
     }
     realtime(|| p.process(&mut [0.0; 128], 2));
     let _ = c.check_health();
-    c.send(Command::InjectPanic).unwrap();
-    // The injected panic deliberately allocates its unwind payload, as existing fault
-    // tests do; only ordinary publication and refusal belong inside the RT guard.
-    p.process(&mut [0.0; 128], 2);
-    c.set_timeline(grooviq_engine::TimelineUpdate {
-        pattern: Box::default(),
-        song: Box::new(grooviq_engine::SongData {
-            frame_extent: Some(Arc::new(grooviq_engine::SongFrameExtent {
-                musical_end_tick: 0,
-                audio: Vec::with_capacity(1),
-            })),
-            ..Default::default()
-        }),
-        bpm: 130.0,
-        mode: grooviq_engine::PlaybackMode::Pattern,
-        region: None,
-        remove_channel: None,
-    })
-    .unwrap();
-    realtime(|| p.process(&mut [0.0; 128], 2));
+    #[cfg(feature = "test-hooks")]
+    {
+        c.send(Command::InjectPanic).unwrap();
+        // The injected panic deliberately allocates its unwind payload, as existing fault
+        // tests do; only ordinary publication and refusal belong inside the RT guard.
+        p.process(&mut [0.0; 128], 2);
+        c.set_timeline(grooviq_engine::TimelineUpdate {
+            pattern: Box::default(),
+            song: Box::new(grooviq_engine::SongData {
+                frame_extent: Some(Arc::new(grooviq_engine::SongFrameExtent {
+                    musical_end_tick: 0,
+                    audio: Vec::with_capacity(1),
+                })),
+                ..Default::default()
+            }),
+            bpm: 130.0,
+            mode: grooviq_engine::PlaybackMode::Pattern,
+            region: None,
+            remove_channel: None,
+        })
+        .unwrap();
+        realtime(|| p.process(&mut [0.0; 128], 2));
+    }
 }
 
 #[test]

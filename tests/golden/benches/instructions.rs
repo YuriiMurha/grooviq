@@ -19,6 +19,10 @@ mod synth_workload;
 mod sampler_workload;
 
 #[cfg(target_os = "linux")]
+#[path = "support/song_workload.rs"]
+mod song_workload;
+
+#[cfg(target_os = "linux")]
 mod counts {
     use super::sampler_workload::scenario;
     use std::hint::black_box;
@@ -29,7 +33,7 @@ mod counts {
     use grooviq_dsp::{Device, NoteEvent};
     use grooviq_engine::{
         AudioProcessor, ChannelId, ChannelMix, ChannelSetup, Command, Controller, EngineConfig,
-        EngineState, NoteId, engine_with,
+        EngineState, NoteId, PlaybackMode, engine_with,
     };
     use grooviq_golden::SAMPLE_RATE;
     use grooviq_golden::perf::perf_scenes;
@@ -73,8 +77,8 @@ mod counts {
         l[BLOCK - 1] + r[BLOCK - 1]
     }
 
-    /// A sampler with `voices` notes of a two-second stereo noise sample, from key 55 up.
-    fn sampler(voices: usize) -> Sampler {
+    /// A sampler playing stereo noise, with distinct note IDs for each voice.
+    fn sampler(voices: usize, fixed_step: Option<f32>) -> Sampler {
         let mut x = 0x2545_f491_u32;
         let mut next = move || {
             x ^= x << 13;
@@ -82,12 +86,25 @@ mod counts {
             x ^= x << 5;
             (x as f32 / u32::MAX as f32) - 0.5
         };
-        let len = 2 * SAMPLE_RATE as usize;
+        // Leave an extra block past the measurement so fixed-step voices stay in the interior.
+        let output_frames = (SETTLE_BLOCKS + COUNTED_BLOCKS + 1) * BLOCK;
+        let source_frames = output_frames as f32 * fixed_step.unwrap_or(1.0);
+        let len = (2 * SAMPLE_RATE as usize).max(source_frames.ceil() as usize);
         let l: Vec<f32> = (0..len).map(|_| next()).collect();
         let r: Vec<f32> = (0..len).map(|_| next()).collect();
         let mut s = Sampler::new(SR);
-        s.set_sample(Some(Arc::new(SampleBuf { rate: SR, l, r })));
-        settle(s, &chord(55, voices))
+        if fixed_step.is_some() {
+            let pitch_track = PARAM_IDS
+                .iter()
+                .position(|id| *id == "pitch_track")
+                .unwrap();
+            s.set_param(pitch_track as u32, 0.0);
+        }
+        let rate = SR * fixed_step.unwrap_or(1.0);
+        s.set_sample(Some(Arc::new(SampleBuf { rate, l, r })));
+        let s = settle(s, &chord(55, voices));
+        assert_eq!(s.active_voices(), voices);
+        s
     }
 
     fn synth(patch: &str, voices: usize) -> Synth {
@@ -100,9 +117,11 @@ mod counts {
 
     // 100 blocks of 64 frames. (Plain comments: the macro rejects doc attributes.)
     #[library_benchmark]
-    #[bench::voices_0(sampler(0))]
-    #[bench::voices_2(sampler(2))]
-    #[bench::voices_16(sampler(16))]
+    #[bench::voices_0(sampler(0, None))]
+    #[bench::voices_2(sampler(2, None))]
+    #[bench::voices_16(sampler(16, None))]
+    #[bench::step_4_voices_16(sampler(16, Some(4.0)))]
+    #[bench::step_16_voices_16(sampler(16, Some(16.0)))]
     #[bench::filter_static_16(scenario(0.0, false))]
     #[bench::filter_envelope_16(scenario(0.7, false))]
     #[bench::filter_velocity_16(scenario(0.7, true))]
@@ -111,7 +130,7 @@ mod counts {
     }
 
     fn mono_glide_and_steals() -> (Sampler, [NoteEvent; 48]) {
-        let mut s = sampler(1);
+        let mut s = sampler(1, None);
         for (id, value) in [("voice_mode", 1.0), ("glide", 2.5)] {
             let i = PARAM_IDS.iter().position(|&key| key == id).unwrap();
             s.set_param(i as u32, value);
@@ -223,8 +242,49 @@ mod counts {
         (controller, processor, buf)
     }
 
+    const SONG_BLOCK: usize = 128;
+    const SONG_WINDOW_TICKS: [u64; 3] = [26_860, 40_300, 134_380];
+    const SONG_WINDOW_BLOCKS: usize =
+        10 * SAMPLE_RATE as usize / SONG_WINDOW_TICKS.len() / SONG_BLOCK;
+    type SongWindow = (Controller, AudioProcessor, [f32; SONG_BLOCK * 2]);
+
+    fn song_windows() -> [SongWindow; SONG_WINDOW_TICKS.len()] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::song_workload::reopen(dir.path())
+            .checked_export_state()
+            .unwrap();
+        assert_eq!(state.playback_mode, PlaybackMode::Song);
+        assert!(state.song_loop.is_none(), "expected a single Song pass");
+        // Start just before the overlapping Water clips at 14, 21 and 70 s.
+        // These windows include both playback directions, fades, automation priority changes
+        // and both occupied and empty pattern bars. Process the transport commands before the
+        // first clip starts, so seeking and starting playback are outside the measured loop.
+        SONG_WINDOW_TICKS.map(|tick| {
+            let (mut controller, mut processor) =
+                engine_with(EngineConfig { sample_rate: SR }, state.clone());
+            controller.send(Command::Play).unwrap();
+            controller.send(Command::Seek { tick }).unwrap();
+            let mut buf = [0.0; SONG_BLOCK * 2];
+            processor.process(&mut buf, 2);
+            (controller, processor, buf)
+        })
+    }
+
+    #[library_benchmark]
+    #[bench::song_m3(song_windows())]
+    fn song_blocks(
+        mut windows: [SongWindow; SONG_WINDOW_TICKS.len()],
+    ) -> [SongWindow; SONG_WINDOW_TICKS.len()] {
+        for (_, processor, buf) in &mut windows {
+            for _ in 0..SONG_WINDOW_BLOCKS {
+                processor.process(black_box(&mut buf[..]), 2);
+            }
+        }
+        windows
+    }
+
     library_benchmark_group!(name = dsp; benchmarks = sampler_blocks, sampler_event_blocks, synth_blocks, synth_idle_blocks);
-    library_benchmark_group!(name = engine; benchmarks = scene_second);
+    library_benchmark_group!(name = engine; benchmarks = scene_second, song_blocks);
 }
 
 #[cfg(target_os = "linux")]

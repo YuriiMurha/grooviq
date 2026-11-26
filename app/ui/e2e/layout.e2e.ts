@@ -1,3 +1,4 @@
+import { choosePickerOption, pickerButton } from "./listPickerHelpers";
 // The window at its normal and its smallest size (tauri.conf.json: 1280×800, at least 900×560),
 // the keyboard path through the toolbar into the grid, and the project name in the toolbar.
 import { expect, grid, project, soundsFor, test } from "./fixture";
@@ -118,14 +119,14 @@ test.describe("long project title", () => {
     };
     await check();
     await mock.eval("(m) => m.holdCommand('arrangement_mode')");
-    const mode = app.getByRole("combobox", { name: "Playback mode" });
-    await mode.selectOption("song");
+    const mode = pickerButton(app, "Playback mode");
+    await choosePickerOption(app, "Playback mode", "Song");
     await expect(mode).toBeDisabled();
     await expect(app.locator(".pattern-current")).toHaveText("Changing mode…");
     await check();
     await mock.eval("(m) => m.releaseCommand('arrangement_mode')");
     await expect(mode).toBeEnabled();
-    await expect(mode).toHaveValue("song");
+    await expect(mode).toHaveAccessibleName("Playback mode: Song");
     await expect(app.locator(".pattern-current")).toHaveText(patternName);
     await check();
     expect(await mock.calls("transport_play")).toHaveLength(0);
@@ -136,7 +137,7 @@ test.describe("keyboard path", () => {
   test.use({ seed: { project: project(KIT, { 1: [0] }), files: soundsFor(KIT) } });
 
   test("Tab reaches every toolbar control, then the rack, then the grid", async ({ app }, info) => {
-    await expect(app.getByRole("combobox", { name: "Playback mode" })).toBeEnabled();
+    await expect(pickerButton(app, "Playback mode")).toBeEnabled();
     await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
     const focusStops = await app.locator('button:enabled, input:enabled, select:enabled, [tabindex="0"]').evaluateAll((nodes) =>
       nodes.filter((node) => node instanceof HTMLElement && node.tabIndex >= 0 && node.getClientRects().length > 0).length);
@@ -159,7 +160,7 @@ test.describe("keyboard path", () => {
       if (focused.label === "Step grid") break;
     }
     await info.attach("tab-order", { body: order.join("\n"), contentType: "text/plain" });
-    for (const stop of ["QA beat", "Play", "Stop", "Playback mode", "BPM", "Beats per bar", "Beat note value", "Test tone", "New", "Pattern 1", "Duplicate", "Rename", "Refresh patterns", "Pattern length", "Mute Kick", "Step grid"]) {
+    for (const stop of ["QA beat", "Play", "Stop", "Playback mode: Pattern", "BPM", "Beats per bar: 4", "Beat note value: 4", "Test tone", "New", "Pattern 1", "Duplicate", "Rename", "Refresh patterns", "Pattern length", "Mute Kick", "Step grid"]) {
       expect(order.some((o) => o.replace(/\s/g, "") === stop.replace(/\s/g, "") || o === stop), `Tab reaches ${stop}`).toBe(true);
     }
     await expect(grid(app)).toBeFocused();

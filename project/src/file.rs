@@ -17,10 +17,13 @@ use crate::reading::NoteDrops;
 use crate::{outline, reading};
 use grooviq_engine::InstrumentKind;
 use serde::Serialize;
+use serde::de::value::{MapAccessDeserializer, StrDeserializer};
+use serde::de::{Deserialize, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zip::result::ZipError;
@@ -91,6 +94,27 @@ pub struct Loaded {
     /// Things the person should know, one sentence each: fixes, and samples that were not in
     /// the file.
     pub warnings: Vec<String>,
+}
+
+/// A load prepared for opening in a session, with provenance for its saved checkpoint.
+pub struct LoadedForOpen {
+    pub(crate) loaded: Loaded,
+    pub(crate) unchanged_at: Option<PathBuf>,
+}
+
+impl LoadedForOpen {
+    pub fn loaded(&self) -> &Loaded {
+        &self.loaded
+    }
+}
+
+impl From<Loaded> for LoadedForOpen {
+    fn from(loaded: Loaded) -> Self {
+        Self {
+            loaded,
+            unchanged_at: None,
+        }
+    }
 }
 
 /// Why a project did not open.
@@ -171,6 +195,42 @@ impl Write for Capped {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+pub(crate) fn matches_json(value: &impl Serialize, mut expected: impl BufRead) -> bool {
+    struct Matching<'a, R>(&'a mut R);
+
+    impl<R: BufRead> Write for Matching<'_, R> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes.is_empty() {
+                return Ok(0);
+            }
+            let expected = self.0.fill_buf()?;
+            let n = bytes.len().min(expected.len());
+            if n == 0 || bytes[..n] != expected[..n] {
+                return Err(io::Error::other("project JSON differs"));
+            }
+            self.0.consume(n);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    serde_json::to_writer(Matching(&mut expected), value).is_ok()
+        && expected.fill_buf().is_ok_and(|rest| rest.is_empty())
+}
+
+#[cfg(test)]
+#[test]
+fn json_comparison_rejects_short_long_and_different_input() {
+    let matches = |bytes| matches_json(&[1, 2], BufReader::with_capacity(2, bytes));
+    assert!(matches(b"[1,2]".as_slice()));
+    assert!(!matches(b"[1,2".as_slice()));
+    assert!(!matches(b"[1,2] ".as_slice()));
+    assert!(!matches(b"[1,3]".as_slice()));
 }
 
 /// `project.json`'s bytes: compact (pretty printing tripled a note-heavy project), and at most
@@ -710,19 +770,29 @@ fn load_with_budget(path: &Path, budget: u64) -> Result<Loaded, LoadError> {
 /// limit is not loaded: the warning says it is too big, and the channel keeps its entry name (a
 /// later save refuses rather than drop it).
 fn load_with_limits(path: &Path, limits: Limits) -> Result<Loaded, LoadError> {
-    load_inner(path, limits, None)
+    load_inner(path, limits, None, false).map(|result| result.loaded)
 }
 pub fn load_budgeted(
     path: &Path,
     budget: &grooviq_engine::media_budget::MediaBudget,
 ) -> Result<Loaded, LoadError> {
-    load_inner(path, LIMITS, Some(budget))
+    load_inner(path, LIMITS, Some(budget), false).map(|result| result.loaded)
+}
+
+/// Loads outside the session lock and checks whether the current-format manifest was
+/// preserved, including fields the loader can repair silently.
+pub fn load_for_open(
+    path: &Path,
+    budget: &grooviq_engine::media_budget::MediaBudget,
+) -> Result<LoadedForOpen, LoadError> {
+    load_inner(path, LIMITS, Some(budget), true)
 }
 fn load_inner(
     path: &Path,
     limits: Limits,
     budget: Option<&grooviq_engine::media_budget::MediaBudget>,
-) -> Result<Loaded, LoadError> {
+    check_unchanged: bool,
+) -> Result<LoadedForOpen, LoadError> {
     let mut left = limits.total;
     let mut file = File::open(path)?;
     // A zip starts with "PK"; anything else is not one of ours, and says so plainly instead of
@@ -760,9 +830,15 @@ fn load_inner(
     }
     let version = checked_version(outline.version)?;
     let (project, drops, mixer) = reading::with_context_mixer(version, outline.channels, || {
-        serde_json::from_reader::<_, reading::Named<Project>>(project_json(&mut zip, limits.json)?)
-            .map(|named| named.0)
-            .map_err(does_not_fit)
+        let json = project_json(&mut zip, limits.json)?;
+        let result = if version < 4 {
+            let mut de = serde_json::Deserializer::from_reader(json);
+            de.deserialize_map(LegacyProjectFields)
+                .and_then(|project| de.end().map(|()| project))
+        } else {
+            serde_json::from_reader::<_, reading::Named<Project>>(json).map(|named| named.0)
+        };
+        result.map_err(does_not_fit)
     });
     let mut project = project?;
     if version >= 4 && !mixer {
@@ -876,11 +952,110 @@ fn load_inner(
             asset.sample.file = None;
         }
     }
-    Ok(Loaded {
-        project,
-        samples,
-        warnings,
+    // Advisory only: a failed read or mismatch just keeps the session dirty, never fails the load.
+    let unchanged = check_unchanged
+        && version == VERSION
+        && warnings.is_empty()
+        && project_json(&mut zip, limits.json).is_ok_and(|reader| {
+            matches_json(
+                &Document {
+                    format: FORMAT,
+                    version: VERSION,
+                    project: &project,
+                },
+                BufReader::new(reader),
+            )
+        });
+    Ok(LoadedForOpen {
+        loaded: Loaded {
+            project,
+            samples,
+            warnings,
+        },
+        unchanged_at: unchanged.then(|| path.to_path_buf()),
     })
+}
+
+struct LegacyProjectFields;
+
+impl<'de> Visitor<'de> for LegacyProjectFields {
+    type Value = Project;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(reading::NAMED)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, inner: A) -> Result<Project, A::Error> {
+        Project::deserialize(MapAccessDeserializer::new(SkipRepeatedMixer {
+            inner,
+            seen_mixer: false,
+        }))
+    }
+}
+
+/// The existing legacy field reader discards the first mixer value. Discard later values
+/// here so the derived project reader keeps its normal duplicate checks for every other key.
+struct SkipRepeatedMixer<A> {
+    inner: A,
+    seen_mixer: bool,
+}
+
+impl<'de, A: MapAccess<'de>> MapAccess<'de> for SkipRepeatedMixer<A> {
+    type Error = A::Error;
+
+    fn next_key_seed<S: DeserializeSeed<'de>>(
+        &mut self,
+        mut seed: S,
+    ) -> Result<Option<S::Value>, A::Error> {
+        while let Some(key) = self.inner.next_key_seed(ProjectField {
+            seed,
+            seen_mixer: &mut self.seen_mixer,
+        })? {
+            match key {
+                ControlFlow::Break(value) => return Ok(Some(value)),
+                ControlFlow::Continue(reuse_seed) => {
+                    self.inner.next_value::<IgnoredAny>()?;
+                    seed = reuse_seed;
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn next_value_seed<S: DeserializeSeed<'de>>(&mut self, seed: S) -> Result<S::Value, A::Error> {
+        self.inner.next_value_seed(seed)
+    }
+}
+
+struct ProjectField<'a, S> {
+    seed: S,
+    seen_mixer: &'a mut bool,
+}
+
+impl<'de, S: DeserializeSeed<'de>> DeserializeSeed<'de> for ProjectField<'_, S> {
+    type Value = ControlFlow<S::Value, S>;
+
+    fn deserialize<D: Deserializer<'de>>(self, de: D) -> Result<Self::Value, D::Error> {
+        de.deserialize_identifier(self)
+    }
+}
+
+impl<'de, S: DeserializeSeed<'de>> Visitor<'de> for ProjectField<'_, S> {
+    type Value = ControlFlow<S::Value, S>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a project field name")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, key: &str) -> Result<Self::Value, E> {
+        if key == "mixer" && std::mem::replace(self.seen_mixer, true) {
+            Ok(ControlFlow::Continue(self.seed))
+        } else {
+            self.seed
+                .deserialize(StrDeserializer::new(key))
+                .map(ControlFlow::Break)
+        }
+    }
 }
 
 /// `project.json` from the zip, streamed and buffered, never more than `limit` bytes.
@@ -1140,6 +1315,70 @@ mod tests {
     thread_local! {
         /// Syncs [`sync_file`] made on this thread.
         pub(super) static SYNCED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn load_mixer_fixture(version: u32, extra: &str) -> Result<Loaded, LoadError> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixer.grooviq");
+        let json = format!(
+            r#"{{"format":"grooviq-project","version":{version},"name":"Beat","bpm":120,
+            "patterns":[{{"id":0,"name":"Beat","steps":16,"notes":[]}}],
+            "currentPattern":0,"nextId":1{extra}}}"#
+        );
+        write_zip(&mut File::create(&path).unwrap(), json.as_bytes(), &[]).unwrap();
+        load(&path)
+    }
+
+    #[test]
+    fn file_mixer_keys_ignore_repeated_legacy_values() {
+        for version in 1..4 {
+            let loaded = load_mixer_fixture(
+                version,
+                r#", "mixer":"obsolete", "m\u0069xer":{"mode":"routed"}, "mixer":[1,2]"#,
+            )
+            .unwrap();
+            assert_eq!(
+                loaded.project,
+                load_mixer_fixture(version, "").unwrap().project
+            );
+            assert_eq!(loaded.project.mixer.mode, crate::mixer::Mode::LegacyDirect);
+            assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        }
+    }
+
+    #[test]
+    fn file_mixer_keys_refuse_v4_duplicates() {
+        let identity = r#"{"mode":"legacyDirect","tracks":[{"id":0,"name":"Master"}],"nextTrackId":1,"nextInsertId":1,"nextSendId":1}"#;
+        let error = load_mixer_fixture(4, &format!(r#", "mixer":{identity}, "mixer":{identity}"#))
+            .unwrap_err();
+        assert!(
+            matches!(error, LoadError::Corrupt(ref why) if why.contains("duplicate field `mixer`")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn file_mixer_keys_keep_other_known_legacy_keys_strict() {
+        for version in 1..4 {
+            let error =
+                load_mixer_fixture(version, r#", "mixer":null, "mixer":{}, "name":"Other""#)
+                    .unwrap_err();
+            assert!(
+                matches!(error, LoadError::Corrupt(ref why) if why.contains("duplicate field `name`")),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_mixer_keys_refuse_future_header_before_typed_fields() {
+        assert!(matches!(
+            load_mixer_fixture(5, r#", "mixer":false, "mixer":{}, "channels":[[]]"#),
+            Err(LoadError::NewerVersion {
+                found: 5,
+                supported: 4
+            })
+        ));
     }
 
     #[cfg(unix)]

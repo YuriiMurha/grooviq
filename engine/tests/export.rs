@@ -951,9 +951,24 @@ fn the_real_adapter_reports_a_sync_the_os_refuses() {
     assert!(result.is_err(), "the real adapter did not sync");
 }
 
-fn routed_export_fixture(kind: &str) -> EngineState {
+fn routed_export_fixture(kinds: &[&str]) -> EngineState {
     use grooviq_engine::mixer::*;
-    let insert = InsertId(1);
+    let inserts: Vec<_> = kinds
+        .iter()
+        .enumerate()
+        .map(|(index, kind)| describe_builtin_insert(InsertId(index as u64 + 1), kind).unwrap())
+        .collect();
+    let devices = inserts
+        .iter()
+        .zip(kinds)
+        .rev()
+        .map(|(insert, &kind)| InsertDevice {
+            insert: insert.id,
+            kind: kind.into(),
+            seed: 123,
+            params: Vec::new(),
+        })
+        .collect();
     EngineState {
         pattern: PatternData {
             length: STEP_TICKS,
@@ -964,24 +979,27 @@ fn routed_export_fixture(kind: &str) -> EngineState {
                 tracks: vec![Track {
                     id: MASTER,
                     output: None,
-                    inserts: vec![Insert {
-                        id: insert,
-                        latency_frames: 0,
-                        memory_bytes: 0,
-                    }],
+                    inserts,
                 }],
                 ..Default::default()
             },
-            devices: vec![InsertDevice {
-                insert,
-                kind: kind.into(),
-                seed: 123,
-                params: Vec::new(),
-            }],
+            devices,
             gains: Vec::new(),
         }),
         ..EngineState::default()
     }
+}
+
+#[test]
+fn sample_rate_check_reports_all_blocked_inserts_in_mixer_order() {
+    let mix = routed_export_fixture(&["bitcrusher", "utility", "algorithmic_reverb"]).mix;
+    let error = mix.check_sample_rate(16_000.0).unwrap_err().to_string();
+    let bitcrusher = error.find("bitcrusher").expect(&error);
+    let reverb = error.find("algorithmic_reverb").expect(&error);
+    assert!(bitcrusher < reverb, "{error}");
+    assert!(!error.contains("utility"), "{error}");
+
+    assert!(mix.check_sample_rate(48_000.0).is_ok());
 }
 
 #[test]
@@ -1010,7 +1028,7 @@ fn unsupported_insert_rate_refuses_before_export_touches_files_or_reports_progre
         names
     };
     let before = list();
-    for sample_rate in [8_000, 384_000] {
+    for sample_rate in [8_000, 16_000, 384_000] {
         let options = ExportOptions {
             sample_rate,
             max_tail_seconds: 0.0,
@@ -1018,7 +1036,7 @@ fn unsupported_insert_rate_refuses_before_export_touches_files_or_reports_progre
         };
         let mut progress = Vec::new();
         let error = export_wav(
-            routed_export_fixture("bitcrusher"),
+            routed_export_fixture(&["algorithmic_reverb", "bitcrusher"]),
             &options,
             &path,
             &mut |p| progress.push(p),
@@ -1026,14 +1044,17 @@ fn unsupported_insert_rate_refuses_before_export_touches_files_or_reports_progre
         )
         .unwrap_err();
         assert!(matches!(&error, ExportError::InsertRate(_)), "{error}");
-        assert!(error.to_string().contains("bitcrusher"), "{error}");
+        let message = error.to_string();
+        let reverb = message.find("algorithmic_reverb").expect(&message);
+        let bitcrusher = message.find("bitcrusher").expect(&message);
+        assert!(reverb < bitcrusher, "{message}");
         assert!(progress.is_empty());
         assert_eq!(fs::read(&path).unwrap(), b"old export");
         assert_eq!(fs::read(&stale).unwrap(), b"old partial");
         assert_eq!(list(), before);
         assert!(matches!(
             export_wav(
-                routed_export_fixture("bitcrusher"),
+                routed_export_fixture(&["algorithmic_reverb", "bitcrusher"]),
                 &options,
                 &path,
                 &mut |_| panic!("cancelled export reported progress"),
@@ -1050,8 +1071,8 @@ fn exports_accept_the_inclusive_endpoints_of_each_native_rate_range() {
     let path = dir.path().join("export.wav");
     for (state, rates) in [
         (EngineState::default(), [8_000, 384_000]),
-        (routed_export_fixture("utility"), [8_000, 384_000]),
-        (routed_export_fixture("bitcrusher"), [22_050, 192_000]),
+        (routed_export_fixture(&["utility"]), [8_000, 384_000]),
+        (routed_export_fixture(&["bitcrusher"]), [22_050, 192_000]),
     ] {
         for sample_rate in rates {
             let options = ExportOptions {

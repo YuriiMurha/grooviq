@@ -27,7 +27,7 @@ export function createFakeEngine(initial: ProjectView) {
 
   function applyEdit(edit: Edit) {
     const cells = view.pattern.cells;
-    const row = (channel: number) => (cells[String(channel)] ??= Array(view.pattern.steps).fill(null));
+    const row = (channel: number) => (cells[channel] ??= Array(view.pattern.steps).fill(null));
     switch (edit.kind) {
       case "toggleStep": {
         const r = row(edit.channel);
@@ -47,7 +47,7 @@ export function createFakeEngine(initial: ProjectView) {
         break;
       case "setPatternLength":
         view.pattern.steps = edit.steps;
-        for (const key of Object.keys(cells)) {
+        for (const key of Object.keys(cells).map(Number)) {
           cells[key] = Array.from({ length: edit.steps }, (_, i) => cells[key][i] ?? null);
         }
         break;
@@ -106,6 +106,8 @@ export function createFakeEngine(initial: ProjectView) {
           name,
           color: (id - 1) % 6,
           sampleName: name,
+          sampleNameBasis: null,
+          sampleReference: null,
           sampleFrames: 48_000,
           missing: false,
           volume: 1,
@@ -120,7 +122,7 @@ export function createFakeEngine(initial: ProjectView) {
           roll: false,
         };
         view.channels = [...view.channels, channel];
-        view.pattern.cells[String(id)] = Array(view.pattern.steps).fill(null);
+        view.pattern.cells[id] = Array(view.pattern.steps).fill(null);
         return touch();
       }
       case "channel_set_sample": {
@@ -175,6 +177,8 @@ export function channel(id: number, name: string, extra: Partial<ChannelView> = 
     name,
     color: (id - 1) % 6,
     sampleName: `${name} 01`,
+    sampleNameBasis: null,
+    sampleReference: null,
     missing: false,
     sampleFrames: 48_000,
     volume: 1,
@@ -223,5 +227,8 @@ export function project(
     recording: false,
     canUndo: false,
     canRedo: false,
+    projectCanUndo: false,
+    projectCanRedo: false,
+    patternRevision: 0,
   };
 }

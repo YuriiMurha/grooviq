@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -20,6 +21,28 @@ def sha(number):
 
 BASE, ACTIVE = sha(100), sha(200)
 GREEN = {name: ("success", "") for name in REQUIRED}
+E2E_BATCH = "6b3f47e5b984f573de7c8477daab5a31d7455d20"
+E2E_RUN = "https://github.com/YuriiMurha/grooviq/actions/runs/45872387560"
+E2E_JOB = {
+    "id": 140094920735, "name": "e2e", "head_sha": E2E_BATCH, "run_id": 45872387560,
+    "run_attempt": 1, "status": "completed", "conclusion": "failure",
+}
+E2E_CHECK = {
+    "id": 140094920735, "name": "e2e", "head_sha": E2E_BATCH, "app": {"id": 15368},
+    "check_suite": {"id": 124108886071}, "status": "completed", "conclusion": "failure",
+    "details_url": f"{E2E_RUN}/job/140094920735",
+}
+E2E_WORKFLOW = {
+    "id": 45872387560, "check_suite_id": 124108886071, "run_attempt": 1,
+    "path": ".github/workflows/ci.yml", "head_sha": E2E_BATCH, "head_branch": "merge-train/batch",
+    "event": "push", "html_url": E2E_RUN,
+}
+E2E_CHECKS_PATH = f"commits/{E2E_BATCH}/check-runs?filter=latest&per_page=100"
+E2E_WORKFLOW_PATH = (
+    "actions/workflows/ci.yml/runs?branch=merge-train%2Fbatch&event=push"
+    f"&head_sha={E2E_BATCH}&per_page=1"
+)
+E2E_JOBS_PATH = "actions/runs/45872387560/jobs?filter=latest&per_page=100"
 
 
 class Repo:
@@ -51,6 +74,9 @@ class Repo:
 
     def checks(self, head):
         return self.states.get(head, GREEN)
+
+    def failed_e2e_run(self, head):
+        return None
 
     def reject(self, number, head, reason):
         self.rejected.append((number, head, reason))
@@ -408,6 +434,23 @@ class MergeTrainTests(unittest.TestCase):
         self.written([10, 20], [30, 40, 50], expected=ACTIVE)
         self.assertFalse(self.repo.merged or self.repo.rejected)
 
+    def test_unattended_failure_stops_before_bisection_or_rejection(self):
+        for members in ([10, 20], [10]):
+            with self.subTest(members=members):
+                self.setUp()
+                self.git.batch(members)
+                self.repo.states[ACTIVE] = {
+                    **GREEN, "ui": ("failure", ""), REQUIRED[0]: ("in_progress", ""),
+                }
+                with self.assertRaisesRegex(
+                    RuntimeError, "failed required checks.*ui.*make merge-train ORDER=.*make merge-train-agent-resume"
+                    ".*make merge-train-order.*make merge-train-agent-resume",
+                ):
+                    self.run_tick(agent_deadline=float("inf"))
+                self.assertFalse(self.git.writes)
+                self.assertFalse(self.repo.rejected)
+                self.assertFalse(self.repo.merged)
+
     def test_failed_singleton_is_rejected_and_suspects_revalidated(self):
         self.git.batch([10], [20, 30, 40])
         self.repo.prs[20]["draft"] = True
@@ -474,6 +517,64 @@ class MergeTrainTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Merged so far: #20"):
             self.run_tick()
         self.assertEqual(self.repo.merged, [(20, sha(20))])
+        self.assertFalse(self.git.writes)
+
+    def test_train_announces_parseable_squash_attempt_before_merge(self):
+        from merge_train_agent import SQUASH_ATTEMPT
+
+        self.git.batch([10, 20])
+        merge = self.repo.merge
+        before_merges = []
+
+        def inspect_attempt(number, head):
+            before_merges.append(self.output.getvalue().splitlines()[-1])
+            return merge(number, head)
+
+        self.repo.merge = inspect_attempt
+        self.run_tick((10, 20), agent_deadline=time.monotonic() + 60)
+        self.assertEqual(self.repo.merged, [(10, sha(10)), (20, sha(20))])
+        attempts = [SQUASH_ATTEMPT.fullmatch(line) for line in before_merges]
+        self.assertTrue(all(attempts), before_merges)
+        self.assertEqual([attempt.groups() for attempt in attempts],
+                         [("10", sha(10), BASE), ("20", sha(20), sha(310))])
+
+    def test_agent_deadline_stops_between_squashes_after_reporting_the_prefix(self):
+        self.git.batch([10, 20])
+        merge = self.repo.merge
+        now = 1
+
+        def squash_after_deadline(number, head):
+            nonlocal now
+            result = merge(number, head)
+            self.assertNotIn(f"Merged #{number}", self.output.getvalue())
+            now = 3
+            return result
+
+        self.repo.merge = squash_after_deadline
+        with patch.object(train.time, "monotonic", side_effect=lambda: now):
+            with self.assertRaisesRegex(train.TickDeadline, "before squash of #20"):
+                self.run_tick(agent_deadline=2)
+        self.assertEqual(self.repo.merged, [(10, sha(10))])
+        self.assertEqual(self.output.getvalue().count(f"Merged #10 at {sha(310)}"), 1)
+        self.assertFalse(self.git.writes)
+
+    def test_agent_deadline_stops_rebuild_after_final_squash(self):
+        self.git.batch([10])
+        merge = self.repo.merge
+        now = 1
+
+        def squash_before_expiry(number, head):
+            nonlocal now
+            result = merge(number, head)
+            now = 3
+            return result
+
+        self.repo.merge = squash_before_expiry
+        with patch.object(train.time, "monotonic", side_effect=lambda: now):
+            with self.assertRaisesRegex(train.TickDeadline, "before rebuilding the batch after landing"):
+                self.run_tick((10, 20), agent_deadline=2)
+        self.assertEqual(self.repo.merged, [(10, sha(10))])
+        self.assertIn(f"Merged #10 at {sha(310)}", self.output.getvalue())
         self.assertFalse(self.git.writes)
 
     def test_ambiguous_merge_errors_recover_the_landed_squash_and_continue(self):
@@ -824,6 +925,104 @@ class MergeTrainTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_current_aggregate_failure_latches_unattended_before_any_squash(self):
+        self.exercise_aggregate_failure(unattended=True, holds=True)
+
+    def test_attended_merge_does_not_read_the_aggregate_guard(self):
+        self.exercise_aggregate_failure(unattended=False)
+
+    def test_unattended_merge_does_not_wait_for_a_later_aggregate_result(self):
+        self.exercise_aggregate_failure(unattended=True, reported_late=True)
+
+    def test_unavailable_initial_advisory_read_does_not_latch_the_train(self):
+        self.exercise_aggregate_failure(unattended=True, unavailable=E2E_CHECKS_PATH,
+                                        read_error=subprocess.TimeoutExpired("gh", 45))
+
+    def test_unavailable_confirmation_preserves_failure_evidence_without_squash(self):
+        for path in (E2E_WORKFLOW_PATH, E2E_JOBS_PATH):
+            for error in (subprocess.CalledProcessError(1, "gh", stderr="HTTP 503"),
+                          subprocess.TimeoutExpired("gh", 45)):
+                with self.subTest(path=path, error=type(error).__name__):
+                    self.exercise_aggregate_failure(unattended=True, holds=True,
+                                                    unavailable=path, read_error=error)
+
+    def exercise_aggregate_failure(self, *, unattended, holds=False, reported_late=False,
+                                   unavailable=None, read_error=None):
+        fixture = Repo()
+        git = FakeGit(fixture)
+        git.batch([10])
+        git.active = E2E_BATCH
+        writes, batch_reads, aggregate_reads = [], [], []
+
+        def api(_self, path, *, method="GET", body=None, paginate=False):
+            if method != "GET":
+                writes.append((method, path))
+                if (method, path) == ("PUT", "pulls/10/merge"):
+                    return {"merged": True, "sha": fixture.merge(10, body["sha"])}
+                raise AssertionError((method, path))
+            if path == "branches/main/protection/required_status_checks":
+                return {"strict": False, "checks": [
+                    {"context": name, "app_id": ACTIONS_APP} for name in REQUIRED
+                ]}
+            if path.startswith("issues?"):
+                return [[{"number": 10, "pull_request": {}}]]
+            if path == "pulls/10":
+                return fixture.pull(10)
+            if path.startswith("commits/"):
+                head = path.split("/")[1]
+                checks = [{"name": name, "head_sha": head, "app": {"id": ACTIONS_APP},
+                           "status": "completed", "conclusion": "success"} for name in REQUIRED]
+                if head == E2E_BATCH:
+                    batch_reads.append(path)
+                    if unavailable == path and len(batch_reads) == 2:
+                        raise read_error
+                    if not reported_late or len(batch_reads) > 2:
+                        checks.append(E2E_CHECK)
+                return [{"check_runs": checks}]
+            aggregate_reads.append(path)
+            if unavailable == path:
+                raise read_error
+            if path == E2E_WORKFLOW_PATH:
+                return {"total_count": 1, "workflow_runs": [E2E_WORKFLOW]}
+            if path == E2E_JOBS_PATH:
+                return {"total_count": 1, "jobs": [E2E_JOB]}
+            raise AssertionError(path)
+
+        argv = ["merge_train.py", "--order", f"10={sha(10)}"]
+        if unattended:
+            argv.extend(["--agent-deadline", str(time.monotonic() + 60)])
+        with (TemporaryDirectory() as tmp,
+              patch.object(sys, "argv", argv),
+              patch.object(train.Path, "home", return_value=Path(tmp)),
+              patch.object(train.subprocess, "check_output", return_value=tmp),
+              patch.object(train, "Git", return_value=git),
+              patch.object(train.GitHub, "api", api),
+              redirect_stdout(io.StringIO()) as stdout,
+              redirect_stderr(io.StringIO()) as stderr):
+            code = train.main()
+
+        if holds:
+            self.assertEqual(writes, [])
+            self.assertEqual(git.writes, [])
+            self.assertEqual(code, 1)
+            self.assertNotIn("Squash attempt", stdout.getvalue())
+            message = stderr.getvalue()
+            for evidence in (E2E_BATCH, E2E_RUN, "aggregate e2e", "archived evidence",
+                             "requalify", "infrastructure false alarm", "make merge-train-agent-disable"):
+                self.assertIn(evidence, message)
+            if unavailable:
+                self.assertIn("current-attempt verification unavailable", message)
+                self.assertNotIn("HTTP 503", message)
+                expected_reads = [E2E_WORKFLOW_PATH, E2E_JOBS_PATH]
+                self.assertEqual(aggregate_reads, expected_reads[:expected_reads.index(unavailable) + 1])
+        else:
+            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertEqual(writes, [("PUT", "pulls/10/merge")])
+            self.assertEqual(aggregate_reads, [])
+            self.assertEqual(batch_reads, [E2E_CHECKS_PATH] * (2 if unattended else 1))
+            if unavailable:
+                self.assertIn(E2E_BATCH, stderr.getvalue())
+
     def test_make_treats_a_busy_lock_as_success_and_keeps_real_stops_fatal(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -834,7 +1033,7 @@ class CliTests(unittest.TestCase):
             gh = root / "gh"
             gh.write_text("#!/bin/sh\ntouch gh-called\nexit 99\n")
             gh.chmod(0o755)
-            env = {**os.environ, "PATH": f"{root}{os.pathsep}{os.environ['PATH']}"}
+            env = {**os.environ, "HOME": str(root), "PATH": f"{root}{os.pathsep}{os.environ['PATH']}"}
             makefile = Path(__file__).resolve().parents[1] / "Makefile"
             make = ["make", "-f", str(makefile), "merge-train", "BATCH=4", "ACK_MISMATCH="]
 
@@ -850,6 +1049,89 @@ class CliTests(unittest.TestCase):
             self.assertEqual(stopped.returncode, 2)
             self.assertIn("ORDER requires", stopped.stderr)
             self.assertFalse((root / "gh-called").exists())
+
+    def test_manual_train_refuses_registered_agent_order_before_creating_clients(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            plist = home / "Library/LaunchAgents/io.github.yuriimurha.grooviq.merge-train.plist"
+            plist.parent.mkdir(parents=True)
+            plist.touch()
+            disabled = home / "Library/Application Support/Grooviq Ops/merge-train/disabled"
+            disabled.parent.mkdir(parents=True)
+            with (patch.object(train.Path, "home", return_value=home),
+                  patch.object(sys, "argv", ["merge_train.py", "--order", f"10={sha(10)}"]),
+                  patch.object(train.subprocess, "check_output", return_value=tmp),
+                  patch.object(train, "tick") as tick,
+                  redirect_stderr(io.StringIO()) as stderr):
+                self.assertEqual(train.main(), 1)
+                self.assertIn("make merge-train-order", stderr.getvalue())
+                self.assertIn("make merge-train-agent-disable", stderr.getvalue())
+                self.assertIn("make merge-train ORDER=", stderr.getvalue())
+                self.assertRegex(
+                    stderr.getvalue(),
+                    "make merge-train ORDER=.*make merge-train-order ORDER=.*heads still approved"
+                    ".*make merge-train-agent-enable.*make merge-train-agent-resume",
+                )
+                tick.assert_not_called()
+                disabled.touch()
+                self.assertEqual(train.main(), 0)
+                tick.assert_called_once()
+
+    def test_unattended_cli_holds_failed_pr_and_disables_all_git_hooks(self):
+        with TemporaryDirectory() as tmp:
+            fixture = Repo()
+            pr = fixture.prs[10]
+            git_calls, api_calls = [], []
+
+            def git(argv, **kwargs):
+                git_calls.append(argv)
+                if "--git-common-dir" in argv:
+                    stdout = tmp
+                elif "ls-remote" in argv:
+                    stdout = f"{BASE} {train.MAIN_REF}\n"
+                elif "fetch" in argv:
+                    stdout = ""
+                else:
+                    raise AssertionError(argv)
+                return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+            def api(_self, path, *, method="GET", **kwargs):
+                api_calls.append(method)
+                if method != "GET":
+                    return None
+                if path == "branches/main/protection/required_status_checks":
+                    return {"strict": False, "checks": [
+                        {"context": name, "app_id": ACTIONS_APP} for name in REQUIRED
+                    ]}
+                if path.startswith("issues?"):
+                    return [[{"number": 10, "pull_request": {}}]]
+                if path == "pulls/10":
+                    return pr if "DELETE" not in api_calls else {**pr, "labels": []}
+                if path.startswith("commits/"):
+                    head = path.split("/")[1]
+                    return [{"check_runs": [
+                        {"name": name, "head_sha": head, "app": {"id": ACTIONS_APP},
+                         "status": "completed", "conclusion": "failure"
+                         if name == "ui" and head == sha(10) else "success"}
+                        for name in REQUIRED
+                    ]}]
+                raise AssertionError(path)
+
+            argv = ["merge_train.py", "--order", f"10={sha(10)}",
+                    "--agent-deadline", str(time.monotonic() + 60)]
+            with (patch.object(sys, "argv", argv), patch.object(train.subprocess, "run", side_effect=git),
+                  patch.object(train.GitHub, "api", api),
+                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as stderr):
+                code = train.main()
+            self.assertIn("Held #10", stderr.getvalue())
+            self.assertIn("make merge-train ORDER=", stderr.getvalue())
+            self.assertRegex(stderr.getvalue(), "make merge-train-order.*make merge-train-agent-resume")
+            self.assertEqual(code, 1)
+            self.assertTrue(api_calls)
+            self.assertEqual(set(api_calls), {"GET"})
+            self.assertGreaterEqual(len(git_calls), 3)
+            for argv in git_calls:
+                self.assertEqual(argv[:3], ["git", "-c", "core.hooksPath=/dev/null"])
 
     def test_busy_flock_returns_tempfail_before_creating_clients(self):
         with TemporaryDirectory() as tmp:
@@ -876,6 +1158,7 @@ class CliTests(unittest.TestCase):
         with (TemporaryDirectory() as tmp,
               patch.object(sys, "argv", ["merge_train.py", "--order", f"10={sha(10)}"]),
               patch.object(train.subprocess, "check_output", return_value=tmp),
+              patch.object(train.Path, "home", return_value=Path(tmp)),
               patch.object(train, "tick", side_effect=BlockingIOError("tick failed")),
               redirect_stderr(io.StringIO()) as stderr):
             self.assertEqual(train.main(), 1)
@@ -899,6 +1182,87 @@ class CliTests(unittest.TestCase):
 
 
 class GitHubTests(unittest.TestCase):
+    def e2e_api(self, *, checks=(E2E_CHECK,), workflow=E2E_WORKFLOW, count=1, jobs=(E2E_JOB,)):
+        def api(path, **kwargs):
+            if path == E2E_CHECKS_PATH:
+                self.assertEqual(kwargs, {"paginate": True})
+                return [{"check_runs": [check]} for check in checks] or [{"check_runs": []}]
+            if path == E2E_WORKFLOW_PATH:
+                return {"total_count": count, "workflow_runs": [workflow]}
+            if path == E2E_JOBS_PATH:
+                return {"total_count": len(jobs), "jobs": list(jobs)}
+            raise AssertionError(path)
+        return api
+
+    def test_reads_current_aggregate_failure_with_canonical_run_evidence(self):
+        repo = GitHub()
+        for details in (E2E_CHECK["details_url"], E2E_RUN):
+            with self.subTest(details=details):
+                repo.api = self.e2e_api(checks=({**E2E_CHECK, "details_url": details},))
+                self.assertEqual(repo.failed_e2e_run(E2E_BATCH), E2E_RUN)
+
+    def test_only_completed_exact_head_actions_aggregate_can_hold(self):
+        repo = GitHub()
+        # Includes an unreported/late failure and a no-runner job cancellation.
+        for fields in (None, {"head_sha": sha(20)}, {"name": "e2e-browser (chromium, 1)"},
+                       {"app": {"id": 9}}, {"app": None}, {"status": "in_progress"},
+                       {"status": "queued", "conclusion": None}, {"conclusion": "cancelled"},
+                       {"conclusion": "skipped"}, {"conclusion": "success"},
+                       {"conclusion": "neutral"}, {"conclusion": None}):
+            with self.subTest(fields=fields):
+                checks = () if fields is None else ({**E2E_CHECK, **fields},)
+                repo.api = self.e2e_api(checks=checks)
+                self.assertIsNone(repo.failed_e2e_run(E2E_BATCH))
+
+    def test_untrusted_links_and_suite_or_job_ids_cannot_hold(self):
+        repo = GitHub()
+        for fields in (
+            {"details_url": E2E_RUN.replace("github.com", "github.com.evil.example")},
+            {"details_url": E2E_RUN.replace("grooviq", "other")},
+            {"details_url": f"{E2E_RUN}/job/123"},
+            {"details_url": f"{E2E_RUN}/job/140094920735?redirect=1"},
+            {"details_url": "https://github.com/YuriiMurha/grooviq/actions/runs/123"},
+            {"details_url": None}, {"id": 123}, {"check_suite": {"id": 123}},
+        ):
+            with self.subTest(fields=fields):
+                repo.api = self.e2e_api(checks=({**E2E_CHECK, **fields},))
+                self.assertIsNone(repo.failed_e2e_run(E2E_BATCH))
+
+    def test_foreign_workflow_or_ambiguous_same_sha_runs_cannot_hold(self):
+        repo = GitHub()
+        for fields, count in (
+            ({"id": 123}, 1), ({"path": ".github/workflows/perf.yml"}, 1),
+            ({"head_sha": sha(20)}, 1), ({"head_branch": "main"}, 1),
+            ({"event": "pull_request"}, 1), ({}, 2),
+        ):
+            with self.subTest(fields=fields, count=count):
+                repo.api = self.e2e_api(workflow={**E2E_WORKFLOW, **fields}, count=count)
+                self.assertIsNone(repo.failed_e2e_run(E2E_BATCH))
+
+    def test_historical_attempt_or_unconfirmed_job_cannot_hold(self):
+        repo = GitHub()
+        for jobs in ((), ({**E2E_JOB, "id": 123, "run_attempt": 2},),
+                     ({**E2E_JOB, "name": "e2e-browser"},),
+                     ({**E2E_JOB, "head_sha": sha(20)},), ({**E2E_JOB, "run_id": 123},),
+                     ({**E2E_JOB, "status": "in_progress"},),
+                     ({**E2E_JOB, "conclusion": "cancelled"},),
+                     (E2E_JOB, {**E2E_JOB, "id": 123})):
+            with self.subTest(jobs=jobs):
+                repo.api = self.e2e_api(jobs=jobs)
+                self.assertIsNone(repo.failed_e2e_run(E2E_BATCH))
+        repo.api = self.e2e_api(workflow={**E2E_WORKFLOW, "run_attempt": 2}, jobs=(E2E_JOB,))
+        self.assertIsNone(repo.failed_e2e_run(E2E_BATCH))
+
+    def test_duplicate_history_does_not_shadow_a_proven_current_failure(self):
+        repo = GitHub()
+        old = {**E2E_CHECK, "id": 123, "details_url": f"{E2E_RUN}/job/123"}
+        repo.api = self.e2e_api(
+            checks=(old, E2E_CHECK),
+            workflow={**E2E_WORKFLOW, "run_attempt": 2},
+            jobs=({**E2E_JOB, "run_attempt": 2},),
+        )
+        self.assertEqual(repo.failed_e2e_run(E2E_BATCH), E2E_RUN)
+
     def test_api_exposes_http_error_text_to_retry_logic(self):
         def gh(argv, **kwargs):
             self.assertTrue(kwargs["capture_output"])
@@ -990,6 +1354,13 @@ class GitHubTests(unittest.TestCase):
                 with self.assertRaises(subprocess.CalledProcessError):
                     operation(layer)
 
+    def test_unattended_rejection_holds_before_any_public_write(self):
+        repo = GitHub(hold_rejections=True)
+        with patch.object(repo, "api") as api:
+            with self.assertRaisesRegex(RuntimeError, "Held #10.*failed check"):
+                repo.reject(10, sha(10), "failed check")
+            api.assert_not_called()
+
     def test_changed_head_after_comment_keeps_label(self):
         repo = GitHub()
         calls = []
@@ -1031,6 +1402,18 @@ class GitHubTests(unittest.TestCase):
         repo.api = lambda *args, **kwargs: {"merged": True}
         with self.assertRaisesRegex(RuntimeError, "squash SHA"):
             repo.merge(10, sha(10))
+
+
+class GitTests(unittest.TestCase):
+    def test_publish_does_not_push_after_deadline(self):
+        git = train.Git(agent_deadline=2)
+        with (patch.object(train.time, "monotonic", return_value=2),
+              patch.object(train.subprocess, "run") as run,
+              redirect_stderr(io.StringIO()) as stderr):
+            with self.assertRaisesRegex(train.TickDeadline, "before publishing the batch"):
+                git.publish(sha(10), ACTIVE)
+        run.assert_not_called()
+        self.assertEqual(stderr.getvalue(), "")
 
 
 class GitIntegrationTest(unittest.TestCase):

@@ -10,7 +10,8 @@ function classifyPath(path) {
     return "shared";
   }
   // The Tauri command-parity test reads the mock source. Tauri's build embeds frontendDist.
-  if (path === "app/ui/e2e/mockTauri.ts" || path.startsWith("app/ui/dist/")) return "shared";
+  if (path === "app/ui/e2e/mockTauri.ts" || path.startsWith("app/ui/dist/") ||
+      path.startsWith("app/ui/src/api/generated/")) return "shared";
   // The Rust jobs also install native npm dependencies and build frontendDist on both desktop OSes.
   if (UI_BUILD_FILES.has(path) || UI_BUILD_CONFIG.test(path)) return "shared";
   if (path.startsWith("app/ui/")) return "ui";

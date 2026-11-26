@@ -29,13 +29,15 @@ pub fn arrangement_edit(
     arrangement_core::arrangement_edit(&audio.session, generation, revision, &edits_json)
 }
 #[tauri::command]
-pub fn arrangement_history(
+pub async fn arrangement_history(
     audio: State<'_, Audio>,
     generation: u64,
     revision: u64,
     undo: bool,
-) -> serde_json::Value {
-    arrangement_core::arrangement_history(&audio.session, generation, revision, undo)
+) -> Result<serde_json::Value, String> {
+    let reply = arrangement_core::arrangement_history(&audio.session, generation, revision, undo);
+    audio.clear_retired_autosaves().await;
+    Ok(reply)
 }
 #[tauri::command]
 pub fn arrangement_curve(

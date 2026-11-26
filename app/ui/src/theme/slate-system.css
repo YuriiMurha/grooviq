@@ -32,6 +32,7 @@
   --paper: #f0f3f6;
   --well: #171c23; /* the inset slate shade composited over the canvas */
   --rec: #e36b65;
+  --on-rec: var(--bg);
   --hair: rgba(48, 55, 64, 0.64);
   --step-a: #323a43;
   --step-b: #2e363e;
@@ -52,6 +53,8 @@
   --roll-key-white: #c3cad2; /* muted steel keeps the shared dark octave labels readable */
   --roll-key-black: #21282f;
 
+  --dev-amp: #e17783;
+  --dev-voice: #6a97ec;
   --dev-card: #293038;
   --dev-shadow: 0 28px 70px -24px rgba(8, 11, 16, 0.85), 0 0 0 1px var(--line);
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
