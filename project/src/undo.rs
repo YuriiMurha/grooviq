@@ -308,6 +308,55 @@ impl NoteHistory {
         self.log.shrink_to_fit();
     }
 
+    /// Removes both sides of a note's history if it belonged to the deleted channel.
+    /// A note moved between channels cannot otherwise be brought back under its old id.
+    pub(crate) fn forget_channel(&mut self, channel: u32, current: &[Note]) {
+        let removed: HashSet<_> = current
+            .iter()
+            .chain(
+                self.undo
+                    .iter()
+                    .chain(&self.redo)
+                    .flat_map(|step| step.change.before.iter().chain(&step.change.after)),
+            )
+            .filter(|note| note.channel == channel)
+            .map(|note| note.id)
+            .collect();
+        self.close();
+        if removed.is_empty() {
+            return;
+        }
+        let mut empty = Vec::new();
+        for step in self.undo.iter_mut().chain(&mut self.redo) {
+            if step
+                .change
+                .before
+                .iter()
+                .chain(&step.change.after)
+                .any(|n| removed.contains(&n.id))
+            {
+                let delta = std::sync::Arc::make_mut(&mut step.change);
+                delta.before.retain(|n| !removed.contains(&n.id));
+                delta.after.retain(|n| !removed.contains(&n.id));
+                delta.before.shrink_to_fit();
+                delta.after.shrink_to_fit();
+                if delta.size() == 0 {
+                    empty.push(step.order);
+                }
+            }
+        }
+        self.notes = self
+            .undo
+            .iter()
+            .chain(&self.redo)
+            .map(|step| step.change.size())
+            .sum();
+        for order in empty {
+            // As with normal eviction, growth from applied steps stays in the length log.
+            self.evict_order(order);
+        }
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }

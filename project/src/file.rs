@@ -448,11 +448,8 @@ fn plan_with_missing(
     limits: Limits,
     allow_missing: bool,
 ) -> io::Result<(Project, Vec<Entry>)> {
-    // Nothing writes a mixer the runtime does not play yet (#477, #506), nor an invalid one.
+    // The resulting file must be valid and render with every stored mixer setting.
     crate::mixer::require_runtime_support(project).map_err(|e| too_big(e.to_string()))?;
-    project
-        .validate_mixer()
-        .map_err(|e| too_big(e.to_string()))?;
     if let Some(p) = project
         .patterns
         .iter()
@@ -1764,7 +1761,7 @@ mod tests {
         let path = dir.path().join("a.grooviq");
         let (mut project, samples) = with_sizes(&[6]);
         project.mixer.mode = crate::mixer::Mode::Routed;
-        project.mixer.tracks[0].level = crate::mixer::Level::Silence;
+        project.mixer.tracks[0].mute = true;
         project.validate_mixer().unwrap();
 
         let dead = grooviq_engine::create_owned_temp(&path, ".tmp").unwrap();
@@ -1772,7 +1769,9 @@ mod tests {
         let dead_path = dead.path.clone();
         drop(dead.file);
 
-        save(&project, &samples, &path).unwrap_err();
+        let error = save(&project, &samples, &path).unwrap_err();
+        let unsupported = crate::mixer::MixerError::UnsupportedTrackControls(0);
+        assert_eq!(error.to_string(), unsupported.to_string());
         assert!(
             dead_path.exists(),
             "unsupported routing must refuse before cleanup"

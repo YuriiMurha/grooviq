@@ -1,5 +1,5 @@
 // A labelled offline fixture for the mixer components: generated tracks, a synthetic meter
-// snapshot, and a stand-in host that applies or refuses commands. No engine, IPC or audio; never
+// stream, and a stand-in host that applies or refuses commands. No engine, IPC or audio; never
 // part of the app's build (a non-production Vite input).
 //
 // Query: ?tracks=<n> generated tracks (0 for none), ?long=1 long names and chains.
@@ -8,10 +8,10 @@ import "@fontsource-variable/manrope";
 import "../theme/riso.css";
 import "../app.css";
 import "../devices/devices.css";
-import { StrictMode, useLayoutEffect, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
+import { Profiler, StrictMode, useLayoutEffect, useRef, useState } from "react";
+import { createRoot } from "react-dom/profiling";
 import { Mixer } from "./Mixer";
-import type { MeterSource, MixerCommand, MixerError, MixerInsert, MixerMaster, MixerOption, MixerTrack } from "./mixerModel";
+import type { MeterSource, MixerCommand, MixerError, MixerInsert, MixerMaster, MixerOption, MixerProps, MixerTrack } from "./mixerModel";
 
 const EFFECTS: MixerOption[] = [
   "EQ",
@@ -67,26 +67,49 @@ function base(id: string, name: string, kind: string, ink: number, level: number
   };
 }
 
-/** Outputs and send destinations: the stand-in host's own rule (buses and returns), not a
- * route validator of the mixer's. */
+/** Stand-in host route rules. Even a silent send participates in cycle detection. */
 function wire(tracks: MixerTrack[], master: MixerMaster): MixerTrack[] {
-  const buses = tracks.filter((t) => t.kind === "Bus" || t.kind === "Return");
-  const returns = tracks.filter((t) => t.kind === "Return");
-  return tracks.map((t) => {
-    const outputs = [...buses.filter((b) => b.id !== t.id && t.kind !== "Bus" && t.kind !== "Return"), master].map(({ id, name }) => ({ id, name }));
-    const sendDestinations = t.kind === "Return" ? [] : returns.map(({ id, name }) => ({ id, name }));
-    const inserts = t.inserts.map((s) => (DETECTOR.has(s.name) ? { ...s, detector: s.detector ?? { options: detectorSources(tracks, t.id), sourceId: null } } : s));
-    return { ...t, outputs, sendDestinations, inserts };
+  const nodes = new Map(tracks.map((track) => [track.id, track]));
+  const buses = tracks.filter((track) => track.kind === "Bus");
+  const returns = tracks.filter((track) => track.kind === "Return");
+  const reaches = (from: string, to: string): boolean => {
+    const seen = new Set<string>();
+    const visit = (id: string): boolean => {
+      if (id === to) return true;
+      const track = nodes.get(id);
+      if (!track || seen.has(id)) return false;
+      seen.add(id);
+      return (track.outputId !== null && visit(track.outputId)) || track.sends.some((send) => visit(send.destinationId));
+    };
+    return visit(from);
+  };
+  const option = ({ id, name }: MixerTrack) => ({ id, name });
+
+  return tracks.map((track) => {
+    const candidates = track.kind === "Return" ? [master] : [...buses, master];
+    const outputs = candidates.filter((target) => !reaches(target.id, track.id)).map(option);
+    const sendDestinations = returns.filter((target) => !reaches(target.id, track.id)).map(option);
+    const inserts = track.inserts.map((slot) => DETECTOR.has(slot.name) && !slot.detector
+      ? { ...slot, detector: { options: detectorSources(tracks, track.id), sourceId: null } }
+      : slot);
+    return { ...track, outputs, sendDestinations, inserts };
   });
 }
 
 const detectorSources = (tracks: MixerTrack[], self: string) => tracks.filter((t) => t.id !== self && t.kind === "Instrument").map(({ id, name }) => ({ id, name }));
 
+const q = new URLSearchParams(location.search);
+const UNSUPPORTED: MixerProps["unsupported"] = q.has("unsupported") ? {
+  mute: "Mute is unavailable in this mixer host.",
+  solo: "Solo is unavailable in this mixer host.",
+  bypass: "Bypass is unavailable in this mixer host.",
+  detector: "Detector selection is unavailable in this mixer host.",
+} : undefined;
+
 function initial(): State {
-  const q = new URLSearchParams(location.search);
   const count = q.get("tracks");
   const long = q.get("long") === "1";
-  const master: MixerMaster = { ...base("n-master", "Master", "Output", 1, 0, ["Limiter"]), outputId: null, outputLabel: "Audio device" };
+  const master: MixerMaster = { ...base("n-master", "Master", "Output", 1, 0, ["Limiter"]), outputId: null, outputLabel: "Stereo out" };
   let tracks: MixerTrack[];
   if (count !== null) {
     const n = Math.max(0, Math.floor(Number(count)) || 0);
@@ -94,29 +117,29 @@ function initial(): State {
   } else {
     tracks = [
       base("n-kick", "Kick", "Instrument", 1, -4, ["EQ", "Drum Shaper"]),
-      base("n-snare", "Snare", "Instrument", 4, -7, ["EQ", "Saturation"]),
-      base("n-hats", "Hats", "Instrument", 3, -12, ["EQ"]),
+      base("n-snare", "Snare", "Instrument", 4, -8, UNSUPPORTED ? ["EQ", "Compressor"] : ["EQ"]),
+      base("n-drums", "Kit bus", "Bus", 4, -2, ["Multiband Compressor"]),
       base("n-bass", "Bass", "Instrument", 5, -5, ["Fattener", "Compressor"]),
-      base("n-keys", "Keys", "Instrument", 2, -8, ["EQ", "Lo-fi Colour", "Character Delay"]),
-      base("n-vocal", "Vocal take", "Audio track", 6, -6, []),
-      base("n-drums", "Drum bus", "Bus", 4, 0, ["Multiband Compressor"]),
-      base("n-air", "Air return", "Return", 2, -10, ["Algorithmic Reverb"]),
-      base("n-echo", "Echo return", "Return", 6, -13, ["Character Delay"]),
+      base("n-keys", "Keys", "Instrument", 2, -9, ["EQ", "Lo-fi Colour", "Character Delay"]),
+      base("n-vocal", "Vocal take", "Audio", 6, -6, []),
+      base("n-music", "Music bus", "Bus", 3, -1, ["Utility"]),
+      base("n-air", "Room", "Return", 2, -10, ["Algorithmic Reverb"]),
+      base("n-echo", "Echo", "Return", 6, -12, ["Character Delay"]),
     ];
-    for (const id of ["n-kick", "n-snare", "n-hats"]) tracks.find((t) => t.id === id)!.outputId = "n-drums";
-    const kick = tracks[0];
-    kick.sends = [{ id: uid("send"), destinationId: "n-air", amount: 0.05, pre: false }];
-    tracks[1].sends = [{ id: uid("send"), destinationId: "n-air", amount: 0.23, pre: false }];
-    tracks[4].sends = [{ id: uid("send"), destinationId: "n-echo", amount: 0.3, pre: true }];
+    tracks[0].outputId = tracks[1].outputId = "n-drums";
+    tracks[2].outputId = tracks[3].outputId = tracks[4].outputId = "n-music";
+    tracks[1].sends = [{ id: uid("send"), destinationId: "n-air", amount: 0.16, pre: false }];
+    tracks[2].sends = [{ id: uid("send"), destinationId: "n-air", amount: 0.12, pre: false }];
+    tracks[4].sends = [{ id: uid("send"), destinationId: "n-air", amount: 0.24, pre: false }];
+    tracks[5].sends = [{ id: uid("send"), destinationId: "n-echo", amount: 0.19, pre: false }];
     tracks[1].clipped = true;
-    tracks[4].inserts = tracks[4].inserts.map((x, i) => (i === 1 ? { ...x, active: false } : x));
     if (long) {
       tracks[0].name = "Kick drum layered with a long sub tail, take three (final)";
       tracks[0].inserts = ["EQ", "Drum Shaper", "Saturation", "Compressor", "Clipper", "Utility", "Character Delay"].map((n) => insert(n));
       tracks[7].name = "Air return with a very long plate-style reverb name";
     }
   }
-  return { tracks: wire(tracks, master), master, selectedId: tracks.find((t) => t.kind === "Bus")?.id ?? tracks[0]?.id ?? master.id, error: null, refuse: null, opened: null };
+  return { tracks: wire(tracks, master), master, selectedId: tracks.find((t) => t.name === "Snare")?.id ?? tracks[0]?.id ?? master.id, error: null, refuse: null, opened: null };
 }
 
 function update(state: State, id: string, f: (t: MixerTrack) => MixerTrack): State {
@@ -182,16 +205,23 @@ function apply(state: State, c: MixerCommand): State {
   }
 }
 
-/** A still, synthetic meter snapshot derived from each generated level: not a signal. */
-function snapshot(get: () => State | null): MeterSource {
+const measure = q.has("measure");
+let meterFrames = 0;
+let mixerCommits = 0;
+
+/** Synthetic stereo peaks sampled on demand. No signal or audio device is created. */
+function meterSource(get: () => State | null): MeterSource {
   return {
     read(id, out) {
-      const s = get();
-      const t = s && node(s, id);
-      if (!t || t.mute) return false;
-      const peak = Math.pow(10, (t.level - 4) / 20);
-      out[0] = t.clipped ? 1 : peak * (1 - Math.max(0, t.pan) * 0.5);
-      out[1] = t.clipped ? 1 : peak * (1 + Math.min(0, t.pan) * 0.5);
+      const state = get();
+      // Master is registered for every frame, regardless of the windowed strip count.
+      if (measure && state?.master.id === id) meterFrames++;
+      const track = state && node(state, id);
+      if (!track || track.mute) return false;
+      const time = q.has("still") ? 0 : performance.now() / 450;
+      const peak = Math.pow(10, (track.level - 5) / 20);
+      out[0] = peak * (0.75 + 0.17 * Math.sin(time + track.level)) * (1 - Math.max(0, track.pan) * 0.5);
+      out[1] = peak * (0.65 + 0.18 * Math.cos(time + track.level)) * (1 + Math.min(0, track.pan) * 0.5);
       return true;
     },
   };
@@ -202,6 +232,7 @@ declare global {
     /** The fixture's host, for the Playwright spec. */
     mixerFixture: {
       log: MixerCommand[];
+      stats(): { meterFrames: number; mixerCommits: number };
       refuseNext(message: string): void;
       deferNextCommit(): void;
       settleCommit(accepted: boolean): void;
@@ -217,9 +248,9 @@ declare global {
 /** Every command the mixer emitted, in order. */
 const LOG: MixerCommand[] = [];
 
-/** The state the meter snapshot reads. */
+/** The state the meter source reads. */
 let shownState: State | null = null;
-const METERS = snapshot(() => shownState);
+const METERS = meterSource(() => shownState);
 
 export function Fixture() {
   const [state, setState] = useState(initial);
@@ -237,6 +268,7 @@ export function Fixture() {
   useLayoutEffect(() => {
     window.mixerFixture = {
       log: LOG,
+      stats: () => ({ meterFrames, mixerCommits }),
       refuseNext: (message) => setState((s) => ({ ...s, refuse: message })),
       deferNextCommit: () => { deferNext.current = true; },
       settleCommit: (accepted) => {
@@ -268,22 +300,22 @@ export function Fixture() {
         return { ...s, refuse: null, error: { nodeId: "nodeId" in c ? c.nodeId : c.target.nodeId, message: s.refuse } };
       }
       const next = apply(s, c);
-      return live || next === s ? next : { ...next, error: null };
+      if (live || next === s) return next;
+      const routesChanged = c.type === "setOutput" || c.type === "addSend" || c.type === "removeSend";
+      return { ...next, tracks: routesChanged ? wire(next.tracks, next.master) : next.tracks, error: null };
     });
   };
 
+  const mixer = <Mixer tracks={state.tracks} master={state.master} effects={EFFECTS} selectedId={state.selectedId} error={state.error} meters={METERS} unsupported={UNSUPPORTED} onCommand={onCommand} />;
   return (
     <main className="fx">
-      <header className="fx-head">
-        <div>
-          <h1>Mixer components</h1>
-          <p>Synthetic fixture: generated tracks, a still synthetic meter snapshot, no audio and no engine. A stand-in host applies each command.</p>
-        </div>
-        <p className="fx-count">
-          {state.tracks.length} tracks{state.opened ? ` · Opened ${state.opened}` : ""}
-        </p>
+      <header className="mx-fixture-head">
+        <h1>Mixer</h1>
+        <span>Night sketch · 140 BPM</span>
+        {state.opened && <span role="status">Opened {state.opened}</span>}
+        <p>Silent fixture · simulated meters</p>
       </header>
-      <Mixer tracks={state.tracks} master={state.master} effects={EFFECTS} selectedId={state.selectedId} error={state.error} meters={METERS} onCommand={onCommand} />
+      {measure ? <Profiler id="mixer" onRender={() => { mixerCommits++; }}>{mixer}</Profiler> : mixer}
     </main>
   );
 }

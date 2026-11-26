@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from "react";
-import type { LoopRegion, ArrangementStamp } from "../api/arrangement";
+import { pickSound } from "../rack/audioFiles";
+import { errorText } from "../api/project";
+import { dropNotice, missingAudioAssets } from "./audio/media";
+import { createWaveformLoader, packWaveforms, visibleWaveforms } from "./audio/waveforms";
+import { useAudioDrop } from "./audio/useAudioDrop";
+import { arrangementWaveform, type LoopRegion, type ArrangementStamp } from "../api/arrangement";
 import type { PatternsView } from "../api/patterns";
 import { PATTERN_DRAG_TYPE } from "../patterns/PickerRail";
 import { isProjectReplacing, projectGeneration } from "../project/replacement";
@@ -15,11 +20,11 @@ import { buildClipAction, selectedPatternClips, selectionIsMuted, type ClipActio
 import { keyboardLoop, keyboardSeek, seekTarget, LoopGesture, rulerTick } from "./ruler";
 import "./playlist.css";
 
-type Props = Readonly<{ rulerPosition: { readonly current: number | null }; model: PlaylistModel; patterns: PatternsView | null; bpm: number; beats: number; unit: number }>;
+type Props = Readonly<{ rulerPosition: { readonly current: number | null }; model: PlaylistModel; patterns: PatternsView | null; bpm: number; beats: number; unit: number; notifyAudioDrop: (message: string) => void }>;
 type Active = { gesture: PatternGesture | PatternGroupGesture; start: Point; moved: boolean; clickId: number | null; pointerId: number; stamp: ArrangementStamp; kind: GestureInput["kind"] };
 const DEFAULT_VIEW: PlaylistView = { width: 1, height: 1, scrollTick: 0, scrollTrack: 0, tickWidth: 0.05, rowHeight: 64 };
 
-export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: Props) {
+export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, notifyAudioDrop }: Props) {
   const { state, mutate, reload, seek } = model;
   const snapshot = state.snapshot;
   const barTicks = Math.max(1, Math.floor(3840 / Math.max(1, unit))) * Math.max(1, beats);
@@ -54,8 +59,16 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
   const [previewIndex, setPreviewIndex] = useState(-1);
   const [sliceGuide, setSliceGuide] = useState<{ tick: number; trackIndex: number } | null>(null);
   const [rendererKind, setRendererKind] = useState<string>("Loading display");
+  const dropPreview = useRef<RenderClip | null>(null);
+  const [relinkError, setRelinkError] = useState<{ generation: number; message: string } | null>(null);
   const [displayError, setDisplayError] = useState<string | null>(null);
   const canvas = useRef<HTMLCanvasElement>(null), scroll = useRef<HTMLDivElement>(null);
+  const restoreCancelFocus = useRef(false);
+  useEffect(() => {
+    if (state.media !== null || !restoreCancelFocus.current) return;
+    restoreCancelFocus.current = false;
+    if (document.activeElement === document.body && !isProjectReplacing() && !modalIsOpen()) canvas.current?.focus();
+  }, [state.media]);
   const renderer = useRef<PlaylistRenderer | null>(null), active = useRef<Active | null>(null);
   const draw = useRef<() => void>(() => {});
   const projection = useMemo(() => {
@@ -77,8 +90,12 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
   }, [snapshot]);
   const patternsOnly = useMemo(() => [...patternClips.values()], [patternClips]);
   const selectedClip = selected === null ? null : patternClips.get(selected) ?? null;
+  const missingAssets = useMemo(() => missingAudioAssets(snapshot?.warnings ?? []), [snapshot]);
+  const selectedAsset = snapshot?.clips.find(clip => clip.id === selected)?.content;
+  const missingAsset = selectedAsset?.type === "audio" && missingAssets.has(selectedAsset.asset) ? selectedAsset.asset : null;
   const selectedIndex = useMemo(() => selected === null ? -1 : clips.findIndex(clip => clip.id === selected), [clips, selected]);
   const cancel = useCallback(() => {
+    if (dropPreview.current) { dropPreview.current = null; draw.current(); }
     const loop = loopActive.current; loopActive.current = null; loop?.gesture.cancel(); setLoopPreview(null);
     if (loop && ruler.current?.hasPointerCapture(loop.pointerId)) ruler.current.releasePointerCapture(loop.pointerId);
     const seeking = seekActive.current; seekActive.current = null; seekPreview.current = null;
@@ -154,7 +171,7 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
       const dpr = Math.max(1, window.devicePixelRatio || 1);
       const width = Math.round(view.width * dpr), height = Math.round(view.height * dpr);
       if (element.width !== width) element.width = width; if (element.height !== height) element.height = height;
-      const scene: PlaylistScene = { view, dpr, barTicks, selected: selectedIndex, preview: transformed ? { index: previewIndex, clip: transformed } : null, group: groupPreview };
+      const scene: PlaylistScene = { view, dpr, barTicks, selected: selectedIndex, preview: transformed ? { index: previewIndex, clip: transformed } : null, group: groupPreview, drop: dropPreview.current };
       display.draw(scene, readPlaylistPalette(element));
     };
     draw.current = render;
@@ -166,8 +183,62 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
     const redraw = () => draw.current(); window.addEventListener("resize", redraw);
     return () => { observer.disconnect(); window.removeEventListener("resize", redraw); };
   }, []);
+  const waveforms = useRef<ReturnType<typeof createWaveformLoader> | null>(null);
+  useEffect(() => {
+    const loader = createWaveformLoader(arrangementWaveform, rows => {
+      renderer.current?.setWaveforms(packWaveforms(rows));
+      draw.current();
+    });
+    waveforms.current = loader;
+    return () => { loader.update(-1, new Map(), [], []); waveforms.current = null; };
+  }, []);
+  useEffect(() => {
+    waveforms.current?.update(snapshot?.generation ?? -1, state.waveformVersions, snapshot?.audioAssets ?? [],
+      snapshot ? visibleWaveforms(snapshot, clips, view, missingAssets) : []);
+  }, [snapshot, state.waveformVersions, clips, view, missingAssets]);
   const dimensions = useMemo(() => extent(clips, snapshot?.tracks.length ?? 0, view, barTicks), [clips, snapshot, view, barTicks]);
-  const busy = state.busy || state.requiresRefresh || !snapshot || view.width <= 1 || view.height <= 1 || rendererKind === "Loading display" || Boolean(displayError || projection.error);
+  const busy = state.busy || state.media !== null || state.requiresRefresh || !snapshot || view.width <= 1 || view.height <= 1 || rendererKind === "Loading display" || Boolean(displayError || projection.error);
+  useAudioDrop({
+    canvas, snapshot, view, quantum, busy,
+    showPreview: clip => {
+      const previous = dropPreview.current;
+      if (previous === clip || (previous && clip && previous.startTick === clip.startTick &&
+          previous.trackIndex === clip.trackIndex && previous.lengthTicks === clip.lengthTicks)) return;
+      dropPreview.current = clip;
+      draw.current();
+    },
+    report: notifyAudioDrop,
+    commit: (stamp, input, skipped) => {
+      setRelinkError(null);
+      const replacements = projectGeneration();
+      void model.importAudio(stamp, input).then(result => {
+        if (replacements !== projectGeneration()) return;
+        const id = result.status === "applied" ? result.reply.createdIds.at(-1) : undefined;
+        if (id !== undefined) setSelected({ generation: stamp.generation, ids: [id] });
+        const notice = dropNotice(result.status, skipped);
+        const files = skipped === 1 ? "1 more file was skipped" : `${skipped} more files were skipped`;
+        if (notice === "retry") notifyAudioDrop("The playlist couldn’t accept audio. Try dropping it again.");
+        else if (notice === "imported-and-skipped") notifyAudioDrop(`Imported ${input.name}. ${files}. Drop one audio file at a time.`);
+        else if (notice === "skipped-only") notifyAudioDrop(`${files}. Drop one audio file at a time.`);
+      });
+    },
+  });
+  const pickingRelink = useRef(false);
+  const relink = async () => {
+    if (busy || !snapshot || missingAsset === null || pickingRelink.current || isProjectReplacing() || modalIsOpen()) return;
+    const replacements = projectGeneration();
+    const current = () => replacements === projectGeneration() && !isProjectReplacing();
+    pickingRelink.current = true;
+    setRelinkError(null);
+    try {
+      const path = await pickSound("Find the missing audio file");
+      if (path && current() && !modalIsOpen()) await model.relinkAudio(snapshot, missingAsset, path);
+    } catch (error) {
+      if (current()) setRelinkError({ generation: snapshot.generation, message: errorText(error) });
+    } finally {
+      pickingRelink.current = false;
+    }
+  };
   const coordinates = (event: { clientX: number; clientY: number }) => {
     const rect = canvas.current?.getBoundingClientRect(); if (!rect) throw new Error("Playlist input area is unavailable");
     const point = localPoint({ x: event.clientX, y: event.clientY }, rect, view);
@@ -423,7 +494,14 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
     return labels;
   }, [clips, preview, previewIndex, view, groupPreview, previewMembers]);
   const visibleIds = useMemo(() => new Set(visibleLabels.map(clip => clip.id)), [visibleLabels]);
-  return <section className="playlist" aria-label="Playlist" aria-busy={state.busy}>
+  const message = state.message ?? (relinkError?.generation === snapshot?.generation ? relinkError?.message : null) ?? displayError ?? projection.error;
+  let status = `${snapshot?.total ?? 0} clips`;
+  if (state.media === "import") status = "Importing audio…";
+  else if (state.media === "relink") status = "Relinking audio…";
+  else if (state.busy) status = "Updating playlist…";
+  else if (state.cancelledMedia === "import") status = "Audio import cancelled";
+  else if (state.cancelledMedia === "relink") status = "Audio relink cancelled";
+  return <section className="playlist" aria-label="Playlist" aria-busy={state.busy || state.media !== null}>
     <header className="playlist-tools"><h2>Playlist</h2>
       <div role="group" aria-label="Playlist tool"><button type="button" aria-pressed={tool === "draw"} onClick={() => { cancel(); setTool("draw"); }}>Draw</button><button type="button" aria-pressed={tool === "select"} onClick={() => { cancel(); setTool("select"); }}>Select</button><button type="button" aria-pressed={tool === "slice"} onClick={() => { cancel(); setTool("slice"); }}>Slice</button></div>
       <button type="button" aria-pressed={snapshot?.loopRegion?.enabled ?? false} disabled={busy || !snapshot?.loopRegion} onClick={() => {
@@ -433,7 +511,7 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
       <span className="playlist-snap">Snap ¼ bar</span>
       <button type="button" disabled={busy || !actionClips.length} onClick={() => { void selectedAction("duplicate"); }}>Duplicate {clipLabel}</button>
       <label>Zoom<input type="range" aria-label="Playlist zoom" min="96" max="768" step="24" value={pixelsPerBar} onChange={event => { cancel(); setPixelsPerBar(Number(event.target.value)); }} /></label>
-      <button type="button" disabled={state.busy} onClick={() => { cancel(); void reload(); }}>Refresh playlist</button>
+      <button type="button" disabled={state.busy || state.media !== null} onClick={() => { cancel(); void reload(); }}>Refresh playlist</button>
     </header>
     <div ref={seekRuler} className="playlist-ruler playlist-seek-ruler" role="group" aria-label="Playlist seek ruler" tabIndex={0} aria-disabled={busy}
       aria-description="Click or drag to seek. Home seeks to zero; arrow keys seek one snap from the live position."
@@ -460,14 +538,23 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
           maxWidth: Math.max(0, Math.min(clip.lengthTicks * view.tickWidth - 12, view.width)) }}>{clip.name}{clip.kind !== "pattern" ? ` · ${clip.kind}` : ""}</span>)}{sliceGuide && <div className="playlist-slice-guide" style={{ left: (sliceGuide.tick - view.scrollTick) * view.tickWidth, top: (sliceGuide.trackIndex - view.scrollTrack) * view.rowHeight + 18, height: Math.min(42, Math.max(1, view.rowHeight - 22)) }} />}</div>
       </div>
     </div></div>
-    <div className="playlist-status"><span id="playlist-help">In Select, modifier-click toggles clips and a drag from empty space selects a box. Drag a group to move it or Alt-drag to copy it. Escape cancels.</span><span aria-live="polite">{selectedIds.length} selected</span><span role="status">{state.busy ? "Updating playlist…" : `${snapshot?.total ?? 0} clips`}</span></div>
-    <div className="playlist-selection"><label htmlFor="selected-playlist-clip">Selected clip</label><select id="selected-playlist-clip" aria-label="Selected playlist clip" value={selected ?? ""} disabled={state.busy} onChange={event => { cancel(); setSelected(event.target.value ? { generation: snapshot?.generation ?? 0, ids: [Number(event.target.value)] } : null); }}><option value="">None</option>{clips.filter(clip => clip.id === selected || visibleIds.has(clip.id)).map(clip => <option key={clip.id} value={clip.id ?? ""}>{clip.name} · Track {clip.trackIndex + 1} · {clip.startTick} ticks</option>)}</select>
+    <div className="playlist-status">
+      <span id="playlist-help">In Select, modifier-click toggles clips and a drag from empty space selects a box. Drag a group to move it or Alt-drag to copy it. Escape cancels.</span>
+      <span aria-live="polite">{selectedIds.length} selected</span>
+      <span role="status">{status}</span>
+      {state.media && <button type="button" disabled={state.cancelRequested} aria-label={state.media === "import" ? "Cancel audio import" : "Cancel audio relink"} onClick={event => {
+        restoreCancelFocus.current = event.detail === 0;
+        void model.cancelMedia();
+      }}>Cancel</button>}
+    </div>
+    <div className="playlist-selection"><label htmlFor="selected-playlist-clip">Selected clip</label><select id="selected-playlist-clip" aria-label="Selected playlist clip" value={selected ?? ""} disabled={state.busy || state.media !== null} onChange={event => { cancel(); setSelected(event.target.value ? { generation: snapshot?.generation ?? 0, ids: [Number(event.target.value)] } : null); }}><option value="">None</option>{clips.filter(clip => clip.id === selected || visibleIds.has(clip.id)).map(clip => <option key={clip.id} value={clip.id ?? ""}>{clip.name} · Track {clip.trackIndex + 1} · {clip.startTick} ticks</option>)}</select>
       <button type="button" aria-label={`${unmuteSelection ? "Unmute" : "Mute"} selected ${clipLabel}`} disabled={busy || !actionClips.length} onClick={() => { void selectedAction("mute"); }}>{unmuteSelection ? "Unmute" : "Mute"}</button>
       <button type="button" aria-label="Make selected clip unique" disabled={busy || !selectedClip} onClick={() => { void selectedAction("makeUnique"); }}>Make unique</button>
+      {missingAsset !== null && <button type="button" disabled={busy} onClick={() => { void relink(); }}>Relink missing audio</button>}
       <button type="button" aria-label={`Delete selected ${clipLabel}`} disabled={busy || !actionClips.length} onClick={() => { void selectedAction("delete"); }}>Delete</button>
     </div>
-    {(state.message || displayError || projection.error) && <p role="alert" className="playlist-error">{state.message ?? displayError ?? projection.error}</p>}
-    {selected !== null && !selectedClip && <p className="playlist-readonly">This clip is visible here; its editing controls are not available yet.</p>}
-    {!state.busy && snapshot?.total === 0 && <p className="playlist-empty">Choose a pattern in the rail, then draw it on the timeline.</p>}
+    {message && <p role="alert" className="playlist-error">{message}</p>}
+    {missingAsset !== null ? <p className="playlist-readonly">The audio file for this clip is missing.</p> : selected !== null && !selectedClip && <p className="playlist-readonly">This clip is visible here; its editing controls are not available yet.</p>}
+    {!state.busy && state.media === null && snapshot?.total === 0 && <p className="playlist-empty">Draw a pattern or drop an audio file onto a track.</p>}
   </section>;
 }

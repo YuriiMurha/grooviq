@@ -10,6 +10,8 @@
 //! [`output_mode`]): the silent mode for QA runs.
 
 mod arrangement_cmds;
+#[doc(hidden)]
+pub mod arrangement_core;
 mod audio_log;
 mod autosave_notice;
 mod commands;

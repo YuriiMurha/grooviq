@@ -578,10 +578,10 @@ impl State {
         {
             let mut controller = lock(&self.controller);
             if controller.sample_rate() != config.rate()
-                && !controller.reconfigure(&mut processor, config)
+                && let Err(error) = controller.try_reconfigure(&mut processor, config)
             {
                 self.processor = Some(processor);
-                return Err("the sound engine could not rebuild for the output rate".into());
+                return Err(error.to_string());
             }
         }
         slot.put(processor);
@@ -860,6 +860,82 @@ mod tests {
         assert!(state.processor.is_none());
         slot.process(&mut out, 2);
         assert!(out.iter().any(|x| *x != 0.0));
+    }
+
+    #[test]
+    fn stream_open_rejects_insert_rate_and_keeps_the_processor() {
+        struct At16000;
+        impl OutputBackend for At16000 {
+            fn outputs(&self) -> Vec<OutputInfo> {
+                vec![]
+            }
+            fn open(&mut self, _: &OutputInfo, slot: Arc<AudioSlot>) -> Result<u32, String> {
+                let mut out = [1.0; BLOCK * 2];
+                slot.process(&mut out, 2);
+                assert!(out.iter().all(|&sample| sample == 0.0));
+                Ok(16_000)
+            }
+            fn close(&mut self) {}
+        }
+
+        let (mut c, p) = crate::engine_with(
+            EngineConfig {
+                sample_rate: 48_000.0,
+            },
+            crate::EngineState {
+                mix: crate::controller::restricted_rate_test_mix(),
+                ..crate::EngineState::default()
+            },
+        );
+        c.send(Command::TestTone {
+            on: true,
+            hz: 440.0,
+            gain_db: -12.0,
+        })
+        .unwrap();
+        let before = c.state().clone();
+        let live_before = c.live();
+        let slot = Arc::new(AudioSlot::new(c.live_shared()));
+        let controller = Arc::new(Mutex::new(c));
+        let mut state = State {
+            backend: Box::new(At16000),
+            controller: Arc::clone(&controller),
+            monitor: OutputMonitor::new(OutputChoice::SystemDefault, false),
+            processor: Some(p),
+            open: None,
+            target: None,
+            retry: Retry::default(),
+            owed: false,
+            reported: HashSet::new(),
+        };
+        let target = OutputInfo {
+            id: "fake-headset".into(),
+            name: "Fake headset".into(),
+            kind: super::super::OutputKind::Headphones,
+            is_default: true,
+            sample_rate: 48_000,
+        };
+        let mut events = vec![];
+        state.try_open(&target, &slot, &mut events);
+        assert_eq!(
+            events,
+            [OutputEvent::OpenFailed {
+                output: target,
+                error: "Mixer insert bitcrusher cannot run at 16000 Hz".into(),
+            }]
+        );
+        assert!(state.open.is_none());
+        assert!(slot.claim_control().processor().is_none());
+        let mut c = lock(&controller);
+        assert!(c.check_health().is_empty());
+        assert_eq!(c.sample_rate(), 48_000.0);
+        assert_eq!(c.state(), &before);
+        assert_eq!(c.live(), live_before);
+
+        let mut out = [0.0; BLOCK * 2];
+        state.processor.as_mut().unwrap().process(&mut out, 2);
+        assert!(out.iter().any(|&sample| sample != 0.0));
+        assert_eq!(c.live().faults, 0);
     }
 
     #[test]

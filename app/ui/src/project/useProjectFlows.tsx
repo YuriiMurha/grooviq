@@ -54,11 +54,12 @@ interface Deps {
   unsettled: () => boolean;
   /** Resolves once the piano roll's queued edits are answered: `false` if any was refused. */
   settle: () => Promise<boolean>;
+  settleReplacement?: () => Promise<boolean>;
 }
 
 /** Every project action (new, open, save, save as, export), the "Save changes?" guard, the
  * close request, crash recovery and the autosave clock. It returns the dialogs to render. */
-export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, unsettled, settle }: Deps) {
+export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, unsettled, settle, settleReplacement = settle }: Deps) {
   const [pending, setPending] = useState<Pending | null>(null);
   const [recovery, setRecovery] = useState<RecoveryStatus | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -66,14 +67,14 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
   const viewRef = useRef(view);
   const busy = useRef(false);
   const unsettledRef = useRef(unsettled);
-  const settleRef = useRef(settle);
+  const settleRef = useRef({ settle, settleReplacement });
 
   // Shortcuts can arrive as soon as the project view commits, before passive effects run.
   useLayoutEffect(() => {
     viewRef.current = view;
     unsettledRef.current = unsettled;
-    settleRef.current = settle;
-  }, [view, unsettled, settle]);
+    settleRef.current = { settle, settleReplacement };
+  }, [view, unsettled, settle, settleReplacement]);
 
   const fail = useCallback((e: unknown) => toast(errorText(e), true), [toast]);
 
@@ -89,8 +90,9 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
 
   /** Waits for the piano roll's queued edits; `false`, with a warning, if any was refused: what
    * the person drew is not all in the project, so nothing is saved (and nothing replaces it). */
-  const settled = useCallback(async (): Promise<boolean> => {
-    if (await settleRef.current()) {
+  const settled = useCallback(async (replacing = false): Promise<boolean> => {
+    const { settle, settleReplacement } = settleRef.current;
+    if (await (replacing ? settleReplacement() : settle())) {
       const reply = await settlePattern();
       if (reply.status === "refused") { toast(reply.message, true); return false; }
       adopt(reply.state.view);
@@ -147,17 +149,23 @@ export function useProjectFlows({ view, adopt, enqueue, toast, stopIfPlaying, un
   const replaceWith = useCallback(
     async <T,>(command: () => Promise<T>): Promise<T> => {
       const finish = beginProjectTransition();
+      const failReplacement = () => { finish(); projectReplaceFailed(); };
       try {
-        if (!(await settled())) throw new Error("Pending edits were refused; the project was not replaced.");
+        await settled(true).then(ready => {
+          if (!ready) throw new Error("Pending edits were refused; the project was not replaced.");
+        }).catch(error => { failReplacement(); throw error; });
         projectReplacing();
-        const result = await enqueue(command);
-        projectReplaced();
-        return result;
-      } catch (e) {
-        // The old project survives. Its observers must run after our admission fence opens.
-        finish();
-        projectReplaceFailed();
-        throw e;
+        return await enqueue(async () => {
+          try {
+            const result = await command();
+            projectReplaced();
+            return result;
+          } catch (error) {
+            // Readers queued during replacement need to know which project survived.
+            failReplacement();
+            throw error;
+          }
+        });
       } finally { finish(); }
     },
     [enqueue, settled],

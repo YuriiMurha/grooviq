@@ -167,6 +167,10 @@ if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs"
     "scripts/merge_train.py", "scripts/test_merge_train.py"].includes(path)))
   step("merge train safety tests", "make", ["test-merge-train"]);
 if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
+    "scripts/merge_train_agent.py", "scripts/test_merge_train_agent.py",
+    "scripts/refresh_install.py", "scripts/merge_train.py"].includes(path)))
+  step("merge train agent safety tests", "make", ["test-merge-train-agent"]);
+if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
     ".githooks/pre-commit", "scripts/test_pre_commit.py"].includes(path)))
   step("staged conflict safety tests", "make", ["test-pre-commit"]);
 if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
@@ -175,6 +179,10 @@ if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs"
 if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
     "scripts/reclaim_caches.py", "scripts/test_reclaim_caches.py"].includes(path)))
   step("cache reclaim safety tests", "make", ["test-reclaim-caches"]);
+if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
+    "scripts/optional-rust-checks.cjs", "scripts/optional-rust-checks.test.cjs",
+    ".github/workflows/perf.yml", ".github/workflows/rtsan.yml"].includes(path)))
+  step("optional Rust policy tests", "make", ["optional-rust-policy-test"]);
 const uiDir = join(root, "app", "ui");
 const needsUi = ui || workspace || rustCrates.has("grooviq-app");
 

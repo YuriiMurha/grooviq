@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useState } from "react";
-import { arrangementEdit, arrangementSeek, arrangementView } from "../api/arrangement";
+import { arrangementEdit, arrangementSeek, arrangementView, audioCancelTicket, audioImport, audioRelink } from "../api/arrangement";
 import { patternEdit, patternList } from "../api/patterns";
 import { projectView, type ProjectView } from "../api/project";
 import type { ProjectStamp } from "../project/context";
 import { beginProjectTransition, registerSettlement } from "../project/pending";
-import { isProjectReplacing, isProjectReplacementPending, onProjectReplacing, onProjectReplaceFailed, projectGeneration } from "../project/replacement";
+import { isProjectReplacing, isProjectReplacementPending, onProjectReplacing, onProjectReplaced, onProjectReplaceFailed, projectGeneration } from "../project/replacement";
 import { modalIsOpen } from "../project/shortcuts";
 import { EMPTY_PLAYLIST, PlaylistController, type PlaylistState } from "./store";
 
@@ -27,7 +27,9 @@ class SessionPlaylistBinding {
       current, blocked: isProjectReplacing, seekBlocked: modalIsOpen, beginTransition: beginProjectTransition,
       enqueueRead: command => this.session.enqueue(command),
       enqueueMutation: command => this.session.enqueueMutation(command),
-      seek: arrangementSeek, readPage: arrangementView, readPatterns: patternList, edit: arrangementEdit, readProject: projectView,
+      seek: arrangementSeek, readPage: arrangementView, readPatterns: patternList, edit: arrangementEdit,
+      importAudio: (stamp, input, ticket) => audioImport(stamp, { ...input, ticket }),
+      relinkAudio: audioRelink, cancelAudio: audioCancelTicket, readProject: projectView,
       selectPattern: (base, pattern) => patternEdit(base, { kind: "select", pattern }),
       publishProject: (view, at) => {
         if (!current(at) || view.generation !== at.generation) return false;
@@ -40,7 +42,7 @@ class SessionPlaylistBinding {
   update(session: SessionAdapter): void { this.session = session; }
   mount(): () => void {
     this.mounted = true;
-    return () => { this.mounted = false; this.controller.retire(); };
+    return () => { this.mounted = false; this.controller.retireMedia(); this.controller.retire(); };
   }
 }
 
@@ -52,6 +54,9 @@ export function usePlaylist(session: SessionAdapter) {
   useLayoutEffect(() => { binding.update(session); }, [binding, session]);
   useLayoutEffect(() => binding.mount(), [binding]);
   useEffect(() => registerSettlement(controller.settle), [controller]);
+  // Save and Open must settle admitted media edits before reading or replacing the project.
+  useEffect(() => registerSettlement(controller.settleMedia), [controller]);
+  useEffect(() => onProjectReplaced(controller.replaceMedia), [controller]);
   useEffect(() => onProjectReplacing(controller.retire), [controller]);
   useEffect(() => onProjectReplaceFailed(() => { void controller.reload(); }), [controller]);
   // Ordinary observations do not adopt ProjectView, so its identity change cannot create a
@@ -61,6 +66,8 @@ export function usePlaylist(session: SessionAdapter) {
   useEffect(() => {
     if (session.view !== null) void controller.reload();
   }, [controller, session.view]);
-  return { state, reload: controller.reload, mutate: controller.mutate, seek: controller.seek, unsettled: controller.unsettled };
+  return { state, reload: controller.reload, mutate: controller.mutate, seek: controller.seek, unsettled: controller.unsettled,
+    importAudio: controller.importAudio, relinkAudio: controller.relinkAudio, cancelMedia: controller.cancelMedia, settleMedia: controller.settleMedia,
+    invalidateWaveforms: controller.invalidateWaveforms };
 }
 export type PlaylistModel = ReturnType<typeof usePlaylist>;

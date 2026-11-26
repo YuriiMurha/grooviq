@@ -318,6 +318,7 @@ def recover_prefix(repo, git, active, batch, main, pulls, mismatch_file, ack_mis
     if not matched or any(check_status(repo, active, scope="batch")):
         return 0, []
     prefix = landed[:matched]
+    print(f"Tested batch {active}")
     print_landed(prefix)
     tested = git.first_parent_chain(batch.base, active)
     if len(tested) != len(batch.members):
@@ -333,6 +334,7 @@ def merge_batch(repo, git, active, batch, order, mismatch_file):
         if reason:
             raise RuntimeError(f"Held #{number} before merge: {reason}.")
     git.verify_chain(active, batch)
+    print(f"Tested batch {active}")
     merged = []
     expected_main = batch.base
     try:
@@ -444,6 +446,8 @@ class GitHub:
             argv += ["--paginate", "--slurp"]
         if body is not None:
             argv += ["--input", "-"]
+        if method != "GET":
+            print(f"Attempting GitHub {method} {path}", file=sys.stderr)
         # The caller reconciles remote state before retrying a failed write.
         result = subprocess.run(
             argv, input="" if body is None else json.dumps(body),
@@ -589,6 +593,7 @@ class Git:
             parent = commit
 
     def publish(self, head, expected):
+        print(f"Attempting Git push {BATCH_REF}", file=sys.stderr)
         self.run("push", "origin", f"{head}:{BATCH_REF}", f"--force-with-lease={BATCH_REF}:{expected}")
 
 

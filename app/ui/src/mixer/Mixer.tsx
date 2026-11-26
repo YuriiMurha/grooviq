@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type CSSProperties } from "react";
 import { Inspector } from "./Inspector";
-import { MixerGestures, navTarget, renderIndices, revealScroll, visibleWindow, type MixerProps, type MixerTrack, type ParamTarget, type Window } from "./mixerModel";
+import { MixerGestures, navTarget, renderIndices, revealScroll, unsupportedReason, visibleWindow, type MixerProps, type MixerTrack, type ParamTarget, type Window } from "./mixerModel";
 import { TrackStrip, type StripActions } from "./TrackStrip";
 import "./mixer.css";
 
-/** A strip's width plus the gap after it, CSS px (mixer.css draws strips 94 px wide). */
-const PITCH = 98;
+/** Strip width in CSS px, shared with the windowed row. */
+const PITCH = 80;
 /** Strips drawn beyond each edge of the view. */
 const OVERSCAN = 2;
 /** The meter's floor: quieter reads as empty. */
@@ -19,13 +19,14 @@ function barLength(peak: number): number {
 /** The mixer: windowed vertical strips, the pinned master and the selected track's inspector. A
  * controlled component: the host's props are the truth, and every change is a command. */
 export function Mixer(props: MixerProps) {
-  const { tracks, master, effects, selectedId, error, meters } = props;
+  const { tracks, master, effects, selectedId, error, meters, unsupported } = props;
   const latest = useRef(props);
   const byId = useMemo(() => {
     const m = new Map<string, MixerTrack>(tracks.map((t) => [t.id, t]));
     m.set(master.id, master);
     return m;
   }, [tracks, master]);
+  const latestNodes = useRef(byId);
   const [, repaint] = useReducer((n: number) => n + 1, 0);
 
   const [gestures] = useState(() => new MixerGestures());
@@ -33,6 +34,7 @@ export function Mixer(props: MixerProps) {
   // Host updates first reach the gestures: one on a removed target ends before anything else runs.
   useLayoutEffect(() => {
     latest.current = props;
+    latestNodes.current = byId;
     gestures.connect({
       emit: (c) => props.onCommand({ type: "param", ...c }),
       stored: (t: ParamTarget) => {
@@ -100,12 +102,11 @@ export function Mixer(props: MixerProps) {
   // ---------------- meters ----------------
   const meterEls = useRef(new Map<string, HTMLElement>());
   useEffect(() => {
-    if (!meters) return;
     const peaks = new Float32Array(2);
     let raf = 0;
     const draw = () => {
       for (const [id, el] of meterEls.current) {
-        const has = meters.read(id, peaks);
+        const has = meters?.read(id, peaks);
         const bars = el.children;
         for (let c = 0; c < 2; c++) {
           const bar = bars[c] as HTMLElement | undefined;
@@ -115,14 +116,19 @@ export function Mixer(props: MixerProps) {
           bar.classList.toggle("clip", v >= 1);
         }
       }
-      raf = requestAnimationFrame(draw);
+      if (meters) raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
   }, [meters]);
 
   const [actions] = useState<StripActions>(() => ({
-    command: (c) => void latest.current.onCommand(c),
+    command: (c) => {
+      const track = latestNodes.current.get(c.type === "param" ? c.target.nodeId : c.nodeId);
+      const viewing = c.type === "select" || c.type === "openInsert";
+      if (!track || (track.pending && !viewing) || unsupportedReason(latest.current.unsupported, c.type) !== undefined) return;
+      void latest.current.onCommand(c);
+    },
     gestures,
     focused: (id) => setFocusId(id),
     meter: (id, el) => {
@@ -149,16 +155,14 @@ export function Mixer(props: MixerProps) {
   const drawn = renderIndices(win, pinned, tracks.length);
   const selected = selectedId === null ? null : (byId.get(selectedId) ?? null);
   const tabId = focusId !== null && byId.has(focusId) ? focusId : selected ? selected.id : (tracks[0]?.id ?? master.id);
-  const outputName = (t: MixerTrack) => (t.outputId === null ? "Unassigned" : (t.outputs.find((o) => o.id === t.outputId)?.name ?? "Unavailable output"));
-
   return (
-    <div className="mx" ref={root}>
+    <div className="mx" ref={root} style={{ "--mx-pitch": `${PITCH}px` } as CSSProperties}>
       <div className="mx-console">
         <div className="mx-scroll" ref={scroller} onScroll={measure} role="group" aria-label={`Mixer tracks (${tracks.length})`}>
           {tracks.length === 0 ? (
             <p className="mx-empty">No tracks yet. The master is always here.</p>
           ) : (
-            <div className="mx-row" style={{ width: tracks.length * PITCH - (PITCH - 94) }}>
+            <div className="mx-row" style={{ width: tracks.length * PITCH }}>
               {drawn.map((i) => {
                 const t = tracks[i];
                 return (
@@ -166,7 +170,9 @@ export function Mixer(props: MixerProps) {
                     key={t.id}
                     track={t}
                     actions={actions}
-                    outputLabel={outputName(t)}
+                    nodes={byId}
+                    unsupported={unsupported}
+                    index={i + 1}
                     level={gestures.shown({ kind: "level", nodeId: t.id }) ?? t.level}
                     pan={gestures.shown({ kind: "pan", nodeId: t.id }) ?? t.pan}
                     selected={t.id === selectedId}
@@ -181,8 +187,9 @@ export function Mixer(props: MixerProps) {
         <TrackStrip
           track={master}
           actions={actions}
-          master
-          outputLabel={master.outputLabel}
+          masterOutput={master.outputLabel}
+          nodes={byId}
+          unsupported={unsupported}
           level={gestures.shown({ kind: "level", nodeId: master.id }) ?? master.level}
           pan={gestures.shown({ kind: "pan", nodeId: master.id }) ?? master.pan}
           selected={master.id === selectedId}
@@ -198,6 +205,8 @@ export function Mixer(props: MixerProps) {
         effects={effects}
         error={error ?? null}
         actions={actions}
+        nodes={byId}
+        unsupported={unsupported}
       />
     </div>
   );

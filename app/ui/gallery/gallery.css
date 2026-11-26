@@ -1,6 +1,8 @@
 /* Gallery layout only. Shipping control selectors and tokens stay authoritative. */
 .gallery { max-width: 960px; margin: 0 auto; padding: 32px; }
 .gallery header { margin-bottom: 32px; }
+.gallery-theme { display: inline-flex; align-items: center; gap: 8px; }
+.gallery-theme select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 4px 8px; }
 .gallery h1 { font-size: 24px; margin: 0 0 8px; }
 .gallery h2 { font-size: 15px; margin: 0 0 12px; }
 .gallery p { color: var(--muted); max-width: 72ch; margin: 8px 0 16px; }

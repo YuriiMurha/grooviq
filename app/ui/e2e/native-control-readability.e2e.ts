@@ -57,10 +57,10 @@ for (const viewport of [{ width: 900, height: 560 }, { width: 1280, height: 800 
     }
     const output = app.getByRole("button", { name: /Silent \(QA mode\)/ });
     await output.click();
-    await expect(app.getByRole("dialog", { name: "Audio output" })).toBeVisible();
+    await expect(app.getByRole("dialog", { name: "Settings" })).toBeVisible();
     await info.attach("output-icons", { body: await app.screenshot({ animations: "disabled", scale: "css" }), contentType: "image/png" });
     await app.keyboard.press("Escape");
-    await expect(app.getByRole("dialog", { name: "Audio output" })).toBeHidden();
+    await expect(app.getByRole("dialog", { name: "Settings" })).toBeHidden();
     await expect(output).toBeFocused();
   });
 }
