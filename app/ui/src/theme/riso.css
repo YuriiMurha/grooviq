@@ -12,9 +12,12 @@
   --faint: #9693b3;
   --accent: #ff48b0;        /* Riso Fluorescent Pink: transport, playhead, primary */
   --on-accent: var(--well);
+  --play: var(--accent);
+  --on-play: var(--on-accent);
   --select: #f3eee4;        /* registration white: selection never collides with an ink */
   --ok: #82d8d5;            /* Riso Mint: power, meters */
-  --mute: var(--ink-3);
+  --mute: var(--muted);
+  --solo: var(--ink-3);
   --warn: var(--ink-3);     /* warning notices and unsaved changes */
   --error: #f0504a;         /* error notices and meter clipping */
   --ink-1: #ff48b0; --ink-1b: #2f7bd8;   /* Fluorescent Pink / Blue */
@@ -66,7 +69,7 @@
   --dev-osc1: var(--ink-5);
   --dev-osc2: var(--ink-6);
   --dev-filter: var(--ink-3);
-  --dev-amp: var(--ink-1);
+  --dev-amp: #3d86e8;
   --dev-lfo: var(--ink-4);
   --dev-mix: var(--ink-2);
   --dev-voice: var(--accent);

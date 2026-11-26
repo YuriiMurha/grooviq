@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import type { ArrangementStamp } from "../src/api/arrangement";
 import { test, expect, project, workspaceReady, SYNTH_PARAMS, SYNTH_PRESETS } from "./fixture";
 import { installMockTauri, type MockSeed } from "./mockTauri";
 
@@ -116,16 +117,29 @@ test("compact seek row moves the playhead while the loop row only edits loops", 
 
 test("keyboard uses live ticks; native failures do not dirty or create history", async ({ app, mock }) => {
   await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
+  const mode = app.getByRole("combobox", { name: "Playback mode" });
+  const stamp = () => mock.eval<ArrangementStamp>("m => { const { generation, revision } = m.workspaceSnapshot(); return { generation, revision }; }");
+  await expect(mode).toHaveValue("song");
+  const patternArgs = { ...await stamp(), mode: "pattern" };
+  await mode.selectOption("pattern");
+  await expect(mode).toHaveValue("pattern");
+  const songArgs = { ...await stamp(), mode: "song" };
+  await mode.selectOption("song");
+  await expect(mode).toHaveValue("song");
+  await expect(mode).toBeEnabled();
+  expect.soft((await mock.calls("arrangement_mode")).map(call => call.args)).toEqual([patternArgs, songArgs]);
   await app.keyboard.press("Space");
   await mock.eval("m => m.hold(1700)");
   await app.keyboard.press("F5");
   const ruler = app.getByRole("group", { name: "Playlist seek ruler" });
   await expect(ruler).toHaveAttribute("aria-disabled", "false");
   await expect.poll(() => mock.eval("m => m.ticks()")).toBe(1700);
+  const seekStamp = await stamp();
+  const seekArgs = async () => (await mock.calls("arrangement_seek")).map(call => call.args);
   await ruler.focus(); await app.keyboard.press("ArrowRight");
-  await expect.poll(async () => (await mock.calls("arrangement_seek"))[0]?.args.tick).toBe(2660);
+  await expect.poll(async () => (await seekArgs())[0]?.tick).toBe(2660);
   await app.keyboard.press("Home");
-  await expect.poll(async () => (await mock.calls("arrangement_seek"))[1]?.args.tick).toBe(0);
+  await expect.poll(seekArgs).toEqual([{ ...seekStamp, tick: 2660 }, { ...seekStamp, tick: 0 }]);
   const before = await mock.view();
   await mock.eval("m => m.refuseWorkspaceNext('seek admission refused')");
   await app.keyboard.press("ArrowRight");

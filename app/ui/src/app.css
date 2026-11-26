@@ -110,9 +110,9 @@ input {
 }
 
 .tone[aria-pressed="true"] {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
+  background: var(--play);
+  border-color: var(--play);
+  color: var(--on-play);
   font-weight: 700;
 }
 
@@ -801,8 +801,8 @@ input[type="checkbox"] {
 }
 
 .solo[aria-pressed="true"] {
-  background: var(--ink-3);
-  border-color: var(--ink-3);
+  background: var(--solo);
+  border-color: var(--solo);
   color: var(--bg);
 }
 
@@ -1050,14 +1050,14 @@ input[type="checkbox"] {
 }
 
 .transport-btn.play {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
+  background: var(--play);
+  border-color: var(--play);
+  color: var(--on-play);
   box-shadow: var(--reg-x) var(--reg-y) 0 var(--ink-1b);
 }
 
 .transport-btn.play[aria-pressed="true"] {
-  box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--accent);
+  box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--play);
 }
 
 .transport-btn.record {
@@ -1156,19 +1156,28 @@ input[type="checkbox"] {
   line-height: 1.25;
 }
 
-.tempo-caption select {
+.signature-choice {
+  display: flex;
+}
+
+.tempo-caption .signature-trigger {
+  justify-content: center;
+  min-width: 2ch;
+  min-height: 0;
   padding: 0;
   background: none;
   border: 0;
   color: var(--muted);
   font: inherit;
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
 }
 
-.tempo-caption select:hover {
+.tempo-caption .signature-trigger:hover,
+.tempo-caption .signature-trigger[aria-expanded="true"] {
   color: var(--text);
+}
+
+.signature-trigger .list-picker-chevron {
+  display: none;
 }
 
 /* ---------------- hint bar ---------------- */

@@ -6,11 +6,13 @@
 // ?offscreen-send=1 makes the last generated track a send destination.
 
 import "@fontsource-variable/manrope";
-import "../theme/riso.css";
+import "../theme/styles";
 import "../app.css";
 import "../devices/devices.css";
 import { Profiler, StrictMode, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/profiling";
+import { initializeTheme } from "../theme/bootstrap";
+import { waitForStartupStyles } from "../theme/waitForStartupStyles";
 import { Mixer } from "./Mixer";
 import { StripProfiler } from "./stripProfiler";
 import type { MeterSource, MixerCommand, MixerError, MixerInsert, MixerMaster, MixerOption, MixerProps, MixerTrack } from "./mixerModel";
@@ -335,8 +337,11 @@ export function Fixture() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <Fixture />
-  </StrictMode>,
-);
+void waitForStartupStyles(document, window).then(() => {
+  initializeTheme();
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      <Fixture />
+    </StrictMode>,
+  );
+});

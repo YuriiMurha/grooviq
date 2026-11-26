@@ -4,13 +4,15 @@ import { parseColor } from "../rack/palette";
  * Keep these hex/rgb compatible: computed custom properties can still contain color-mix. */
 export const THEME_COLOR_TOKENS = [
   "--bg", "--panel", "--raised", "--line", "--line-soft", "--text", "--muted", "--faint",
-  "--accent", "--on-accent", "--select", "--ok", "--mute", "--warn", "--error", "--paper", "--well", "--rec", "--hair",
+  "--accent", "--on-accent", "--play", "--on-play", "--select", "--ok", "--mute", "--warn", "--error",
+  "--paper", "--well", "--rec", "--hair",
   "--ink-1", "--ink-1b", "--ink-2", "--ink-2b", "--ink-3", "--ink-3b",
   "--ink-4", "--ink-4b", "--ink-5", "--ink-5b", "--ink-6", "--ink-6b",
   "--step-a", "--step-b", "--step-lit", "--grid-focus", "--grid-playhead", "--knob-track", "--knob-gap",
   "--roll-row", "--roll-row-black", "--roll-outside", "--roll-dim", "--roll-line", "--roll-beat", "--roll-bar",
   "--roll-select", "--roll-box", "--roll-playhead", "--roll-key-white", "--roll-key-black", "--roll-key-held", "--roll-key-scale",
   "--dev-osc1", "--dev-osc2", "--dev-filter", "--dev-amp", "--dev-lfo", "--dev-mix", "--dev-voice", "--dev-card",
+  "--solo",
 ] as const;
 
 const OFFSET_PATTERN = /^-?\d+(?:\.\d+)?(?:px)?$/;

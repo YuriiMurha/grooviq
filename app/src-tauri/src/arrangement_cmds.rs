@@ -292,6 +292,100 @@ mod tests {
         s.release_media_ticket(ticket, &intent);
         assert!(s.pending_media_requests().is_empty());
     }
+    fn cancel_held_import(stage: crate::arrangement_core::media_test_gate::Stage) {
+        use crate::arrangement_core::media_test_gate::{GATE, Gate, Stage, TIMEOUT};
+        use std::{sync::mpsc, thread};
+
+        const TICKET: u64 = 1;
+        let (session, assets, track) = media_rig();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("generated.wav");
+        std::fs::write(&path, wav()).unwrap();
+        let (before, stamp, history) = {
+            let s = lock(&session);
+            (s.project().clone(), s.arrangement_view(), s.history_usage())
+        };
+        // Any new worker submission for this import key would cancel the earlier request.
+        let previous_worker = (stage == Stage::Read).then(|| {
+            let intent = lock(&session)
+                .media_intent(stamp.generation, stamp.revision, import(track))
+                .unwrap();
+            assets
+                .submit(0, intent.key(), intent.request(), generated_file())
+                .unwrap()
+        });
+        let (pending, cancelled, response) = thread::scope(|scope| {
+            let (arrived, entered) = mpsc::channel();
+            let (resume, proceed) = mpsc::channel();
+            let (session, assets, path) = (&session, &assets, &path);
+            let running = scope.spawn(move || {
+                GATE.set(Some(Gate {
+                    stage,
+                    arrived,
+                    proceed,
+                }));
+                prepare_import(session, assets, track, path, TICKET)
+            });
+            entered
+                .recv_timeout(TIMEOUT)
+                .expect("import did not reach gate");
+            let pending = lock(session).pending_media_requests();
+            let cancelled = crate::arrangement_core::audio_cancel_ticket(session, TICKET);
+            resume.send(()).unwrap();
+            (pending, cancelled, running.join().unwrap())
+        });
+
+        assert_eq!(pending.len(), usize::from(stage == Stage::Admitted));
+        if stage == Stage::Admitted {
+            assert_eq!(response.request, Some(pending[0]));
+        }
+        assert_eq!(
+            response.status, "refused",
+            "cancel by ticket returned {cancelled}"
+        );
+        assert!(
+            cancelled,
+            "ticket must still be live while the import is held"
+        );
+        if let Some(previous_worker) = previous_worker {
+            previous_worker
+                .receive()
+                .expect("cancelled import reached the worker and superseded the earlier request");
+            assert_eq!(
+                response.message.as_deref(),
+                Some("Older or cancelled media request")
+            );
+        }
+        assert!(response.request.is_some());
+        assert!(!response.changed);
+        assert!(response.created_ids.is_empty());
+        assert_eq!(response.generation, stamp.generation);
+        assert_eq!(response.revision, stamp.revision);
+        {
+            let mut s = lock(&session);
+            assert_eq!(s.project(), &before);
+            assert_eq!(s.history_usage(), history);
+            assert!(s.pending_media_requests().is_empty());
+            let save = s
+                .begin_save(Some(&dir.path().join("snapshot.grooviq")))
+                .unwrap();
+            s.save_failed();
+            assert!(save.samples.is_empty());
+        }
+        assert_ticket_released(&session, track, TICKET);
+
+        let fresh = prepare_import(&session, &assets, track, &path, TICKET + 1);
+        assert_eq!(fresh.status, "applied");
+        assert_eq!(fresh.created_ids, [before.next_id, before.next_id + 1]);
+    }
+    #[test]
+    fn native_cancel_ticket_during_held_read() {
+        cancel_held_import(crate::arrangement_core::media_test_gate::Stage::Read);
+    }
+    #[test]
+    fn native_cancel_ticket_during_held_admission() {
+        cancel_held_import(crate::arrangement_core::media_test_gate::Stage::Admitted);
+    }
     #[test]
     fn native_cancel_before_submit_leaves_the_worker_and_project_unchanged() {
         let (session, assets, track) = media_rig();

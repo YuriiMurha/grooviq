@@ -73,8 +73,8 @@ mod counts {
         l[BLOCK - 1] + r[BLOCK - 1]
     }
 
-    /// A sampler with `voices` notes of a two-second stereo noise sample, from key 55 up.
-    fn sampler(voices: usize) -> Sampler {
+    /// A sampler playing stereo noise, with distinct note IDs for each voice.
+    fn sampler(voices: usize, fixed_step: Option<f32>) -> Sampler {
         let mut x = 0x2545_f491_u32;
         let mut next = move || {
             x ^= x << 13;
@@ -86,8 +86,18 @@ mod counts {
         let l: Vec<f32> = (0..len).map(|_| next()).collect();
         let r: Vec<f32> = (0..len).map(|_| next()).collect();
         let mut s = Sampler::new(SR);
-        s.set_sample(Some(Arc::new(SampleBuf { rate: SR, l, r })));
-        settle(s, &chord(55, voices))
+        if fixed_step.is_some() {
+            let pitch_track = PARAM_IDS
+                .iter()
+                .position(|id| *id == "pitch_track")
+                .unwrap();
+            s.set_param(pitch_track as u32, 0.0);
+        }
+        let rate = SR * fixed_step.unwrap_or(1.0);
+        s.set_sample(Some(Arc::new(SampleBuf { rate, l, r })));
+        let s = settle(s, &chord(55, voices));
+        assert_eq!(s.active_voices(), voices);
+        s
     }
 
     fn synth(patch: &str, voices: usize) -> Synth {
@@ -100,9 +110,10 @@ mod counts {
 
     // 100 blocks of 64 frames. (Plain comments: the macro rejects doc attributes.)
     #[library_benchmark]
-    #[bench::voices_0(sampler(0))]
-    #[bench::voices_2(sampler(2))]
-    #[bench::voices_16(sampler(16))]
+    #[bench::voices_0(sampler(0, None))]
+    #[bench::voices_2(sampler(2, None))]
+    #[bench::voices_16(sampler(16, None))]
+    #[bench::step_4_voices_16(sampler(16, Some(4.0)))]
     #[bench::filter_static_16(scenario(0.0, false))]
     #[bench::filter_envelope_16(scenario(0.7, false))]
     #[bench::filter_velocity_16(scenario(0.7, true))]
@@ -111,7 +122,7 @@ mod counts {
     }
 
     fn mono_glide_and_steals() -> (Sampler, [NoteEvent; 48]) {
-        let mut s = sampler(1);
+        let mut s = sampler(1, None);
         for (id, value) in [("voice_mode", 1.0), ("glide", 2.5)] {
             let i = PARAM_IDS.iter().position(|&key| key == id).unwrap();
             s.set_param(i as u32, value);
