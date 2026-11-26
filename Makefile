@@ -49,6 +49,10 @@ merge-train-order: ## Save Quality's approved order (ORDER="12=<approved SHA> 34
 test-merge-train-agent: ## Exercise the merge-train agent with fake launchd and local Git fixtures
 	$(REFRESH_PYTHON) -B scripts/test_merge_train_agent.py -v
 
+.PHONY: test-loom
+test-loom: ## Model the real-time worker protocol with Loom
+	RUSTFLAGS="--cfg loom" CARGO_TARGET_DIR=target/loom $(CARGO) test -p grooviq-engine --lib rt_workers::loom -- --test-threads=1
+
 .PHONY: test-pre-commit
 test-pre-commit: ## Exercise staged conflict checks in disposable Git repositories
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_pre_commit.py -v
@@ -288,3 +292,7 @@ test-perf-fetch: ## Exercise bounded benchmark dependency setup without Cargo or
 .PHONY: bench-mixer
 bench-mixer: ## Static mixer kernel render timings at 64/128 frames (smoke only, no deadline claim)
 	$(CARGO) bench -p grooviq-engine --bench mixer_kernels
+
+.PHONY: bench-rt-workers
+bench-rt-workers: ## Worker pool block timings, wake latency or idle CPU (ARGS=--wake-latency or --idle-cpu=2)
+	$(CARGO) bench -p grooviq-engine --bench rt_workers -- $(ARGS)

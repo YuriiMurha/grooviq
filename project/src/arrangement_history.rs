@@ -208,6 +208,37 @@ impl Change {
             p.arrangement.loop_region = if undo { a.clone() } else { b.clone() };
         }
     }
+    fn touches_pattern(&self, pattern: u32, deleted_index: Option<usize>) -> bool {
+        self.clips
+            .iter()
+            .flat_map(|d| d.before.iter().chain(&d.after))
+            .any(|(_, clip)| {
+                matches!(clip.content, ClipContent::Pattern { pattern: id, .. } if id == pattern)
+            })
+            || self
+                .patterns
+                .iter()
+                .flat_map(|d| d.before.iter().chain(&d.after))
+                .any(|(index, p)| p.id == pattern || deleted_index.is_some_and(|i| *index >= i))
+    }
+
+    fn effects(&self) -> HistoryEffects {
+        HistoryEffects {
+            playlist: !self.clips.is_empty()
+                || !self.tracks.is_empty()
+                || !self.patterns.is_empty()
+                || !self.assets.is_empty()
+                || !self.media.is_empty(),
+            // Mixer source assignments can depend on playlist track membership.
+            mixer: self.mixer.is_some()
+                || self
+                    .tracks
+                    .iter()
+                    .any(|d| d.before.is_none() || d.after.is_none()),
+            region: self.region.is_some(),
+        }
+    }
+
     fn forget_channel(&mut self, channel: u32) -> bool {
         for d in &mut self.clips {
             for version in [&mut d.before, &mut d.after] {
@@ -318,12 +349,72 @@ impl Change {
         n
     }
 }
+#[derive(Default)]
+struct HistoryEffects {
+    playlist: bool,
+    mixer: bool,
+    region: bool,
+}
+impl HistoryEffects {
+    fn overlaps(&self, other: &Self) -> bool {
+        (self.playlist && other.playlist)
+            || (self.mixer && other.mixer)
+            || (self.region && other.region)
+    }
+
+    fn include(&mut self, other: &Self) {
+        self.playlist |= other.playlist;
+        self.mixer |= other.mixer;
+        self.region |= other.region;
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ArrangementHistory {
     pub undo: Vec<Change>,
     pub redo: Vec<Change>,
 }
 impl ArrangementHistory {
+    pub fn forget_pattern(
+        &mut self,
+        pattern: u32,
+        deleted_index: Option<usize>,
+        floors: &mut HashMap<u32, (u32, u32)>,
+    ) {
+        for stack in [&mut self.undo, &mut self.redo] {
+            // Pending applications run from the top of each stack. An omitted
+            // step freezes its applied state on undo and skips it on redo.
+            // Whole-entity snapshots farther away can depend on that step.
+            let mut blocked = HistoryEffects::default();
+            stack.reverse();
+            stack.retain(|step| {
+                let effects = step.effects();
+                if step.touches_pattern(pattern, deleted_index) || blocked.overlaps(&effects) {
+                    blocked.include(&effects);
+                    false
+                } else {
+                    true
+                }
+            });
+            stack.reverse();
+            stack.shrink_to_fit();
+        }
+        self.prune_floors(floors);
+    }
+
+    fn prune_floors(&self, floors: &mut HashMap<u32, (u32, u32)>) {
+        let ids: std::collections::HashSet<_> = self
+            .undo
+            .iter()
+            .chain(&self.redo)
+            .flat_map(|c| &c.patterns)
+            .flat_map(|d| d.before.iter().chain(&d.after))
+            .map(|(_, p)| p.id)
+            .collect();
+        floors.retain(|id, _| ids.contains(id));
+        floors.shrink_to_fit();
+    }
+
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
@@ -435,22 +526,8 @@ impl Histories {
         bytes += trim.bytes();
         (steps, notes, bytes)
     }
-    fn prune_floors(&mut self) {
-        let ids: std::collections::HashSet<_> = self
-            .arrangement
-            .undo
-            .iter()
-            .chain(&self.arrangement.redo)
-            .flat_map(|c| &c.patterns)
-            .flat_map(|d| [&d.before, &d.after])
-            .flatten()
-            .map(|(_, p)| p.id)
-            .collect();
-        self.floors.retain(|id, _| ids.contains(id));
-        self.floors.shrink_to_fit();
-    }
     pub fn admit(&mut self, limits: HistoryLimits, current: u32) -> Result<(), String> {
-        self.prune_floors();
+        self.arrangement.prune_floors(&mut self.floors);
         for h in std::iter::once(&self.current).chain(self.patterns.values()) {
             let (n, b) = h.largest(&self.protected);
             if n > limits.notes || b > limits.bytes {
@@ -528,7 +605,7 @@ impl Histories {
                 None => return Err("History metadata exceeds the control-byte budget".into()),
             }
             self.patterns.retain(|_, h| h.retained().0 > 0);
-            self.prune_floors();
+            self.arrangement.prune_floors(&mut self.floors);
         }
         Ok(())
     }
@@ -537,6 +614,168 @@ impl Histories {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn pattern_clip(id: u32, pattern: u32) -> Clip {
+        Clip {
+            id,
+            track: 1,
+            name: String::new(),
+            start_tick: 0,
+            muted: false,
+            content: ClipContent::Pattern {
+                pattern,
+                offset_tick: 0,
+                length_ticks: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn forgotten_mixed_step_blocks_dependent_mixer_history_on_both_stacks() {
+        for undo in [true, false] {
+            let mut p = Project::new();
+            let mut before = p.clone();
+            p.mixer.tracks[0].pan = -0.5;
+            let first = Change::between(&before, &p);
+            before = p.clone();
+            p.mixer.tracks[0].name = "Mixed edit".into();
+            p.arrangement.clips.push(pattern_clip(2, 0));
+            let mixed = Change::between(&before, &p);
+            before = p.clone();
+            p.mixer.tracks[0].pan = 0.5;
+            let last = Change::between(&before, &p);
+            let usable_order = if undo { last.order } else { first.order };
+            let mut history = ArrangementHistory::default();
+            if undo {
+                history.undo = vec![first, mixed, last];
+            } else {
+                history.redo = vec![last, mixed, first];
+            }
+
+            history.forget_pattern(0, None, &mut HashMap::new());
+            let stack = if undo { &history.undo } else { &history.redo };
+            assert_eq!(
+                stack.iter().map(|step| step.order).collect::<Vec<_>>(),
+                [usable_order]
+            );
+        }
+    }
+
+    #[test]
+    fn forgotten_pattern_step_blocks_dependent_loop_edits_on_both_stacks() {
+        let remaining = [true, false].map(|undo| {
+            let mut p = Project::new();
+            p.arrangement.tracks.push(PlaylistTrack {
+                id: 1,
+                name: "Playlist".into(),
+                color: 0,
+                mute: false,
+            });
+            p.patterns.push(Pattern::new(2, "P"));
+            let clip = pattern_clip(3, 2);
+            let region = |end_tick| {
+                Some(LoopRegion {
+                    start_tick: 0,
+                    end_tick,
+                    enabled: true,
+                })
+            };
+            p.arrangement.loop_region = region(960);
+            if undo {
+                p.arrangement.clips.push(clip.clone());
+            }
+            let mut middle = p.clone();
+            middle.arrangement.loop_region = region(1920);
+            let mut last = middle.clone();
+            last.arrangement.loop_region = region(2880);
+            if undo {
+                // Undo encounters the combined clip deletion and loop edit first.
+                last.arrangement.clips.clear();
+            } else {
+                // Redo encounters the combined clip creation and loop edit first.
+                middle.arrangement.clips.push(clip.clone());
+                last.arrangement.clips.push(clip);
+            }
+            let first = Change::between(&p, &middle);
+            let second = Change::between(&middle, &last);
+            let mut history = if undo {
+                ArrangementHistory {
+                    undo: vec![first, second],
+                    ..Default::default()
+                }
+            } else {
+                ArrangementHistory {
+                    redo: vec![second, first],
+                    ..Default::default()
+                }
+            };
+            history.forget_pattern(2, Some(1), &mut HashMap::new());
+            (history.undo.len(), history.redo.len())
+        });
+        assert_eq!(remaining, [(0, 0), (0, 0)], "undo case, then redo case");
+    }
+
+    #[test]
+    fn deleting_pattern_drops_shifted_slots_and_releases_history_bytes() {
+        let mut p = Project::new();
+        p.arrangement.tracks.push(PlaylistTrack {
+            id: 1,
+            name: "Playlist".into(),
+            color: 0,
+            mute: false,
+        });
+        p.patterns.push(Pattern::new(2, "Deleted"));
+        let mut before = p.clone();
+        p.patterns.push(Pattern::new(3, "Shifted"));
+        let shifted = Change::between(&before, &p);
+        before = p.clone();
+        p.arrangement.clips.push(pattern_clip(4, 0));
+        let other_clip = Change::between(&before, &p);
+        let other_order = other_clip.order;
+        let mut histories = Histories {
+            current: Default::default(),
+            patterns: Default::default(),
+            arrangement: ArrangementHistory {
+                undo: vec![shifted, other_clip],
+                ..Default::default()
+            },
+            trim: Default::default(),
+            floors: HashMap::from([(3, (17, 4))]),
+            protected: Default::default(),
+        };
+        let base = Histories::usage_of(
+            &histories.current,
+            &histories.patterns,
+            &ArrangementHistory::default(),
+            &HashMap::new(),
+            &histories.trim,
+        )
+        .2;
+
+        histories
+            .arrangement
+            .forget_pattern(2, Some(1), &mut histories.floors);
+
+        assert!(histories.floors.is_empty());
+        assert_eq!(histories.arrangement.undo.len(), 1);
+        assert!(histories.arrangement.redo.is_empty());
+        let retained = &histories.arrangement.undo[0];
+        assert_eq!(retained.order, other_order);
+        assert_eq!(
+            histories.usage(),
+            (
+                1,
+                0,
+                base + std::mem::size_of::<Change>() + retained.bytes(&mut HashMap::new())
+            )
+        );
+        p.patterns.remove(1);
+        retained.apply(&mut p, true);
+        assert!(p.arrangement.clips.is_empty());
+        retained.apply(&mut p, false);
+        assert_eq!(p.arrangement.clips[0].content, pattern_clip(4, 0).content);
+        assert_eq!(p.patterns[1].id, 3);
+    }
+
     #[test]
     fn maximum_shape_geometry_delta_shares_curve_payloads_and_has_bounded_retention() {
         let mut p = Project::new();

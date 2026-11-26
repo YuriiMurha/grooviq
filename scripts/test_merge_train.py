@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -408,6 +409,23 @@ class MergeTrainTests(unittest.TestCase):
         self.written([10, 20], [30, 40, 50], expected=ACTIVE)
         self.assertFalse(self.repo.merged or self.repo.rejected)
 
+    def test_unattended_failure_stops_before_bisection_or_rejection(self):
+        for members in ([10, 20], [10]):
+            with self.subTest(members=members):
+                self.setUp()
+                self.git.batch(members)
+                self.repo.states[ACTIVE] = {
+                    **GREEN, "ui": ("failure", ""), REQUIRED[0]: ("in_progress", ""),
+                }
+                with self.assertRaisesRegex(
+                    RuntimeError, "failed required checks.*ui.*make merge-train ORDER=.*make merge-train-agent-resume"
+                    ".*make merge-train-order.*make merge-train-agent-resume",
+                ):
+                    self.run_tick(agent_deadline=float("inf"))
+                self.assertFalse(self.git.writes)
+                self.assertFalse(self.repo.rejected)
+                self.assertFalse(self.repo.merged)
+
     def test_failed_singleton_is_rejected_and_suspects_revalidated(self):
         self.git.batch([10], [20, 30, 40])
         self.repo.prs[20]["draft"] = True
@@ -474,6 +492,64 @@ class MergeTrainTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Merged so far: #20"):
             self.run_tick()
         self.assertEqual(self.repo.merged, [(20, sha(20))])
+        self.assertFalse(self.git.writes)
+
+    def test_train_announces_parseable_squash_attempt_before_merge(self):
+        from merge_train_agent import SQUASH_ATTEMPT
+
+        self.git.batch([10, 20])
+        merge = self.repo.merge
+        before_merges = []
+
+        def inspect_attempt(number, head):
+            before_merges.append(self.output.getvalue().splitlines()[-1])
+            return merge(number, head)
+
+        self.repo.merge = inspect_attempt
+        self.run_tick((10, 20), agent_deadline=time.monotonic() + 60)
+        self.assertEqual(self.repo.merged, [(10, sha(10)), (20, sha(20))])
+        attempts = [SQUASH_ATTEMPT.fullmatch(line) for line in before_merges]
+        self.assertTrue(all(attempts), before_merges)
+        self.assertEqual([attempt.groups() for attempt in attempts],
+                         [("10", sha(10), BASE), ("20", sha(20), sha(310))])
+
+    def test_agent_deadline_stops_between_squashes_after_reporting_the_prefix(self):
+        self.git.batch([10, 20])
+        merge = self.repo.merge
+        now = 1
+
+        def squash_after_deadline(number, head):
+            nonlocal now
+            result = merge(number, head)
+            self.assertNotIn(f"Merged #{number}", self.output.getvalue())
+            now = 3
+            return result
+
+        self.repo.merge = squash_after_deadline
+        with patch.object(train.time, "monotonic", side_effect=lambda: now):
+            with self.assertRaisesRegex(train.TickDeadline, "before squash of #20"):
+                self.run_tick(agent_deadline=2)
+        self.assertEqual(self.repo.merged, [(10, sha(10))])
+        self.assertEqual(self.output.getvalue().count(f"Merged #10 at {sha(310)}"), 1)
+        self.assertFalse(self.git.writes)
+
+    def test_agent_deadline_stops_rebuild_after_final_squash(self):
+        self.git.batch([10])
+        merge = self.repo.merge
+        now = 1
+
+        def squash_before_expiry(number, head):
+            nonlocal now
+            result = merge(number, head)
+            now = 3
+            return result
+
+        self.repo.merge = squash_before_expiry
+        with patch.object(train.time, "monotonic", side_effect=lambda: now):
+            with self.assertRaisesRegex(train.TickDeadline, "before rebuilding the batch after landing"):
+                self.run_tick((10, 20), agent_deadline=2)
+        self.assertEqual(self.repo.merged, [(10, sha(10))])
+        self.assertIn(f"Merged #10 at {sha(310)}", self.output.getvalue())
         self.assertFalse(self.git.writes)
 
     def test_ambiguous_merge_errors_recover_the_landed_squash_and_continue(self):
@@ -834,7 +910,7 @@ class CliTests(unittest.TestCase):
             gh = root / "gh"
             gh.write_text("#!/bin/sh\ntouch gh-called\nexit 99\n")
             gh.chmod(0o755)
-            env = {**os.environ, "PATH": f"{root}{os.pathsep}{os.environ['PATH']}"}
+            env = {**os.environ, "HOME": str(root), "PATH": f"{root}{os.pathsep}{os.environ['PATH']}"}
             makefile = Path(__file__).resolve().parents[1] / "Makefile"
             make = ["make", "-f", str(makefile), "merge-train", "BATCH=4", "ACK_MISMATCH="]
 
@@ -850,6 +926,89 @@ class CliTests(unittest.TestCase):
             self.assertEqual(stopped.returncode, 2)
             self.assertIn("ORDER requires", stopped.stderr)
             self.assertFalse((root / "gh-called").exists())
+
+    def test_manual_train_refuses_registered_agent_order_before_creating_clients(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            plist = home / "Library/LaunchAgents/io.github.yuriimurha.grooviq.merge-train.plist"
+            plist.parent.mkdir(parents=True)
+            plist.touch()
+            disabled = home / "Library/Application Support/Grooviq Ops/merge-train/disabled"
+            disabled.parent.mkdir(parents=True)
+            with (patch.object(train.Path, "home", return_value=home),
+                  patch.object(sys, "argv", ["merge_train.py", "--order", f"10={sha(10)}"]),
+                  patch.object(train.subprocess, "check_output", return_value=tmp),
+                  patch.object(train, "tick") as tick,
+                  redirect_stderr(io.StringIO()) as stderr):
+                self.assertEqual(train.main(), 1)
+                self.assertIn("make merge-train-order", stderr.getvalue())
+                self.assertIn("make merge-train-agent-disable", stderr.getvalue())
+                self.assertIn("make merge-train ORDER=", stderr.getvalue())
+                self.assertRegex(
+                    stderr.getvalue(),
+                    "make merge-train ORDER=.*make merge-train-order ORDER=.*heads still approved"
+                    ".*make merge-train-agent-enable.*make merge-train-agent-resume",
+                )
+                tick.assert_not_called()
+                disabled.touch()
+                self.assertEqual(train.main(), 0)
+                tick.assert_called_once()
+
+    def test_unattended_cli_holds_failed_pr_and_disables_all_git_hooks(self):
+        with TemporaryDirectory() as tmp:
+            fixture = Repo()
+            pr = fixture.prs[10]
+            git_calls, api_calls = [], []
+
+            def git(argv, **kwargs):
+                git_calls.append(argv)
+                if "--git-common-dir" in argv:
+                    stdout = tmp
+                elif "ls-remote" in argv:
+                    stdout = f"{BASE} {train.MAIN_REF}\n"
+                elif "fetch" in argv:
+                    stdout = ""
+                else:
+                    raise AssertionError(argv)
+                return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+            def api(_self, path, *, method="GET", **kwargs):
+                api_calls.append(method)
+                if method != "GET":
+                    return None
+                if path == "branches/main/protection/required_status_checks":
+                    return {"strict": False, "checks": [
+                        {"context": name, "app_id": ACTIONS_APP} for name in REQUIRED
+                    ]}
+                if path.startswith("issues?"):
+                    return [[{"number": 10, "pull_request": {}}]]
+                if path == "pulls/10":
+                    return pr if "DELETE" not in api_calls else {**pr, "labels": []}
+                if path.startswith("commits/"):
+                    head = path.split("/")[1]
+                    return [{"check_runs": [
+                        {"name": name, "head_sha": head, "app": {"id": ACTIONS_APP},
+                         "status": "completed", "conclusion": "failure"
+                         if name == "ui" and head == sha(10) else "success"}
+                        for name in REQUIRED
+                    ]}]
+                raise AssertionError(path)
+
+            argv = ["merge_train.py", "--order", f"10={sha(10)}",
+                    "--agent-deadline", str(time.monotonic() + 60)]
+            with (patch.object(sys, "argv", argv), patch.object(train.subprocess, "run", side_effect=git),
+                  patch.object(train.GitHub, "api", api),
+                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as stderr):
+                code = train.main()
+            self.assertIn("Held #10", stderr.getvalue())
+            self.assertIn("make merge-train ORDER=", stderr.getvalue())
+            self.assertRegex(stderr.getvalue(), "make merge-train-order.*make merge-train-agent-resume")
+            self.assertEqual(code, 1)
+            self.assertTrue(api_calls)
+            self.assertEqual(set(api_calls), {"GET"})
+            self.assertGreaterEqual(len(git_calls), 3)
+            for argv in git_calls:
+                self.assertEqual(argv[:3], ["git", "-c", "core.hooksPath=/dev/null"])
 
     def test_busy_flock_returns_tempfail_before_creating_clients(self):
         with TemporaryDirectory() as tmp:
@@ -876,6 +1035,7 @@ class CliTests(unittest.TestCase):
         with (TemporaryDirectory() as tmp,
               patch.object(sys, "argv", ["merge_train.py", "--order", f"10={sha(10)}"]),
               patch.object(train.subprocess, "check_output", return_value=tmp),
+              patch.object(train.Path, "home", return_value=Path(tmp)),
               patch.object(train, "tick", side_effect=BlockingIOError("tick failed")),
               redirect_stderr(io.StringIO()) as stderr):
             self.assertEqual(train.main(), 1)
@@ -990,6 +1150,13 @@ class GitHubTests(unittest.TestCase):
                 with self.assertRaises(subprocess.CalledProcessError):
                     operation(layer)
 
+    def test_unattended_rejection_holds_before_any_public_write(self):
+        repo = GitHub(hold_rejections=True)
+        with patch.object(repo, "api") as api:
+            with self.assertRaisesRegex(RuntimeError, "Held #10.*failed check"):
+                repo.reject(10, sha(10), "failed check")
+            api.assert_not_called()
+
     def test_changed_head_after_comment_keeps_label(self):
         repo = GitHub()
         calls = []
@@ -1031,6 +1198,18 @@ class GitHubTests(unittest.TestCase):
         repo.api = lambda *args, **kwargs: {"merged": True}
         with self.assertRaisesRegex(RuntimeError, "squash SHA"):
             repo.merge(10, sha(10))
+
+
+class GitTests(unittest.TestCase):
+    def test_publish_does_not_push_after_deadline(self):
+        git = train.Git(agent_deadline=2)
+        with (patch.object(train.time, "monotonic", return_value=2),
+              patch.object(train.subprocess, "run") as run,
+              redirect_stderr(io.StringIO()) as stderr):
+            with self.assertRaisesRegex(train.TickDeadline, "before publishing the batch"):
+                git.publish(sha(10), ACTIVE)
+        run.assert_not_called()
+        self.assertEqual(stderr.getvalue(), "")
 
 
 class GitIntegrationTest(unittest.TestCase):

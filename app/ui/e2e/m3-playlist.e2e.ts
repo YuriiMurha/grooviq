@@ -244,7 +244,7 @@ test.describe("source phase at repeated pattern boundaries", () => {
       await expect.poll(async () => (await state(app)).clips).toEqual([expected]);
       expect(await mock.eval<number>("m => m.state.project.nextId")).toBe(allocation);
       expect((await ipc<ProjectView>(app, "project_view")).pattern.id).toBe(3);
-      expect(await playlist.getByRole("combobox", { name: "Selected playlist clip" }).inputValue()).toBe("5");
+      await expect(playlist.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName(`Selected playlist clip: Repeated source · Track 1 · ${expected.startTick} ticks`);
       await expect(canvas).toHaveAttribute("aria-disabled", "false");
       expect(await mock.calls("transport_play")).toHaveLength(0);
     });
@@ -290,7 +290,7 @@ for (const flow of ["Open", "New", "Restore"] as const) test.describe(`failed ${
     };
     await expect(ui.playlist.getByRole("status")).toHaveText("1 clips");
     await expect(ui.canvas).toHaveAttribute("aria-disabled", "false");
-    if (flow !== "Restore") await expect(ui.playlist.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("3");
+    if (flow !== "Restore") await expect(ui.playlist.getByRole("button", { name: /^Selected playlist clip:/ })).toHaveAccessibleName("Selected playlist clip: Retained clip · Track 1 · 960 ticks");
     const box = await ui.canvas.boundingBox(); if (!box) throw new Error("No retained actual canvas");
     const edits = (await mock.calls("arrangement_edit")).length;
     await app.mouse.move(box.x + 144, box.y + 40); await app.mouse.down();
