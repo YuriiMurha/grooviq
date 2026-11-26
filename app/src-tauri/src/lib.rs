@@ -40,7 +40,7 @@ use grooviq_engine::{
     AudioOutput, Controller, EngineConfig, OutputChoice, OutputEvent, StreamServer, engine,
     start_stream,
 };
-use grooviq_project::autosave::{AutosaveTick, autosave_tick};
+use grooviq_project::autosave::{AutosaveTick, autosave_tick, clear_retired_autosaves};
 use grooviq_project::recovery::{Recovery, RecoveryDir};
 use grooviq_project::session::Session;
 use midi::{MidiHub, MidirPorts, NO_CHANNEL};
@@ -102,6 +102,31 @@ pub(crate) struct Audio {
     selected_channel: notes_cmds::SelectedChannel,
     /// The MIDI inputs; the `grooviq-midi` thread polls it.
     midi: Arc<Mutex<MidiHub>>,
+}
+
+impl Audio {
+    /// Finish recovery cleanup before acknowledging history replay or a save to the caller.
+    async fn clear_retired_autosaves(&self) {
+        if !lock(&self.session).autosave_cleanup_pending() {
+            return;
+        }
+        let session = Arc::clone(&self.session);
+        let recovery = Arc::clone(&self.recovery);
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            clear_retired_autosaves(&session, &recovery)
+        })
+        .await;
+        let error = match result {
+            Ok(Ok(())) => return,
+            Ok(Err(e)) => e.to_string(),
+            Err(e) => e.to_string(),
+        };
+        // The autosave clock retries; a failed cleanup does not roll back history or a save.
+        lock(&self.log).push(
+            Level::Warn,
+            format!("Could not retire the autosave: {error}"),
+        );
+    }
 }
 
 /// Locks `mutex` even if a thread panicked while holding it.
