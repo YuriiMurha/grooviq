@@ -156,18 +156,26 @@ pub async fn prepare_media(
         }
         (intent, s.media_budget())
     };
+    #[cfg(test)]
+    let (read_gate, admission_gate) = media_test_gate::take();
     let prepared = async {
         let path = PathBuf::from(path);
         let file = tauri::async_runtime::spawn_blocking(move || {
+            #[cfg(test)]
+            media_test_gate::hold(read_gate);
             grooviq_project::read_sample_file_budgeted(&path, &budget).map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())??;
         let request = submit_media(session, assets, &intent, file)?;
-        tauri::async_runtime::spawn_blocking(move || request.receive())
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("Media preparation failed: {e:?}"))
+        tauri::async_runtime::spawn_blocking(move || {
+            #[cfg(test)]
+            media_test_gate::hold(admission_gate);
+            request.receive()
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("Media preparation failed: {e:?}"))
     }
     .await;
     let mut s = lock(session);
@@ -179,6 +187,49 @@ pub async fn prepare_media(
     s.release_media_ticket(ticket, &intent);
     reply(&s, result, Some(intent.request()))
 }
+
+#[cfg(test)]
+pub(crate) mod media_test_gate {
+    use std::{cell::Cell, sync::mpsc, time::Duration};
+
+    pub const TIMEOUT: Duration = Duration::from_secs(30);
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Stage {
+        Read,
+        Admitted,
+    }
+
+    pub struct Gate {
+        pub stage: Stage,
+        pub arrived: mpsc::Sender<()>,
+        pub proceed: mpsc::Receiver<()>,
+    }
+
+    thread_local! {
+        // The caller installs a one-shot gate before polling prepare_media on its own thread.
+        pub static GATE: Cell<Option<Gate>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn take() -> (Option<Gate>, Option<Gate>) {
+        let gate = GATE.take();
+        match gate.as_ref().map(|gate| gate.stage) {
+            Some(Stage::Read) => (gate, None),
+            Some(Stage::Admitted) => (None, gate),
+            None => (None, None),
+        }
+    }
+
+    pub(super) fn hold(gate: Option<Gate>) {
+        if let Some(gate) = gate {
+            gate.arrived.send(()).expect("test stopped before gate");
+            gate.proceed
+                .recv_timeout(TIMEOUT)
+                .expect("test did not resume import");
+        }
+    }
+}
+
 pub fn audio_cancel(session: &Mutex<Session>, request: u64) -> bool {
     lock(session).cancel_media_request(request)
 }
