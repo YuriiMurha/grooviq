@@ -943,6 +943,7 @@ fn load_inner(
             asset.sample.file = None;
         }
     }
+    // Advisory only: a failed read or mismatch just keeps the session dirty, never fails the load.
     let unchanged = check_unchanged
         && version == VERSION
         && warnings.is_empty()
