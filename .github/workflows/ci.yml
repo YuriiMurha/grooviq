@@ -9,10 +9,13 @@ permissions:
   contents: read
 
 concurrency:
-  # A concurrency group has one pending slot by default. Give each main push its own group.
+  # Main pushes share one group without cancel-in-progress: a started run always finishes (rust-cache
+  # saves only on main), and each newly queued run replaces the pending one in queue-arrival order, so
+  # at most one runs and one waits (#693). A batch tip, even main's latest tree, may get no main run
+  # until a later push. That is not a gap: its tested record is the merge-train/batch run on the same
+  # tree plus the train's tree-equality check. PRs and merge-train/batch: per ref, cancel older.
   group: >-
     ci-${{ github.workflow }}-${{ github.event.pull_request.number ||
-    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
     github.ref }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' ||
