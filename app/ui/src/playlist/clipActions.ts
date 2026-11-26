@@ -1,19 +1,22 @@
-import type { ArrangementOperation, ClipSummary, PatternContent } from "../api/arrangement";
+import type { ArrangementOperation, AudioContent, ClipSummary, PatternContent } from "../api/arrangement";
+import { audioDurationTicks } from "./audio/geometry";
 import { MAX_SONG_TICKS } from "./geometry";
 
 export type ClipAction = "delete" | "mute" | "duplicate";
-type PatternClip = ClipSummary & { content: PatternContent };
+type EditableClip = ClipSummary & { content: PatternContent | AudioContent };
 
-export function selectedPatternClips(clips: readonly ClipSummary[], selection: ReadonlySet<number>): PatternClip[] {
+export function selectedEditableClips(clips: readonly ClipSummary[], selection: ReadonlySet<number>): EditableClip[] {
   if (!selection.size) return [];
-  return clips.filter((clip): clip is PatternClip => selection.has(clip.id) && clip.content.type === "pattern");
+  return clips.filter((clip): clip is EditableClip => selection.has(clip.id) && clip.content.type !== "automation");
 }
 
-export function selectionIsMuted(clips: readonly PatternClip[]): boolean {
+export function selectionIsMuted(clips: readonly EditableClip[]): boolean {
   return clips.length > 0 && clips.every(clip => clip.muted);
 }
 
-export function buildClipAction(action: ClipAction, clips: readonly PatternClip[]): ArrangementOperation[] {
+export function buildClipAction(
+  action: ClipAction, clips: readonly EditableClip[], audioAssets: ReadonlyMap<number, { sourceRate: number }>, bpm: number,
+): ArrangementOperation[] {
   if (!clips.length) return [];
   switch (action) {
     case "delete":
@@ -27,7 +30,14 @@ export function buildClipAction(action: ClipAction, clips: readonly PatternClip[
       let endTick = 0;
       for (const clip of clips) {
         firstTick = Math.min(firstTick, clip.startTick);
-        endTick = Math.max(endTick, clip.startTick + clip.content.lengthTicks);
+        const content = clip.content;
+        let length: number;
+        if (content.type === "audio") {
+          const asset = audioAssets.get(content.asset);
+          if (!asset) return [];
+          length = audioDurationTicks(content.sourceEnd - content.sourceStart, asset.sourceRate, bpm);
+        } else length = content.lengthTicks;
+        endTick = Math.max(endTick, clip.startTick + length);
       }
       const offset = Math.min(endTick - firstTick, MAX_SONG_TICKS - endTick);
       // At the song horizon a copy would land exactly on its original and be invisible.

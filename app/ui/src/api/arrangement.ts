@@ -56,7 +56,9 @@ export function encodeArrangementBatch(operations: readonly ArrangementOperation
 export const arrangementView = (offset = 0, limit = 256) => invoke<ArrangementPage>("arrangement_view", { offset, limit });
 export function arrangementEdit(stamp: ArrangementStamp, operations: readonly ArrangementOperation[]) {
   validateStamp(stamp);
-  return invoke<ArrangementReply>("arrangement_edit", { ...stamp, editsJson: encodeArrangementBatch(operations) });
+  // Callers may pass a whole arrangement page as the stamp; send only its identity.
+  const { generation, revision } = stamp;
+  return invoke<ArrangementReply>("arrangement_edit", { generation, revision, editsJson: encodeArrangementBatch(operations) });
 }
 export function arrangementHistory(stamp: ArrangementStamp, undo: boolean) {
   validateStamp(stamp);

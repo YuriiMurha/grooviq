@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ClipSummary } from "../api/arrangement";
-import { buildClipAction, selectedPatternClips } from "./clipActions";
+import { buildClipAction, selectedEditableClips } from "./clipActions";
 import { MAX_SONG_TICKS } from "./geometry";
 
 const first: ClipSummary = {
@@ -11,8 +11,8 @@ const second: ClipSummary = {
   ...first, id: 10, track: 2, name: "Second", muted: true, startTick: 1920,
 };
 const audio: ClipSummary = {
-  ...first, id: 3,
-  content: { type: "audio", asset: 2, sourceStart: 0, sourceEnd: 200, gain: 1, reverse: false, fadeIn: 0, fadeOut: 0 },
+  ...first, id: 3, name: "Audio", startTick: 2880,
+  content: { type: "audio", asset: 2, sourceStart: 0, sourceEnd: 48000, gain: 1, reverse: false, fadeIn: 0, fadeOut: 0 },
 };
 const automation: ClipSummary = {
   ...first, id: 4,
@@ -20,31 +20,38 @@ const automation: ClipSummary = {
 };
 const clips = [first, audio, second, automation, { ...second, id: 30 }];
 const selection = new Set([10, 4, 3, 20, 999]);
-const members = () => selectedPatternClips(clips, selection);
+const audioAssets = new Map([[2, { sourceRate: 48000 }]]);
+const batch = (action: Parameters<typeof buildClipAction>[0], members: ReturnType<typeof selectedEditableClips>) =>
+  buildClipAction(action, members, audioAssets, 120);
+const members = () => selectedEditableClips(clips, selection);
 
 describe("playlist clip actions", () => {
-  it("deletes every selected pattern in playlist order, skipping read-only and unselected clips", () => {
-    expect(buildClipAction("delete", members())).toEqual([
+  it("deletes every editable clip in playlist order, skipping read-only and unselected clips", () => {
+    expect(batch("delete", members())).toEqual([
       { kind: "deleteClip", clip: 20 },
+      { kind: "deleteClip", clip: 3 },
       { kind: "deleteClip", clip: 10 },
     ]);
   });
 
   it("mutes a mixed selection and unmutes a fully muted selection", () => {
-    expect(buildClipAction("mute", members())).toEqual([
+    expect(batch("mute", members())).toEqual([
       { kind: "setClip", clip: 20, name: "First", muted: true },
+      { kind: "setClip", clip: 3, name: "Audio", muted: true },
       { kind: "setClip", clip: 10, name: "Second", muted: true },
     ]);
-    expect(buildClipAction("mute", selectedPatternClips([{ ...first, muted: true }, second, audio], selection))).toEqual([
+    expect(batch("mute", selectedEditableClips([{ ...first, muted: true }, second, { ...audio, muted: true }], selection))).toEqual([
       { kind: "setClip", clip: 20, name: "First", muted: false },
       { kind: "setClip", clip: 10, name: "Second", muted: false },
+      { kind: "setClip", clip: 3, name: "Audio", muted: false },
     ]);
   });
 
   it("duplicates in playlist order with one offset and keeps each clip on its track", () => {
-    expect(buildClipAction("duplicate", members())).toEqual([
-      { kind: "copy", clip: 20, track: 1, startTick: 3840 },
-      { kind: "copy", clip: 10, track: 2, startTick: 4800 },
+    expect(batch("duplicate", members())).toEqual([
+      { kind: "copy", clip: 20, track: 1, startTick: 4800 },
+      { kind: "copy", clip: 3, track: 1, startTick: 6720 },
+      { kind: "copy", clip: 10, track: 2, startTick: 5760 },
     ]);
   });
 
@@ -53,16 +60,16 @@ describe("playlist clip actions", () => {
       { ...first, startTick: MAX_SONG_TICKS - 3500 },
       { ...second, startTick: MAX_SONG_TICKS - 2000 },
     ];
-    expect(buildClipAction("duplicate", selectedPatternClips(nearEnd, selection))).toEqual([
+    expect(batch("duplicate", selectedEditableClips(nearEnd, selection))).toEqual([
       { kind: "copy", clip: 20, track: 1, startTick: MAX_SONG_TICKS - 3420 },
       { kind: "copy", clip: 10, track: 2, startTick: MAX_SONG_TICKS - 1920 },
     ]);
     const atEnd = [first, { ...second, startTick: MAX_SONG_TICKS - 1920 }];
-    expect(buildClipAction("duplicate", selectedPatternClips(atEnd, selection))).toEqual([]);
+    expect(batch("duplicate", selectedEditableClips(atEnd, selection))).toEqual([]);
   });
 
   it.each(["delete", "mute", "duplicate"] as const)("builds no %s batch for empty or read-only selections", action => {
-    expect(buildClipAction(action, selectedPatternClips(clips, new Set()))).toEqual([]);
-    expect(buildClipAction(action, selectedPatternClips(clips, new Set([3, 4])))).toEqual([]);
+    expect(batch(action, selectedEditableClips(clips, new Set()))).toEqual([]);
+    expect(batch(action, selectedEditableClips(clips, new Set([4])))).toEqual([]);
   });
 });
