@@ -38,15 +38,7 @@ fn character_delay_exact_references_and_partitions() {
                 if std::env::var("GOLDEN_UPDATE").as_deref() == Ok("1") {
                     write_wav(&path, &reference);
                 } else {
-                    let mut expected = read_wav(&path);
-                    // The original Digital and Tape WAVs contain subnormal tails.
-                    // Keep those files intact and expect signed zero for just those samples.
-                    for sample in &mut expected {
-                        if sample.is_subnormal() {
-                            *sample = 0.0f32.copysign(*sample);
-                        }
-                    }
-                    compare_exact(&reference, &expected).unwrap();
+                    compare_exact(&reference, &read_wav(&path)).unwrap();
                 }
             }
         }
