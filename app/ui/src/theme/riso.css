@@ -69,7 +69,7 @@
   --dev-osc1: var(--ink-5);
   --dev-osc2: var(--ink-6);
   --dev-filter: var(--ink-3);
-  --dev-amp: var(--ink-1);
+  --dev-amp: #3d86e8;
   --dev-lfo: var(--ink-4);
   --dev-mix: var(--ink-2);
   --dev-voice: var(--accent);
