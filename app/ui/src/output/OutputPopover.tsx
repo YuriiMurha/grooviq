@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import { SYSTEM_DEFAULT, type LogEntry, type Output } from "../audio";
 import { AudioLog } from "../log/AudioLog";
 import { MidiSettings } from "../midi/MidiSettings";
+import type { ThemeApplication } from "../theme/apply";
+import { themes, type ThemeId } from "../theme/preference";
 import { focusInto, returnFocus } from "./focus";
 import { kindWarns } from "./kind";
 import { OutputIcon } from "./OutputIcon";
@@ -12,14 +14,21 @@ interface Props {
   chosen: string;
   guard: boolean;
   log: LogEntry[];
+  appearance: ThemeApplication;
+  onTheme: (id: ThemeId) => void;
   onSelect: (id: string) => void;
   onGuard: (on: boolean) => void;
   onClose: () => void;
 }
 
-/** The output menu: every device, the MIDI keyboards, the speaker guard and the audio log. Escape or a click
- * outside closes it. Focus moves into it on open and back to what opened it on close. */
-export function OutputPopover({ outputs, chosen, guard, log, onSelect, onGuard, onClose }: Props) {
+const themeNotices: Record<ThemeApplication["status"], string> = {
+  applied: "",
+  "session-only": "Your theme choice won’t be remembered.",
+  unavailable: "That theme couldn’t be applied.",
+};
+
+/** Escape or a click outside closes Settings. Focus returns to its opener on close. */
+export function OutputPopover({ outputs, chosen, guard, log, appearance, onTheme, onSelect, onGuard, onClose }: Props) {
   const box = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -58,7 +67,7 @@ export function OutputPopover({ outputs, chosen, guard, log, onSelect, onGuard, 
 
   const defaultName = outputs.find((o) => o.isDefault)?.name;
   return (
-    <div ref={box} className="popover" role="dialog" aria-label="Audio output" tabIndex={-1}>
+    <div ref={box} className="popover" role="dialog" aria-label="Settings" tabIndex={-1}>
       <fieldset className="devices">
         <legend>Output</legend>
         <label className="device">
@@ -88,6 +97,18 @@ export function OutputPopover({ outputs, chosen, guard, log, onSelect, onGuard, 
             </span>
           </label>
         ))}
+      </fieldset>
+      <fieldset className="devices" role="radiogroup" aria-labelledby="appearance-heading">
+        <legend id="appearance-heading">Appearance</legend>
+        <div className="theme-options">
+          {themes.map(({ id, name }) => (
+            <label key={id} className="device">
+              <input type="radio" name="theme" checked={appearance.theme === id} onChange={() => onTheme(id)} />
+              {name}
+            </label>
+          ))}
+        </div>
+        <p className="theme-notice" role="status">{themeNotices[appearance.status]}</p>
       </fieldset>
       <MidiSettings />
       <label className="guard">
