@@ -126,6 +126,23 @@ test("rejects a nested block in a theme rule", () => {
   expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`${testSelector} must not contain nested blocks`);
 });
 
+test.each([
+  ['"var(--ink)"', '"var(--ink)"'],
+  ['"var(--absent)"', '"var(--absent)"'],
+  ["'var(--ink)'", "'var(--ink)'"],
+  ["'var(--absent)'", "'var(--absent)'"],
+  ['"a\\"var(--ink)", var(--ink)', '"a\\"var(--ink)", #123'],
+  ['"a\\\r\nvar(--ink)"', '"a\\\r\nvar(--ink)"'],
+])("preserves quoted text when resolving %j", (value, expected) => {
+  const declarations = parseThemeDeclarations(`:root { --ink: #123; --value: ${value}; }`, ":root");
+  expect(resolveThemeDeclarations(declarations).get("--value")).toBe(expected);
+});
+
+test("preserves quoted text from a referenced declaration", () => {
+  const declarations = parseThemeDeclarations(':root { --value: var(--label); --label: "var(--absent)"; }', ":root");
+  expect(resolveThemeDeclarations(declarations).get("--value")).toBe('"var(--absent)"');
+});
+
 test("resolves alias chains and multi-value properties against the overlaid palette", () => {
   const base = parseThemeDeclarations(":root { --ink: #123; --step: var(--ink); --device: var(--step); --shadow: 0 0 0 1px var(--device); }", ":root");
   const variant = parseThemeDeclarations(':root[data-theme="test"] { --ink: #456; }', ':root[data-theme="test"]');
