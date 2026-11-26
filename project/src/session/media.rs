@@ -209,17 +209,15 @@ impl Session {
         files: &SampleFiles,
         decoded: &HashMap<u32, Arc<SampleBuf>>,
     ) -> Result<(), SessionError> {
+        self.arrangement_stamp(self.generation, self.arrangement_revision)
+            .map_err(SessionError::InvalidValue)?;
         crate::validate_save(project, files).map_err(SessionError::Save)?;
         self.admit_media(files, decoded)?;
         if let Some(validate) = &self.precommit {
             validate(project).map_err(SessionError::InvalidValue)?;
         }
-        let song = crate::compile_song::compile_song(project, decoded, None, self.song_note_limit)
-            .map_err(SessionError::InvalidValue)?;
-        lock(&self.controller).set_timeline(Self::timeline(project, song.clone()))?;
-        self.compiled_song = song;
-        self.song_error = None;
-        Ok(())
+        let song = self.prepare_song_with(project, decoded)?;
+        self.publish_prepared_candidate(project, song, Some(decoded))
     }
     pub fn publish_media(
         &mut self,

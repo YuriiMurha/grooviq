@@ -51,6 +51,8 @@ import { rollEditsUnsettled } from "./roll/commitQueue";
 import { isTypingTarget, modalIsOpen, shortcutFor } from "./project/shortcuts";
 import { useProjectFlows } from "./project/useProjectFlows";
 import { useSession } from "./project/useSession";
+import { applyTheme, type ThemeApplication } from "./theme/apply";
+import { resolveThemeId } from "./theme/preference";
 import { Toasts, type Toast } from "./toast/Toasts";
 import { KeyboardToggle } from "./transport/KeyboardToggle";
 import { MetronomeButton } from "./transport/MetronomeButton";
@@ -69,6 +71,10 @@ export function App() {
   const [guard, setGuard] = useState(true);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [open, setOpen] = useState(false);
+  const [appearance, setAppearance] = useState<ThemeApplication>(() => ({
+    theme: resolveThemeId(document.documentElement.dataset.theme),
+    status: "applied",
+  }));
   const [toasts, setToasts] = useState<Toast[]>([]);
   // From live frames, set only when they change.
   const [tone, setTone] = useState(false);
@@ -127,6 +133,7 @@ export function App() {
   const { view } = session;
   const patterns = usePatterns({ view, publishPatterns: session.publishPatterns, enqueue: session.enqueue, run: session.context.run });
   const playlist = usePlaylist(session);
+  const { invalidateWaveforms } = playlist;
   useEffect(() => onProjectReplacing(() => { rulerPosition.current = null; }), []);
 
   // A project that is replaced must not go on playing, nor keep notes held on its channels.
@@ -146,6 +153,7 @@ export function App() {
     stopIfPlaying,
     unsettled: () => session.unsettled() || rollEditsUnsettled() || patterns.unsettled() || playlist.unsettled(),
     settle: settleProjectEdits,
+    settleReplacement: () => settleProjectEdits(playlist.settleMedia),
   });
   const { perform, modalOpen } = flows;
 
@@ -230,13 +238,13 @@ export function App() {
       stamp: arrangementView,
       invoke: arrangementHistory,
       // Native view adoption + synchronous roll invalidation happen in session.history.
-      refresh: async () => {},
+      refresh: async effect => { if (effect.kind === "arrangement") invalidateWaveforms(); },
     }).then((reply) => {
       if (!current()) return;
       if (reply.status === "refused") toast(reply.message, true);
       else if (reply.status === "unsettled") toast("Pending edits were refused. History was not changed.", true);
     }, (error: unknown) => { if (current()) toast(errorText(error), true); });
-  }, [session, toast]);
+  }, [session, toast, invalidateWaveforms]);
   useEffect(() => trackDrags(window), []);
   const menuHistoryAction = useRef(stepHistory);
   useLayoutEffect(() => { menuHistoryAction.current = stepHistory; }, [stepHistory]);
@@ -486,6 +494,8 @@ export function App() {
                   chosen={chosen}
                   guard={guard}
                   log={log}
+                  appearance={appearance}
+                  onTheme={(id) => setAppearance(applyTheme(id))}
                   onSelect={select}
                   onGuard={changeGuard}
                   onClose={close}
@@ -505,7 +515,7 @@ export function App() {
           </div>
         </header>
         <main className="stage">
-          {view && <Workspace picker={<PickerRail key={view.generation} picker={patterns} />} playlist={<Playlist rulerPosition={rulerPosition} model={playlist} patterns={patterns.state.canonical} bpm={view.bpm} beats={view.timeSignature.beats} unit={view.timeSignature.unit} />} latest={latest} subscribePlaybackStart={subscribePlaybackStart} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
+          {view && <Workspace picker={<PickerRail key={view.generation} picker={patterns} />} playlist={<Playlist rulerPosition={rulerPosition} model={playlist} patterns={patterns.state.canonical} bpm={view.bpm} beats={view.timeSignature.beats} unit={view.timeSignature.unit} notifyAudioDrop={message => toast(message, false)} />} latest={latest} subscribePlaybackStart={subscribePlaybackStart} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
         </main>
         <HintBar />
         <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />

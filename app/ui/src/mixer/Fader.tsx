@@ -22,7 +22,6 @@ export function Fader({ control, param, value, name, format, disabled }: FaderPr
   const range = { ...param, dragPixels: FADER_PX };
   const { dragging, pointer } = useVerticalDrag(range, value, control, el);
   const n = toNorm(param, value);
-  const zero = toNorm(param, 0);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     const next = keyValue(param, value, e.key, e.shiftKey);
@@ -52,10 +51,7 @@ export function Fader({ control, param, value, name, format, disabled }: FaderPr
       }}
       {...pointer}
     >
-      <span className="mx-fader-track" aria-hidden="true">
-        <span className="mx-fader-fill" style={{ transform: `scaleY(${n})` }} />
-        <span className="mx-fader-zero" style={{ bottom: `${zero * 100}%` }} />
-      </span>
+      <span className="mx-fader-track" aria-hidden="true" />
       <span className="mx-fader-cap" aria-hidden="true" />
     </div>
   );

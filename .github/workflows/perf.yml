@@ -1,10 +1,9 @@
 name: perf
 
-# Speed numbers for benchmark inputs, in each job's summary and as artifacts. Timings on shared
-# runners are noisy, so they never fail a job; the render benchmark fails only when a scene's
-# bits depend on the block size. Instruction counts are exact: that job fails when a benchmark
-# runs more than 1 % more instructions than on the pull request's base. None of these jobs is
-# a required check.
+# Speed numbers for benchmark inputs. Render timing is informational; roll timing retries a
+# budget failure once. Instruction counts are exact: that job fails when a benchmark runs
+# more than 1 % more instructions than on the merge commit's first parent (the base branch
+# tip GitHub merged onto). None is a required check.
 
 on:
   push:
@@ -30,8 +29,9 @@ permissions:
 
 concurrency:
   group: >-
-    perf-${{ (inputs.capture_only && github.run_id) || github.event.pull_request.number ||
-    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
+    perf-${{ (inputs.capture_only && github.run_id) ||
+    (github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.ref)) ||
+    github.event.pull_request.number ||
     github.ref }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' ||
@@ -40,7 +40,7 @@ concurrency:
 jobs:
   optional-inputs:
     if: ${{ !inputs.capture_only }}
-    name: Optional Rust inputs
+    name: Optional performance inputs
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -48,6 +48,7 @@ jobs:
       pull-requests: read
     outputs:
       run: ${{ steps.select.outputs.result }}
+      roll: ${{ steps.select.outputs.roll }}
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
@@ -58,14 +59,41 @@ jobs:
         with:
           script: |
             const { shouldRun } = require('./scripts/optional-rust-checks.cjs');
-            return await shouldRun({
-              workflow: 'perf',
+            const request = {
               eventName: context.eventName,
               pullRequest: context.payload.pull_request,
               repo: context.repo,
               rest: github.rest,
               paginate: github.paginate,
-            });
+            };
+            core.setOutput('roll', await shouldRun({ ...request, workflow: 'roll' }));
+            return await shouldRun({ ...request, workflow: 'perf' });
+
+  roll:
+    needs: optional-inputs
+    if: >-
+      ${{ always() && !cancelled() && needs.optional-inputs.outputs.roll != 'false' &&
+      (github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    name: roll timing (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: make roll-timing-test
+      - run: npm --prefix app/ui ci --no-audit --no-fund
+      - name: Measure piano-roll operations
+        run: node scripts/roll-timing.cjs "$RUNNER_TEMP/roll-timing"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: roll-timing-ubuntu-latest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/roll-timing/
+          retention-days: 7
 
   bench:
     needs: optional-inputs
@@ -185,6 +213,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
       - name: Key the Rust cache on the root manifest
         shell: bash
         run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
@@ -208,13 +238,28 @@ jobs:
           if [ "$(gungraun-runner --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
             cargo install gungraun-runner --version "$version" --locked
           fi
-      - name: Baseline (the pull request's base)
+      - name: Baseline (the merge commit's first parent)
         if: github.event_name == 'pull_request'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          read -r -a parents <<< "$(git show -s --format=%P HEAD)"
+          BASE_SHA=$(git rev-parse --verify HEAD^1 2>/dev/null) || BASE_SHA=unavailable
+          printf '%s\n' '### Instruction comparison revisions' '' \
+            "- BASE \`$BASE_SHA\`" "- HEAD \`$HEAD_SHA\`" "- PR head \`$PR_HEAD_SHA\`" '' |
+            tee -a "$GITHUB_STEP_SUMMARY"
+          reason=
+          if [ "${#parents[@]}" -ne 2 ] || [ "$BASE_SHA" = unavailable ]; then
+            reason="expected a merge commit with two parents available in the checkout."
+          elif ! second_parent=$(git rev-parse --verify HEAD^2 2>/dev/null) || [ "$second_parent" != "$PR_HEAD_SHA" ]; then
+            reason="the merge commit's second parent (${second_parent:-unavailable}) does not match the PR head."
+          fi
+          if [ -n "$reason" ]; then
+            echo "::error::Skipping comparison: $reason"
+            echo "Skipping comparison: $reason" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           overlay=$(mktemp -d)
           paths=(tests/golden/benches/instructions.rs tests/golden/benches/support/synth_workload.rs tests/golden/benches/support/sampler_workload.rs)
           for path in "${paths[@]}"; do
@@ -259,7 +304,7 @@ jobs:
             echo "## Instruction counts (Callgrind)"
             echo
             if [ -n "$BASELINE" ]; then
-              echo "Compared with the pull request's base; more than 1 % more instructions fails this job."
+              echo "Compared with the merge commit's first parent; more than 1 % more instructions fails this job."
             else
               echo "No base to compare with."
             fi

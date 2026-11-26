@@ -1,4 +1,4 @@
-//! Shared semantic transcript: the browser mock must produce these same replies and bytes.
+//! Shared semantic transcripts: the browser mock must produce these same replies and bytes.
 use grooviq_engine::{EngineConfig, engine};
 use grooviq_project::{
     notes::NotesEdit,

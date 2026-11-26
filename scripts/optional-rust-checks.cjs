@@ -24,6 +24,10 @@ const UNRELATED_FILES = new Set([
   "AGENTS.md", "CLAUDE.md", "LICENSE", "NOTICE", "README.md", "deny.toml", ".editorconfig",
   ".gitattributes", ".gitignore", ".github/pull_request_template.md",
 ]);
+const ROLL_UNRELATED_RUST_FILES = new Set([
+  "Cargo.toml", "Cargo.lock", "rustfmt.toml", "clippy.toml", ".config/nextest.toml",
+  ".github/workflows/rtsan.yml",
+]);
 const FILE_STATUSES = new Set(["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"]);
 const BATCH_BRANCH = "merge-train/batch";
 const under = (path, dir) => path === dir || path.startsWith(`${dir}/`);
@@ -70,7 +74,14 @@ function loadPolicy(metadata = readCargoMetadata()) {
 }
 
 function isInput(path, workflow, { inputs, workspaceDirs }) {
-  if (typeof path !== "string") return true;
+  if (typeof path !== "string" || path.split("/").some(part => !part || part === "." || part === "..")) return true;
+  if (workflow === "roll") {
+    // The roll runs in Vitest without the engine. Keep unmapped paths in scope.
+    if (under(path, "app/ui")) return !under(path, "app/ui/e2e");
+    return !UNRELATED_FILES.has(path) && !ROLL_UNRELATED_RUST_FILES.has(path) &&
+      !/^rust-toolchain[^/]*$/.test(path) && !under(path, ".cargo") &&
+      !under(path, "docs") && !workspaceDirs.some(dir => under(path, dir));
+  }
   if (SHARED_FILES.has(path) || WORKFLOW_FILES[workflow].has(path) ||
       /^rust-toolchain[^/]*$/.test(path) || under(path, ".cargo") || under(path, ".config")) return true;
   if ([...inputs[workflow]].some(dir => under(path, dir))) return true;
@@ -110,7 +121,7 @@ async function listBatchFiles({ after, repo, rest, paginate }) {
 
 async function shouldRun(request) {
   const { workflow, eventName, ref, load = loadPolicy } = request;
-  if (!Object.hasOwn(ROOT_PACKAGES, workflow)) return true;
+  if (workflow !== "roll" && !Object.hasOwn(ROOT_PACKAGES, workflow)) return true;
   const isBatchPush = workflow === "rtsan" && eventName === "push" && ref === `refs/heads/${BATCH_BRANCH}`;
   if (eventName !== "pull_request" && !isBatchPush) return true;
   try {

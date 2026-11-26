@@ -125,9 +125,43 @@ export interface MixerProps {
   /** The selected track (or master) id; a stale id shows the removed-selection state. */
   selectedId: string | null;
   error?: MixerError | null;
+  /** Supplied reason for each control the host cannot support. */
+  unsupported?: Partial<Record<"mute" | "solo" | "bypass" | "detector", string>>;
   /** Supplied meter data; without it the meters stay empty. */
   meters?: MeterSource;
   onCommand: (command: MixerCommand) => CommandResult;
+}
+
+export function unsupportedReason(unsupported: MixerProps["unsupported"], type: MixerCommand["type"]): string | undefined {
+  switch (type) {
+    case "mute": return unsupported?.mute;
+    case "solo": return unsupported?.solo;
+    case "setInsertActive": return unsupported?.bypass;
+    case "setDetector": return unsupported?.detector;
+    default: return undefined;
+  }
+}
+
+/** A native select's placeholder value must not collide with a host's opaque id. */
+export function placeholderValue(options: readonly MixerOption[]): string {
+  const ids = new Set(options.map(({ id }) => id));
+  let value = "";
+  while (ids.has(value)) value += " ";
+  return value;
+}
+
+/** A current destination may need a display label even when the host excludes it from the picker. */
+export function outputChoices(options: readonly MixerOption[], outputId: string | null, nodes: ReadonlyMap<string, { name: string }>) {
+  const current = outputId === null ? undefined : options.find((option) => option.id === outputId);
+  const label = current?.name ?? (outputId === null ? "Unassigned" : nodes.get(outputId)?.name ?? "Unavailable output");
+  const placeholder = current ? undefined : placeholderValue(options);
+  return { options, label, placeholder, value: current?.id ?? placeholder };
+}
+
+/** The host supplies route choices. The picker also hides destinations already used in this strip. */
+export function availableSends(options: readonly MixerOption[], sends: readonly MixerSend[]): MixerOption[] {
+  const used = new Set(sends.map((send) => send.destinationId));
+  return options.filter((option) => !used.has(option.id));
 }
 
 /** Fader view: the finite bottom stop denotes off, matching the approved prototype. */

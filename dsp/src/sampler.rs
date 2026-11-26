@@ -1,9 +1,10 @@
 //! Sampler: plays one sample per instance, pitched by key.
 //!
 //! Each note picks a region of the sample (`start`..`end`, optionally reversed), plays it at a
-//! rate set at note-on (`source_rate / engine_rate * 2^(semitones / 12)`) through a cubic
-//! Hermite read, and shapes it with an attack/decay/sustain/release envelope. In one-shot mode a
-//! note plays to the end of its region and ignores note-off; in gate mode note-off releases it.
+//! rate set at note-on (`source_rate / engine_rate * 2^(semitones / 12)`) and shapes it with an
+//! attack/decay/sustain/release envelope. Reads use cubic Hermite up to a step of 1.09 and
+//! crossfade to a low-pass FIR by 1.25. A one-shot note plays to the end of its region and
+//! ignores note-off. In gate mode note-off releases it.
 //! Loop mode repeats the region's tail (from `loop_start`, a fraction of the played region in
 //! play order) until note-off, then releases, also in one-shot mode. Each voice runs a 12 dB/oct
 //! state-variable filter (low-, high- or band-pass) whose cutoff follows its own envelope and
@@ -22,6 +23,8 @@
 //! refreshed from inputs sampled every 16 frames counted from each note's start, so the output
 //! never depends on how the blocks are split. Real-time: `process` and `set_param` never allocate; `set_sample`
 //! hands the previous buffer back so the caller frees it elsewhere.
+
+mod resample;
 
 use crate::api::{Device, NoteEvent};
 use crate::util::clamp_param;
@@ -945,7 +948,7 @@ fn coefs(p: &[f32; PARAMS], sr: f32) -> Coefs {
 
 /// Cubic Hermite read of one channel at `pos`, sample index `k` read from `index(k)` (frames
 /// outside the sample read as zero). At an integer position it returns that sample itself.
-#[inline]
+#[cfg(test)]
 fn hermite(x: &[f32], pos: f64, index: impl Fn(i64) -> i64) -> f32 {
     let n = x.len() as i64;
     let i = pos.floor() as i64;
@@ -1016,6 +1019,41 @@ impl Device for Sampler {
 impl Sampler {
     // Tests use eager filter coefficient updates as an oracle.
     fn render<const EAGER: bool>(&mut self, l: &mut [f32], r: &mut [f32], events: &[NoteEvent]) {
+        let mut span = if self.sample.is_some() {
+            self.voices.span()
+        } else {
+            VOICES
+        };
+        if !EAGER && events.is_empty() && span == VOICES && self.sample.is_some() {
+            let notes = &self.voices.v[..VOICES];
+            span = notes
+                .iter()
+                .rposition(|v| v.stage != Stage::Off)
+                .map_or(0, |last| last + 1);
+            // The full note loop pays off from three sounding slots. Sparse blocks keep
+            // the early Off check and can skip the unused suffix until the next event.
+            if span >= 3
+                && self.out.map(f32::to_bits) == self.c.out.map(f32::to_bits)
+                && notes[..span]
+                    .iter()
+                    .filter(|v| v.stage != Stage::Off)
+                    .nth(2)
+                    .is_some()
+            {
+                self.render_block::<EAGER, true>(l, r, events, span);
+                return;
+            }
+        }
+        self.render_block::<EAGER, false>(l, r, events, span);
+    }
+
+    fn render_block<const EAGER: bool, const NOTES_ONLY: bool>(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        events: &[NoteEvent],
+        mut span: usize,
+    ) {
         l.fill(0.0);
         r.fill(0.0);
         let n = l.len().min(r.len());
@@ -1043,13 +1081,12 @@ impl Sampler {
         let filter_on = kind != 0;
         let (env_amount, flt_sustain) = (p[FILTER_ENV], p[FLT_SUSTAIN]);
         let mut ev = events.iter().peekable();
-        // Only events (and a choke, before the block) put voices in fade slots.
-        let mut span = voices.span();
         if !EAGER {
             if filter_on && *filter_bypassed {
                 // A parameter change between ticks must use the previous tick's inputs until
                 // the next one. New notes and reset slots carry no pending inputs.
-                for v in &mut voices.v[..span] {
+                let limit = if NOTES_ONLY { VOICES } else { span };
+                for v in &mut voices.v[..limit] {
                     if let Some((octaves, damp)) = v.pending_filter.take() {
                         v.filter_coefs(octaves, damp, *sr);
                     }
@@ -1058,26 +1095,29 @@ impl Sampler {
             *filter_bypassed = !filter_on;
         }
         for f in 0..n {
-            let mut evented = false;
-            while let Some(e) = ev.next_if(|e| e.offset as usize <= f) {
-                voices.event(p, *sr, buf, e);
-                evented = true;
-            }
-            if evented {
-                span = voices.span();
+            if !NOTES_ONLY {
+                let mut evented = false;
+                while let Some(e) = ev.next_if(|e| e.offset as usize <= f) {
+                    voices.event(p, *sr, buf, e);
+                    evented = true;
+                }
+                if evented {
+                    span = voices.span();
+                }
             }
             let fade_frames = voices.fade;
             let sustain = sustain.next();
             let log2_cutoff = cutoff.next();
             let (mut sl, mut sr_) = (0.0f32, 0.0f32);
-            for v in voices.v[..span].iter_mut() {
-                if v.stage == Stage::Off {
+            let limit = if NOTES_ONLY { VOICES } else { span };
+            for v in &mut voices.v[..limit] {
+                if !NOTES_ONLY && v.stage == Stage::Off {
                     continue;
                 }
                 // Fading out (stolen, cut or choked): a straight line to silence, then the slot
                 // is free.
                 let mut fade = None;
-                if v.fade > 0 {
+                if !NOTES_ONLY && v.fade > 0 {
                     v.fade -= 1;
                     if v.fade == 0 {
                         *v = Voice::OFF;
@@ -1178,12 +1218,7 @@ impl Sampler {
                         }
                     }
                 }
-                let (mut xl, mut xr) = if v.looping {
-                    let at = |k| v.loop_index(k);
-                    (hermite(&buf.l, v.pos, at), hermite(&buf.r, v.pos, at))
-                } else {
-                    (hermite(&buf.l, v.pos, |k| k), hermite(&buf.r, v.pos, |k| k))
-                };
+                let (mut xl, mut xr) = resample::read(buf, v);
                 if filter_on {
                     xl = v.filter(0, kind, xl);
                     xr = v.filter(1, kind, xr);
@@ -1211,23 +1246,29 @@ impl Sampler {
                     *v = Voice::OFF;
                 }
             }
-            for ch in 0..2 {
-                let d = c.out[ch] - out[ch];
-                out[ch] = if d.abs() < 1e-6 {
-                    c.out[ch]
-                } else {
-                    out[ch] + d * *smooth
-                };
+            if !NOTES_ONLY {
+                for ch in 0..2 {
+                    let d = c.out[ch] - out[ch];
+                    out[ch] = if d.abs() < 1e-6 {
+                        c.out[ch]
+                    } else {
+                        out[ch] + d * *smooth
+                    };
+                }
             }
             l[f] = sl * out[0];
             r[f] = sr_ * out[1];
         }
         // Events past the block's end still apply (at its end).
-        for e in ev {
-            voices.event(p, *sr, buf, e);
+        if !NOTES_ONLY {
+            for e in ev {
+                voices.event(p, *sr, buf, e);
+            }
         }
     }
 }
 
+#[cfg(test)]
+mod reference;
 #[cfg(test)]
 mod tests;

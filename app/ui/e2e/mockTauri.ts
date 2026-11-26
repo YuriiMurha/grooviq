@@ -4,9 +4,11 @@
 // project_cmds.rs, project/src/session.rs). Playwright serialises the function, so it must not
 // reference anything outside its own body.
 
+import type { ArrangementPage, ArrangementReply, AudioContent, PatternContent } from "../src/api/arrangement";
+
 /** A file in the mock's file system. */
 export type MockFile =
-  | { kind: "sample"; seconds?: number }
+  | { kind: "sample"; seconds?: number; wav?: number[] | null }
   | { kind: "folder" }
   | { kind: "text" }
   | { kind: "project"; project: MockProject };
@@ -25,8 +27,10 @@ export interface MockProject {
   playMode?: "pattern" | "song";
   arrangement?: { tracks: { id: number; name: string; color: number; mute: boolean }[];
     clips: { id: number; track: number; name: string; startTick: number; muted: boolean;
-      content: { type: "pattern"; pattern: number; offsetTick: number; lengthTicks: number } }[];
-    audioAssets: never[]; loopRegion: { startTick: number; endTick: number; enabled: boolean } | null };
+      content: PatternContent | AudioContent }[];
+    audioAssets: ArrangementPage["audioAssets"][number][]; loopRegion: { startTick: number; endTick: number; enabled: boolean } | null };
+  /** Embedded fixture WAV bytes keyed by asset ID, independent of the original paths. */
+  arrangementMedia?: Record<number, number[]>;
   nextId: number;
   key?: { root: number; scale: string } | null;
 }
@@ -91,6 +95,8 @@ interface Growth {
 type LengthEntry = { owner: number | null; growth: Growth } | { set: number };
 
 export interface MockSeed {
+  /** Native platform whose file-drop coordinates the fixture emits. */
+  platform?: "macos" | "windows" | "linux";
   audioLog?: { id: number; atMs: number; level: "info" | "warn" | "error"; message: string }[];
   holdAudioLog?: boolean;
   holdProjectView?: boolean;
@@ -280,7 +286,57 @@ export function installMockTauri(seed: MockSeed): void {
   let trimRedo: TrimChange[] = [];
   type Arrangement = NonNullable<Project["arrangement"]>;
   type AddedPattern = { initial: Project["pattern"]; dormant?: PatternEntry };
-  type ClipChange = { order: number; before: Arrangement; after: Arrangement; addedPatterns: AddedPattern[] };
+  type AudioSource = { bytes: number[]; data: DataView; rate: number; frames: number; channels: number; fromWorker: boolean };
+  type ClipChange = { order: number; before: Arrangement; after: Arrangement; addedPatterns: AddedPattern[];
+    media?: { asset: number; before: AudioSource | undefined; after: AudioSource } };
+  const audioSources = new Map<number, AudioSource>();
+  type MediaIntent = { request: number; cancelled: boolean };
+  const pendingMedia = new Map<number, MediaIntent>();
+  const latestMediaRequests = new Map<number, number>();
+  const mediaTickets = new Map<number, MediaIntent>();
+  const cancelledMediaTickets = new Set<number>();
+  const validMediaTicket = (ticket: number) => Number.isSafeInteger(ticket) && ticket > 0;
+  const cancelMediaRequest = (request: number) => {
+    for (const [key, intent] of pendingMedia) {
+      if (intent.request === request) {
+        pendingMedia.delete(key);
+        intent.cancelled = true;
+        return true;
+      }
+    }
+    return false;
+  };
+  const cancelMediaTicket = (ticket: number) => {
+    if (!validMediaTicket(ticket)) return false;
+    const intent = mediaTickets.get(ticket);
+    if (intent) {
+      intent.cancelled = true;
+      return true;
+    }
+    if (!cancelledMediaTickets.has(ticket)) {
+      if (cancelledMediaTickets.size === 64) {
+        cancelledMediaTickets.delete(cancelledMediaTickets.values().next().value!);
+      }
+      cancelledMediaTickets.add(ticket);
+    }
+    return false;
+  };
+  let nextMediaRequest = 1;
+  type MediaHold = { promise: Promise<boolean>; release: (decode: boolean) => void };
+  const mediaReadHolds = new Map<string, MediaHold>();
+  const mediaHolds = new Map<string, MediaHold>();
+  const mediaPublicationHolds = new Map<string, MediaHold>();
+  const waveformHolds = new Map<number, MediaHold>();
+  const holdMedia = <K,>(holds: Map<K, MediaHold>, key: K) => {
+    if (holds.has(key)) throw new Error("Media is already held");
+    let release: MediaHold["release"] = () => {};
+    const promise = new Promise<boolean>(resolve => { release = resolve; });
+    holds.set(key, { promise, release });
+  };
+  const releaseMedia = <K,>(holds: Map<K, MediaHold>, key: K, decode = true) => {
+    holds.get(key)?.release(decode);
+    holds.delete(key);
+  };
   let clipUndo: ClipChange[] = [], clipRedo: ClipChange[] = [];
   let workspaceRefusal: string | null = null;
   const workspaceTrace: { command: string; generation: number; revision: number; status: string; effect?: unknown }[] = [];
@@ -948,11 +1004,40 @@ export function installMockTauri(seed: MockSeed): void {
     }
   };
   let unconfirmNextSave = false;
+  // project/file.rs::entry_name. Saving assigns ZIP entry names only to the saved copy.
+  const saveArrangementMedia = (project: Project) => {
+    if (!project.arrangement?.audioAssets.length) return;
+    const entries: { bytes?: number[]; name: string }[] = [];
+    const entryFor = (path: string, bytes?: number[]) => {
+      const shared = bytes && entries.find(entry => entry.bytes && sameAudioBytes(entry.bytes, bytes));
+      if (shared) return shared.name;
+      const name = Array.from(path.split(/[/\\]/).at(-1) ?? "", char =>
+        /[\p{Cc}:*?"<>|]/u.test(char) ? "_" : char,
+      ).slice(0, 120).join("").replace(/^[. ]+|[. ]+$/g, "") || "sample";
+      const entry = { bytes, name: `samples/${entries.length + 1}-${name}` };
+      entries.push(entry);
+      return entry.name;
+    };
+    for (const channel of project.channels) {
+      if (channel.sample === null || channel.embedded === false) continue;
+      const file = files.get(channel.sample);
+      entryFor(channel.sample, file?.kind === "sample" ? file.wav ?? undefined : undefined);
+    }
+    project.arrangementMedia = {};
+    for (const asset of project.arrangement.audioAssets) {
+      const source = audioSources.get(asset.id);
+      if (!source) continue;
+      asset.sample.file = entryFor(asset.sample.path, source.bytes);
+      project.arrangementMedia[asset.id] = source.bytes.slice();
+    }
+  };
   const saveTo = (target: string | null) => {
     const path = target === null ? s.path : withExtension(target, "grooviq", false);
     if (path === null) throw "Choose where to save this project.";
     if (files.get(path)?.kind === "project") s.backups.set(path, (s.backups.get(path) ?? 0) + 1);
-    files.set(path, { kind: "project", project: clone({ ...s.project, patterns: allPatterns() }) });
+    const saved = clone({ ...s.project, patterns: allPatterns() });
+    saveArrangementMedia(saved);
+    files.set(path, { kind: "project", project: saved });
     s.path = path;
     if (unconfirmNextSave) {
       unconfirmNextSave = false;
@@ -972,6 +1057,12 @@ export function installMockTauri(seed: MockSeed): void {
     s.generation += 1;
     trimIdentities.clear(); trimUndo = []; trimRedo = []; clipUndo = []; clipRedo = []; arrangementRevision = 0; workspaceRefusal = null;
     s.project = normalise(clone(p));
+    for (const intent of pendingMedia.values()) intent.cancelled = true;
+    pendingMedia.clear();
+    latestMediaRequests.clear();
+    mediaTickets.clear();
+    cancelledMediaTickets.clear();
+    openArrangementMedia();
     clearHistory();
     notesChanged();
     initialisePatterns();
@@ -981,6 +1072,13 @@ export function installMockTauri(seed: MockSeed): void {
     const warnings = p.channels
       .filter((c) => missing(c))
       .map((c) => `Channel "${c.name}": its sample is missing from the project file. Relink it to hear it.`);
+    for (const asset of s.project.arrangement?.audioAssets ?? []) {
+      const source = audioSources.get(asset.id);
+      if (!source) warnings.push(`Audio asset ${asset.id}: its sample is missing from the project file. Relink it to hear it.`);
+      else if (source.rate !== asset.sourceRate || source.frames !== asset.sourceFrames) {
+        warnings.push(`Audio asset ${asset.id}: decoded geometry differs from saved source metadata; saved trim duration is preserved.`);
+      }
+    }
     return { view: view(), warnings };
   };
 
@@ -1239,13 +1337,13 @@ export function installMockTauri(seed: MockSeed): void {
     const candidate = new Map([...patternBank].map(([id, entry]) => [id, { pattern: clone(entry.pattern), revision: entry.revision, history: entry.history }]));
     let nextId = s.project.nextId;
     const allocate = () => {
-      while (nextId < 0xffffffff && (candidate.has(nextId) || s.project.channels.some((c) => c.id === nextId) || s.project.patternClips?.some((c) => c.id === nextId) || s.project.arrangement?.tracks.some(t => t.id === nextId) || s.project.arrangement?.clips.some(c => c.id === nextId))) nextId++;
+      while (nextId < 0xffffffff && (candidate.has(nextId) || s.project.channels.some((c) => c.id === nextId) || s.project.patternClips?.some((c) => c.id === nextId) || s.project.arrangement?.tracks.some(t => t.id === nextId) || s.project.arrangement?.clips.some(c => c.id === nextId) || s.project.arrangement?.audioAssets.some(a => a.id === nextId))) nextId++;
       if (nextId >= 0xffffffff) return null;
       return nextId++;
     };
     let selected = s.project.pattern.id;
     const clips = clone(s.project.patternClips ?? []);
-    if (edit.kind === "delete" && s.project.arrangement?.clips.some(c => c.content.pattern === edit.pattern)) return refuse("referencedPattern", "This pattern is still used by a clip.");
+    if (edit.kind === "delete" && s.project.arrangement?.clips.some(c => c.content.type === "pattern" && c.content.pattern === edit.pattern)) return refuse("referencedPattern", "This pattern is still used by a clip.");
     if (["select", "delete", "rename", "duplicate"].includes(edit.kind) && !candidate.has(edit.pattern!)) return refuse("unknownPattern", `Pattern ${edit.pattern} no longer exists. Reload the pattern list.`);
     if ((edit.kind === "select" && edit.pattern === selected) || (edit.kind === "rename" && candidate.get(edit.pattern!)!.pattern.name === edit.name)) return { status:"applied", state:patternsView(), settlement };
     if (edit.kind === "create" || edit.kind === "duplicate" || edit.kind === "makeUnique") {
@@ -1280,7 +1378,7 @@ export function installMockTauri(seed: MockSeed): void {
 
   const nextChannelIdentity = () => {
     let id=s.project.nextId;
-    while (id < 0xffffffff && (s.project.channels.some((c) => c.id===id) || patternBank.has(id) || s.project.patternClips?.some((c) => c.id===id) || s.project.arrangement?.tracks.some(t => t.id===id) || s.project.arrangement?.clips.some(c => c.id===id))) id++;
+    while (id < 0xffffffff && (s.project.channels.some((c) => c.id===id) || patternBank.has(id) || s.project.patternClips?.some((c) => c.id===id) || s.project.arrangement?.tracks.some(t => t.id===id) || s.project.arrangement?.clips.some(c => c.id===id) || s.project.arrangement?.audioAssets.some(a => a.id===id))) id++;
     if (id>=0xffffffff) throw "Project ids are exhausted.";
     return id;
   };
@@ -1308,22 +1406,35 @@ export function installMockTauri(seed: MockSeed): void {
     }
     workspaceAdmit(candidate, scoped);
   };
+  const emptyArrangement = (): Arrangement => ({ tracks: [], clips: [], audioAssets: [], loopRegion: null });
+  const mediaWarnings = () => (s.project.arrangement?.audioAssets ?? []).flatMap(asset => {
+    const source = audioSources.get(asset.id);
+    if (!source) return [`Audio asset ${asset.id} is missing; relink it to hear its clips.`];
+    if (source.rate !== asset.sourceRate || source.frames !== asset.sourceFrames) {
+      return [`Audio asset ${asset.id}: decoded geometry differs from saved provenance; trim duration is preserved and unavailable decoded frames are silent.`];
+    }
+    return [];
+  });
+  const arrangementReply = (request: number | null, changed: boolean, createdIds: number[], message: string | null = null): ArrangementReply => ({
+    status: message === null ? "applied" : "refused", generation: s.generation, revision: arrangementRevision,
+    request, createdIds, changed, reload: message !== null, message, warnings: mediaWarnings(),
+  });
   const workspaceView = (args: Record<string, unknown>) => {
     const limit = Number(args.limit); if (limit < 1 || limit > 1024) throw "Read 1..1024 clips per page";
     if (s.project.patternClips?.length) requireEmptyArrangement();
-    const arrangement = s.project.arrangement ?? { tracks: [], clips: [], audioAssets: [], loopRegion: null };
+    const arrangement = s.project.arrangement ?? emptyArrangement();
     const offset = Number(args.offset);
     return { generation: s.generation, revision: arrangementRevision, offset, total: arrangement.clips.length,
       clips: clone(arrangement.clips.slice(offset, offset + limit)), tracks: clone(arrangement.tracks), audioAssets: clone(arrangement.audioAssets), loopRegion: arrangement.loopRegion, playMode: s.project.playMode ?? "pattern",
-      songError: null, pendingRequests: [], warnings: [] };
+      songError: null, pendingRequests: Array.from(pendingMedia.values(), intent => intent.request), warnings: mediaWarnings() };
   };
   const workspaceMode = (args: Record<string, unknown>) => {
     try {
       workspaceStamp(args);
       const mode = args.mode as "pattern" | "song"; const changedMode = (s.project.playMode ?? "pattern") !== mode;
       if (changedMode) { workspaceAdmit({ ...s.project, playMode: mode }); s.project.playMode = mode; changed(); }
-      return { status: "applied", generation: s.generation, revision: arrangementRevision, request: null, createdIds: [], changed: changedMode, reload: false, message: null, warnings: [] };
-    } catch (error) { return { status: "refused", generation: s.generation, revision: arrangementRevision, request: null, createdIds: [], changed: false, reload: true, message: String(error), warnings: [] }; }
+      return arrangementReply(null, changedMode, []);
+    } catch (error) { return arrangementReply(null, false, [], String(error)); }
   };
   const stepProjectHistory = (args: Record<string, unknown>) => {
     try {
@@ -1370,6 +1481,11 @@ export function installMockTauri(seed: MockSeed): void {
           patternsRevision++;
         }
         s.project.arrangement = candidate.arrangement;
+        if (clip.media) {
+          const source = undo ? clip.media.before : clip.media.after;
+          if (source) audioSources.set(clip.media.asset, source);
+          else audioSources.delete(clip.media.asset);
+        }
         if (undo) { clipUndo = clipUndo.filter(entry => entry !== clip); clipRedo.push(clip); }
         else { clipRedo = clipRedo.filter(entry => entry !== clip); clipUndo.push(clip); }
         changed(); effect = { kind: "arrangement" };
@@ -1390,34 +1506,53 @@ export function installMockTauri(seed: MockSeed): void {
       return { status: "applied", generation: s.generation, revision: arrangementRevision, effect };
     } catch (error) { return { status: "refused", generation: s.generation, revision: arrangementRevision, message: String(error), reload: true }; }
   };
-  /** Finite pattern-clip counterpart to Session::edit_arrangement, not an audio/automation
-   * engine. Candidate data, native-shaped refusal and real inverse snapshots are compared
-   * to the offline Session fixture before browser outcomes earn integration grade. */
-  const editPatternClips = (args: Record<string, unknown>) => {
+  /** Finite pattern and audio clip counterpart to Session::edit_arrangement. */
+  const editArrangement = (args: Record<string, unknown>) => {
     try {
       workspaceStamp(args); saveActivePattern();
       if (s.project.patternClips?.length) throw "Legacy clip records are outside the finite playlist fixture";
       const raw = String(args.editsJson); if (new TextEncoder().encode(raw).length > 64 * 1024 * 1024) throw "Arrangement request too large";
       const operations: Record<string, unknown>[] = JSON.parse(raw);
       if (!Array.isArray(operations) || operations.length > 100_000) throw "Invalid arrangement batch";
-      const before: Arrangement = clone(s.project.arrangement ?? { tracks: [], clips: [], audioAssets: [], loopRegion: null });
-      if (before.audioAssets.length) throw "Audio/automation editing is outside the finite pattern fixture";
+      const before: Arrangement = clone(s.project.arrangement ?? emptyArrangement());
       const candidate = clone(s.project); const arrangement = clone(before); candidate.arrangement = arrangement;
       const addedPatterns = new Map<number, PatternEntry>();
       const sourcePattern = (id: number) => addedPatterns.get(id) ?? patternBank.get(id);
-      let next = candidate.nextId; const issued = new Set([...candidate.channels.map(c => c.id), ...patternBank.keys(), ...arrangement.tracks.map(t => t.id), ...arrangement.clips.map(c => c.id)]);
+      let next = candidate.nextId; const issued = new Set([...candidate.channels.map(c => c.id), ...patternBank.keys(), ...arrangement.tracks.map(t => t.id), ...arrangement.clips.map(c => c.id), ...arrangement.audioAssets.map(a => a.id)]);
       const ids: number[] = [], tracksByOperation = new Map<number, number>();
       const allocate = () => { while (next < 0xffffffff && issued.has(next)) next++; if (next >= 0xffffffff) throw "Project ids exhausted"; const id = next++; issued.add(id); return id; };
-      const int = (value: unknown, max = 38_400_000): number => { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > max) throw "Invalid arrangement integer"; return value; };
+      const maxSongTicks = 38_400_000;
+      const int = (value: unknown, max = maxSongTicks): number => { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > max) throw "Invalid arrangement integer"; return value; };
+      const safeUint = (value: unknown) => int(value, Number.MAX_SAFE_INTEGER);
       const name = (value: unknown): string => { if (typeof value !== "string") throw "Invalid clip name"; return value; };
-      const content = (value: unknown): Arrangement["clips"][number]["content"] => {
+      const patternContent = (value: unknown): PatternContent => {
         if (!value || typeof value !== "object" || !("type" in value) || value.type !== "pattern" || !("pattern" in value) || !("offsetTick" in value) || !("lengthTicks" in value)) throw "Only pattern content is supported by this finite fixture";
         const pattern = int(value.pattern, 0xffffffff), offsetTick = int(value.offsetTick), lengthTicks = int(value.lengthTicks);
         if (!sourcePattern(pattern) || lengthTicks < 1) throw "Invalid pattern source or length";
         return { type: "pattern", pattern, offsetTick, lengthTicks };
       };
-      const track = (value: unknown) => { const id = int(value, 0xffffffff); if (!arrangement.tracks.some(t => t.id === id)) throw "Unknown track"; return id; };
-      const clip = (value: unknown) => { const id = int(value, 0xffffffff); const result = arrangement.clips.find(c => c.id === id); if (!result) throw "Unknown clip"; return result; };
+      const audioContent = (value: unknown): AudioContent => {
+        if (!value || typeof value !== "object" || !("type" in value) || value.type !== "audio") throw "Resize must preserve source, target and priority";
+        const fields = value as Record<string, unknown>;
+        if (typeof fields.gain !== "number" || typeof fields.reverse !== "boolean") throw "Invalid audio content";
+        return { type: "audio", asset: int(fields.asset, 0xffffffff), sourceStart: safeUint(fields.sourceStart),
+          sourceEnd: safeUint(fields.sourceEnd), gain: Math.fround(fields.gain), reverse: fields.reverse,
+          fadeIn: safeUint(fields.fadeIn), fadeOut: safeUint(fields.fadeOut) };
+      };
+      const audioAssets = new Map(arrangement.audioAssets.map(asset => [asset.id, asset]));
+      const bpm = Math.fround(candidate.bpm);
+      const track = (value: unknown) => {
+        const id = int(value, 0xffffffff);
+        if (!arrangement.tracks.some(t => t.id === id)) throw `Unknown track ${id}`;
+        return id;
+      };
+      const clip = (value: unknown) => {
+        const id = int(value, 0xffffffff);
+        const result = arrangement.clips.find(c => c.id === id);
+        if (!result) throw `Unknown clip ${id}`;
+        if (result.content.type !== "pattern" && result.content.type !== "audio") throw "Automation clips are outside the finite fixture";
+        return result;
+      };
       operations.forEach((op, index) => {
         if (!op || typeof op !== "object") throw "Invalid arrangement operation";
         if (op.kind === "setLoop") {
@@ -1434,26 +1569,63 @@ export function installMockTauri(seed: MockSeed): void {
           const target = op.kind === "createClip" ? track(op.track) : tracksByOperation.get(int(op.trackOperation, 100_000));
           if (target === undefined) throw "Track must refer to an earlier CreateTrack";
           if (typeof op.muted !== "boolean") throw "Invalid muted flag";
-          const id = allocate(); arrangement.clips.push({ id, track: target, name: name(op.name), startTick: int(op.startTick), muted: op.muted, content: content(op.content) }); ids.push(id);
+          const id = allocate(); arrangement.clips.push({ id, track: target, name: name(op.name), startTick: int(op.startTick), muted: op.muted, content: patternContent(op.content) }); ids.push(id);
         } else if (op.kind === "move" || op.kind === "copy") {
-          const source = clip(op.clip), destination = track(op.track), start = int(op.startTick);
-          if (op.kind === "copy") { const copy = clone(source); copy.id = allocate(); copy.track = destination; copy.startTick = start; arrangement.clips.push(copy); ids.push(copy.id); }
+          const destination = track(op.track);
+          const source = clip(op.clip);
+          const start = source.content.type === "audio" ? safeUint(op.startTick) : int(op.startTick);
+          if (op.kind === "copy") {
+            const copy = { ...clone(source), id: allocate(), track: destination, startTick: start };
+            arrangement.clips.push(copy); ids.push(copy.id);
+          }
           else { source.track = destination; source.startTick = start; }
         } else if (op.kind === "slice") {
-          const source = clip(op.clip), tick = int(op.tick), cut = tick - source.startTick;
-          if (op.audioFirstFrames != null || cut <= 0 || cut >= source.content.lengthTicks) throw "Invalid musical slice";
-          const period = sourcePattern(source.content.pattern)!.pattern.steps * STEP_TICKS;
-          const right = clone(source); right.id = allocate(); right.startTick = tick;
-          right.content.offsetTick = (source.content.offsetTick + cut) % period;
-          right.content.lengthTicks -= cut; source.content.lengthTicks = cut;
+          const source = clip(op.clip), left = source.content;
+          const tick = left.type === "audio" ? safeUint(op.tick) : int(op.tick), cut = tick - source.startTick;
+          let rightContent: typeof left;
+          if (left.type === "audio") {
+            if (cut <= 0) throw "Slice must be inside clip";
+            if (op.audioFirstFrames == null) throw "Audio slice requires explicit source-frame count";
+            const count = safeUint(op.audioFirstFrames), frames = left.sourceEnd - left.sourceStart;
+            if (frames < 0) throw "Invalid source bounds";
+            if (count === 0 || count >= frames) throw "Audio cut must partition source frames";
+            const asset = audioAssets.get(left.asset);
+            if (!asset) throw "Unknown audio asset";
+            if (cut !== Math.ceil(count / asset.sourceRate * bpm * 960 / 60)) {
+              throw "Audio cut tick must equal start plus ceil(source frames × BPM × 960 / (source rate × 60))";
+            }
+            rightContent = { ...left, fadeIn: 0, fadeOut: Math.min(left.fadeOut, frames - count) };
+            if (left.reverse) {
+              const edge = left.sourceEnd - count;
+              left.sourceStart = edge; rightContent.sourceEnd = edge;
+            } else {
+              const edge = left.sourceStart + count;
+              left.sourceEnd = edge; rightContent.sourceStart = edge;
+            }
+            // Chronological fades stay at the outside, even when the source plays backwards.
+            left.fadeIn = Math.min(left.fadeIn, count); left.fadeOut = 0;
+          } else {
+            if (op.audioFirstFrames != null || cut <= 0 || cut >= left.lengthTicks) throw "Invalid musical slice";
+            const period = sourcePattern(left.pattern)!.pattern.steps * STEP_TICKS;
+            rightContent = { ...left, offsetTick: (left.offsetTick + cut) % period, lengthTicks: left.lengthTicks - cut };
+            left.lengthTicks = cut;
+          }
+          const right = { ...source, id: allocate(), startTick: tick, content: rightContent };
           arrangement.clips.push(right); ids.push(right.id);
         } else if (op.kind === "resize") {
-          const source = clip(op.clip), resized = content(op.content);
-          if (source.content.pattern !== resized.pattern) throw "Resize cannot retarget its source";
-          const duration = sourcePattern(source.content.pattern)!.pattern.steps * STEP_TICKS;
-          const phase = ((source.content.offsetTick + int(op.startTick) - source.startTick) % duration + duration) % duration;
-          if (resized.offsetTick !== phase) throw "Resize must preserve pattern source phase";
-          source.content = resized; source.startTick = int(op.startTick);
+          const source = clip(op.clip);
+          if (source.content.type === "audio") {
+            const resized = audioContent(op.content);
+            if (resized.asset !== source.content.asset) throw "Resize must preserve source, target and priority";
+            source.content = { ...source.content, ...resized }; source.startTick = safeUint(op.startTick);
+          } else {
+            const resized = patternContent(op.content);
+            if (source.content.pattern !== resized.pattern) throw "Resize cannot retarget its source";
+            const duration = sourcePattern(source.content.pattern)!.pattern.steps * STEP_TICKS;
+            const phase = ((source.content.offsetTick + int(op.startTick) - source.startTick) % duration + duration) % duration;
+            if (resized.offsetTick !== phase) throw "Resize must preserve pattern source phase";
+            source.content = resized; source.startTick = int(op.startTick);
+          }
         } else if (op.kind === "setClip") {
           const source = clip(op.clip);
           if (typeof op.muted !== "boolean") throw "Invalid muted flag";
@@ -1463,16 +1635,32 @@ export function installMockTauri(seed: MockSeed): void {
           arrangement.clips = arrangement.clips.filter(candidate => candidate.id !== source.id);
         } else if (op.kind === "makeUnique") {
           const target = clip(op.clip);
+          if (target.content.type !== "pattern") throw "Only pattern content is supported by this finite fixture";
           const source = sourcePattern(target.content.pattern);
           if (!source) throw "Unknown pattern source";
           const id = allocate();
           addedPatterns.set(id, { pattern: { ...clone(source.pattern), id }, revision: 1, history: emptyHistory() });
           target.content.pattern = id;
           ids.push(id);
-        } else throw "This arrangement operation is outside the finite pattern fixture";
+        } else throw "This arrangement operation is outside the finite fixture";
       });
-      if (arrangement.tracks.length > 256 || arrangement.clips.length > 100_000 || arrangement.clips.some(c => c.startTick + c.content.lengthTicks > 38_400_000)) throw "Arrangement bounds exceeded";
-      if (!addedPatterns.size && JSON.stringify(before) === JSON.stringify(arrangement)) return { status: "applied", generation: s.generation, revision: arrangementRevision, request: null, createdIds: [], changed: false, reload: false, message: null, warnings: [] };
+      if (arrangement.tracks.length > 256 || arrangement.clips.length > 100_000) throw "Arrangement bounds exceeded";
+      // Like validate_arrangement, check final clip geometry after the whole batch.
+      for (const clip of arrangement.clips) {
+        if (clip.content.type === "pattern") {
+          if (clip.startTick + clip.content.lengthTicks > maxSongTicks) throw "Arrangement bounds exceeded";
+        } else if (clip.content.type === "audio") {
+          const { asset: id, sourceStart, sourceEnd, fadeIn, fadeOut, gain } = clip.content;
+          const asset = audioAssets.get(id), frames = sourceEnd - sourceStart;
+          const ticks = asset ? Math.ceil(frames / asset.sourceRate * bpm * 16) : 0;
+          if (!asset || frames < 1 || sourceEnd > asset.sourceFrames || !(gain >= 0 && gain <= 2) ||
+              fadeIn > frames || fadeOut > frames || clip.startTick >= maxSongTicks || clip.startTick + ticks > maxSongTicks) {
+            throw `Clip ${clip.id} (${clip.name}): invalid track/source reference, bounds or automation value.`;
+          }
+        }
+      }
+      // Session treats consumed IDs as a change, even if the batch leaves the arrangement identical.
+      if (next === candidate.nextId && JSON.stringify(before) === JSON.stringify(arrangement)) return arrangementReply(null, false, []);
       candidate.nextId = next;
       workspaceAdmit(candidate, true, [...allPatterns(), ...Array.from(addedPatterns.values(), entry => entry.pattern)]);
       clearWorkspaceRedo();
@@ -1480,11 +1668,194 @@ export function installMockTauri(seed: MockSeed): void {
       for (const [id, entry] of addedPatterns) patternBank.set(id, entry);
       if (addedPatterns.size) patternsRevision++;
       s.project.arrangement = arrangement; s.project.nextId = next; pruneWorkspaceHistory(); changed();
-      return { status: "applied", generation: s.generation, revision: arrangementRevision, request: null, createdIds: ids, changed: true, reload: false, message: null, warnings: [] };
-    } catch (error) { return { status: "refused", generation: s.generation, revision: arrangementRevision, request: null, createdIds: [], changed: false, reload: true, message: String(error), warnings: [] }; }
+      return arrangementReply(null, true, ids);
+    } catch (error) { return arrangementReply(null, false, [], String(error)); }
   };
-  // Clip/media editing remains native-only. Reduced workspace history above applies
-  // only real note/trim inverses; it cannot skip unsupported arrangement operations.
+  // Canonical RIFF/WAVE only: 44-byte header, 16-byte PCM fmt, then mono or stereo PCM16 data.
+  // No metadata chunks; media.rs initializes tempo/key to null on import and preserves them on relink.
+  const decodeAudio = (bytes: number[] | null | undefined, fromWorker: boolean): AudioSource => {
+    const invalid = 'Media preparation failed: Decode("This file is not a sound Grooviq can open; use WAV, AIFF, FLAC, MP3 or OGG.")';
+    if (!bytes || bytes.length < 44) throw invalid;
+    const data = new DataView(Uint8Array.from(bytes).buffer);
+    const channels = data.getUint16(22, true);
+    const rate = data.getUint32(24, true);
+    const frames = data.getUint32(40, true) / (channels * 2);
+    if (data.getUint32(0) !== 0x52494646 || data.getUint32(8) !== 0x57415645 ||
+        data.getUint32(12) !== 0x666d7420 || data.getUint32(16, true) !== 16 ||
+        data.getUint16(20, true) !== 1 || data.getUint16(34, true) !== 16 ||
+        data.getUint32(36) !== 0x64617461 || (channels !== 1 && channels !== 2) ||
+        rate < 8000 || rate > 384000 || !Number.isInteger(frames) || frames < 1 ||
+        44 + frames * channels * 2 !== bytes.length) throw invalid;
+    return { bytes, data, rate, frames, channels, fromWorker };
+  };
+  const sameAudioBytes = (left: number[], right: number[]) =>
+    left === right || (left.length === right.length && left.every((value, index) => value === right[index]));
+  const retainedAudioSource = (bytes: number[]) => {
+    const retained = [...audioSources.values()];
+    for (const change of [...clipUndo, ...clipRedo]) {
+      if (change.media?.before) retained.push(change.media.before);
+      if (change.media) retained.push(change.media.after);
+    }
+    // Match the worker's equal-byte reuse while a worker-decoded source is still owned.
+    // Open decodes archive bytes separately from the worker.
+    // This finite fixture does not model the worker's 32-entry FIFO eviction
+    // (project/src/audio_assets.rs). An older live or history-owned source can still match here.
+    return retained.find(source => source.fromWorker && sameAudioBytes(source.bytes, bytes));
+  };
+  const openArrangementMedia = () => {
+    audioSources.clear();
+    for (const asset of s.project.arrangement?.audioAssets ?? []) {
+      const bytes = s.project.arrangementMedia?.[asset.id];
+      if (asset.sample.file !== null && bytes) audioSources.set(asset.id, decodeAudio(bytes, false));
+      else asset.sample.file = null;
+    }
+  };
+  openArrangementMedia();
+
+  const prepareAudio = async (
+    args: Record<string, unknown>,
+    target: { kind: "import"; track: number; startTick: number; name: string } | { kind: "relink"; asset: number },
+  ) => {
+    const path = String(args.path);
+    const key = target.kind === "import" ? 0xffffffff : target.asset;
+    const ticket = Number(args.ticket);
+    let intent: MediaIntent | undefined;
+    try {
+      workspaceStamp(args);
+      const before = s.project.arrangement ?? emptyArrangement();
+      if (target.kind === "import") {
+        if (!before.tracks.some(track => track.id === target.track) || target.startTick >= 38_400_000) {
+          throw "Invalid import destination";
+        }
+      } else if (!before.audioAssets.some(asset => asset.id === target.asset)) {
+        throw "Audio asset removed";
+      }
+      if (nextMediaRequest >= Number.MAX_SAFE_INTEGER) throw "Request identities exhausted";
+      const request = nextMediaRequest++;
+      if (!validMediaTicket(ticket)) throw "Invalid media ticket";
+      if (cancelledMediaTickets.has(ticket)) throw "Media ticket cancelled";
+      if (mediaTickets.has(ticket)) throw "Media ticket already in use";
+      intent = { request, cancelled: false };
+      mediaTickets.set(ticket, intent);
+      const reading = mediaReadHolds.get(path);
+      if (reading) await reading.promise;
+      const file = files.get(path);
+      if (!file) throw "No such file or directory (os error 2)";
+      if (file.kind === "folder") throw "not a regular file";
+      workspaceStamp(args);
+      if (intent.cancelled || (latestMediaRequests.get(key) ?? 0) > request) {
+        throw "Older or cancelled media request";
+      }
+      const old = pendingMedia.get(key);
+      if (old) old.cancelled = true;
+      latestMediaRequests.set(key, request);
+      pendingMedia.set(key, intent);
+      // Pause before the worker returns so cancellation here reaches receive().
+      const held = mediaHolds.get(path);
+      const decoded = held ? await held.promise : true;
+      if (intent.cancelled) throw "Media preparation failed: Cancelled";
+      const prepared = decodeAudio(decoded && file.kind === "sample" ? file.wav : undefined, true);
+      const publishing = mediaPublicationHolds.get(path);
+      if (publishing) await publishing.promise;
+      workspaceStamp(args);
+      if (intent.cancelled || pendingMedia.get(key) !== intent) throw "Media request cancelled or superseded";
+      const candidate = clone(s.project);
+      const arrangement = candidate.arrangement ?? emptyArrangement();
+      candidate.arrangement = arrangement;
+      const name = path.split(/[/\\]/).at(-1) || "sample";
+      const sample = { path: name, file: null };
+      const createdIds: number[] = [];
+      let asset: number;
+      if (target.kind === "import") {
+        const issued = new Set([
+          ...candidate.channels.map(channel => channel.id), ...patternBank.keys(),
+          ...arrangement.tracks.map(track => track.id), ...arrangement.clips.map(clip => clip.id),
+          ...arrangement.audioAssets.map(entry => entry.id),
+        ]);
+        const allocate = () => {
+          while (candidate.nextId < 0xffffffff && issued.has(candidate.nextId)) candidate.nextId++;
+          if (candidate.nextId >= 0xffffffff) throw "Project ids exhausted";
+          return candidate.nextId++;
+        };
+        asset = allocate();
+        const clip = allocate();
+        if (arrangement.audioAssets.length >= 4096 || arrangement.clips.length >= 100_000) {
+          throw "Invalid arrangement: bounds, identity, reference or native parameter range.";
+        }
+        const ticks = Math.ceil(prepared.frames / prepared.rate * candidate.bpm * 16);
+        if (target.startTick + ticks > 38_400_000) {
+          throw `Clip ${clip} (${target.name}): invalid track/source reference, bounds or automation value.`;
+        }
+        arrangement.audioAssets.push({ id: asset, sample, sourceRate: prepared.rate, sourceFrames: prepared.frames,
+          originalTempo: null, originalKey: null });
+        arrangement.clips.push({ id: clip, track: target.track, name: target.name, startTick: target.startTick, muted: false,
+          content: { type: "audio", asset, sourceStart: 0, sourceEnd: prepared.frames, gain: 1, reverse: false, fadeIn: 0, fadeOut: 0 } });
+        createdIds.push(asset, clip);
+      } else {
+        asset = target.asset;
+        const entry = arrangement.audioAssets.find(entry => entry.id === asset);
+        if (!entry) throw "Relink asset removed";
+        entry.sample = sample;
+      }
+      workspaceAdmit(candidate);
+      const source = retainedAudioSource(prepared.bytes) ?? prepared;
+      clearWorkspaceRedo();
+      clipUndo.push({ order: historyOrder++, before, after: arrangement, addedPatterns: [],
+        media: { asset, before: audioSources.get(asset), after: source } });
+      s.project.arrangement = arrangement;
+      s.project.nextId = candidate.nextId;
+      audioSources.set(asset, source);
+      pruneWorkspaceHistory();
+      changed();
+      return arrangementReply(request, true, createdIds);
+    } catch (error) {
+      return arrangementReply(intent?.request ?? null, false, [], String(error));
+    } finally {
+      if (intent && pendingMedia.get(key) === intent) pendingMedia.delete(key);
+      if (intent && mediaTickets.get(ticket) === intent) mediaTickets.delete(ticket);
+    }
+  };
+
+  const waveformSource = (generation: number, asset: number) => {
+    if (generation !== s.generation) throw "Project replaced";
+    const source = audioSources.get(asset);
+    if (!source) throw "Audio is missing; relink it";
+    return source;
+  };
+  const arrangementWaveform = async (args: Record<string, unknown>) => {
+    const { generation, request, asset, start, end, bins } = args as Record<string, number>;
+    const source = waveformSource(generation, asset);
+    if (start >= end || end > source.frames || bins === 0 || bins > 16384 || bins > end - start) {
+      throw "Invalid waveform range or bin count";
+    }
+    if (!Number.isSafeInteger(request)) throw "Invalid waveform identity";
+    const held = waveformHolds.get(request);
+    if (held) await held.promise;
+    if (waveformSource(generation, asset) !== source) throw "Waveform source replaced; reload";
+    // engine/src/waveform.rs::PeakPyramid::encode: WFP1, little-endian, 64-byte header.
+    const packet = new DataView(new ArrayBuffer(64 + bins * 16));
+    packet.setUint32(0, 0x31504657, true);
+    packet.setUint32(4, asset, true);
+    [generation, request, source.frames, start, end].forEach((value, index) =>
+      packet.setBigUint64(8 + index * 8, BigInt(value), true));
+    [source.rate, 2, bins, 0].forEach((value, index) => packet.setUint32(48 + index * 4, value, true));
+    for (let bin = 0; bin < bins; bin++) {
+      const from = start + Math.floor((end - start) * bin / bins);
+      const to = start + Math.floor((end - start) * (bin + 1) / bins);
+      let leftMin = Infinity, leftMax = -Infinity, rightMin = Infinity, rightMax = -Infinity;
+      for (let frame = from; frame < to; frame++) {
+        const offset = 44 + frame * source.channels * 2;
+        const left = source.data.getInt16(offset, true) / 32768;
+        const right = source.channels === 2 ? source.data.getInt16(offset + 2, true) / 32768 : left;
+        leftMin = Math.min(leftMin, left); leftMax = Math.max(leftMax, left);
+        rightMin = Math.min(rightMin, right); rightMax = Math.max(rightMax, right);
+      }
+      [leftMin, leftMax, rightMin, rightMax].forEach((peak, index) =>
+        packet.setFloat32(64 + bin * 16 + index * 4, peak, true));
+    }
+    return packet.buffer;
+  };
+
   const seekArrangementTransport = (args: Record<string, unknown>) => {
     try {
       workspaceStamp(args);
@@ -1505,14 +1876,14 @@ export function installMockTauri(seed: MockSeed): void {
   const nativeArrangementOnly = () => { throw "Arrangement/media commands are not simulated by this browser fixture; use native offline acceptance."; };
   const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
     arrangement_view: workspaceView,
-    arrangement_edit: editPatternClips,
+    arrangement_edit: editArrangement,
     arrangement_history: stepProjectHistory,
     arrangement_curve: nativeArrangementOnly,
-    audio_import: nativeArrangementOnly,
-    audio_relink: nativeArrangementOnly,
-    audio_cancel: nativeArrangementOnly,
-    audio_cancel_ticket: nativeArrangementOnly,
-    arrangement_waveform: nativeArrangementOnly,
+    audio_import: (a) => prepareAudio(a, { kind: "import", track: Number(a.track), startTick: Number(a.startTick), name: String(a.name) }),
+    audio_relink: (a) => prepareAudio(a, { kind: "relink", asset: Number(a.asset) }),
+    audio_cancel: (a) => cancelMediaRequest(Number(a.request)),
+    audio_cancel_ticket: (a) => cancelMediaTicket(Number(a.ticket)),
+    arrangement_waveform: arrangementWaveform,
     arrangement_mode: workspaceMode,
     arrangement_loop: nativeArrangementOnly,
     arrangement_seek: seekArrangementTransport,
@@ -1962,6 +2333,7 @@ export function installMockTauri(seed: MockSeed): void {
   const isInt = (v: unknown, max: number) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= max;
   const u8: Check = (v) => (isInt(v, 255) ? null : `invalid value: ${JSON.stringify(v)}, expected u8`);
   const u32: Check = (v) => (isInt(v, 0xffffffff) ? null : `invalid value: ${JSON.stringify(v)}, expected u32`);
+  const wireU64: Check = (v) => isInt(v, 2 ** 64) && Number(v) < 2 ** 64 ? null : "expected u64";
   // A u64 as JavaScript numbers carry it exactly (the presses the shell hands out stay far below).
   const u64: Check = (v) => (isInt(v, Number.MAX_SAFE_INTEGER) ? null : `invalid value: ${JSON.stringify(v)}, expected u64`);
   // JSON has no NaN or infinity: they arrive as null.
@@ -2028,6 +2400,11 @@ export function installMockTauri(seed: MockSeed): void {
     arrangement_mode: { generation: u64, revision: u64, mode: (value) => value === "pattern" || value === "song" ? null : "expected pattern or song" },
     arrangement_history: { generation: u64, revision: u64, undo: bool },
     arrangement_edit: { generation: u64, revision: u64, editsJson: str },
+    audio_import: { generation: u64, revision: u64, track: u32, startTick: u64, name: str, path: str, ticket: wireU64 },
+    audio_relink: { generation: u64, revision: u64, asset: u32, path: str, ticket: wireU64 },
+    audio_cancel: { request: wireU64 },
+    audio_cancel_ticket: { ticket: wireU64 },
+    arrangement_waveform: { generation: u64, asset: u32, start: u64, end: u64, bins: u64, request: wireU64 },
     sampler_trim_view: { channel:u32 },
     sampler_trim_reset: { channel:u32,stamp:str },
     sampler_trim_undo: { channel:u32,stamp:str,token:str },
@@ -2158,11 +2535,26 @@ export function installMockTauri(seed: MockSeed): void {
       s.exitCount += 1;
       return false;
     },
-    /** Files dragged from the OS: enter, then drop (or leave). */
-    drag: (paths: string[], drop: boolean) => {
-      emit("tauri://drag-enter", { paths, position: { x: 400, y: 300 } });
-      emit("tauri://drag-over", { position: { x: 400, y: 300 } });
-      if (drop) emit("tauri://drag-drop", { paths, position: { x: 400, y: 300 } });
+    holdAudioRead: (path: string) => holdMedia(mediaReadHolds, path),
+    releaseAudioRead: (path: string) => releaseMedia(mediaReadHolds, path),
+    holdAudio: (path: string, phase: "worker" | "publication" = "worker") =>
+      holdMedia(phase === "worker" ? mediaHolds : mediaPublicationHolds, path),
+    releaseAudio: (path: string) => {
+      releaseMedia(mediaHolds, path);
+      releaseMedia(mediaPublicationHolds, path);
+    },
+    refuseAudio: (path: string) => releaseMedia(mediaHolds, path, false),
+    holdWaveform: (request: number) => holdMedia(waveformHolds, request),
+    releaseWaveform: (request: number) => releaseMedia(waveformHolds, request),
+    /** Files dragged from the OS at CSS client coordinates. */
+    drag: (paths: string[], drop: boolean, client = { x: 400, y: 300 }) => {
+      // Wry 0.57.2 drag_drop.rs: WKWebView 74–124 and WebKitGTK 71–115 send logical units;
+      // WebView2 225–309 sends physical pixels. Tauri wraps them unscaled. Retina hand-check: #636.
+      const scale = seed.platform === "windows" ? window.devicePixelRatio : 1;
+      const position = { x: client.x * scale, y: client.y * scale };
+      emit("tauri://drag-enter", { paths, position });
+      emit("tauri://drag-over", { position });
+      if (drop) emit("tauri://drag-drop", { paths, position });
       else emit("tauri://drag-leave", null);
     },
     /** Delivers one frame now that says `playing` whatever the transport does: a frame the

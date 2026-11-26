@@ -1,5 +1,5 @@
 # Repeatable commands. `make help` lists them. macOS or Linux shell.
-.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan bench bench-roll-operations bench-instructions profile profile-tracy build-app install-app qa-ui qa-app
+.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan bench bench-roll-operations roll-timing-test bench-instructions profile profile-tracy build-app install-app qa-ui qa-app
 
 # rustup installs cargo into ~/.cargo/bin, which is often not on PATH.
 export PATH := $(HOME)/.cargo/bin:$(PATH)
@@ -22,6 +22,32 @@ merge-train: ## Quality only: advance a tested batch (ORDER="12=<approved SHA> 3
 
 test-merge-train: ## Test ordered protected merges without calling GitHub
 	python3 -B -m unittest discover -s scripts -p test_merge_train.py -v
+
+.PHONY: merge-train-agent-enable merge-train-agent-disable merge-train-agent-status merge-train-agent-resume merge-train-agent-tick merge-train-agent-ledger merge-train-order test-merge-train-agent
+merge-train-agent-enable: ## Enable optional three-minute merge-train ticks from merged main
+	$(REFRESH_PYTHON) -E -s -S -B scripts/merge_train_agent.py enable
+
+merge-train-agent-disable: ## Disable future merge-train ticks without interrupting an active tick
+	$(REFRESH_PYTHON) -E -s -S -B scripts/merge_train_agent.py disable
+
+merge-train-agent-status: ## Show the local approved order and any merge-train stop record
+	@$(REFRESH_PYTHON) -E -s -S -B scripts/merge_train_agent.py status
+
+merge-train-agent-resume: ## Clear the agent stop record after investigating it
+	$(REFRESH_PYTHON) -E -s -S -B scripts/merge_train_agent.py resume
+
+merge-train-agent-tick: ## Run the same guarded tick that launchd runs
+	$(REFRESH_PYTHON) -E -s -S -B scripts/merge_train_agent.py tick
+
+merge-train-agent-ledger: ## Print landed merge-train batches as Markdown rows
+	@$(REFRESH_PYTHON) -E -s -S -B scripts/merge_train_agent.py ledger
+
+merge-train-order: export BATCH := $(BATCH)
+merge-train-order: ## Save Quality's approved order (ORDER="12=<approved SHA> 34=<approved SHA>", BATCH=4)
+	$(REFRESH_PYTHON) -E -s -S -B scripts/merge_train_agent.py set-order --make-order="$$ORDER" --batch="$$BATCH"
+
+test-merge-train-agent: ## Exercise the merge-train agent with fake launchd and local Git fixtures
+	$(REFRESH_PYTHON) -B scripts/test_merge_train_agent.py -v
 
 .PHONY: test-loom
 test-loom: ## Model the real-time worker protocol with Loom
@@ -47,7 +73,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: test-instruction-profiles test-merge-train test-pre-commit test-qa-driver ci-paths-test e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles test-merge-train test-merge-train-agent test-pre-commit test-qa-driver ci-paths-test e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test optional-rust-policy-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
@@ -117,7 +143,14 @@ bench: ## Render speed, block times and determinism of the reference scenes, the
 	$(CARGO) bench -p grooviq-dsp --bench kernels
 
 bench-roll-operations: ## The six piano-roll timing budgets, without work counters (run on a quiet host)
-	GROOVIQ_ROLL_PERF=1 npm --prefix $(UI) test -- --run src/roll/budgets.test.ts --maxWorkers=1 --disableConsoleIntercept
+	@set --; \
+	if [ -n "$$ROLL_TIMING_REPORT" ]; then \
+		set -- --reporter=default --reporter=json --outputFile.json="$$ROLL_TIMING_REPORT"; \
+	fi; \
+	GROOVIQ_ROLL_PERF=1 npm --prefix $(UI) test -- --run src/roll/budgets.test.ts --maxWorkers=1 --disableConsoleIntercept "$$@"
+
+roll-timing-test: ## Test evidence validation and the bounded piano-roll timing rerun
+	node --test scripts/roll-timing.test.cjs
 
 bench-instructions: ## Instruction counts (Linux only: needs valgrind and gungraun-runner)
 	$(CARGO) bench -p grooviq-golden --bench instructions

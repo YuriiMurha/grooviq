@@ -21,9 +21,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Renders and data of the fixtures as the last version 3 build (90ec26d) produced them.
+// v1 and v2 play sampler voices above step 1.09, so their sound follows the sampler's
+// band-limited read (#542); with that read forced to Hermite they hash as before.
 const BASELINE: [(&str, u64, u64); 3] = [
-    ("v1", 0x0b4d_3305_2ae3_f1ae, 0x728d_f32f_82f0_4ddf),
-    ("v2", 0xc10f_35b6_d9fa_1725, 0xb3e3_e049_4b7a_3e6e),
+    ("v1", 0x7679_e6fa_3dda_c72a, 0x728d_f32f_82f0_4ddf),
+    ("v2", 0x9adb_f194_b066_58d9, 0xb3e3_e049_4b7a_3e6e),
     ("v3", 0x864b_0d92_c75b_b1ef, 0x6f47_398f_c689_746c),
 ];
 
@@ -904,7 +906,7 @@ fn a_mixer_built_in_memory_is_held_to_the_same_bounds() {
     assert_eq!(check(&m), Err(MixerError::TooBig("tracks")));
 }
 
-// ---- A routed mixer is refused wherever it would play or be written ----
+// ---- Unsupported controls are refused wherever the project would play or be written ----
 
 /// The v3 fixture with [`routed`], as a version 4 file: readable, valid, unsupported.
 fn routed_file(dir: &Path) -> (std::path::PathBuf, Loaded) {
@@ -938,18 +940,18 @@ fn routed_file(dir: &Path) -> (std::path::PathBuf, Loaded) {
 }
 
 #[test]
-fn compiling_a_routed_mixer_is_refused_not_rendered_dry() {
+fn compiling_a_bypassed_insert_is_refused() {
     let d = tempfile::tempdir().unwrap();
     let (_, loaded) = routed_file(d.path());
     let decoded = decode_samples(&loaded).samples;
     let p = &loaded.project;
     assert_eq!(
         engine_state(p, &decoded),
-        Err(MixerError::RoutedUnsupported)
+        Err(MixerError::UnsupportedBypass(2))
     );
     assert_eq!(
         compile_channels(p, &decoded),
-        Err(MixerError::RoutedUnsupported)
+        Err(MixerError::UnsupportedBypass(2))
     );
     assert!(compile_song(p, &decoded, None, 1_000_000).is_err());
     // The same project with the legacy mixer compiles: the guard is the only refusal.
@@ -970,7 +972,7 @@ fn listing(dir: &Path) -> Vec<String> {
 }
 
 #[test]
-fn writing_a_routed_mixer_is_refused_before_any_file_changes() {
+fn writing_a_bypassed_insert_is_refused_before_any_file_changes() {
     let d = tempfile::tempdir().unwrap();
     let (_, loaded) = routed_file(d.path());
     let out = d.path().join("out");
@@ -999,7 +1001,7 @@ fn writing_a_routed_mixer_is_refused_before_any_file_changes() {
 }
 
 #[test]
-fn opening_a_routed_mixer_changes_nothing_in_the_session() {
+fn opening_a_bypassed_insert_changes_nothing_in_the_session() {
     let d = tempfile::tempdir().unwrap();
     let (path, routed) = routed_file(d.path());
     let (controller, mut processor) = e::engine(e::EngineConfig {

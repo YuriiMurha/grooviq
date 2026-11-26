@@ -43,6 +43,117 @@ fn sine(rate: f32, hz: f64, len: usize) -> Vec<f32> {
         .collect()
 }
 
+#[test]
+fn faster_reads_reject_folded_tones() {
+    let mut levels = Vec::new();
+    for (rate, key, source_hz, alias_hz, pass_source_hz, pass_output_hz) in [
+        (192_000.0, 60, 89_000.0, 7_000.0, 1_000.0, 1_000.0),
+        (48_000.0, 72, 21_000.0, 6_000.0, 1_000.0, 2_000.0),
+        (48_000.0, 84, 21_000.0, 12_000.0, 1_000.0, 4_000.0),
+        (72_000.0, 60, 31_500.0, 16_500.0, 1_000.0, 1_000.0),
+        (98_400.0, 60, 43_000.0, 5_000.0, 16_000.0, 16_000.0),
+    ] {
+        let measure = |source_hz, output_hz| {
+            let mut s = sampler(SR, buf(rate, sine(rate, source_hz, 20_000)));
+            let (l, r) = render(&mut s, 5_000, &[on(0, key, 1.0)]);
+            // Skip the onset. This window contains an integer number of cycles at every
+            // measured frequency, so the two quadratures give the peak tone amplitude.
+            let amplitude = |x: &[f32]| {
+                let window = &x[240..4_080];
+                let (re, im) = window
+                    .iter()
+                    .enumerate()
+                    .fold((0.0, 0.0), |(re, im), (i, &x)| {
+                        let phase = std::f64::consts::TAU * output_hz * i as f64 / SR as f64;
+                        (
+                            re + x as f64 * libm::cos(phase),
+                            im + x as f64 * libm::sin(phase),
+                        )
+                    });
+                20.0 * libm::log10(2.0 * libm::hypot(re, im) / window.len() as f64)
+            };
+            [amplitude(&l), amplitude(&r)]
+        };
+        let alias = measure(source_hz, alias_hz);
+        let pass = measure(pass_source_hz, pass_output_hz);
+        eprintln!("{rate} Hz, key {key}: alias {alias:.2?} dBFS, passband {pass:.2?} dBFS");
+        levels.push((rate, key, alias, pass));
+    }
+    for (rate, key, alias, pass) in levels {
+        // A full-scale sinusoid should fold to at most 0.1% amplitude. The passband
+        // control must stay within 0.25 dB of full scale, so silence cannot pass.
+        assert!(
+            alias.into_iter().all(|db| db <= -60.0),
+            "{rate} Hz key {key}: {alias:?} dBFS"
+        );
+        assert!(
+            pass.into_iter().all(|db| db.abs() < 0.25),
+            "{rate} Hz key {key}: {pass:?} dBFS"
+        );
+    }
+}
+
+#[test]
+fn faster_reads_keep_trimmed_stereo_edges_isolated() {
+    let mut l = vec![1.0; 512];
+    let mut r = vec![-1.0; 512];
+    l[128..384].fill(-0.75);
+    r[128..384].fill(0.5);
+    let source = Arc::new(SampleBuf { rate: SR, l, r });
+    for reverse in [0.0, 1.0] {
+        let mut s = sampler(SR, Arc::clone(&source));
+        s.set_param(p("start"), 0.25);
+        s.set_param(p("end"), 0.75);
+        s.set_param(p("reverse"), reverse);
+        let (l, r) = render(&mut s, 128, &[on(0, 84, 1.0)]);
+        // The selected 256 frames play in 64 output frames. Padding the FIR with
+        // adjacent material would leak the opposite-polarity samples into the edges.
+        assert!(l[..64].iter().all(|&x| (x + 0.75).abs() < 1e-6));
+        assert!(r[..64].iter().all(|&x| (x - 0.5).abs() < 1e-6));
+        assert!(l[64..].iter().chain(&r[64..]).all(|&x| x == 0.0));
+    }
+}
+
+#[test]
+fn fir_loop_matches_unrolled_audio_in_both_directions() {
+    let source = noise(512);
+    for rate in [72_000.0, 192_000.0] {
+        for loop_frames in [32, 128] {
+            for reverse in [false, true] {
+                let mut unrolled = source.clone();
+                if reverse {
+                    unrolled.reverse();
+                }
+                let repeated = unrolled[512 - loop_frames..].repeat(160);
+                unrolled.extend(repeated);
+                if reverse {
+                    unrolled.reverse();
+                }
+                let mut looping = sampler(SR, buf(rate, source.clone()));
+                let mut linear = sampler(SR, buf(rate, unrolled));
+                for s in [&mut looping, &mut linear] {
+                    s.set_param(p("reverse"), f32::from(reverse));
+                }
+                looping.set_param(p("loop"), 1.0);
+                looping.set_param(p("loop_start"), 1.0 - loop_frames as f32 / 512.0);
+                let note = [on(0, 60, 1.0)];
+                let (looped, _) = render(&mut looping, 1_024, &note);
+                let (unrolled, _) = render(&mut linear, 1_024, &note);
+                // Compare whole seams after the first wrap, including taps that reach
+                // back through the near edge of a long loop.
+                for frame in 512..1_024 {
+                    assert!(
+                        (looped[frame] - unrolled[frame]).abs() <= 1e-5,
+                        "rate {rate}, loop {loop_frames}, reverse {reverse}, frame {frame}: {} vs {}",
+                        looped[frame],
+                        unrolled[frame]
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Deterministic non-zero noise in (-1, 1) without exact zeros.
 fn noise(len: usize) -> Vec<f32> {
     let mut s = 0x1234_5678u32;
@@ -677,7 +788,7 @@ fn m1_scene() -> Vec<f32> {
 }
 
 #[test]
-fn defaults_leave_the_m1_sound_unchanged() {
+fn sampler_matches_its_reference() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/sampler_m1.f32");
     let scene = m1_scene();
     if std::env::var("GOLDEN_UPDATE").as_deref() == Ok("1") {

@@ -7,6 +7,7 @@ import { onePassingTest } from "./notes-edit-budget.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const replays = [
   { crate: "grooviq-project", suite: "semantic_replay", name: "session_matches_shared_semantic_replay" },
+  { crate: "grooviq-app", suite: "arrangement_media_replay", name: "arrangement_media_matches_shared_replay" },
   { crate: "grooviq-app", suite: "midi", name: "semantic_replay::hub_matches_shared_midi_replay" },
 ];
 for (const { crate, suite, name } of replays) {

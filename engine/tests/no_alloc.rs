@@ -156,6 +156,26 @@ fn profiling_first_callback_is_realtime_safe() {
     );
 }
 
+#[test]
+fn delay_and_reverb_high_cut_meters_are_realtime_safe() {
+    for id in ["delay", "character_delay", "reverb"] {
+        let mut device = grooviq_dsp::create(id, 22_050.0).unwrap();
+        let meters = realtime(|| {
+            device.set_param(6, 20_000.0);
+            let fresh = device.meter(3);
+            device.process(&mut [0.0; 16], &mut [0.0; 16], None, &[]);
+            device.set_param(6, 1000.0);
+            device.process(&mut [0.0; 128], &mut [0.0; 128], None, &[]);
+            let gliding = device.meter(3);
+            device.reset();
+            (fresh, gliding, device.meter(3))
+        });
+        assert_eq!(meters.0, 9922.5, "{id} fresh");
+        assert!(meters.1 > 1000.0 && meters.1 < 9922.5, "{id} gliding");
+        assert!((meters.2 - 1000.0).abs() < 0.01, "{id} reset");
+    }
+}
+
 /// One fake output that keeps the slot it is opened with.
 struct OneDevice(Arc<Mutex<Option<Arc<AudioSlot>>>>);
 
@@ -354,6 +374,36 @@ fn tone_sample(len: usize) -> Arc<SampleBuf> {
         r: l.clone(),
         l,
     })
+}
+
+#[test]
+fn band_limited_sampler_loop_never_allocates_on_the_audio_thread() {
+    let mut params = grooviq_dsp::sampler::SPEC.map(|(_, _, default)| default);
+    params[5] = 1.0; // reverse
+    params[15] = 1.0; // loop
+    let state = EngineState {
+        channels: vec![ChannelSetup::sampler(
+            ChannelId(1),
+            Some(tone_sample(512)),
+            params.to_vec(),
+            ChannelMix::default(),
+        )],
+        ..EngineState::default()
+    };
+    let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
+    c.send(Command::ChannelNote {
+        channel: ChannelId(1),
+        key: 84, // step 4, through the reverse loop seam on every other block
+        velocity: 1.0,
+        on: true,
+        id: NoteId(1),
+    })
+    .unwrap();
+    let mut out = [0.0; 128];
+    for _ in 0..8 {
+        realtime(|| p.process(&mut out, 2));
+    }
+    assert!(out.iter().any(|x| x.abs() > 0.1), "the loop still plays");
 }
 
 #[test]

@@ -8,6 +8,9 @@
 //! Jot absorption filter per line: DC decays at RT60, Nyquist at RT60 * (1 - 0.92 * damping).
 //! Output: two orthogonal taps (decorrelated L/R), width (M/S), 12 dB/oct low/high cut,
 //! equal-power dry/wet.
+//!
+//! Scalar meter 3 reports the active wet-path high cut in Hz, including log2 smoothing and the
+//! sample-rate cap from [`crate::effective_high_cut`].
 
 use crate::api::{Device, NoteEvent};
 use crate::util::*;
@@ -70,6 +73,7 @@ pub struct Reverb {
     hi: Smooth,
     c_lo: Coefs,
     c_hi: Coefs,
+    high_cut_hz: f32,
     st_lo: [Biquad; 2],
     st_hi: [Biquad; 2],
     width: Smooth,
@@ -162,6 +166,7 @@ impl Reverb {
             hi: Smooth::new(13.0, 15.0, ctrl_rate),
             c_lo: Coefs::IDENTITY,
             c_hi: Coefs::IDENTITY,
+            high_cut_hz: 0.0,
             st_lo: [Biquad::default(); 2],
             st_hi: [Biquad::default(); 2],
             width: sm(1.0, 15.0),
@@ -208,7 +213,9 @@ impl Reverb {
         let sr = self.sr as f64;
         let q = std::f64::consts::FRAC_1_SQRT_2;
         self.c_lo = Coefs::highpass(libm::exp2f(self.lo.next()) as f64, q, sr);
-        self.c_hi = Coefs::lowpass((libm::exp2f(self.hi.next()) as f64).min(0.45 * sr), q, sr);
+        let high_cut_hz = effective_high_cut(libm::exp2f(self.hi.next()) as f64, sr);
+        self.c_hi = Coefs::lowpass(high_cut_hz, q, sr);
+        self.high_cut_hz = high_cut_hz as f32;
     }
 
     fn snap_all(&mut self) {
@@ -376,12 +383,40 @@ impl Device for Reverb {
         self.fresh = true;
     }
 
+    /// 0–2: input, output, and wet tail peaks in dB.
+    /// 3: active wet-path high cut in Hz.
     fn meter(&self, index: u32) -> f32 {
         match index {
             0 => self.in_m.db(),
             1 => self.out_m.db(),
             2 => self.tail_m.db(),
+            3 => self.high_cut_hz,
             _ => 0.0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn longest_pre_delay_and_diffuser_taps_fit_at_native_rate_limits() {
+        for sr in [8_000.0, 384_000.0] {
+            let mut reverb = Reverb::new(sr);
+            reverb.set_param(2, SPEC[2].1);
+            reverb.process(&mut [0.25], &mut [-0.25], None, &[]);
+        }
+    }
+
+    #[test]
+    fn largest_modulated_fdn_taps_fit_at_native_rate_limits() {
+        for sr in [8_000.0, 384_000.0] {
+            let mut reverb = Reverb::new(sr);
+            reverb.set_param(0, SPEC[0].1);
+            // Evaluate the longest tap on every line by placing each LFO at its crest.
+            reverb.mod_ph = reverb.mod_inc.map(|increment| 0.25 - increment);
+            reverb.process(&mut [0.25], &mut [-0.25], None, &[]);
         }
     }
 }
