@@ -22,6 +22,7 @@ path = "src/main.rs"
 tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
+grooviq-dsp = { path = "../../dsp" }
 grooviq-engine = { path = "../../engine" }
 grooviq-project = { path = "../../project" }
 serde = { version = "1", features = ["derive"] }

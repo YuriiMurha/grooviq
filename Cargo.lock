@@ -1460,6 +1460,7 @@ dependencies = [
 name = "grooviq-app"
 version = "0.1.0"
 dependencies = [
+ "grooviq-dsp",
  "grooviq-engine",
  "grooviq-project",
  "libc",
