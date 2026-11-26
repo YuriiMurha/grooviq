@@ -10,10 +10,15 @@ const PROMOTED: &str = "promoted";
 
 pub struct Row {
     pub summary: Summary,
+    pub frames: usize,
     pub promotion: String,
 }
 
 impl Row {
+    pub fn audio_seconds(&self) -> f64 {
+        self.frames as f64 / f64::from(SAMPLE_RATE)
+    }
+
     fn under_b2_target(&self) -> Option<bool> {
         if self.promotion == PROMOTED {
             self.summary.under_b2_target()
@@ -44,30 +49,31 @@ pub fn b2_target(row: &Row) -> &'static str {
     }
 }
 
-pub fn markdown(rows: &[Row], frames: usize, reps: usize) -> String {
+pub fn markdown(rows: &[Row], reps: usize) -> String {
     let mut out = format!(
-        "### Render speed and block times\n\n{:.1} s of audio at {SAMPLE_RATE} Hz, {reps} timed \
+        "### Render speed and block times\n\nAudio at {SAMPLE_RATE} Hz, {reps} timed \
          repetitions. For promoted 128-frame runs, the target is a max below 50% of the \
          deadline. Preemption counts are wall-time outliers above 10× the row's p50.\n\n\
-         | scene | block | x real time (median) | x real time (slowest) | p50 µs | p99 µs | \
-         p99.9 µs | max µs | p99 % of deadline | max % of deadline | preemption count | \
+         | scene | block | audio s | x real time (median) | x real time (slowest) | p50 µs | p99 µs | \
+         p99.9 µs | max µs | deadline µs | p99 % of deadline | max % of deadline | preemption count | \
          128-frame target | thread priority | output hash |\n\
-         |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|---|---|\n",
-        frames as f64 / f64::from(SAMPLE_RATE)
+         |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|---|---|\n"
     );
     for row in rows {
         let s = &row.summary;
         let _ = writeln!(
             out,
-            "| {} | {} | {:.1} | {:.1} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {} | {} | {} | `{:016x}` |",
+            "| {} | {} | {:.1} | {:.1} | {:.1} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {} | {} | {} | `{:016x}` |",
             s.scene,
             s.block,
+            row.audio_seconds(),
             s.speed_median,
             s.speed_worst,
             us(s.p50_ns),
             us(s.p99_ns),
             us(s.p999_ns),
             us(s.max_ns),
+            s.deadline_ns / 1e3,
             s.deadline_pct(s.p99_ns),
             s.deadline_pct(s.max_ns),
             s.preemption_count,
@@ -89,6 +95,7 @@ pub fn json(rows: &[Row], frames: usize, reps: usize) -> String {
             json!({
                 "scene": s.scene,
                 "block": s.block,
+                "frames": row.frames,
                 "deadline_ns": s.deadline_ns.round() as u64,
                 "x_realtime_median": s.speed_median,
                 "x_realtime_slowest": s.speed_worst,
@@ -124,6 +131,7 @@ mod tests {
         times.extend([20_000; 995]);
         times.extend([100_000, 110_000, 150_000, 190_000, 1_000_000]);
         Row {
+            frames: 2_000 * block,
             summary: Measurement {
                 scene: "test_scene",
                 block,
@@ -181,6 +189,7 @@ mod tests {
             let row = &report["results"][i];
             assert_eq!(row["scene"], "test_scene");
             assert_eq!(row["block"], 128);
+            assert_eq!(row["frames"], 256_000);
             assert_eq!(row["hash"], "0000000000001234");
             assert_eq!(row["promotion"], status);
             assert_eq!(row["preemption_count"], 4);
@@ -207,7 +216,7 @@ mod tests {
             row(128, "not promoted: denied | policy"),
         ];
         rows[1].summary.max_ns = 2_000_000;
-        let report = markdown(&rows, 256_000, 1);
+        let report = markdown(&rows, 1);
         assert!(report.contains("| preemption count | 128-frame target | thread priority |"));
         assert!(report.contains("| 37.50 | 4 | under 50% | promoted |"));
         assert!(

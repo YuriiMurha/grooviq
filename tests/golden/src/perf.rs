@@ -6,8 +6,10 @@
 use std::time::Instant;
 
 use grooviq_dsp::synth::preset;
-use grooviq_engine::{Command, EngineConfig, EngineState, NoteId, STEP_TICKS, engine_with};
-use grooviq_project::{SampleFiles, engine_state};
+use grooviq_engine::{
+    Command, EngineConfig, EngineState, NoteId, PlaybackMode, STEP_TICKS, engine_with,
+};
+use grooviq_project::{SampleFiles, engine_state, session::Session};
 
 use crate::{SAMPLE_RATE, decode_samples, drums_4ch_project, kit_dir};
 
@@ -84,6 +86,18 @@ pub fn perf_scenes() -> Vec<PerfScene> {
         start,
     };
     vec![drums, beat]
+}
+
+/// The reopened M3 golden session, played through the engine's Song transport.
+pub fn song_m3(session: &Session) -> PerfScene {
+    let state = session.checked_export_state().unwrap();
+    assert_eq!(state.playback_mode, PlaybackMode::Song);
+    assert!(state.song_loop.is_none(), "expected a single Song pass");
+    PerfScene {
+        name: "song_m3",
+        state,
+        start: vec![Command::Play],
+    }
 }
 
 /// What [`measure`] saw for one scene at one block size.
