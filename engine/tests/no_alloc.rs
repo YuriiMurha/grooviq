@@ -35,6 +35,8 @@ mod character_delay;
 mod delay;
 #[path = "realtime/fattener.rs"]
 mod fattener;
+#[path = "realtime/half_time.rs"]
+mod half_time;
 #[path = "realtime/mixer_live.rs"]
 mod mixer_live;
 #[path = "realtime/mixer_runtime.rs"]
