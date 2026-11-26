@@ -1,7 +1,7 @@
 import { cellPoint, colourDistance, expect, grid, pixelsAt, project, soundsFor, test, workspaceReady } from "./fixture";
 import { boxSelect, canvas, lane, local, openRoll, stats, twoChannels } from "./rollHelpers";
 import { parseColor } from "../src/rack/palette";
-import { contrastRatio } from "../src/theme/contrast";
+import { contrastRatio, oklabDeltaE } from "../src/theme/contrast";
 import { THEME_COLOR_TOKENS, themeTokenProblems } from "../src/theme/contract";
 import { themes, THEME_PREFERENCE_KEY } from "../src/theme/preference";
 
@@ -20,6 +20,17 @@ test.use({ seed: { project: beat, files: soundsFor(["Kick", "Snare", "Hat"]) }, 
 
 type Renderer = "webgl2" | "canvas2d";
 type RenderProbe = Window & { themeTestRenderers?: WeakMap<HTMLCanvasElement, Renderer> };
+
+const quietNoteStrength = 0.45;
+const noteStrengths = Array.from({ length: 551 }, (_, index) => quietNoteStrength + index / 1000);
+
+function nearestVelocityShadeDistance(primary: number[], slide: number[]) {
+  // Both renderers scale the primary RGB from 45% to 100%. Project onto that segment.
+  const lengthSquared = primary.reduce((sum, channel) => sum + channel * channel, 0);
+  const projection = primary.reduce((sum, channel, index) => sum + channel * slide[index], 0);
+  const strength = lengthSquared === 0 ? 1 : Math.max(quietNoteStrength, Math.min(1, projection / lengthSquared));
+  return colourDistance(primary.map((channel) => channel * strength), slide);
+}
 
 for (const { id } of themes) {
   for (const renderer of ["webgl2", "canvas2d"] as const) {
@@ -73,11 +84,16 @@ for (const { id } of themes) {
         for (const row of ["--roll-row", "--roll-row-black"]) {
           expect(contrastRatio(rgb(ink), rgb(row)), `${ink} over ${row}`).toBeGreaterThanOrEqual(3);
         }
+        const primary = ink.slice(0, -1);
         if (id === "taste") {
-          const primary = ink.slice(0, -1);
+          // Taste's shade-only slide inks still collide with normal velocities. See #642.
           expect(colourDistance(bytes(ink), bytes(primary)), `${ink} versus ${primary}`).toBeGreaterThanOrEqual(48);
+        } else {
+          expect(nearestVelocityShadeDistance(bytes(primary), bytes(ink)),
+            `${ink} versus the closest velocity shade of ${primary}`).toBeGreaterThanOrEqual(48);
         }
       }
+      expect(contrastRatio(rgb("--on-accent"), rgb("--accent")), "accent foreground").toBeGreaterThanOrEqual(4.5);
       for (const text of ["--text", "--muted", "--faint", "--error", "--warn"]) {
         for (const surface of ["--bg", "--panel", "--raised"]) {
           // Riso retains its existing Bright Red at 4.40:1 on raised controls. See #634.
@@ -88,7 +104,8 @@ for (const { id } of themes) {
       for (const surface of ["--well", "--line-soft"]) {
         expect(contrastRatio(rgb("--error"), rgb(surface)), `meter clip indicator over ${surface}`).toBeGreaterThanOrEqual(3);
       }
-      for (const status of ["--ok", "--error"]) {
+      expect(colourDistance(bytes("--mute"), bytes("--ok")), "mute versus solo").toBeGreaterThanOrEqual(48);
+      for (const status of ["--ok", "--error", "--select"]) {
         expect(colourDistance(bytes("--warn"), bytes(status)), `--warn versus ${status}`).toBeGreaterThanOrEqual(48);
       }
       if (id === "luminous") {
@@ -106,14 +123,25 @@ for (const { id } of themes) {
           }
         }
       }
-      for (const state of ["--select", "--grid-focus", "--roll-select", "--grid-playhead", "--roll-playhead"]) {
+      for (const state of ["--select", "--grid-focus", "--roll-select"]) {
+        const outline = rgb(state);
+        for (const ink of inks) {
+          const fill = rgb(ink);
+          if (ink.endsWith("b")) {
+            expect(oklabDeltaE(outline, fill), `${state} versus ${ink} in OKLab`).toBeGreaterThanOrEqual(0.10);
+          } else {
+            const [r, g, b] = fill;
+            const nearest = Math.min(...noteStrengths.map((strength) =>
+              oklabDeltaE(outline, [r * strength, g * strength, b * strength])));
+            expect(nearest, `${state} versus ${ink} velocity shades in OKLab`).toBeGreaterThanOrEqual(0.10);
+          }
+        }
+      }
+      for (const state of ["--grid-playhead", "--roll-playhead"]) {
         for (const ink of inks) {
           // Keep the existing Riso playhead palette covered while its pink collision awaits #546.
-          const risoPlayhead = id === "riso" && state.endsWith("playhead");
-          if (risoPlayhead && ink === "--ink-1") continue;
-          // 48 is nearly a fifth of one RGB channel's range. This catches close palette
-          // collisions well above the screenshot tolerance, without prescribing a hue.
-          expect(colourDistance(bytes(state), bytes(ink)), `${state} versus ${ink}`).toBeGreaterThanOrEqual(risoPlayhead ? 32 : 48);
+          if (id === "riso" && ink === "--ink-1") continue;
+          expect(colourDistance(bytes(state), bytes(ink)), `${state} versus ${ink}`).toBeGreaterThanOrEqual(id === "riso" ? 32 : 48);
         }
       }
 
@@ -165,10 +193,18 @@ for (const { id } of themes) {
       expect((await stats(app)).renderer).toBe(renderer);
       const note = await local(app, 800, 60);
       const velocity = { x: (await local(app, 480, 60)).x + 1, y: 20 };
-      const [noteFill, slideFill] = await pixelsAt(app, canvas(app), [note, await local(app, 2800, 67)]);
+      const [noteFill, slideFill, halfVelocityFill] = await pixelsAt(app, canvas(app), [
+        note, await local(app, 2800, 67), await local(app, 1650, 64),
+      ]);
       const [bar] = await pixelsAt(app, lane(app), [velocity]);
       expect(colourDistance(noteFill, bytes("--ink-4")), "full-velocity Bass note").toBeLessThan(8);
       expect(colourDistance(slideFill, bytes("--ink-4b")), "full-velocity Bass slide note").toBeLessThan(8);
+      const halfVelocityInk = bytes("--ink-4").map((channel) => channel * (1 + quietNoteStrength) / 2);
+      expect(colourDistance(halfVelocityFill, halfVelocityInk), "half-velocity Bass note").toBeLessThan(8);
+      // Taste's shade-only slide ink can read as a quieter normal note. See #642.
+      if (id !== "taste") {
+        expect(colourDistance(slideFill, halfVelocityFill), "slide versus half-velocity Bass note").toBeGreaterThanOrEqual(48);
+      }
       expect(colourDistance(bar, bytes("--ink-4")), "velocity bar").toBeLessThan(8);
 
       const [ghost, row] = await pixelsAt(app, canvas(app), [await local(app, 800, 64), await local(app, 3200, 64)]);

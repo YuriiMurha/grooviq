@@ -470,7 +470,7 @@
 .preset[aria-pressed="true"] {
   background: var(--accent);
   box-shadow: none;
-  color: var(--bg);
+  color: var(--on-accent);
 }
 
 .synth-volume {
