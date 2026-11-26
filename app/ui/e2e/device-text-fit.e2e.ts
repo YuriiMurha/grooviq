@@ -42,7 +42,7 @@ async function openEditor(page: Page, name: string): Promise<Locator> {
   return dialog;
 }
 
-async function clipping(dialog: Locator): Promise<string[]> {
+async function textVisibilityIssues(dialog: Locator): Promise<string[]> {
   return dialog.evaluate((root) => {
     const tolerance = 1;
     const issues: string[] = [];
@@ -62,6 +62,48 @@ async function clipping(dialog: Locator): Promise<string[]> {
       return `${pixels(rect.width)} text vs ${pixels(box.width)} box${overhang ? `, ${overhang}` : ""}`;
     };
 
+    const samplePoints = [[0.1, 0.5], [0.5, 0.5], [0.9, 0.5], [0.5, 0.25], [0.5, 0.75]];
+    const inClosedDetails = (el: Element) => el.closest("details:not([open])") && !el.closest("summary");
+    const controls = [...root.querySelectorAll(".dctl, button, [role=radio], [role=slider], summary")]
+      .filter((el) => !inClosedDetails(el) && getComputedStyle(el).visibility === "visible")
+      .map((el) => ({ el, box: el.getBoundingClientRect() }))
+      .filter(({ box }) => box.width > 0 && box.height > 0);
+    const checkVisibility = (el: Element, selector: string, rects: DOMRect[]) => {
+      for (let bound: Element | null = el; bound && root.contains(bound); bound = bound.parentElement) {
+        const css = getComputedStyle(bound);
+        const mask = css.maskImage || css.getPropertyValue("-webkit-mask-image");
+        if (css.clipPath !== "none") issues.push(`${selector}: clip-path on ${describe(bound)} (${css.clipPath})`);
+        if (mask && mask !== "none") issues.push(`${selector}: mask on ${describe(bound)} (${mask})`);
+      }
+
+      // The filter's translucent response fill is drawn over the axis cells; the opaque
+      // curve and handle still count. Shell overlays (e.g. the QA toast) are outside this editor.
+      const inEditor = (candidate: Element) => root.contains(candidate) &&
+        !(el instanceof SVGTextElement && candidate.matches(".filter-display .dw-fill") &&
+          candidate.closest("svg") === el.ownerSVGElement);
+      const neighbours = new Set<Element>();
+      const occluders = new Set<Element | null>();
+      for (const rect of rects) {
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        for (const { el: control, box } of controls) {
+          const width = Math.min(rect.right, box.right) - Math.max(rect.left, box.left);
+          const height = Math.min(rect.bottom, box.bottom) - Math.max(rect.top, box.top);
+          if (width > tolerance && height > tolerance && !control.contains(el)) neighbours.add(control);
+        }
+
+        // Sample inside the text, away from glyph-box edges and inter-line gaps.
+        for (const [across, down] of samplePoints) {
+          const x = rect.left + rect.width * across;
+          const y = rect.top + rect.height * down;
+          let hit = document.elementFromPoint(x, y);
+          if (hit && !inEditor(hit)) hit = document.elementsFromPoint(x, y).find(inEditor) ?? null;
+          if (!el.contains(hit)) occluders.add(hit);
+        }
+      }
+      for (const control of neighbours) issues.push(`${selector}: overlaps ${describe(control)}`);
+      for (const hit of occluders) issues.push(`${selector}: occluded by ${hit ? describe(hit) : "the viewport edge"}`);
+    };
+
     for (const el of root.querySelectorAll("*")) {
       const style = getComputedStyle(el);
       if (style.visibility !== "visible" || el.getClientRects().length === 0) continue;
@@ -79,6 +121,7 @@ async function clipping(dialog: Locator): Promise<string[]> {
             textBox.top < viewport.top - tolerance || textBox.bottom > viewport.bottom + tolerance) {
           issues.push(`${selector}: outside SVG (${spans(textBox, viewport)})`);
         }
+        checkVisibility(el, selector, [textBox]);
         continue;
       }
       if (!(el instanceof HTMLElement)) continue;
@@ -90,7 +133,7 @@ async function clipping(dialog: Locator): Promise<string[]> {
         return [...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
       });
       // Closed <details> content can have a layout box in Chromium, with no rendered text rects.
-      if (rects.length === 0 || (el.closest("details:not([open])") && !el.closest("summary"))) continue;
+      if (rects.length === 0 || inClosedDetails(el)) continue;
 
       const overflowsWidth = (rect: DOMRect, box: DOMRect) =>
         rect.left < box.left - tolerance || rect.right > box.right + tolerance;
@@ -103,9 +146,15 @@ async function clipping(dialog: Locator): Promise<string[]> {
         issues.push(`${selector}: scrollWidth ${el.scrollWidth}px vs clientWidth ${el.clientWidth}px${missingTitle}`);
       }
 
+      // Range includes characters hidden by ellipsis. Restrict neighbour checks to the drawn span.
+      const visibleRects = ellipsis ? rects.map((rect) => {
+        const left = Math.max(rect.left, box.left);
+        return new DOMRect(left, rect.top, Math.min(rect.right, box.right) - left, rect.height);
+      }) : rects;
+      checkVisibility(el, selector, visibleRects);
       // A nowrap span can grow to fit itself and still spill out of its control or grid cell.
       // Positioned or transformed text can cross its control without affecting layout widths.
-      const visibleRects = ellipsis ? [box] : rects;
+      const overflowRects = ellipsis ? [box] : rects;
       const control = el.closest(".dctl");
       for (let bound: Element | null = el; bound && root.contains(bound); bound = bound.parentElement) {
         const css = getComputedStyle(bound);
@@ -113,7 +162,7 @@ async function clipping(dialog: Locator): Promise<string[]> {
         const clips = (overflow: string) => overflow === "hidden" || overflow === "clip";
         const horizontal = bounds.width > 0 && css.display !== "inline";
         const vertical = bound === control || clips(css.overflowY);
-        const overflow = visibleRects.find((rect) => (horizontal && overflowsWidth(rect, bounds)) ||
+        const overflow = overflowRects.find((rect) => (horizontal && overflowsWidth(rect, bounds)) ||
           (vertical && (rect.top < bounds.top - tolerance || rect.bottom > bounds.bottom + tolerance)));
         if (overflow) {
           const edges = DOMRect.fromRect({
@@ -132,7 +181,7 @@ async function clipping(dialog: Locator): Promise<string[]> {
 }
 
 async function measure(dialog: Locator, state: string, findings: Set<string>) {
-  for (const issue of await clipping(dialog)) findings.add(`${state} | ${issue}`);
+  for (const issue of await textVisibilityIssues(dialog)) findings.add(`${state} | ${issue}`);
 }
 
 async function measureExtremes(dialog: Locator, state: string, findings: Set<string>) {
@@ -200,7 +249,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 900, height: 560 
       await expect(status).toContainText("0 voices");
       await measure(synth, "synth / idle Output", findings);
 
-      expect(findings.size, `Clipping at ${viewport.width}×${viewport.height}:\n${[...findings].join("\n")}`).toBe(0);
+      expect(findings.size, `Device text visibility at ${viewport.width}×${viewport.height}:\n${[...findings].join("\n")}`).toBe(0);
     });
   });
 }
