@@ -41,15 +41,6 @@ test.describe("Space after the transport fields (check 9)", () => {
     await expect(swing).toHaveValue("2");
   });
 
-  test("after picking 3/4", async ({ app, mock }) => {
-    const beats = app.getByRole("combobox", { name: "Beats per bar" });
-    await beats.selectOption("3");
-    await expect.poll(() => mock.eval<number>("(m) => m.state.project.timeSignature.beats")).toBe(3);
-    await beats.focus();
-    await spaceToggles(app, mock);
-    await expect(beats).toHaveValue("3");
-  });
-
   test("after typing a pattern length and pressing Enter", async ({ app, mock }) => {
     const length = app.getByRole("spinbutton", { name: "Pattern length" });
     await length.fill("12");
@@ -57,6 +48,68 @@ test.describe("Space after the transport fields (check 9)", () => {
     await expect.poll(() => mock.view().then((v) => v.pattern.steps)).toBe(12);
     await spaceToggles(app, mock);
   });
+});
+
+test("time-signature arrows and Escape leave the project alone until Enter commits once", async ({ app, mock }, info) => {
+  await app.setViewportSize({ width: 900, height: 560 });
+  await app.evaluate(() => document.fonts.ready.then(() => true));
+  const cases = [
+    { label: "Beats per bar", finalValue: 7, arrowSteps: 3, beats: 7, unit: 4 },
+    { label: "Beat note value", finalValue: 16, arrowSteps: 2, beats: 7, unit: 16 },
+  ];
+  const edits = async () => (await mock.calls("project_edit")).map((call) => call.args.edit);
+  const committed: { kind: "setTimeSignature"; beats: number; unit: number }[] = [];
+
+  for (const { label, finalValue, arrowSteps, beats, unit } of cases) {
+    await test.step(label, async () => {
+      const trigger = app.getByRole("button", { name: new RegExp(`^${label}:`) });
+      const list = app.getByRole("listbox", { name: label, exact: true });
+      await expect(trigger).toBeInViewport({ ratio: 1 });
+
+      await trigger.press("Enter");
+      await expect(list).toBeFocused();
+      await expect(list).toBeInViewport({ ratio: 1 });
+      for (let step = 0; step < arrowSteps; step++) await app.keyboard.press("ArrowDown");
+      const beforeEnter = await edits();
+      await app.keyboard.press("Enter");
+      await expect(list).toBeHidden();
+      await expect.poll(() => mock.eval("(m) => m.state.project.timeSignature")).toEqual({ beats, unit });
+      committed.push({ kind: "setTimeSignature", beats, unit });
+      expect(await edits(), `exactly one project edit for ${label}`).toEqual(committed);
+      expect(beforeEnter).toEqual(committed.slice(0, -1));
+      await expect(trigger).toHaveAccessibleName(`${label}: ${finalValue}`);
+
+      await trigger.press("Enter");
+      await expect(list).toBeFocused();
+      await app.keyboard.press("ArrowUp");
+      await app.keyboard.press("Escape");
+      await expect(list).toBeHidden();
+      await expect(trigger).toBeFocused();
+      expect(await edits()).toEqual(committed);
+
+      await trigger.press("Enter");
+      await expect(list).toBeFocused();
+      await app.keyboard.press("ArrowUp");
+      await app.getByRole("textbox", { name: "BPM" }).focus();
+      await expect(list).toBeHidden();
+      expect(await edits()).toEqual(committed);
+    });
+  }
+
+  await app.screenshot({ path: info.outputPath("time-signature-900x560.png") });
+});
+
+test("Space chooses a time signature, then plays again when focus leaves the picker", async ({ app, mock }) => {
+  const beats = app.getByRole("button", { name: /^Beats per bar:/ });
+  const list = app.getByRole("listbox", { name: "Beats per bar" });
+  await beats.press("Space");
+  await expect(list).toBeFocused();
+  await app.keyboard.press("ArrowUp");
+  await app.keyboard.press("Space");
+  await expect(beats).toHaveAccessibleName("Beats per bar: 3");
+  expect((await mock.calls()).filter((call) => call.cmd.startsWith("transport_"))).toEqual([]);
+  await app.getByRole("button", { name: "Stop", exact: true }).focus();
+  await spaceToggles(app, mock);
 });
 
 test.describe("swing while playing (check 10)", () => {
