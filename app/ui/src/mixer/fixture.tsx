@@ -242,6 +242,7 @@ declare global {
       deferNextCommit(): void;
       settleCommit(accepted: boolean): void;
       setPending(id: string, pending: boolean): void;
+      offerSend(id: string, destination: MixerOption): void;
       remove(id: string): void;
       replace(id: string, newId: string): void;
       removeSend(id: string, sendId: string): void;
@@ -294,6 +295,7 @@ export function Fixture() {
         });
       },
       setPending: (id, pending) => setState((s) => update(s, id, (t) => ({ ...t, pending }))),
+      offerSend: (id, destination) => setState((s) => update(s, id, (t) => ({ ...t, sendDestinations: [...t.sendDestinations, destination] }))),
       remove: (id) => setState((s) => ({ ...s, tracks: s.tracks.filter((t) => t.id !== id) })),
       replace: (id, newId) => setState((s) => ({ ...s, tracks: s.tracks.map((t) => (t.id === id ? { ...t, id: newId, sends: t.sends.map((x) => ({ ...x, id: uid("send") })) } : t)) })),
       removeSend: (id, sendId) => setState((s) => update(s, id, (t) => ({ ...t, sends: t.sends.filter((x) => x.id !== sendId) }))),

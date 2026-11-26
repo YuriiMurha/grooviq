@@ -7,6 +7,7 @@ type Drag = {
   anchor: HTMLButtonElement;
   pointerId: number;
   point: Point;
+  targetId?: string;
   gesture: RouteGesture;
   listeners: AbortController;
   frame: number;
@@ -92,7 +93,8 @@ export function useSendRouting(
 
       const target = point ? targetAt(point) : null;
       const source = host.current.nodes.get(drag.nodeId);
-      const route = finishRoute(drag.gesture, reason, source, target);
+      // Only the last previewed strip can receive the drop. Admission still comes from the current host.
+      const route = finishRoute(drag.gesture, reason, source, target?.id === drag.targetId ? target : null);
       if (!route || route.kind === "idle") {
         if (drag.gesture.moving) announce("Send drag canceled.");
       } else if (route.kind === "ready") {
@@ -119,6 +121,7 @@ export function useSendRouting(
       const bounds = scroller.getBoundingClientRect();
       const anchor = drag.anchor.getBoundingClientRect();
       const target = targetAt(drag.point);
+      drag.targetId = target?.id;
       const { kind, message } = classifyRoute(source, target);
       const start = { x: Math.max(bounds.left + 3, Math.min(bounds.right - 3, anchor.x + anchor.width / 2)), y: anchor.y + anchor.height / 2 };
       const end = drag.point;
@@ -199,7 +202,7 @@ export function useSendRouting(
       dragging: () => active.current !== null,
       pick: (nodeId: string, destinationId: string) => {
         const source = host.current.nodes.get(nodeId);
-        if (!source || !availableSends(source.sendDestinations, source.sends).some(({ id }) => id === destinationId)) return;
+        if (!source || !availableSends(source).some(({ id }) => id === destinationId)) return;
         const anchor = document.activeElement;
         add(sendCommand(nodeId, destinationId), anchor instanceof HTMLElement ? anchor : null);
       },
@@ -212,6 +215,7 @@ export function useSendRouting(
     if (drag) {
       const source = nodes.get(drag.nodeId);
       if (!source || source.pending) routing.finish("pending");
+      else if (drag.targetId !== undefined && !nodes.has(drag.targetId)) routing.finish("target-removed");
     }
     const request = focusNext.current;
     if (!request) return;

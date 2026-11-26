@@ -157,10 +157,10 @@ export function outputChoices(options: readonly MixerOption[], outputId: string 
   return { options, label };
 }
 
-/** The host supplies route choices. The picker also hides destinations already used in this strip. */
-export function availableSends(options: readonly MixerOption[], sends: readonly MixerSend[]): MixerOption[] {
+/** Keep the host's order while excluding existing sends and the main output. */
+export function availableSends({ sendDestinations, sends, outputId }: Pick<MixerTrack, "sendDestinations" | "sends" | "outputId">): MixerOption[] {
   const used = new Set(sends.map((send) => send.destinationId));
-  return options.filter((option) => !used.has(option.id));
+  return sendDestinations.filter(({ id }) => id !== outputId && !used.has(id));
 }
 
 /** Fader view: the finite bottom stop denotes off, matching the approved prototype. */

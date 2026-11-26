@@ -358,10 +358,11 @@ describe("MixerGestures", () => {
 });
 
 describe("strip controls", () => {
-  it("preserves supplied order, removing only already-used send destinations", () => {
+  it("preserves supplied order and excludes existing routes", () => {
     const offered = [{ id: "room", name: "Room" }, { id: "project:echo", name: "Echo" }, { id: "bus", name: "Bus" }];
     const sends = [{ id: "opaque", destinationId: "project:echo", pre: false, amount: 0 }];
-    expect(availableSends(offered, sends)).toEqual([offered[0], offered[2]]);
+    expect(availableSends({ sendDestinations: offered, sends, outputId: null })).toEqual([offered[0], offered[2]]);
+    expect(availableSends({ sendDestinations: offered, sends, outputId: "bus" })).toEqual([offered[0]]);
   });
 
   it("keeps the host's output list and displays an excluded current output as a placeholder", () => {

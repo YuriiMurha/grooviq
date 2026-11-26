@@ -309,6 +309,22 @@ test("route drag with a delayed host refusal leaves focus on the handle and crea
   ]);
 });
 
+test("removing the previewed strip cancels the route drag without retargeting the drop", async ({ fixture }) => {
+  const page = await fixture();
+  const drop = { x: (await center(strip(page, "Room"))).x, y: (await center(routeHandle(page, "Kick"))).y };
+  await dragRoute(page, "Kick", "Room");
+  await expect(routeNote(page)).toContainText("Kick → Room");
+  await page.evaluate(() => window.mixerFixture.remove("n-air"));
+  await expect(strip(page, "Room")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(({ x, y }) =>
+    document.elementFromPoint(x, y)?.closest(".mx-strip")?.getAttribute("data-node"), drop)).toBe("n-echo");
+  // Give the drag preview time to sample the replacement strip before release.
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await page.mouse.up();
+  expect(await log(page)).toEqual([]);
+  await expect(routeNote(page)).toBeHidden();
+});
+
 test("route drag to an existing send or main output focuses its control without a command", async ({ fixture }) => {
   const page = await fixture();
   await dragRoute(page, "Snare", "Room");
@@ -427,6 +443,18 @@ test("Enter opens the route picker and only confirmation adds a send", async ({ 
   await page.keyboard.press("Enter");
   expect(await log(page)).toEqual([
     { type: "addSend", nodeId: "n-snare", destinationId: "n-echo", pre: false, amount: 0 },
+  ]);
+});
+
+test("the route picker excludes the current main output even when offered by the host", async ({ fixture }) => {
+  const page = await fixture();
+  await page.evaluate(() => window.mixerFixture.offerSend("n-kick", { id: "n-drums", name: "Kit bus" }));
+  await routeHandle(page, "Kick").press("Enter");
+  const picker = page.getByRole("listbox", { name: "Add send from Kick" });
+  await expect(picker.getByRole("option")).toHaveText(["Room", "Echo"]);
+  await page.keyboard.press("Enter");
+  expect(await log(page)).toEqual([
+    { type: "addSend", nodeId: "n-kick", destinationId: "n-air", pre: false, amount: 0 },
   ]);
 });
 

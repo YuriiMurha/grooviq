@@ -5,7 +5,7 @@ import { availableSends, type MixerTrack } from "./mixerModel";
 import type { StripActions } from "./TrackStrip";
 
 export function RouteHandle({ track, routing }: { track: MixerTrack; routing: StripActions["routing"] }) {
-  const options = availableSends(track.sendDestinations, track.sends);
+  const options = availableSends(track);
   const empty = options.length === 0;
   const suppressClick = useRef(false);
   return (
