@@ -131,6 +131,10 @@ class FetchFailed(RuntimeError):
     """The agent's read-only fetch did not complete."""
 
 
+class LandingLedgerFailed(RuntimeError):
+    """The pending tick must retain its transcript for ledger recovery."""
+
+
 def stamp():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -267,7 +271,7 @@ class Agent:
         # The tick's flock and mismatch file live in the shared Git directory.
         root = Path(tempfile.mkdtemp(prefix="tick-", dir=self.state))
         script, worktree = root / "merge_train.py", root / "checkout"
-        interrupted = False
+        keep_scratch = False
         added = False
         try:
             source = f"{revision}:scripts/merge_train.py"
@@ -281,12 +285,12 @@ class Agent:
             self.git(*ADD_WORKTREE, str(worktree), revision)
             added = True
             yield worktree, script
-        except KeyboardInterrupt:
-            # A foreground interrupt can leave the train running with our inherited lock.
-            interrupted = True
+        except (KeyboardInterrupt, LandingLedgerFailed):
+            # An interrupted child or an unsettled ledger still needs the scratch files.
+            keep_scratch = True
             raise
         finally:
-            if not interrupted:
+            if not keep_scratch:
                 if added:
                     # An empty index from --no-checkout looks dirty to Git.
                     self.git(*REMOVE_WORKTREE, str(worktree))
@@ -442,49 +446,80 @@ class Agent:
                 return stdout, stderr
             return stdout, f"{stderr.rstrip()}\nUnconfirmed squash of #{number}: {error}.\n".lstrip()
 
+    def reconcile_tick_output(self, scratch, stdout, stderr):
+        confirmed, stderr = self.reconcile_landing(stdout, stderr)
+        if confirmed != stdout:
+            # Keep the confirmed squash available even if the next GitHub read fails.
+            try:
+                atomic_text(safe_path(scratch / "stdout"), confirmed)
+            except (OSError, RuntimeError) as error:
+                raise LandingLedgerFailed(f"Could not persist confirmed squash: {error}") from error
+        return confirmed, stderr
+
     def record_landing(self, record):
+        try:
+            self._record_landing(record)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise LandingLedgerFailed(f"Could not persist landing ledger: {error}") from error
+
+    def _record_landing(self, record):
         tested, merges = None, []
         for line in record["stdout"]:
             if batch := TESTED_BATCH.fullmatch(line):
                 tested, merges = batch[1], []
             elif match := MERGED.fullmatch(line):
-                merges.append((int(match[1]), match[2]))
+                merges.append([int(match[1]), match[2]])
         if not merges:
             return
 
         landed = merges[-1][1]
         path = safe_path(self.landings)
-        ledger = read_text(path) or ""
-        for line in ledger.splitlines():
+        lines = (read_text(path) or "").splitlines(keepends=True)
+        for index, line in enumerate(lines):
             previous = json.loads(line)
             if (previous["tested_batch"], previous["landed_tip"]) == (tested, landed):
-                return
-
-        row = dict(recorded_utc=record["recorded_utc"], tested_batch=tested, landed_tip=landed,
-                   landed_prefix=merges,
-                   landed_tree=None, tested_tree=None, match=None, ci_run_id=None, status="partial")
+                if previous["landed_prefix"] != merges:
+                    return
+                row = previous.copy()
+                break
+        else:
+            index, previous = len(lines), None
+            row = dict(recorded_utc=record["recorded_utc"], tested_batch=tested, landed_tip=landed,
+                       landed_prefix=merges,
+                       landed_tree=None, tested_tree=None, match=None, ci_run_id=None, status="partial")
+        # Git objects are immutable. Only retry evidence the previous read could not verify.
+        check_members = row["status"] == "partial" and (row["match"] is None or "tested_members_error" in row)
         for key, sha in (("landed_tree", landed), ("tested_tree", tested)):
-            if sha is not None:
+            if sha is not None and row[key] is None:
                 try:
                     row[key] = self.commit_tree(sha)
                 except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                     row[f"{key}_error"] = str(error)
-        if tested is not None:
+                else:
+                    row.pop(f"{key}_error", None)
+        if tested is not None and row["ci_run_id"] is None:
             try:
                 row["ci_run_id"] = self.ci_run_id(tested)
             except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                 row["ci_error"] = str(error)
-        if row["landed_tree"] and row["tested_tree"]:
+            else:
+                row.pop("ci_error", None)
+        if check_members and row["landed_tree"] and row["tested_tree"]:
             row["match"] = row["landed_tree"] == row["tested_tree"]
             try:
                 members = Batch.parse(self.commit_message(tested)).members
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                 row["tested_members_error"] = str(error)
             else:
+                row.pop("tested_members_error", None)
                 if [number for number, _ in merges] == [number for number, _ in members]:
                     row["status"] = "complete" if row["match"] else "mismatch"
-        # The tick lock serializes writers. Recovery must see a whole row or no row.
-        atomic_text(path, ledger + json.dumps(row) + "\n")
+        if row != previous:
+            lines[index:index + 1] = [json.dumps(row) + "\n"]
+        elif not record.get("recovered_pending"):
+            return
+        # An interrupted write may be visible even if the directory sync did not complete.
+        atomic_text(path, "".join(lines))
 
     def append_tick(self, record):
         path = safe_path(self.ticks)
@@ -569,7 +604,8 @@ class Agent:
                         detail = detail.decode("utf-8", "replace")
                     reason = (detail or str(error)).splitlines()[-20:]
                     saved = read_text(self.stopped)
-                    if saved is None or json.loads(saved).get("pending"):
+                    if saved is None or (json.loads(saved).get("pending")
+                                         and not isinstance(error, LandingLedgerFailed)):
                         self.latch(record, detail or str(error), reason)
                     record.setdefault("recorded_utc", stamp())
                     record.setdefault("exit_code", getattr(error, "returncode", 1))
@@ -589,8 +625,8 @@ class Agent:
                 stdout, stderr = "", ""
                 scratch = saved.get("scratch")
                 if scratch and scratch.startswith("tick-") and Path(scratch).name == scratch:
-                    stdout, stderr = read_tick_output(self.state / scratch)
-                    stdout, stderr = self.reconcile_landing(stdout, stderr)
+                    root = self.state / scratch
+                    stdout, stderr = self.reconcile_tick_output(root, *read_tick_output(root))
                 reason = ["previous tick did not finish"]
                 record.update(recorded_utc=stamp(), exit_code=1, status="stopped", network_streak=0,
                               reason=reason, recovered_pending=True,
@@ -636,7 +672,7 @@ class Agent:
                 result = self.run_tick(worktree, script, entries, batch, lock_fd=lock_fd)
             except subprocess.TimeoutExpired as error:
                 result = subprocess.CompletedProcess(error.cmd, 124, error.stdout, error.stderr)
-            stdout, stderr = self.reconcile_landing(result.stdout or "", result.stderr or "")
+            stdout, stderr = self.reconcile_tick_output(script.parent, result.stdout or "", result.stderr or "")
             if show_output:
                 print(stdout, end="", flush=True)
                 print(stderr, end="", file=sys.stderr, flush=True)
