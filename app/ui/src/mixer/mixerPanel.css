@@ -1,10 +1,20 @@
+.mx-workspace-rail {
+  display: flex;
+  flex-direction: column;
+}
+
+.mx-workspace-rail > .pattern-rail {
+  flex: 1;
+}
+
 .mx-workspace-tools {
   display: flex;
   flex: none;
   justify-content: flex-end;
   padding: 3px 8px;
   background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  border-top: 1px solid var(--line);
+  border-right: 1px solid var(--line);
 }
 
 .mx-workspace-tools .mx-workspace-toggle {

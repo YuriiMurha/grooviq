@@ -13,7 +13,7 @@ export function createMixerMeters(
 ) {
   let active: MixerMeterRequest | null = null;
   let cancellation: MixerMeterRequest | null = null;
-  let inFlight = false;
+  let inFlight: MixerMeterRequest | null = null;
   let generation: number | null = null;
   let lastFrame = 0n;
   let clipFloor = 0n;
@@ -62,12 +62,12 @@ export function createMixerMeters(
   }
 
   async function send(input: MixerMeterRequest): Promise<void> {
-    inFlight = true;
+    inFlight = input;
     try {
       const frame = await request(input).catch(() => null);
       accept(input, frame);
     } finally {
-      inFlight = false;
+      inFlight = null;
       sendCancellation();
     }
   }
@@ -104,7 +104,12 @@ export function createMixerMeters(
     const sameGeneration = generation === stamp.generation;
     if (!sameGeneration) lastFrame = 0n;
     generation = stamp.generation;
-    cancellation = null;
+    // Finish a close before renewing its lease. If the stamp changed while the close was
+    // outstanding, repeat it with the current revision. Replacement retires the old lease.
+    if (!sameGeneration) cancellation = null;
+    else if (cancellation !== null || (inFlight?.tracks.length === 0 && !sameMixerMeterStamp(inFlight, stamp))) {
+      cancellation = { ...stamp, tracks: [] };
+    }
     active = { generation: stamp.generation, revision: stamp.revision, tracks: ids };
     resetRows(sameGeneration ? visible : undefined);
   }

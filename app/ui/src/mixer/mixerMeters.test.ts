@@ -72,21 +72,29 @@ describe("visible mixer meter cache", () => {
     await next;
   });
 
-  it("skips queued cancellation if the panel reopens before the pending request settles", async () => {
+  it.each([stamp.revision, stamp.revision + 1])("cancels the old lease before polling a reopened panel at revision %i", async (revision) => {
     const { calls, replies, transport } = heldTransport();
     const meters = createMixerMeters(transport);
     meters.setVisible(stamp, [7]);
     const old = meters.poll();
     meters.close();
-    meters.setVisible(stamp, [7]);
+    const reopened = { ...stamp, revision };
+    meters.setVisible(reopened, [7]);
     replies[0](capture(calls[0], 128n, 128n));
     await old;
-    expect(calls).toHaveLength(1);
+    expect(calls).toEqual([{ ...stamp, tracks: [7] }, { ...reopened, tracks: [] }]);
     expect(meters.read(7)).toBeNull();
-    const next = meters.poll();
-    expect(calls[1]).toEqual({ ...stamp, tracks: [7] });
+    expect(meters.poll()).toBeNull();
     replies[1](null);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const next = meters.poll();
+    expect(calls[2]).toEqual({ ...reopened, tracks: [7] });
+    replies[2](capture(calls[2], 256n));
     await next;
+    expect(meters.read(7)).toEqual([0.4, 0.2]);
+    expect(meters.isClipped(7)).toBe(false);
   });
 
   it("expires unchanged captures, ignores older frames and recovers after a rejected poll", async () => {

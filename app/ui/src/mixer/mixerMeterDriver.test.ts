@@ -187,9 +187,14 @@ describe("mounted mixer meter driver", () => {
     cancel(1);
     await Promise.resolve();
     await Promise.resolve();
+    expect(requests[2]).toEqual({ generation: 1, revision: 2, tracks: [] });
+    expect(driver.tick()).toBeNull();
+    cancel(2);
+    await Promise.resolve();
+    await Promise.resolve();
     const reopened = driver.tick();
-    expect(requests[2]).toEqual({ generation: 1, revision: 2, tracks: [7] });
-    answer(2, 80n, null);
+    expect(requests[3]).toEqual({ generation: 1, revision: 2, tracks: [7] });
+    answer(3, 80n, null);
     await reopened;
   });
 });

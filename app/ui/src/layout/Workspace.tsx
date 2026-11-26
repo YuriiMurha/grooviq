@@ -245,8 +245,8 @@ export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError,
   return (
     <SelectionContext.Provider value={selection}>
       <div className="pattern-workspace">
-        {picker}
-        <div className="pattern-workspace-content">
+        <div className="mx-workspace-rail">
+          {picker}
           <div className="mx-workspace-tools">
             <button
               ref={mixerToggle}
@@ -261,6 +261,8 @@ export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError,
               Mixer
             </button>
           </div>
+        </div>
+        <div className="pattern-workspace-content">
           {playlistVisible && (playlist ?? <section className="pattern-playlist-shell" aria-label="Playlist">
             <h2>Playlist</h2><p>Your patterns are ready. Timeline editing is not available yet. F5 hides the playlist.</p>
           </section>)}
