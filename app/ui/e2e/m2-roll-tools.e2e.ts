@@ -3,6 +3,7 @@
 // command log and notes, the roll's counters and the pixels on screen.
 import type { Page } from "@playwright/test";
 import { brightness, colourDistance, expect, pixelsAt, test } from "./fixture";
+import { choosePickerOption, confirmPickerWithArrows, pickerButton } from "./listPickerHelpers";
 import type { MockNote } from "./mockTauri";
 import { at, boxSelect, canvas, drag, lane, local, nextFrame, openRoll, sessionNotes, shot, stats, token, tool, twoChannels } from "./rollHelpers";
 
@@ -12,6 +13,21 @@ const D_MAJOR = 0b101011010110;
 
 /** D major: C and F are white rows outside the key, D an inside one. */
 const KEYED = { key: { root: 2, scale: "major" } };
+
+test.describe("the grid picker", () => {
+  test.use({ seed: { project: twoChannels([]) } });
+
+  test("the grid changes note snapping only after confirmation", async ({ app, mock }) => {
+    await openRoll(app);
+    await confirmPickerWithArrows(app, "Snap", "Step", "1/2 beat", 2, async () => {
+      expect(await mock.calls("notes_edit")).toHaveLength(0);
+    });
+    const point = await at(app, 800, 60);
+    await app.mouse.click(point.x, point.y);
+    await expect.poll(() => sessionNotes(mock)).toEqual([[1, 480, 240, 60]]);
+    expect(await mock.calls("notes_edit")).toHaveLength(1);
+  });
+});
 
 test.describe("key and scale", () => {
   test.use({ seed: { project: twoChannels([], KEYED) } });
@@ -266,8 +282,16 @@ test.describe("chords", () => {
 
   test("a_chord_stamps_and_strums", async ({ app, mock }) => {
     await openRoll(app);
-    await app.getByRole("combobox", { name: "Chord", exact: true }).selectOption("min7");
-    await app.getByRole("combobox", { name: "Inversion", exact: true }).selectOption("1");
+    const noNoteEdits = async () => expect(await mock.calls("notes_edit")).toHaveLength(0);
+    const inversion = pickerButton(app, "Inversion");
+    await expect(inversion).toBeDisabled();
+    await expect(inversion).toHaveAccessibleDescription("Choose a chord first.");
+    await inversion.press("Enter");
+    await expect(inversion).toBeFocused();
+    await expect(app.getByRole("listbox", { name: "Inversion" })).toBeHidden();
+    await confirmPickerWithArrows(app, "Chord", "No chord", "Min7", 8, noNoteEdits);
+    await expect(inversion).toBeEnabled();
+    await confirmPickerWithArrows(app, "Inversion", "Root position", "1st inversion", 5, noNoteEdits);
     const p = await at(app, 970, 60);
     await app.mouse.click(p.x, p.y);
     // A minor seventh on C, first inversion: the lowest voice goes up an octave. One edit.
@@ -296,18 +320,29 @@ test.describe("the key picker", () => {
     await openRoll(app);
     expect((await stats(app)).scaleMask).toBe(0);
     const edits = async () => (await mock.calls("project_edit")).map((c) => c.args.edit);
-    await app.getByRole("combobox", { name: "Key", exact: true }).selectOption({ label: "D" });
-    await expect.poll(edits).toEqual([{ kind: "setProjectKey", key: { root: 2, scale: "major" } }]);
+    const majorEdit = { kind: "setProjectKey", key: { root: 2, scale: "major" } };
+    const minorEdit = { kind: "setProjectKey", key: { root: 2, scale: "minor" } };
+    const scale = pickerButton(app, "Scale");
+    await expect(scale).toBeDisabled();
+    await expect(scale).toHaveAccessibleDescription("Choose a key first.");
+    await scale.press("Enter");
+    await expect(scale).toBeFocused();
+    await expect(app.getByRole("listbox", { name: "Scale" })).toBeHidden();
+    await confirmPickerWithArrows(app, "Key", "None", "D", 3, async () => expect(await edits()).toEqual([]));
+    await expect.poll(edits).toEqual([majorEdit]);
     await expect.poll(async () => (await stats(app)).scaleMask).toBe(D_MAJOR);
-    await app.getByRole("combobox", { name: "Scale", exact: true }).selectOption({ label: "Minor" });
-    await expect.poll(async () => (await edits()).at(-1)).toEqual({ kind: "setProjectKey", key: { root: 2, scale: "minor" } });
+    await expect(scale).toBeEnabled();
+    await confirmPickerWithArrows(app, "Scale", "Major", "Minor", 1, async () => expect(await edits()).toEqual([majorEdit]));
+    await expect.poll(edits).toEqual([majorEdit, minorEdit]);
+    await choosePickerOption(app, "Scale", "Minor");
+    expect(await edits()).toEqual([majorEdit, minorEdit]);
     // D minor: D E F G A Bb C.
     await expect.poll(async () => (await stats(app)).scaleMask).toBe(0b011010110101);
-    await app.getByRole("combobox", { name: "Key", exact: true }).selectOption({ label: "None" });
+    await choosePickerOption(app, "Key", "None");
     await expect.poll(async () => (await edits()).at(-1)).toEqual({ kind: "setProjectKey", key: null });
     await expect.poll(async () => (await stats(app)).scaleMask).toBe(0);
     // The scale and the project's key survive a roll that is closed and opened again.
-    await app.getByRole("combobox", { name: "Key", exact: true }).selectOption({ label: "C" });
+    await choosePickerOption(app, "Key", "C");
     await expect.poll(async () => (await stats(app)).scaleMask).toBe(C_MAJOR);
     await app.keyboard.press("F7");
     await app.keyboard.press("F7");
@@ -443,7 +478,7 @@ test.describe("a dragged chord stamp", () => {
 
   test("a_dragged_chord_stamp_is_one_edit_and_a_preview_until_release", async ({ app, mock }, info) => {
     await openRoll(app);
-    await app.getByRole("combobox", { name: "Chord", exact: true }).selectOption("major");
+    await choosePickerOption(app, "Chord", "Major");
     const from = await at(app, 970, 60);
     await app.mouse.move(from.x, from.y);
     await app.mouse.down();
@@ -474,12 +509,12 @@ test.describe("held gestures", () => {
 
   const gestures = [
     { name: "a_drawn_note", chord: "", from: [970, 60], to: [1450, 62], held: [[1500, 62]], gone: [[1000, 60]] },
-    { name: "a_stamped_chord", chord: "major", from: [970, 60], to: [1450, 62], held: [[1500, 62], [1500, 66], [1500, 69]], gone: [[1000, 60]] },
+    { name: "a_stamped_chord", chord: "Major", from: [970, 60], to: [1450, 62], held: [[1500, 62], [1500, 66], [1500, 69]], gone: [[1000, 60]] },
   ] as const;
   for (const g of gestures) {
     test(`held_notes_survive_an_engine_refresh_${g.name}`, async ({ app, mock }) => {
       await openRoll(app);
-      if (g.chord) await app.getByRole("combobox", { name: "Chord", exact: true }).selectOption(g.chord);
+      if (g.chord) await choosePickerOption(app, "Chord", g.chord);
       const from = await at(app, g.from[0], g.from[1]);
       await app.mouse.move(from.x, from.y);
       await app.mouse.down();

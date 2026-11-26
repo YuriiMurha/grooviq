@@ -1,3 +1,4 @@
+import { choosePickerOption, pickerButton } from "./listPickerHelpers";
 import { cellPoint, colourDistance, expect, grid, pixelsAt, project, soundsFor, test, workspaceReady } from "./fixture";
 import { boxSelect, canvas, lane, local, openRoll, stats, twoChannels } from "./rollHelpers";
 import { parseColor } from "../src/rack/palette";
@@ -233,8 +234,8 @@ for (const { id } of themes) {
       expect(colourDistance(selectedBar, bytes("--roll-select")), "selected velocity bar").toBeLessThan(8);
       if (renderer === "webgl2") {
         await app.screenshot({ path: info.outputPath("roll.png"), scale: "css", animations: "disabled" });
-        await app.getByRole("combobox", { name: "Key", exact: true }).selectOption({ label: "C" });
-        await expect(app.getByRole("combobox", { name: "Scale", exact: true })).toHaveValue("major");
+        await choosePickerOption(app, "Key", "C");
+        await expect(pickerButton(app, "Scale")).toHaveAccessibleName("Scale: Major");
         const warning = app.getByText("Unsaved changes", { exact: true });
         await expect(warning).toHaveCSS("color", `rgb(${bytes("--warn").map(Math.round).join(", ")})`);
         await expect.poll(async () => (await stats(app)).scaleMask).toBe(0b101010110101);

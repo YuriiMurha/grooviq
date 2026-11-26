@@ -1,4 +1,5 @@
 import { test, expect, project, soundsFor, clickCell } from "./fixture";
+import { choosePickerOption, confirmPickerWithArrows, pickerButton } from "./listPickerHelpers";
 import type { PatternsView, PatternReply } from "../src/api/patterns";
 import type { Page } from "@playwright/test";
 
@@ -13,6 +14,76 @@ async function invoke<T>(page: Page, command: string, args: Record<string, unkno
 const list = (page: Page) => invoke<PatternsView>(page, "pattern_list");
 const edit = (page: Page, state: PatternsView, change: Record<string, unknown>) =>
   invoke<PatternReply>(page, "pattern_edit", { generation: state.generation, revision: state.revision, edit: change });
+
+test("playback mode changes once on confirmation", async ({ app, mock }) => {
+  const mode = pickerButton(app, "Playback mode");
+  const commands = () => mock.calls("arrangement_mode");
+  const appliedMode = () => mock.eval<string>("(m) => m.workspaceSnapshot().playMode");
+  await expect(mode).toBeEnabled();
+  await confirmPickerWithArrows(app, "Playback mode", "Pattern", "Song", 3, async () => {
+    expect(await commands()).toHaveLength(0);
+    expect(await appliedMode()).toBe("pattern");
+  });
+  await expect(mode).toBeEnabled();
+  expect(await appliedMode()).toBe("song");
+  expect((await commands()).map((call) => call.args.mode)).toEqual(["song"]);
+
+  await choosePickerOption(app, "Playback mode", "Song");
+  expect((await commands()).map((call) => call.args.mode)).toEqual(["song"]);
+
+  await mock.eval("(m) => m.holdCommand('arrangement_mode')");
+  try {
+    await choosePickerOption(app, "Playback mode", "Pattern");
+    await expect(mode).toBeDisabled();
+    await expect(mode).toHaveAccessibleDescription("Wait for the playback mode to finish changing.");
+    await mode.press("Enter");
+    await expect(mode).toBeFocused();
+    await expect(app.getByRole("listbox", { name: "Playback mode" })).toBeHidden();
+    await expect.poll(async () => (await commands()).map((call) => call.args.mode)).toEqual(["song", "pattern"]);
+  } finally {
+    await mock.eval("(m) => m.releaseCommand('arrangement_mode')");
+  }
+  await expect(mode).toBeEnabled();
+  await expect(mode).toHaveAccessibleName("Playback mode: Pattern");
+  expect(await appliedMode()).toBe("pattern");
+});
+
+test("playback mode stays disabled while a pattern edit is pending", async ({ app, mock }) => {
+  const mode = pickerButton(app, "Playback mode");
+  await expect(mode).toBeEnabled();
+  await mock.eval("(m) => m.holdCommand('pattern_edit')");
+  try {
+    await app.getByRole("complementary", { name: "Patterns" }).getByRole("button", { name: "New", exact: true }).click();
+    await expect(mode).toBeDisabled();
+    await expect(mode).toHaveAccessibleDescription("Wait for the pattern edit to finish.");
+    await mode.press("ArrowDown");
+    await expect(mode).toBeFocused();
+    await expect(app.getByRole("listbox", { name: "Playback mode" })).toBeHidden();
+    expect(await mock.calls("arrangement_mode")).toHaveLength(0);
+  } finally {
+    await mock.eval("(m) => m.releaseCommand('pattern_edit')");
+  }
+  await expect(mode).toBeEnabled();
+});
+
+test("playback mode stays disabled until the new project's mode loads", async ({ app, mock }) => {
+  const mode = pickerButton(app, "Playback mode");
+  await expect(mode).toBeEnabled();
+  await mock.eval("(m) => m.holdCommand('arrangement_view')");
+  try {
+    await app.keyboard.press("ControlOrMeta+n");
+    await expect(mode).toHaveAccessibleName("Playback mode: Loading…");
+    await expect(mode).toBeDisabled();
+    await expect(mode).toHaveAccessibleDescription("Playback mode is loading.");
+    await mode.press("Enter");
+    await expect(mode).toBeFocused();
+    await expect(app.getByRole("listbox", { name: "Playback mode" })).toBeHidden();
+    expect(await mock.calls("arrangement_mode")).toHaveLength(0);
+  } finally {
+    await mock.eval("(m) => m.releaseCommand('arrangement_view')");
+  }
+  await expect(mode).toBeEnabled();
+});
 
 for (const roll of [false, true]) {
   test(`queued Undo and Redo advance their own revisions with the roll ${roll ? "open" : "closed"}`, async ({ app, mock }) => {

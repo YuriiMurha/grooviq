@@ -1,3 +1,4 @@
+import { choosePickerOption, pickerButton } from "./listPickerHelpers";
 import { readFileSync } from "node:fs";
 import type { ArrangementStamp } from "../src/api/arrangement";
 import { test, expect, project, workspaceReady, SYNTH_PARAMS, SYNTH_PRESETS } from "./fixture";
@@ -117,18 +118,18 @@ test("compact seek row moves the playhead while the loop row only edits loops", 
 
 test("keyboard uses live ticks; native failures do not dirty or create history", async ({ app, mock }) => {
   await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
-  const mode = app.getByRole("combobox", { name: "Playback mode" });
+  const mode = pickerButton(app, "Playback mode");
   const stamp = () => mock.eval<ArrangementStamp>("m => { const { generation, revision } = m.workspaceSnapshot(); return { generation, revision }; }");
-  await expect(mode).toHaveValue("song");
+  await expect(mode).toHaveAccessibleName("Playback mode: Song");
   const patternArgs = { ...await stamp(), mode: "pattern" };
-  await mode.selectOption("pattern");
-  await expect(mode).toHaveValue("pattern");
+  await choosePickerOption(app, "Playback mode", "Pattern");
+  await expect(mode).toHaveAccessibleName("Playback mode: Pattern");
   const songArgs = { ...await stamp(), mode: "song" };
-  await mode.selectOption("song");
-  await expect(mode).toHaveValue("song");
+  await choosePickerOption(app, "Playback mode", "Song");
+  await expect(mode).toHaveAccessibleName("Playback mode: Song");
   await expect(mode).toBeEnabled();
   expect.soft((await mock.calls("arrangement_mode")).map(call => call.args)).toEqual([patternArgs, songArgs]);
-  await app.keyboard.press("Space");
+  await app.getByRole("button", { name: "Play", exact: true }).press("Space");
   await mock.eval("m => m.hold(1700)");
   await app.keyboard.press("F5");
   const ruler = app.getByRole("group", { name: "Playlist seek ruler" });

@@ -406,13 +406,10 @@ input[type="checkbox"] {
   color: var(--muted);
 }
 
-.roll-snap select {
-  padding: 3px 6px;
+.roll-snap .list-picker {
+  gap: 4px;
+  padding-inline: 6px;
   background: var(--raised);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-s);
-  color: var(--text);
-  font: inherit;
   font-weight: 700;
 }
 
