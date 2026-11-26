@@ -2,7 +2,8 @@ name: perf
 
 # Speed numbers for benchmark inputs. Render timing is informational; roll timing retries a
 # budget failure once. Instruction counts are exact: that job fails when a benchmark runs
-# more than 1 % more instructions than on the pull request's base. None is a required check.
+# more than 1 % more instructions than on the merge commit's first parent (the base branch
+# tip GitHub merged onto). None is a required check.
 
 on:
   push:
@@ -248,13 +249,16 @@ jobs:
           printf '%s\n' '### Instruction comparison revisions' '' \
             "- BASE \`$BASE_SHA\`" "- HEAD \`$HEAD_SHA\`" "- PR head \`$PR_HEAD_SHA\`" '' |
             tee -a "$GITHUB_STEP_SUMMARY"
+          reason=
           if [ "${#parents[@]}" -ne 2 ] || [ "$BASE_SHA" = unavailable ]; then
-            echo "Skipping comparison: expected a merge commit with two parents available in the checkout." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
+            reason="expected a merge commit with two parents available in the checkout."
+          elif ! second_parent=$(git rev-parse --verify HEAD^2 2>/dev/null) || [ "$second_parent" != "$PR_HEAD_SHA" ]; then
+            reason="the merge commit's second parent (${second_parent:-unavailable}) does not match the PR head."
           fi
-          if ! second_parent=$(git rev-parse --verify HEAD^2 2>/dev/null) || [ "$second_parent" != "$PR_HEAD_SHA" ]; then
-            echo "Skipping comparison: the merge commit's second parent (${second_parent:-unavailable}) does not match the PR head." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
+          if [ -n "$reason" ]; then
+            echo "::error::Skipping comparison: $reason"
+            echo "Skipping comparison: $reason" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
           overlay=$(mktemp -d)
           paths=(tests/golden/benches/instructions.rs tests/golden/benches/support/synth_workload.rs tests/golden/benches/support/sampler_workload.rs)
