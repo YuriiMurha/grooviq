@@ -67,9 +67,8 @@ pub(crate) struct ChannelNode {
     fade: Option<Ramp>,
     /// Removed: fading out, then silent until the graph hands it to the trash queue.
     leaving: bool,
-    /// A sampler with no voice sounding: blocks without events are skipped (the ramps and the
-    /// fade still advance, so skipping never changes the output). Never set for the synth,
-    /// whose LFO runs on while it is silent.
+    /// A silent sampler or synth skips blocks without events. A skipped synth still advances
+    /// its LFO, smoothers and meters through [`Synth::advance_silent`].
     idle: bool,
     events: [NoteEvent; CHANNEL_EVENTS],
     count: usize,
@@ -643,10 +642,10 @@ mod tests {
                     }
                 }
 
-                // As if a group peer had triggered at these offsets. The first set chokes a
-                // sounding voice, the second arrives after its fade slot has gone silent.
+                // A group peer's chokes split silent blocks while the previous note's peaks
+                // decay. The note at frame 63 of block 180 exposes those peaks again.
                 let chokes: &[u32] = match block {
-                    182 | 183 | 240 => &[0, 11, 37, 63],
+                    110..=149 | 182 | 183 | 240 => &[0, 11, 37, 63],
                     _ => &[],
                 };
                 let sentinel = [1.0; BLOCK];
@@ -682,7 +681,7 @@ mod tests {
                     assert!(rendered && b.levels[2] > 0.0, "active tail/voice {block}");
                     assert!(fl.iter().any(|&x| x != 0.0), "audible block {block}");
                 }
-                if matches!(block, 72 | 240 | 270 | 274 | 360) {
+                if matches!(block, 72 | 110..=149 | 240 | 270 | 274 | 360) {
                     assert!(!rendered, "silent block {block} must skip");
                 }
             }
