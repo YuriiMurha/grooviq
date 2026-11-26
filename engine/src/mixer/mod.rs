@@ -13,6 +13,8 @@ mod runtime;
 pub use compile::*;
 pub use insert::{InsertIdentity, ParamError, PreparedInsert};
 pub use latency::*;
-pub use live::{InsertDevice, MixSetup, RoutedMix, insert_kinds};
+pub use live::{
+    InsertDevice, MixSetup, RoutedMix, UnsupportedInsertRate, describe_builtin_insert, insert_kinds,
+};
 pub use model::*;
 pub use runtime::*;

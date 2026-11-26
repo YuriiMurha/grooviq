@@ -3,7 +3,7 @@
 // and the settings and autosave state it reports. Driven through the command layer, as the UI's
 // `invoke` would call it.
 import type { Page } from "@playwright/test";
-import { expect, generatedWav, project, test } from "./fixture";
+import { expect, generatedWav, project, test, type Mock } from "./fixture";
 import type { ArrangementPage, ArrangementReply } from "../src/api/arrangement";
 import { decodeWaveform } from "../src/api/waveform";
 import type { MockNote } from "./mockTauri";
@@ -361,6 +361,162 @@ test.describe("arrangement media contract", () => {
     });
   });
 
+  test.describe("explicit Linux file drops", () => {
+    test.use({ seed: { project: initial, platform: "linux" } });
+
+    test("use CSS positions at DPR 2", async ({ mock }) => {
+      await mock.eval(`() => {
+        const shell = window.__TAURI_INTERNALS__;
+        window.__linuxDrop = null;
+        return shell.invoke("plugin:event|listen", {
+          event: "tauri://drag-drop",
+          handler: shell.transformCallback(({ payload }) => { window.__linuxDrop = payload.position; }),
+        });
+      }`);
+      await mock.dropAudio(path, { x: 311, y: 127 });
+      expect(await mock.eval("() => ({ dpr: devicePixelRatio, position: window.__linuxDrop })"))
+        .toEqual({ dpr: 2, position: { x: 311, y: 127 } });
+    });
+  });
+
+  const startImport = (mock: Mock, args: ReturnType<typeof importArgs>, reply = "audioReply") =>
+    mock.eval(`() => { window[${JSON.stringify(reply)}] =
+      window.__TAURI_INTERNALS__.invoke("audio_import", ${JSON.stringify(args)}); }`);
+
+  test("ticket cancellation works before file reads reach worker admission", async ({ app, mock }) => {
+    await mock.registerAudio(path, generatedWav());
+    await mock.holdAudioRead(path);
+    const before = await view(app);
+    await startImport(mock, importArgs(before));
+    expect(await view(app)).toEqual(before);
+    expect(await call(app, "audio_cancel", { request: 1 })).toBe(false);
+    expect(await call(app, "audio_import", importArgs(before, badPath))).toMatchObject({
+      status: "refused", request: null, message: "Media ticket already in use",
+    });
+    expect(await call(app, "audio_cancel_ticket", { ticket: 12 })).toBe(true);
+    await mock.releaseAudioRead(path);
+    expect(await mock.eval("() => window.audioReply")).toEqual({
+      ...stamp(before), status: "refused", request: 1, createdIds: [], changed: false,
+      reload: true, warnings: [], message: "Older or cancelled media request",
+    });
+    expect(await view(app)).toEqual(before);
+    expect(await call(app, "arrangement_history", { ...stamp(before), undo: true }))
+      .toMatchObject({ effect: { kind: "empty" } });
+    expect(await call(app, "audio_import", importArgs(before)))
+      .toMatchObject({ status: "applied", request: 3, createdIds: [2, 3] });
+  });
+
+  test("request and ticket cancellation follow worker admission and release on exit", async ({ app, mock }) => {
+    await mock.registerAudio(path, generatedWav());
+    const before = await view(app);
+    for (const [command, args, request, pending] of [
+      ["audio_cancel", { request: 1 }, 1, []],
+      ["audio_cancel_ticket", { ticket: 12 }, 2, [2]],
+    ] as const) {
+      await mock.holdAudio(path);
+      await startImport(mock, importArgs(before));
+      expect((await view(app)).pendingRequests).toEqual([request]);
+      expect(await call(app, command, args)).toBe(true);
+      expect((await view(app)).pendingRequests).toEqual(pending);
+      await mock.releaseAudio(path);
+      expect(await mock.eval("() => window.audioReply")).toMatchObject({
+        status: "refused", request, message: "Media preparation failed: Cancelled",
+      });
+      expect(await view(app)).toEqual(before);
+    }
+    expect(await call(app, "audio_cancel", { request: 2 })).toBe(false);
+    expect(await call(app, "audio_import", importArgs(before)))
+      .toMatchObject({ status: "applied", request: 3, createdIds: [2, 3] });
+  });
+
+  test("a failed path read releases the ticket and relink honors an early cancel", async ({ app, mock }) => {
+    await mock.registerAudio(path, generatedWav());
+    const before = await view(app);
+    const { ticket, ...withoutTicket } = importArgs(before);
+    expect(await refusal(app, "audio_import", withoutTicket)).toContain("invalid args `ticket`");
+    expect(await call(app, "audio_import", importArgs(before, badPath)))
+      .toMatchObject({ status: "refused", request: 1, message: "No such file or directory (os error 2)" });
+    expect(await call(app, "audio_import", importArgs(before)))
+      .toMatchObject({ status: "applied", request: 2, createdIds: [2, 3] });
+    const imported = await view(app);
+    expect(await call(app, "audio_cancel_ticket", { ticket })).toBe(false);
+    expect(await call(app, "audio_relink", { ...stamp(imported), asset: 2, path: badPath, ticket }))
+      .toMatchObject({ status: "refused", request: null, message: "Media ticket cancelled" });
+    expect(await view(app)).toEqual(imported);
+  });
+
+  test("an early cancel survives duplicate and invalid cancels and the oldest is evicted at capacity", async ({ app, mock }) => {
+    await mock.registerAudio(path, generatedWav());
+    const before = await view(app);
+    expect(await mock.eval(`async () => {
+      const cancel = ticket => window.__TAURI_INTERNALS__.invoke("audio_cancel_ticket", { ticket });
+      const replies = [];
+      for (let ticket = 1; ticket <= 64; ticket++) replies.push(await cancel(ticket));
+      replies.push(await cancel(1), await cancel(0), await cancel(2 ** 53));
+      return replies;
+    }`)).toEqual(Array(67).fill(false));
+    const attempt = (ticket: number) => call(app, "audio_import", { ...importArgs(before), ticket });
+    expect(await attempt(1)).toMatchObject({ status: "refused", request: null, message: "Media ticket cancelled" });
+    expect(await call(app, "audio_cancel_ticket", { ticket: 65 })).toBe(false);
+    expect(await attempt(2)).toMatchObject({ status: "refused", request: null, message: "Media ticket cancelled" });
+    expect(await attempt(1)).toMatchObject({ status: "applied", request: 3 });
+  });
+
+  test("a newer admission remains authoritative once its worker has exited", async ({ app, mock }) => {
+    await mock.registerAudio(path, generatedWav());
+    await mock.registerAudio(badPath, null);
+    await mock.holdAudioRead(path);
+    const before = await view(app);
+    await startImport(mock, importArgs(before));
+    expect(await call(app, "audio_import", { ...importArgs(before, badPath), ticket: 13 }))
+      .toMatchObject({ status: "refused", request: 2 });
+    await mock.releaseAudioRead(path);
+    expect(await mock.eval("() => window.audioReply")).toMatchObject({
+      status: "refused", request: 1, message: "Older or cancelled media request",
+    });
+    expect(await view(app)).toEqual(before);
+  });
+
+  test("a newer worker cancels the previous admitted request for the same target", async ({ app, mock }) => {
+    await mock.registerAudio(path, generatedWav());
+    await mock.registerAudio(badPath, null);
+    await mock.holdAudio(path);
+    const before = await view(app);
+    await startImport(mock, importArgs(before));
+    expect(await call(app, "audio_import", { ...importArgs(before, badPath), ticket: 13 }))
+      .toMatchObject({ status: "refused", request: 2 });
+    await mock.releaseAudio(path);
+    expect(await mock.eval("() => window.audioReply")).toMatchObject({
+      status: "refused", request: 1, message: "Media preparation failed: Cancelled",
+    });
+    expect(await view(app)).toEqual(before);
+  });
+
+  test("replacement clears tickets and an old completion cannot release a reused ticket", async ({ app, mock }) => {
+    await mock.registerAudio(path, generatedWav());
+    await mock.registerAudio(replacementPath, generatedWav());
+    await mock.holdAudioRead(path);
+    const before = await view(app);
+    await startImport(mock, { ...importArgs(before), ticket: 13 }, "oldAudioReply");
+    expect(await call(app, "audio_cancel_ticket", { ticket: 12 })).toBe(false);
+    await call(app, "project_new");
+    await call(app, "arrangement_edit", { ...stamp(await view(app)),
+      editsJson: JSON.stringify([{ kind: "createTrack", name: "Audio", color: 0 }]) });
+    const current = await view(app);
+    await mock.holdAudioRead(replacementPath);
+    await startImport(mock, { ...importArgs(current, replacementPath), ticket: 13 });
+    await mock.releaseAudioRead(path);
+    expect(await mock.eval("() => window.oldAudioReply")).toMatchObject({
+      status: "refused", request: 1, message: "Project replaced; reload arrangement",
+    });
+    expect(await call(app, "audio_cancel_ticket", { ticket: 13 })).toBe(true);
+    await mock.releaseAudioRead(replacementPath);
+    expect(await mock.eval("() => window.audioReply")).toMatchObject({
+      status: "refused", request: 2, message: "Older or cancelled media request",
+    });
+    expect(await call(app, "audio_import", importArgs(current))).toMatchObject({ status: "applied", request: 3 });
+  });
+
   test("import uses the caller name and adds an asset and clip in one history step", async ({ app, mock }) => {
     await mock.registerAudio(path, generatedWav());
     const before = await view(app);
@@ -400,9 +556,35 @@ test.describe("arrangement media contract", () => {
     expect(Array.from(waveform.peaks)).toEqual([-1, 32767 / 32768, -1, 32767 / 32768]);
   });
 
-  test("an admitted import exposes its pending request and cannot publish into a replacement", async ({ app, mock }) => {
+  test("a replacement cancels a request whose worker has not returned", async ({ app, mock }) => {
     await mock.registerAudio(path, generatedWav());
     await mock.holdAudio(path);
+    await startImport(mock, importArgs(await view(app)));
+    expect((await view(app)).pendingRequests).toEqual([1]);
+    await call(app, "project_new");
+    await mock.releaseAudio(path);
+    expect(await mock.eval("() => window.audioReply")).toMatchObject({
+      status: "refused", generation: 1, message: "Media preparation failed: Cancelled",
+    });
+    expect((await view(app)).pendingRequests).toEqual([]);
+  });
+
+  test("ticket cancellation still prevents publication after a successful worker reply", async ({ app, mock }) => {
+    await mock.registerAudio(path, generatedWav());
+    await mock.holdAudio(path, "publication");
+    const before = await view(app);
+    await startImport(mock, importArgs(before));
+    expect(await call(app, "audio_cancel_ticket", { ticket: 12 })).toBe(true);
+    await mock.releaseAudio(path);
+    expect(await mock.eval("() => window.audioReply")).toMatchObject({
+      status: "refused", request: 1, message: "Media request cancelled or superseded",
+    });
+    expect(await view(app)).toEqual(before);
+  });
+
+  test("an admitted import exposes its pending request and cannot publish into a replacement", async ({ app, mock }) => {
+    await mock.registerAudio(path, generatedWav());
+    await mock.holdAudio(path, "publication");
     const before = await view(app);
     const args = importArgs(before);
     await mock.eval(`() => { window.__audioReply = window.__TAURI_INTERNALS__.invoke("audio_import", ${JSON.stringify(args)}); }`);
@@ -419,7 +601,7 @@ test.describe("arrangement media contract", () => {
 
   test("a held import rechecks the revision within the same project before committing", async ({ app, mock }) => {
     await mock.registerAudio(path, generatedWav());
-    await mock.holdAudio(path);
+    await mock.holdAudio(path, "publication");
     const before = await view(app);
     await mock.eval(`() => { window.__audioReply = window.__TAURI_INTERNALS__.invoke("audio_import", ${JSON.stringify(importArgs(before))}); }`);
     expect((await view(app)).pendingRequests).toEqual([1]);
@@ -469,7 +651,7 @@ test.describe("arrangement media contract", () => {
       window.__waveformReply = window.__TAURI_INTERNALS__.invoke("arrangement_waveform", ${JSON.stringify(request)})
         .then(packet => Array.from(new Uint8Array(packet)), String);
     }`);
-    const reply = await call(app, "audio_relink", { ...stamp(imported), asset: 2, path: replacementPath });
+    const reply = await call(app, "audio_relink", { ...stamp(imported), asset: 2, path: replacementPath, ticket: 27 });
     expect(reply).toMatchObject({ status: "applied", changed: true, revision: imported.revision + 1 });
     expect((await view(app)).audioAssets[0].sample).toEqual({ path: "replacement.wav", file: null });
     await mock.releaseWaveform(request.request);
@@ -481,6 +663,24 @@ test.describe("arrangement media contract", () => {
       -0.5, 32767 / 32768, -0.5, 32767 / 32768,
       -0.25, 0.125, -0.25, 0.125,
     ]);
+  });
+
+  test("relinking identical bytes after Open replaces a held waveform source", async ({ app, mock }) => {
+    const bytes = generatedWav();
+    await mock.registerAudio(path, bytes);
+    await mock.registerAudio(replacementPath, bytes);
+    await call(app, "audio_import", importArgs(await view(app)));
+    await call(app, "project_save_as", { path: savePath });
+    await call(app, "project_open", { path: savePath });
+    const reopened = await view(app);
+    const request = { generation: reopened.generation, asset: 2, request: 552, start: 0, end: 8, bins: 2 };
+    await mock.holdWaveform(request.request);
+    await mock.eval(`() => { window.__waveformReply = window.__TAURI_INTERNALS__.invoke(
+      "arrangement_waveform", ${JSON.stringify(request)}).catch(String); }`);
+    expect(await call(app, "audio_relink", { ...stamp(reopened), asset: 2, path: replacementPath, ticket: 27 }))
+      .toMatchObject({ status: "applied", changed: true });
+    await mock.releaseWaveform(request.request);
+    expect(await mock.eval("() => window.__waveformReply")).toBe("Waveform source replaced; reload");
   });
 
   test("relink preserves provenance, has its own undo step and invalidates a held waveform", async ({ app, mock }) => {
@@ -517,7 +717,7 @@ test.describe("arrangement media contract", () => {
     await mock.eval(`() => { window.__waveformReply = window.__TAURI_INTERNALS__.invoke(
       "arrangement_waveform", ${JSON.stringify(request)}).catch(String); }`);
     await mock.registerAudio(replacementPath, generatedWav({ rate: 48000, samples: [[100, -100], [200, -200]] }));
-    expect(await call(app, "audio_relink", { ...stamp(await view(app)), asset: 2, path: replacementPath }))
+    expect(await call(app, "audio_relink", { ...stamp(await view(app)), asset: 2, path: replacementPath, ticket: 27 }))
       .toMatchObject({ status: "applied", request: 2, revision: 2, createdIds: [], warnings: [
         "Audio asset 2: decoded geometry differs from saved provenance; trim duration is preserved and unavailable decoded frames are silent.",
       ] });

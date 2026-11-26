@@ -78,6 +78,23 @@ impl std::fmt::Display for ControlError {
 
 impl std::error::Error for ControlError {}
 
+#[derive(Debug)]
+pub(crate) enum ReconfigureError {
+    InsertRate(crate::mixer::UnsupportedInsertRate),
+    BuildFailed,
+}
+
+impl std::fmt::Display for ReconfigureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InsertRate(error) => error.fmt(f),
+            Self::BuildFailed => {
+                f.write_str("the sound engine could not rebuild for the output rate")
+            }
+        }
+    }
+}
+
 /// A removed channel instance's fade route (see `Controller::fades`).
 #[derive(Clone, Copy, Debug)]
 struct Fade {
@@ -883,7 +900,7 @@ impl Controller {
 
     /// The rate the engine runs at (after clamping): the output layer compares it with a
     /// device's before deciding to reconfigure.
-    pub(crate) fn sample_rate(&self) -> f32 {
+    pub fn sample_rate(&self) -> f32 {
         self.sample_rate
     }
 
@@ -1004,9 +1021,23 @@ impl Controller {
     /// Switches the engine to a new sample rate, rebuilding the graph from the controller's
     /// state (which also recovers a graph that panicked; the next `check_health` still reports
     /// the panic). Call it with the audio callback stopped (it needs the processor itself),
-    /// never on the audio thread. Returns false if construction failed; the processor stays
-    /// silent and the previous rate, state and queued commands are retained.
+    /// never on the audio thread. Returns false without changing the engine if an insert
+    /// cannot run at the new rate. If construction fails, the processor stays silent and
+    /// the previous rate, state and queued commands are retained.
     pub fn reconfigure(&mut self, processor: &mut AudioProcessor, config: EngineConfig) -> bool {
+        self.try_reconfigure(processor, config).is_ok()
+    }
+
+    pub(crate) fn try_reconfigure(
+        &mut self,
+        processor: &mut AudioProcessor,
+        config: EngineConfig,
+    ) -> Result<(), ReconfigureError> {
+        let rate = config.rate();
+        self.state
+            .mix
+            .check_sample_rate(rate)
+            .map_err(ReconfigureError::InsertRate)?;
         self.settle_recovery_stop(processor);
         // The fresh graph is built from the state every queued message already updated, so a
         // message that only changes the graph would land in it a second time: a channel built
@@ -1017,13 +1048,13 @@ impl Controller {
         // of the queue (`&mut self` and the stopped processor), this sees every message, and
         // what goes back fits.
         let old_rate = self.sample_rate;
-        self.sample_rate = config.rate();
+        self.sample_rate = rate;
         self.generation += 1;
         let Some(graph) = self.try_build_graph() else {
             self.sample_rate = old_rate;
             self.generation -= 1;
             processor.stop_after_failed_rebuild();
-            return false;
+            return Err(ReconfigureError::BuildFailed);
         };
         self.reset_recovery();
         for msg in rebuilt_queue(processor.take_queued()) {
@@ -1044,7 +1075,7 @@ impl Controller {
         // holds a removal (see `rebuilt_queue`).
         self.fades.clear();
         self.free_trash();
-        true
+        Ok(())
     }
 
     /// Construction is transactional: a panic never changes the mirrored project or identities.
@@ -1232,6 +1263,34 @@ fn aliases(
 }
 
 #[cfg(test)]
+pub(crate) fn restricted_rate_test_mix() -> crate::mixer::MixSetup {
+    use crate::mixer::*;
+
+    let insert = InsertId(1);
+    MixSetup::Routed(RoutedMix {
+        mixer: Mixer {
+            tracks: vec![Track {
+                id: MASTER,
+                output: None,
+                inserts: vec![describe_builtin_insert(insert, "bitcrusher").unwrap()],
+            }],
+            sources: vec![Source {
+                id: SourceId::System(SystemSource::Tone),
+                destination: MASTER,
+            }],
+            ..Mixer::default()
+        },
+        gains: vec![],
+        devices: vec![InsertDevice {
+            insert,
+            kind: "bitcrusher".into(),
+            seed: 1,
+            params: vec![],
+        }],
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::command::NoteId;
@@ -1248,6 +1307,65 @@ mod tests {
     fn pretend(c: &Controller, faults: u32, guard_hits: u32) {
         c.live.publish([0.0; 2], false, 0, faults, guard_hits);
         c.live.publish_recovery(faults, 0);
+    }
+
+    #[test]
+    fn reconfigure_rejects_insert_rate_without_disturbing_playback_or_the_queue() {
+        let config = |sample_rate| EngineConfig { sample_rate };
+        let (mut c, mut p) = crate::engine_with(
+            config(48_000.0),
+            EngineState {
+                mix: restricted_rate_test_mix(),
+                ..EngineState::default()
+            },
+        );
+        c.send(Command::TestTone {
+            on: true,
+            hz: 440.0,
+            gain_db: -12.0,
+        })
+        .unwrap();
+        let mut out = [0.0; crate::BLOCK * 2];
+        p.process(&mut out, 2);
+        c.send(Command::Play).unwrap();
+        let before = (
+            c.state().clone(),
+            c.generation,
+            c.graph_epoch,
+            c.commands.slots(),
+            c.live(),
+        );
+
+        let reconfigured = c.try_reconfigure(&mut p, config(16_000.0));
+        assert!(
+            c.check_health().is_empty(),
+            "an unsupported rate is not a fault"
+        );
+        let error = reconfigured.unwrap_err();
+        assert!(matches!(&error, ReconfigureError::InsertRate(_)));
+        assert_eq!(
+            error.to_string(),
+            "Mixer insert bitcrusher cannot run at 16000 Hz"
+        );
+        assert_eq!(c.sample_rate(), 48_000.0);
+        assert_eq!(
+            (
+                c.state().clone(),
+                c.generation,
+                c.graph_epoch,
+                c.commands.slots(),
+                c.live()
+            ),
+            before
+        );
+
+        p.process(&mut out, 2);
+        assert!(c.live().playing, "the queued Play command was retained");
+        assert!(out.iter().any(|&sample| sample != 0.0));
+        assert!(c.reconfigure(&mut p, config(44_100.0)));
+        assert_eq!(c.sample_rate(), 44_100.0);
+        assert_eq!(c.state(), &before.0);
+        assert!(c.check_health().is_empty());
     }
 
     #[test]

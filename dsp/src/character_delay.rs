@@ -378,6 +378,33 @@ impl Device for CharacterDelay {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn longest_modulated_synced_delay_fits_at_native_rate_limits() {
+        for sr in [22_050.0, 192_000.0] {
+            let mut delay = CharacterDelay::new(sr);
+            delay.set_param(0, SPEC[0].0);
+            delay.set_param(2, SPEC[2].1);
+            delay.set_param(9, 1.0); // Tape adds its own modulation to the main LFO.
+            delay.set_param(10, SPEC[10].1);
+            delay.set_param(12, SPEC[12].1);
+            // The LFO advances before reading. Start one increment before its crest.
+            let before_crest = 0.25 - delay.colour[4].cur as f64 / sr as f64;
+            delay.phase = before_crest;
+            delay.process(&mut [0.25], &mut [-0.25], None, &[]);
+
+            delay.set_param(0, SPEC[0].1);
+            delay.set_param(1, SPEC[1].1);
+            delay.set_tempo(SPEC[8].0);
+            delay.phase = before_crest;
+            delay.process(&mut [0.25], &mut [-0.25], None, &[]);
+        }
+    }
+}
+
 /// Original provisional voices; owner sound approval remains under #41.
 pub const PRESETS: [&str; 3] = ["Glass Steps", "Soft Spools", "Dusk Circuit"];
 pub fn preset(name: &str) -> Option<Vec<(u32, f32)>> {

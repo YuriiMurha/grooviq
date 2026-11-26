@@ -5,9 +5,8 @@
 //!   master alone, neutral, nothing assigned. Sources keep the old reduction order
 //!   (tone → legacy synth → channel vector order → song audio), which a flat graph summed
 //!   into the master does not reproduce, so it is a mode, never an inferred graph.
-//! * [`Mode::Routed`] is any other valid graph. It can be read, validated and serialized, but
-//!   nothing plays, exports or saves it yet: [`require_runtime_support`] refuses it until the
-//!   runtime consumes it (#477, #506).
+//! * [`Mode::Routed`] is any other valid graph. [`require_runtime_support`] checks whether
+//!   the live engine can render all of its settings.
 //! * A source (an instrument channel or an audio playlist track) has one destination; one
 //!   without an assignment goes to the master.
 //! * Every list and string is bounded while it is read (see [`Limits`]), before more is kept.
@@ -30,24 +29,7 @@ pub const LEVEL_DB: (f32, f32) = (-60.0, 6.0);
 /// The largest send gain (linear, about +12 dB).
 pub const MAX_SEND_GAIN: f32 = 4.0;
 /// The built-in effects an insert may hold (instruments are not inserts).
-pub const EFFECTS: [&str; 16] = [
-    "algorithmic_reverb",
-    "bitcrusher",
-    "character_delay",
-    "comp",
-    "delay",
-    "drive",
-    "drum_shaper",
-    "eq",
-    "fattener",
-    "limiter",
-    "lofi_colour",
-    "ott",
-    "reverb",
-    "saturation",
-    "shimmer_reverb",
-    "utility",
-];
+pub use grooviq_dsp::EFFECTS;
 
 /// How much a mixer may hold. These bound the file model; they say nothing about the memory or
 /// latency of prepared devices, which the runtime admits separately.
@@ -288,8 +270,12 @@ pub enum MixerError {
     IdentityRouted,
     /// An id counter is used up.
     IdsUsedUp(&'static str),
-    /// Routing is valid but nothing plays, exports or saves it yet.
-    RoutedUnsupported,
+    /// The runtime cannot apply this track's mute or solo state.
+    UnsupportedTrackControls(u32),
+    /// The runtime cannot bypass this insert.
+    UnsupportedBypass(u32),
+    /// The runtime cannot prepare this insert with a supported declaration.
+    UnsupportedInsert(u32),
 }
 
 impl fmt::Display for MixerError {
@@ -319,25 +305,24 @@ impl fmt::Display for MixerError {
             ),
             Self::IdentityRouted => write!(f, "Mixer: routed mode without any routing."),
             Self::IdsUsedUp(what) => write!(f, "Mixer: no {what} ids are left."),
-            Self::RoutedUnsupported => write!(
+            Self::UnsupportedTrackControls(id) => write!(
                 f,
-                "This project uses mixer routing, which this version of Grooviq cannot play, export or save yet."
+                "Mixer: track {id} uses mute or solo, which the runtime does not support yet."
             ),
+            Self::UnsupportedBypass(id) => write!(
+                f,
+                "Mixer: insert {id} uses bypass, which the runtime does not support yet."
+            ),
+            Self::UnsupportedInsert(id) => write!(f, "Mixer: insert {id} cannot be prepared."),
         }
     }
 }
 
 impl std::error::Error for MixerError {}
 
-/// Refuses a mixer the runtime cannot render as it is: anything but the legacy identity.
-/// Pure: callers run it before any state, file or engine change.
+/// Refuses a mixer the runtime cannot render as saved, before state or file changes.
 pub fn require_runtime_support(project: &Project) -> Result<(), MixerError> {
-    let mixer = &project.mixer;
-    match mixer.mode {
-        Mode::LegacyDirect if mixer.is_identity() => Ok(()),
-        Mode::LegacyDirect => Err(MixerError::NotIdentity),
-        Mode::Routed => Err(MixerError::RoutedUnsupported),
-    }
+    crate::mixer_compile::compile_mix(project).map(|_| ())
 }
 
 fn neutral(t: &Track) -> bool {
@@ -357,6 +342,14 @@ impl Mixer {
             && self.sends.is_empty()
             && self.sidechains.is_empty()
             && self.sources.is_empty()
+    }
+
+    pub(crate) fn refresh_mode(&mut self) {
+        self.mode = if self.is_identity() {
+            Mode::LegacyDirect
+        } else {
+            Mode::Routed
+        };
     }
 
     /// Where `source` goes: its assignment, or the master.

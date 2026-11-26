@@ -20,7 +20,7 @@ export default defineConfig(({ mode }) => ({
     projects: [
       {
         extends: true,
-        test: { name: "logic", environment: "node", include: ["src/**/*.test.ts"] },
+        test: { name: "logic", environment: "node", include: ["src/**/*.test.ts", "gallery/**/*.test.ts"] },
       },
       {
         extends: true,

@@ -262,3 +262,63 @@ fn max_feedback_tail_settles_without_subnormals() {
         );
     }
 }
+
+#[test]
+fn overlapping_cuts_tail_settles_without_subnormals() {
+    const BLOCK: usize = 128;
+    let mut failures = Vec::new();
+    for sr in [44_100.0, SR, 96_000.0] {
+        for (time_ms, pingpong) in [(20.0, false), (1.0, false), (20.0, true), (1.0, true)] {
+            let mut delay = wet_delay(sr, 0.95, pingpong);
+            delay.set_param(0, 0.0);
+            delay.set_param(2, time_ms);
+            delay.set_param(5, 2000.0);
+            delay.set_param(6, 1000.0);
+            let frames = 40 * sr as usize;
+            let mut counts = [0; 2];
+            let mut first = [None; 2];
+            let mut echo_peak = 0.0f32;
+            let mut final_peak = 0.0f32;
+
+            for start in (0..frames).step_by(BLOCK) {
+                let n = BLOCK.min(frames - start);
+                let mut left = [0.0; BLOCK];
+                let mut right = [0.0; BLOCK];
+                if start == 0 {
+                    left[0] = 0.8;
+                }
+                delay.process(&mut left[..n], &mut right[..n], None, &[]);
+                for (channel, samples) in [left, right].iter().enumerate() {
+                    for (offset, sample) in samples[..n].iter().enumerate() {
+                        let frame = start + offset;
+                        if sample.is_subnormal() {
+                            counts[channel] += 1;
+                            first[channel].get_or_insert(frame);
+                        }
+                        if frame > 0 {
+                            echo_peak = echo_peak.max(sample.abs());
+                        }
+                        if frame >= frames - sr as usize {
+                            final_peak = final_peak.max(sample.abs());
+                        }
+                    }
+                }
+            }
+
+            let case = format!("{sr} Hz, {time_ms} ms, ping-pong={pingpong}");
+            assert!(echo_peak > 0.001, "{case}: the delay must have sounded");
+            let result = format!(
+                "{case}: subnormals L/R={counts:?}, first L/R={first:?}, final peak={final_peak:e}"
+            );
+            println!("{result}");
+            if counts != [0, 0] || final_peak != 0.0 {
+                failures.push(result);
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the overlapping-cut tail must reach exact silence without subnormals:\n{}",
+        failures.join("\n")
+    );
+}

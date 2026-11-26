@@ -27,9 +27,9 @@ use crate::undo::{Growth, NoteChange, NoteHistory};
 use grooviq_dsp::sampler::{self, PARAM_IDS, SPEC, SampleBuf};
 use grooviq_dsp::synth;
 use grooviq_engine::{
-    ChannelId, ChannelMix, ChannelSetup, Command, ControlError, Controller, EngineState,
-    InstrumentKind, MAX_CHANNELS, MAX_CHOKE_GROUP, MAX_SAMPLE_SECONDS, NoteId, RecordEvent,
-    STEP_TICKS, decode_sample,
+    ChannelId, ChannelMix, Command, ControlError, Controller, EngineState, InstrumentKind,
+    MAX_CHANNELS, MAX_CHOKE_GROUP, MAX_SAMPLE_SECONDS, NoteId, RecordEvent, STEP_TICKS,
+    decode_sample,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -1000,6 +1000,13 @@ impl Session {
             }
             let mut candidate = self.project.clone();
             let ids = crate::arrangement_edit::apply(&mut candidate, ops)?;
+            let playlist_tracks: HashSet<_> =
+                candidate.arrangement.tracks.iter().map(|t| t.id).collect();
+            candidate.mixer.sources.retain(|a| match a.source {
+                crate::mixer::SourceKey::AudioTrack(id) => playlist_tracks.contains(&id),
+                crate::mixer::SourceKey::Channel(_) => true,
+            });
+            candidate.mixer.refresh_mode();
             if candidate == self.project {
                 return Ok((vec![], false));
             }
@@ -1242,6 +1249,7 @@ impl Session {
 
                 // Shared allocators never rewind. A restored pattern's note allocator is
                 // bounded by retained note identities; new pattern IDs never alias old ones.
+                histories.protected.insert(change.order);
                 if undo {
                     histories.arrangement.redo.push(change)
                 } else {
@@ -1331,16 +1339,36 @@ impl Session {
             clips
         }
         // Metadata and equivalent track organization do not affect the runtime bank.
-        // Decoded owners cannot change within this exclusive borrow; media publication
-        // uses a separate path which always rebuilds the bank.
+        // prepare_song_with also checks decoded allocation identity before it reuses the bank.
         runtime(&self.project) == runtime(project)
     }
 
     fn prepare_song(&self, project: &Project) -> Result<grooviq_engine::SongData, SessionError> {
+        self.prepare_song_with(project, &self.decoded)
+    }
+
+    fn prepare_song_with(
+        &self,
+        project: &Project,
+        decoded: &HashMap<u32, Arc<SampleBuf>>,
+    ) -> Result<grooviq_engine::SongData, SessionError> {
+        let before = &self.project.arrangement.audio_assets;
+        let after = &project.arrangement.audio_assets;
+        let same_assets = before.len() == after.len()
+            && before.iter().zip(after).all(|(a, b)| {
+                a.id == b.id
+                    && a.source_rate == b.source_rate
+                    && a.source_frames == b.source_frames
+                    && match (self.decoded.get(&a.id), decoded.get(&b.id)) {
+                        (Some(before), Some(after)) => Arc::ptr_eq(before, after),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            });
         crate::compile_song::compile_song(
             project,
-            &self.decoded,
-            (self.song_error.is_none() && self.same_audio(project))
+            decoded,
+            (self.song_error.is_none() && same_assets && self.same_audio(project))
                 .then_some(&self.compiled_song.audio),
             self.song_note_limit,
         )
@@ -1383,10 +1411,7 @@ impl Session {
         self.arrangement_stamp(self.generation, self.arrangement_revision)
             .map_err(SessionError::InvalidValue)?;
         let song = self.admit(project)?;
-        lock(&self.controller).set_timeline(Self::timeline(project, song.clone()))?;
-        self.compiled_song = song;
-        self.song_error = None;
-        Ok(())
+        self.publish_prepared_candidate(project, song, None)
     }
 
     pub fn set_play_mode(
@@ -2260,20 +2285,25 @@ impl Session {
         let mut candidate = self.project.clone();
         candidate.channels.remove(index);
         candidate.patterns = patterns;
-        let song = self.admit(&candidate)?;
-        let mut timeline = Self::timeline(&candidate, song.clone());
-        timeline.remove_channel = Some(ChannelId(channel));
-        lock(&self.controller).set_timeline(timeline)?;
+        candidate
+            .mixer
+            .sources
+            .retain(|a| a.source != crate::mixer::SourceKey::Channel(channel));
+        candidate.mixer.refresh_mode();
+        let mut files = self.files.clone();
+        let mut decoded = self.decoded.clone();
+        files.remove(&channel);
+        decoded.remove(&channel);
+        // Structural deletion has no inverse. Remove its references from other steps
+        // before dropping the channel, so unrelated gestures still work.
+        let mut histories = self.staged_histories();
+        histories.forget_channel(&self.project, channel);
+        self.admit_histories(&mut histories)?;
+        self.publish_media_candidate(&candidate, &files, &decoded)?;
         self.project = candidate;
-        self.compiled_song = song;
-        self.song_error = None;
-        self.files.remove(&channel);
-        self.decoded.remove(&channel);
-        // Undo cannot bring a channel back (structural undo is M6), nor its notes.
-        self.history.clear();
-        self.pattern_histories.clear();
-        self.arrangement_history.clear();
-        self.trim_history = Default::default();
+        self.files = files;
+        self.decoded = decoded;
+        self.install_histories(histories);
         Ok(())
     }
 
@@ -2365,29 +2395,15 @@ impl Session {
             solo: false,
             choke: 0,
         };
-        candidate.channels.push(channel.clone());
-        let mut candidate_files = self.files.clone();
-        candidate_files.insert(id, file.clone());
-        self.media_budget
-            .original(&file.bytes)
-            .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
-        self.media_budget
-            .sample(&sample)
-            .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
-        crate::validate_save(&candidate, &candidate_files).map_err(SessionError::Save)?;
-        if let Some(validate) = &self.precommit {
-            validate(&candidate).map_err(SessionError::InvalidValue)?;
-        }
-        self.prepare_song(&candidate)?;
-        lock(&self.controller).add_channel(ChannelSetup::sampler(
-            ChannelId(id),
-            Some(Arc::clone(&sample)),
-            sampler_values(&channel),
-            ChannelMix::default(),
-        ))?;
+        candidate.channels.push(channel);
+        let mut files = self.files.clone();
+        let mut decoded = self.decoded.clone();
+        files.insert(id, file);
+        decoded.insert(id, sample);
+        self.publish_media_candidate(&candidate, &files, &decoded)?;
         self.project = candidate;
-        self.files.insert(id, file);
-        self.decoded.insert(id, sample);
+        self.files = files;
+        self.decoded = decoded;
         self.changed(true, now);
         Ok(self.view())
     }
@@ -2430,13 +2446,8 @@ impl Session {
             solo: false,
             choke: 0,
         };
-        candidate.channels.push(channel.clone());
-        self.admit(&candidate)?;
-        lock(&self.controller).add_channel(ChannelSetup::synth(
-            ChannelId(id),
-            synth_values(&channel),
-            ChannelMix::default(),
-        ))?;
+        candidate.channels.push(channel);
+        self.publish_candidate(&candidate)?;
         self.project = candidate;
         self.changed(true, now);
         Ok(self.view())
@@ -2975,10 +2986,13 @@ impl Session {
     ) -> Result<(), SessionError> {
         // Before anything changes: the generic song fallback below must never take a mixer
         // the engine cannot play and open it dry.
-        crate::mixer::require_runtime_support(&project).map_err(mixer_error)?;
+        let mut state = engine_state(&project, &decoded).map_err(mixer_error)?;
+        state
+            .mix
+            .check_sample_rate(lock(&self.controller).sample_rate())
+            .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
         self.settle_recording()?;
         self.admit_media(&files, &decoded)?;
-        let mut state = engine_state(&project, &decoded).map_err(mixer_error)?;
         let (song, error) =
             match crate::compile_song::compile_song(&project, &decoded, None, self.song_note_limit)
             {
@@ -3544,6 +3558,7 @@ mod release_progress_tests {
 }
 
 mod media;
+mod mixer;
 pub use media::{MediaIntent, MediaTarget};
 
 pub mod sampler_trim;

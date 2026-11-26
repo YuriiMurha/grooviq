@@ -1,4 +1,5 @@
 //! Retained changed entities only; immutable curves share allocation ownership with live data.
+use crate::mixer::{Assignment, Mixer, Mode, Send, Sidechain, SourceKey, Track};
 use crate::*;
 use std::collections::HashMap;
 
@@ -29,9 +30,14 @@ pub(crate) struct Change {
     pub assets: Vec<Delta<AudioAsset>>,
     pub media: Vec<(MediaVersion, MediaVersion)>,
     pub region: Option<(Option<LoopRegion>, Option<LoopRegion>)>,
+    pub mixer: Option<Box<MixerChange>>,
     pub order: u64,
 }
-fn diff<T: Clone + PartialEq>(a: &[T], b: &[T], id: impl Fn(&T) -> u32) -> Vec<Delta<T>> {
+fn diff<T: Clone + PartialEq, K: Copy + Ord + std::hash::Hash>(
+    a: &[T],
+    b: &[T],
+    id: impl Fn(&T) -> K,
+) -> Vec<Delta<T>> {
     let old: HashMap<_, _> = a.iter().enumerate().map(|(i, x)| (id(x), (i, x))).collect();
     let new: HashMap<_, _> = b.iter().enumerate().map(|(i, x)| (id(x), (i, x))).collect();
     let mut keys: Vec<_> = old.keys().chain(new.keys()).copied().collect();
@@ -52,7 +58,12 @@ fn diff<T: Clone + PartialEq>(a: &[T], b: &[T], id: impl Fn(&T) -> u32) -> Vec<D
         })
         .collect()
 }
-fn apply<T: Clone>(list: &mut Vec<T>, deltas: &[Delta<T>], undo: bool, id: impl Fn(&T) -> u32) {
+fn apply<T: Clone, K: PartialEq>(
+    list: &mut Vec<T>,
+    deltas: &[Delta<T>],
+    undo: bool,
+    id: impl Fn(&T) -> K,
+) {
     let mut insert = Vec::new();
     for d in deltas {
         let (take, put) = if undo {
@@ -72,6 +83,95 @@ fn apply<T: Clone>(list: &mut Vec<T>, deltas: &[Delta<T>], undo: bool, id: impl 
         list.insert(i.min(list.len()), x);
     }
 }
+#[derive(Clone, Debug)]
+pub(crate) struct MixerChange {
+    tracks: Vec<Delta<Track>>,
+    sends: Vec<Delta<Send>>,
+    sidechains: Vec<Delta<Sidechain>>,
+    sources: Vec<Delta<Assignment>>,
+    mode: Option<(Mode, Mode)>,
+    recheck_mode: bool,
+}
+
+fn sidechain_id(s: &Sidechain) -> (u32, u32, bool) {
+    (s.from, s.to, s.tap == crate::mixer::Tap::Post)
+}
+
+impl MixerChange {
+    fn between(before: &Mixer, after: &Mixer) -> Option<Box<Self>> {
+        if before == after {
+            return None;
+        }
+        let change = Self {
+            tracks: diff(&before.tracks, &after.tracks, |t| t.id),
+            sends: diff(&before.sends, &after.sends, |s| s.id),
+            sidechains: diff(&before.sidechains, &after.sidechains, sidechain_id),
+            sources: diff(&before.sources, &after.sources, |a| a.source),
+            mode: (before.mode != after.mode).then_some((before.mode, after.mode)),
+            recheck_mode: false,
+        };
+        (!change.is_empty()).then(|| Box::new(change))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.tracks.is_empty()
+            && self.sends.is_empty()
+            && self.sidechains.is_empty()
+            && self.sources.is_empty()
+            && self.mode.is_none()
+    }
+
+    fn apply(&self, mixer: &mut Mixer, undo: bool) {
+        apply(&mut mixer.tracks, &self.tracks, undo, |t| t.id);
+        apply(&mut mixer.sends, &self.sends, undo, |s| s.id);
+        apply(&mut mixer.sidechains, &self.sidechains, undo, sidechain_id);
+        apply(&mut mixer.sources, &self.sources, undo, |a| a.source);
+        if self.recheck_mode {
+            mixer.refresh_mode();
+        } else if let Some((before, after)) = self.mode {
+            mixer.mode = if undo { before } else { after };
+        }
+        // Allocation counters are taken from the current project and never part of an inverse.
+    }
+
+    fn forget_channel(&mut self, channel: u32) {
+        self.sources.retain(|d| {
+            d.before
+                .iter()
+                .chain(&d.after)
+                .all(|(_, a)| a.source != SourceKey::Channel(channel))
+        });
+        self.sources.shrink_to_fit();
+        // A removed assignment may have been the last difference from LegacyDirect
+        // in an older project. Recompute the resulting mode as history crosses it.
+        self.mode = None;
+        self.recheck_mode = true;
+    }
+
+    fn bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<Self>()
+            + self.tracks.capacity() * std::mem::size_of::<Delta<Track>>()
+            + self.sends.capacity() * std::mem::size_of::<Delta<Send>>()
+            + self.sidechains.capacity() * std::mem::size_of::<Delta<Sidechain>>()
+            + self.sources.capacity() * std::mem::size_of::<Delta<Assignment>>();
+        for (_, track) in self
+            .tracks
+            .iter()
+            .flat_map(|d| [&d.before, &d.after])
+            .flatten()
+        {
+            bytes += track.name.capacity()
+                + track.inserts.capacity() * std::mem::size_of::<crate::mixer::Insert>();
+            for insert in &track.inserts {
+                bytes += insert.device.capacity()
+                    + insert.params.capacity() * std::mem::size_of::<f32>()
+                    + insert.preset.as_ref().map_or(0, String::capacity);
+            }
+        }
+        bytes
+    }
+}
+
 impl Change {
     pub fn between(a: &Project, b: &Project) -> Self {
         Self {
@@ -90,6 +190,7 @@ impl Change {
                     b.arrangement.loop_region.clone(),
                 )
             }),
+            mixer: MixerChange::between(&a.mixer, &b.mixer),
             order: crate::undo::next_order(),
         }
     }
@@ -100,10 +201,54 @@ impl Change {
         apply(&mut p.arrangement.clips, &self.clips, undo, |c| c.id);
         apply(&mut p.arrangement.tracks, &self.tracks, undo, |c| c.id);
         apply(&mut p.patterns, &self.patterns, undo, |p| p.id);
+        if let Some(mixer) = &self.mixer {
+            mixer.apply(&mut p.mixer, undo);
+        }
         if let Some((a, b)) = &self.region {
             p.arrangement.loop_region = if undo { a.clone() } else { b.clone() };
         }
     }
+    fn forget_channel(&mut self, channel: u32) -> bool {
+        for d in &mut self.clips {
+            for version in [&mut d.before, &mut d.after] {
+                if version.as_ref().is_some_and(|(_, clip)| {
+                    matches!(&clip.content, ClipContent::Automation { target, .. }
+                    if match target {
+                        AutomationTarget::ChannelVolume { channel: id }
+                        | AutomationTarget::ChannelPan { channel: id }
+                        | AutomationTarget::InstrumentParam { channel: id, .. } => *id == channel,
+                    })
+                }) {
+                    *version = None;
+                }
+            }
+        }
+        self.clips
+            .retain(|d| d.before.is_some() || d.after.is_some());
+        self.clips.shrink_to_fit();
+
+        for d in &mut self.patterns {
+            for (_, p) in [&mut d.before, &mut d.after].into_iter().flatten() {
+                p.notes.retain(|note| note.channel != channel);
+                p.notes.shrink_to_fit();
+            }
+        }
+
+        if let Some(mixer) = &mut self.mixer {
+            mixer.forget_channel(channel);
+            if mixer.is_empty() {
+                self.mixer = None;
+            }
+        }
+        !self.clips.is_empty()
+            || !self.tracks.is_empty()
+            || !self.patterns.is_empty()
+            || !self.assets.is_empty()
+            || !self.media.is_empty()
+            || self.region.is_some()
+            || self.mixer.is_some()
+    }
+
     pub fn notes(&self) -> usize {
         self.patterns
             .iter()
@@ -114,6 +259,7 @@ impl Change {
     }
     pub fn bytes(&self, curves: &mut HashMap<usize, usize>) -> usize {
         let mut n = std::mem::size_of::<Self>()
+            + self.mixer.as_deref().map_or(0, MixerChange::bytes)
             + self.assets.capacity() * std::mem::size_of::<Delta<AudioAsset>>()
             + self.media.capacity() * std::mem::size_of::<(MediaVersion, MediaVersion)>();
         for (_, a) in self
@@ -209,6 +355,34 @@ pub(crate) struct Histories {
     pub protected: std::collections::HashSet<u64>,
 }
 impl Histories {
+    pub fn forget_channel(&mut self, project: &Project, channel: u32) {
+        let notes = |pattern| {
+            project
+                .patterns
+                .iter()
+                .find(|p| p.id == pattern)
+                .map_or(&[][..], |p| p.notes.as_slice())
+        };
+        self.current
+            .forget_channel(channel, notes(project.current_pattern));
+        for (&id, history) in &mut self.patterns {
+            history.forget_channel(channel, notes(id));
+        }
+        self.patterns.retain(|_, h| h.can_undo() || h.can_redo());
+        self.arrangement
+            .undo
+            .retain_mut(|step| step.forget_channel(channel));
+        self.arrangement
+            .redo
+            .retain_mut(|step| step.forget_channel(channel));
+        self.arrangement.undo.shrink_to_fit();
+        self.arrangement.redo.shrink_to_fit();
+        self.trim.undo.retain(|step| step.channel != channel);
+        self.trim.redo.retain(|step| step.channel != channel);
+        self.trim.undo.shrink_to_fit();
+        self.trim.redo.shrink_to_fit();
+    }
+
     pub fn clear_redo(&mut self) {
         self.current.clear_redo();
         for h in self.patterns.values_mut() {
