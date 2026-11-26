@@ -1492,11 +1492,28 @@ impl Session {
             self.settle_recording()?;
             return Ok(self.patterns());
         }
-        let invalidates_arrangement_history = matches!(
-            edit,
-            crate::pattern_edit::PatternEdit::Delete { .. }
-                | crate::pattern_edit::PatternEdit::MakeUnique { .. }
-        );
+        use crate::pattern_edit::PatternEdit;
+        let invalidates_arrangement_history = match &edit {
+            PatternEdit::Delete { pattern } => self
+                .project
+                .patterns
+                .iter()
+                .position(|p| p.id == *pattern)
+                .map(|index| (*pattern, Some(index))),
+            PatternEdit::MakeUnique { clip } => {
+                self.project
+                    .arrangement
+                    .clips
+                    .iter()
+                    .find_map(|c| match c.content {
+                        crate::ClipContent::Pattern { pattern, .. } if c.id == *clip => {
+                            Some((pattern, None))
+                        }
+                        _ => None,
+                    })
+            }
+            _ => None,
+        };
         let mut candidate = self.project.clone();
         crate::pattern_edit::apply(&mut candidate, edit).map_err(SessionError::Pattern)?;
         if candidate == self.project {
@@ -1534,8 +1551,12 @@ impl Session {
         self.pattern_histories
             .retain(|id, _| candidate.patterns.iter().any(|p| p.id == *id));
         self.project = candidate;
-        if invalidates_arrangement_history {
-            self.arrangement_history.clear();
+        if let Some((pattern, deleted_index)) = invalidates_arrangement_history {
+            self.arrangement_history.forget_pattern(
+                pattern,
+                deleted_index,
+                &mut self.pattern_note_floors,
+            );
             self.trim_history = Default::default();
         }
         self.patterns_revision += 1;

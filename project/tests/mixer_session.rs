@@ -876,10 +876,10 @@ fn promotion_after_legacy_removal_waits_for_fade_collection() {
 }
 
 #[test]
-fn structural_pattern_edit_clears_mixer_undo_and_redo_without_changing_the_mix() {
+fn structural_pattern_edit_preserves_interleaved_mixer_undo_and_redo() {
     use grooviq_project::{arrangement_edit::HistoryEffect, pattern_edit::PatternEdit};
     for make_unique in [false, true] {
-        let (c, _p) = engine::engine(engine::EngineConfig {
+        let (c, _processor) = engine::engine(engine::EngineConfig {
             sample_rate: 48_000.0,
         });
         let mut session = Session::new(Arc::new(Mutex::new(c)));
@@ -893,56 +893,84 @@ fn structural_pattern_edit_clears_mixer_undo_and_redo_without_changing_the_mix()
             s.edit_patterns(v.generation, v.revision, edit, Instant::now())
                 .unwrap()
         };
-        let structural = if make_unique {
-            let ack = arrangement(
-                &mut session,
-                vec![ArrangementEdit::CreateClip {
-                    track: 2,
-                    name: "Pattern".into(),
-                    start_tick: 0,
-                    muted: false,
-                    content: ClipContent::Pattern {
-                        pattern: 0,
-                        offset_tick: 0,
-                        length_ticks: 960,
-                    },
+        let set_pan = |s: &mut Session, pan| {
+            mixer(
+                s,
+                vec![Op::SetFader {
+                    track: IdRef::Id(0),
+                    level: Level::Db(-6.0),
+                    pan,
                 }],
             );
-            PatternEdit::MakeUnique {
-                clip: ack.created_ids[0],
-            }
+        };
+        let pan = |s: &Session| s.project().mixer.tracks[0].pan;
+        let pattern = if make_unique {
+            0
         } else {
-            let v = edit(
+            edit(
                 &mut session,
                 PatternEdit::Create {
                     name: "Spare".into(),
                 },
-            );
-            PatternEdit::Delete {
-                pattern: v.patterns[1].id,
-            }
+            )
+            .patterns[1]
+                .id
         };
-        mixer(
+        set_pan(&mut session, -0.5);
+        let clip = arrangement(
             &mut session,
-            vec![Op::CreateTrack {
-                name: "Bus".into(),
-                output: IdRef::Id(0),
+            vec![ArrangementEdit::CreateClip {
+                track: 2,
+                name: "Pattern".into(),
+                start_tick: 0,
+                muted: false,
+                content: ClipContent::Pattern {
+                    pattern,
+                    offset_tick: 0,
+                    length_ticks: 960,
+                },
             }],
-        );
-        mixer(
-            &mut session,
-            vec![Op::SetFader {
-                track: IdRef::Id(1),
-                level: Level::Silence,
-                pan: 1.0,
-            }],
-        );
+        )
+        .created_ids[0];
+        set_pan(&mut session, 0.5);
+        let structural = if make_unique {
+            arrangement(
+                &mut session,
+                vec![ArrangementEdit::Move {
+                    clip,
+                    track: 2,
+                    start_tick: 960,
+                }],
+            );
+            history(&mut session, true);
+            PatternEdit::MakeUnique { clip }
+        } else {
+            arrangement(&mut session, vec![ArrangementEdit::DeleteClip { clip }]);
+            history(&mut session, true);
+            PatternEdit::Delete { pattern }
+        };
+        // Leave the second fader in redo. In the Delete case the clip must be
+        // absent, so undo its creation and put that step in redo as well.
         history(&mut session, true);
-        let before = session.project().mixer.clone();
+        if !make_unique {
+            history(&mut session, true);
+        }
+        assert_eq!(pan(&session), -0.5);
         edit(&mut session, structural);
+        let patterns = session.project().patterns.clone();
+        let arrangement = session.project().arrangement.clone();
+        assert_eq!(session.history_usage().0, 2);
+
+        history(&mut session, true);
+        assert_eq!(pan(&session), 0.0);
         assert!(matches!(history(&mut session, true), HistoryEffect::Empty));
+        history(&mut session, false);
+        assert_eq!(pan(&session), -0.5);
+        history(&mut session, false);
+        assert_eq!(pan(&session), 0.5);
         assert!(matches!(history(&mut session, false), HistoryEffect::Empty));
-        assert_eq!(session.project().mixer, before);
+        assert_eq!(session.project().patterns, patterns);
+        assert_eq!(session.project().arrangement, arrangement);
     }
 }
 
