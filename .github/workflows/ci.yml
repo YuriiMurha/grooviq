@@ -66,11 +66,45 @@ jobs:
         shell: bash
         run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
       - run: rustup toolchain install
+      - name: Create Windows Dev Drive
+        if: runner.os == 'Windows'
+        uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
+        with:
+          drive-size: 32GB
+          drive-path: ${{ runner.temp }}/grooviq-dev-drive.vhdx
+      # Keep Cargo and rust-cache on the workspace-relative target path.
+      - name: Link the Cargo target to the Windows Dev Drive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:DEV_DRIVE -notmatch '^[A-Za-z]:$') {
+            throw "Expected a Dev Drive letter, got '$env:DEV_DRIVE'"
+          }
+          $driveTarget = "$env:DEV_DRIVE\target"
+          New-Item -ItemType Directory -Path $driveTarget | Out-Null
+          New-Item -ItemType Junction -Path target -Target $driveTarget | Out-Null
+          node -e 'const fs = require("node:fs");
+            const resolved = fs.realpathSync("target");
+            if (resolved !== fs.realpathSync(process.env.DEV_DRIVE + "/target")) throw new Error(resolved);
+            const entries = fs.readdirSync("target");
+            console.log("Node read target via junction:", resolved, "entries:", entries.length);'
       # The Actions cache is over its 10 GB limit, and PR copies evict main's caches.
       - uses: Swatinem/rust-cache@v2
+        id: rust-cache
         with:
-          shared-key: rust
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: ${{ runner.os == 'Windows' && 'rust-dev-drive' || 'rust' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || (runner.os == 'Windows' && github.head_ref == 'ci/694-dev-drive-retry') }}
+      - name: Verify restored Rust artifacts on the Windows Dev Drive
+        if: runner.os == 'Windows' && steps.rust-cache.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: >-
+          node -e 'const fs = require("node:fs");
+            const resolved = fs.realpathSync("target/debug/deps");
+            if (resolved !== fs.realpathSync(process.env.DEV_DRIVE + "/target/debug/deps")) throw new Error(resolved);
+            const libraries = fs.readdirSync(resolved).filter((file) => file.endsWith(".rlib"));
+            if (!libraries.length) throw new Error("Cache restored no Rust dependency libraries");
+            console.log("Restored Rust dependency libraries on Dev Drive:", libraries.length);'
       # `tauri-build` needs the built UI (`frontendDist`) to compile the app crate.
       - uses: actions/setup-node@v5
         with:
