@@ -1,5 +1,4 @@
 import { ListPicker } from "../layout/ListPicker";
-import { Icon } from "./icons";
 import { outputChoices, type MixerTrack } from "./mixerModel";
 import type { StripActions } from "./TrackStrip";
 
@@ -14,7 +13,7 @@ interface OutputChoiceProps {
 export function OutputChoice({ track, nodes, command, compact }: OutputChoiceProps) {
   const { id, name, outputId, pending } = track;
   const { options, label } = outputChoices(track.outputs, outputId, nodes);
-  const picker = (
+  return (
     <ListPicker
       className={compact ? "mx-route-choice" : undefined}
       label={compact ? `Main output for ${name}` : "Main output"}
@@ -25,5 +24,4 @@ export function OutputChoice({ track, nodes, command, compact }: OutputChoicePro
       onCommit={(outputId) => command({ type: "setOutput", nodeId: id, outputId })}
     />
   );
-  return compact ? <><Icon name="route" />{picker}</> : picker;
 }
