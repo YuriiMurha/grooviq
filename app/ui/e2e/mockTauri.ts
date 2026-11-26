@@ -100,6 +100,7 @@ export interface MockSeed {
   /** Native platform whose file-drop coordinates the fixture emits. */
   platform?: "macos" | "windows" | "linux";
   audioLog?: { id: number; atMs: number; level: "info" | "warn" | "error"; message: string }[];
+  outputName?: string;
   holdAudioLog?: boolean;
   holdProjectView?: boolean;
   /** Paths the mock's file system holds. */
@@ -158,7 +159,7 @@ export function installMockTauri(seed: MockSeed): void {
   const NOTES_MAGIC = 0x314e5147;
   const SILENT_OUTPUT = {
     id: "null",
-    name: "Silent (QA mode)",
+    name: seed.outputName ?? "Silent (QA mode)",
     kind: "headphones",
     isDefault: true,
     current: true,

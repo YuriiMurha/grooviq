@@ -1,12 +1,13 @@
 import { useCallback, useMemo, type CSSProperties, type KeyboardEvent } from "react";
 import { Knob } from "../devices/controls/Knob";
 import type { ParamControl } from "../devices/controls/gesture";
+import { ListPicker } from "../layout/ListPicker";
 import { Fader } from "./Fader";
 import { Icon } from "./icons";
-import { Options, OutputChoice } from "./OutputChoice";
+import { OutputChoice } from "./OutputChoice";
 import { UnsupportedButton } from "./UnsupportedButton";
 import {
-  availableSends, formatDb, formatPan, formatPercent, LEVEL, PAN, placeholderValue, SEND, unsupportedReason,
+  availableSends, formatDb, formatPan, formatPercent, LEVEL, PAN, SEND, unsupportedReason,
   type MixerCommand, type MixerGestures, type MixerProps, type MixerSend, type MixerTrack, type ParamTarget,
 } from "./mixerModel";
 
@@ -53,7 +54,6 @@ export function TrackStrip({ track, actions, nodes, unsupported, masterOutput, i
   const muteReason = unsupportedReason(unsupported, "mute");
   const soloReason = unsupportedReason(unsupported, "solo");
   const destinations = availableSends(track.sendDestinations, track.sends);
-  const addPlaceholder = placeholderValue(destinations);
 
   const onNameKey = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (actions.navigate(id, e.key)) e.preventDefault();
@@ -133,23 +133,16 @@ export function TrackStrip({ track, actions, nodes, unsupported, masterOutput, i
             ))}
             {track.sends.length === 0 && <p className="mx-mini">No sends</p>}
           </div>
-          <div className="mx-add-send-picker">
-            <select
-              className="mx-add-send"
-              aria-label={`Add send from ${name}`}
-              title={destinations.length ? "Add send" : "No destinations available"}
-              value={addPlaceholder}
-              disabled={pending || destinations.length === 0}
-              onChange={(e) => {
-                const destination = destinations.find((option) => option.id === e.currentTarget.value);
-                if (destination) actions.command({ type: "addSend", nodeId: id, destinationId: destination.id, pre: false, amount: 0 });
-              }}
-            >
-              <option value={addPlaceholder} disabled>Add send</option>
-              <Options options={destinations} />
-            </select>
-            <Icon name="chevron" />
-          </div>
+          <ListPicker
+            className="mx-add-send"
+            label={`Add send from ${name}`}
+            options={destinations}
+            value={null}
+            placeholder="Add send"
+            disabled={pending || destinations.length === 0}
+            reason={destinations.length === 0 ? "No destinations available" : undefined}
+            onCommit={(destinationId) => actions.command({ type: "addSend", nodeId: id, destinationId, pre: false, amount: 0 })}
+          />
         </section>
       )}
     </section>

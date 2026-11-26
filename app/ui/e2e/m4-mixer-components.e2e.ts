@@ -41,6 +41,26 @@ const strip = (page: Page, name: string) => page.getByRole("region", { name, exa
 const commits = (cmds: MixerCommand[]) => cmds.filter((c) => !(c.type === "param" && c.phase === "live"));
 const nodeOf = (c: MixerCommand) => (c.type === "param" ? c.target.nodeId : c.nodeId);
 
+async function openPicker(page: Page, trigger: Locator) {
+  await trigger.click();
+  const list = page.getByRole("listbox");
+  await expect(list).toBeVisible();
+  return list;
+}
+
+async function choose(page: Page, trigger: Locator, name: string) {
+  const list = await openPicker(page, trigger);
+  await list.getByRole("option", { name, exact: true }).click();
+}
+
+async function expectHighlight(list: Locator, name: string) {
+  const option = list.getByRole("option", { name, exact: true });
+  const optionId = await option.getAttribute("id");
+  if (!optionId) throw new Error(`Missing option id for ${name}`);
+  await expect(list).toHaveAttribute("aria-activedescendant", optionId);
+  await expect(list).toBeFocused();
+}
+
 async function center(el: Locator) {
   const box = (await el.boundingBox())!;
   return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
@@ -153,7 +173,7 @@ test("inserts: add, bypass, open, reorder and remove by slot id", async ({ fixtu
   const page = await fixture();
   await strip(page, "Bass").getByRole("button", { name: "Bass", exact: true }).click();
   const insp = inspector(page);
-  await insp.getByLabel("Insert chain").selectOption({ label: "Saturation" });
+  await choose(page, insp.getByRole("button", { name: "Insert chain" }), "Saturation");
   const chain = insp.getByRole("listitem");
   await expect(chain).toHaveText([/Fattener/, /Compressor/, /Saturation/]);
 
@@ -167,7 +187,9 @@ test("inserts: add, bypass, open, reorder and remove by slot id", async ({ fixtu
   await expect(insp.getByRole("button", { name: "Move Fattener earlier" })).toBeDisabled();
   await expect(insp.getByRole("button", { name: "Move Compressor later" })).toBeDisabled();
   // A detector-capable insert offers the host's sources: a detector input, not an audible send.
-  await insp.getByRole("listitem", { name: "Compressor" }).getByLabel("Sidechain input").selectOption({ label: "Kick" });
+  const detector = insp.getByRole("listitem", { name: "Compressor" }).getByRole("button", { name: "Sidechain input" });
+  await choose(page, detector, "Kick");
+  await choose(page, detector, "None");
   await insp.getByRole("button", { name: "Remove Fattener" }).click();
   await expect(chain).toHaveText([/Saturation/, /Compressor/]);
 
@@ -181,6 +203,7 @@ test("inserts: add, bypass, open, reorder and remove by slot id", async ({ fixtu
     { type: "moveInsert", nodeId: "n-bass", slotId: slot, beforeSlotId: compressor },
     { type: "openInsert", nodeId: "n-bass", slotId: slot },
     { type: "setDetector", nodeId: "n-bass", slotId: compressor, sourceId: "n-kick" },
+    { type: "setDetector", nodeId: "n-bass", slotId: compressor, sourceId: null },
     { type: "removeInsert", nodeId: "n-bass", slotId: expect.any(String) },
   ]);
   expect(new Set(cmds.map(nodeOf))).toEqual(new Set(["n-bass"]));
@@ -195,10 +218,15 @@ test("visible sends use host options and send their own pre/post, amount and rem
   await tap.click();
   await expect(tap).toHaveAttribute("aria-pressed", "true");
 
-  const add = snare.getByRole("combobox", { name: "Add send from Snare" });
-  await expect(add.getByRole("option", { name: "Room", exact: true })).toHaveCount(0);
-  await expect(add.getByRole("option", { name: "Echo", exact: true })).toHaveCount(1);
-  await add.selectOption({ label: "Echo" });
+  const add = snare.getByRole("button", { name: "Add send from Snare" });
+  const addBounds = (await add.boundingBox())!;
+  await page.setViewportSize({ width: 1280, height: Math.ceil(addBounds.y + addBounds.height + 8) });
+  const addList = await openPicker(page, add);
+  await expect(addList).toBeInViewport({ ratio: 1 });
+  const listBounds = (await addList.boundingBox())!;
+  expect(listBounds.y + listBounds.height).toBeLessThan((await add.boundingBox())!.y);
+  await expect(addList.getByRole("option")).toHaveText(["Echo"]);
+  await addList.getByRole("option", { name: "Echo", exact: true }).click();
   const echo = snare.getByRole("group", { name: "Send to Echo" });
   await expect(echo.getByRole("button", { name: "Pre-fader send to Echo" })).toHaveAttribute("aria-pressed", "false");
   const amount = echo.getByRole("slider", { name: "Send to Echo amount" });
@@ -225,20 +253,174 @@ test("visible sends use host options and send their own pre/post, amount and rem
 
 test("the strip and rack output pickers offer exactly the host's destinations", async ({ fixture }) => {
   const page = await fixture();
-  const rackOutput = inspector(page).getByLabel("Main output");
-
-  const snareOutput = strip(page, "Snare").getByRole("combobox", { name: "Main output for Snare" });
-  await expect(snareOutput.getByRole("option")).toHaveText(["Kit bus", "Music bus", "Master"]);
-  await expect(rackOutput.getByRole("option")).toHaveText(["Kit bus", "Music bus", "Master"]);
-  await expect(snareOutput).toHaveValue("n-drums");
-  await snareOutput.selectOption({ label: "Master" });
-  await expect(rackOutput).toHaveValue("n-master");
+  const rackOutput = inspector(page).getByRole("button", { name: "Main output" });
+  const snareOutput = strip(page, "Snare").getByRole("button", { name: "Main output for Snare" });
+  const stripList = await openPicker(page, snareOutput);
+  await expect(stripList.getByRole("option")).toHaveText(["Kit bus", "Music bus", "Master"]);
+  await expect(stripList.getByRole("option", { selected: true })).toHaveText("Kit bus");
+  const rackList = await openPicker(page, rackOutput);
+  await expect(rackList.getByRole("option")).toHaveText(["Kit bus", "Music bus", "Master"]);
+  await choose(page, snareOutput, "Master");
+  await expect(rackOutput).toHaveText("Master");
   expect(await log(page)).toEqual([{ type: "setOutput", nodeId: "n-snare", outputId: "n-master" }]);
 
   const room = strip(page, "Room");
   await room.getByRole("button", { name: "Room", exact: true }).click();
-  await expect(room.getByRole("combobox", { name: "Main output for Room" }).getByRole("option")).toHaveText(["Master"]);
-  await expect(rackOutput.getByRole("option")).toHaveText(["Master"]);
+  const roomOutput = room.getByRole("button", { name: "Main output for Room" });
+  await expect((await openPicker(page, roomOutput)).getByRole("option")).toHaveText(["Master"]);
+  await expect((await openPicker(page, rackOutput)).getByRole("option")).toHaveText(["Master"]);
+});
+
+test("ListPicker arrows send zero commands, then Enter or click commits exactly once", async ({ fixture }) => {
+  const page = await fixture();
+  const trigger = strip(page, "Snare").getByRole("button", { name: "Main output for Snare" });
+  const list = page.getByRole("listbox", { name: "Main output for Snare" });
+  await expect(trigger).toHaveAccessibleName(/Main output for Snare.*Kit bus/);
+  await trigger.press("ArrowDown");
+  await expectHighlight(list, "Kit bus");
+  for (const [key, name] of [["ArrowDown", "Music bus"], ["ArrowUp", "Kit bus"], ["End", "Master"]]) {
+    await page.keyboard.press(key);
+    expect(await log(page), key).toEqual([]);
+    await expectHighlight(list, name);
+  }
+  await page.keyboard.press("Enter");
+  await expect(list).toBeHidden();
+  const routed = { type: "setOutput", nodeId: "n-snare", outputId: "n-master" };
+  expect(await log(page)).toEqual([routed]);
+  await expect(trigger).toHaveAccessibleName(/Main output for Snare.*Master/);
+
+  await choose(page, trigger, "Master");
+  expect(await log(page)).toEqual([routed]);
+  await choose(page, trigger, "Music bus");
+  expect(await log(page)).toEqual([routed, { ...routed, outputId: "n-music" }]);
+});
+
+test("ListPicker pointer highlight becomes the Enter choice without a command on hover", async ({ fixture }) => {
+  const page = await fixture();
+  const trigger = strip(page, "Snare").getByRole("button", { name: "Main output for Snare" });
+  await trigger.press("Enter");
+  const list = page.getByRole("listbox", { name: "Main output for Snare" });
+  await page.keyboard.press("ArrowDown");
+  await expectHighlight(list, "Music bus");
+
+  await list.getByRole("option", { name: "Master" }).hover();
+  await expectHighlight(list, "Master");
+  expect(await log(page)).toEqual([]);
+  await page.keyboard.press("Enter");
+  await expect(list).toBeHidden();
+  expect(await log(page)).toEqual([{ type: "setOutput", nodeId: "n-snare", outputId: "n-master" }]);
+});
+
+test("ListPicker strip output displays the full Music bus name", async ({ fixture }) => {
+  const page = await fixture();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => document.fonts.ready);
+  const trigger = strip(page, "Snare").getByRole("button", { name: "Main output for Snare" });
+  await choose(page, trigger, "Music bus");
+  const value = trigger.getByText("Music bus", { exact: true });
+  await expect(value).toBeVisible();
+  await expect(trigger).toHaveAttribute("title", "Music bus");
+  const dimensions = await value.evaluate((element) => ({ scrollWidth: element.scrollWidth, clientWidth: element.clientWidth }));
+  expect(dimensions.scrollWidth, "Music bus must fit on the strip").toBeLessThanOrEqual(dimensions.clientWidth);
+});
+
+test("ListPicker Escape, Tab, focus leaving and outside click discard the highlight", async ({ fixture }) => {
+  const page = await fixture();
+  const trigger = inspector(page).getByRole("button", { name: "Main output" });
+  const next = inspector(page).getByRole("button", { name: "Insert chain" });
+  const list = page.getByRole("listbox", { name: "Main output" });
+  const open = async () => {
+    await trigger.press("Enter");
+    await page.keyboard.press("End");
+    await expectHighlight(list, "Master");
+  };
+
+  await open();
+  await page.keyboard.press("Escape");
+  expect(await log(page), "Escape").toEqual([]);
+  await expect(trigger).toBeFocused();
+  await expect(list).toBeHidden();
+
+  await open();
+  await page.keyboard.press("Tab");
+  expect(await log(page), "Tab").toEqual([]);
+  await expect(next).toBeFocused();
+  await expect(list).toBeHidden();
+
+  await open();
+  await next.focus();
+  expect(await log(page), "focus leaving").toEqual([]);
+  await expect(next).toBeFocused();
+  await expect(list).toBeHidden();
+
+  await open();
+  await inspector(page).getByRole("heading", { name: "Snare" }).click();
+  expect(await log(page), "outside click").toEqual([]);
+  await expect(list).toBeHidden();
+  await expect(trigger).toHaveText("Kit bus");
+});
+
+test("ListPicker disabled detector stays focusable and exposes its reason without a command", async ({ fixture }) => {
+  const page = await fixture("?unsupported=1");
+  const compressor = inspector(page).getByRole("listitem", { name: "Compressor" });
+  const trigger = compressor.getByRole("button", { name: "Sidechain input" });
+  const reason = "Detector selection is unavailable in this mixer host.";
+  await expect(trigger).toBeDisabled();
+  await expect(trigger).toHaveAccessibleDescription(reason);
+  await expect(compressor.getByText(reason).filter({ visible: true })).toBeVisible();
+  await compressor.getByRole("button", { name: "Remove Compressor" }).focus();
+  await page.keyboard.press("Tab");
+  await expect(trigger).toBeFocused();
+  for (const key of ["Enter", "Space", "ArrowDown", "ArrowUp"]) await page.keyboard.press(key);
+  await trigger.evaluate((element: HTMLButtonElement) => element.click());
+  await expect(page.getByRole("listbox")).toHaveCount(0);
+  expect(await log(page)).toEqual([]);
+});
+
+test("ListPicker closes when the host disables it and opens fresh when enabled", async ({ fixture }) => {
+  const page = await fixture();
+  const trigger = strip(page, "Snare").getByRole("button", { name: "Main output for Snare" });
+  const list = await openPicker(page, trigger);
+  await page.keyboard.press("End");
+  await page.evaluate(() => window.mixerFixture.setPending("n-snare", true));
+  await expect(list).toBeHidden();
+  await expect(trigger).toBeDisabled();
+  await expect(trigger).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(list).toBeHidden();
+  await page.evaluate(() => window.mixerFixture.setPending("n-snare", false));
+  await expect(trigger).toBeEnabled();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await trigger.press("ArrowUp");
+  await expectHighlight(list, "Kit bus");
+  expect(await log(page)).toEqual([]);
+});
+
+test("ListPicker uses listbox focus and skips disabled options in the provider-free gallery", async ({ page }) => {
+  await page.addInitScript(forbidAudio);
+  await page.goto("/gallery/index.html");
+  const trigger = page.getByRole("button", { name: "Gallery route" });
+  const count = page.getByLabel("Gallery route commits");
+  await expect(trigger).toHaveAccessibleName(/Gallery route.*Main/);
+  await expect(trigger).toHaveAttribute("aria-haspopup", "listbox");
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await trigger.press("Space");
+  const list = page.getByRole("listbox", { name: "Gallery route" });
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  const listId = await list.getAttribute("id");
+  if (!listId) throw new Error("Missing gallery listbox id");
+  await expect(trigger).toHaveAttribute("aria-controls", listId);
+  await expectHighlight(list, "Main");
+  await expect(list.getByRole("option", { name: "Cue" })).toBeDisabled();
+  await page.keyboard.press("ArrowDown");
+  await expectHighlight(list, "Headphones");
+  await expect(list.getByRole("option", { selected: true })).toHaveText("Main");
+  await expect(count).toHaveText("0");
+  await page.keyboard.press("Space");
+  await expect(count).toHaveText("1");
+  await expect(trigger).toHaveAccessibleName(/Gallery route.*Headphones/);
+  await expect(trigger).toBeFocused();
+  await expect(list).toBeHidden();
 });
 
 test("unsupported controls explain why and emit no command", async ({ fixture }) => {
@@ -257,7 +439,7 @@ test("unsupported controls explain why and emit no command", async ({ fixture })
     [mute, /Mute.*unavailable/],
     [snare.getByRole("button", { name: "Solo Snare" }), /Solo.*unavailable/],
     [inspector(page).getByRole("switch", { name: "On" }).first(), /Bypass.*unavailable/],
-    [inspector(page).getByRole("combobox", { name: "Sidechain input" }), /Detector.*unavailable/],
+    [inspector(page).getByRole("button", { name: "Sidechain input" }), /Detector.*unavailable/],
   ] as const;
   for (const [control] of controls) {
     await control.evaluate((el) => {
@@ -354,13 +536,13 @@ test("the master: pinned, output disabled, no sends", async ({ fixture }) => {
 test("a refused change keeps the supplied state, shows the host's error and sends nothing more", async ({ fixture }) => {
   const page = await fixture();
   await strip(page, "Keys").getByRole("button", { name: "Keys", exact: true }).click();
-  const output = inspector(page).getByLabel("Main output");
-  await expect(output).toHaveValue("n-music");
+  const output = inspector(page).getByRole("button", { name: "Main output" });
+  await expect(output).toHaveText("Music bus");
   await page.evaluate(() => window.mixerFixture.refuseNext("That route would feed back into Keys."));
   await clearLog(page);
-  await output.selectOption({ label: "Kit bus" });
+  await choose(page, output, "Kit bus");
   await expect(inspector(page).getByRole("status")).toHaveText("That route would feed back into Keys.");
-  await expect(output).toHaveValue("n-music");
+  await expect(output).toHaveText("Music bus");
 
   const fader = page.getByRole("slider", { name: "Keys level" });
   await page.evaluate(() => window.mixerFixture.refuseNext("The engine is busy."));
@@ -392,11 +574,11 @@ test("a pending track allows selection and insert opening while blocking edits",
   await expect(inspector(page).getByRole("heading", { name: "Kick" })).toBeVisible();
   await inspector(page).getByRole("button", { name: "Open EQ" }).click();
   await expect(page.getByText("Opened EQ on Kick")).toBeVisible();
-  await expect(inspector(page).getByLabel("Insert chain")).toBeDisabled();
+  await expect(inspector(page).getByRole("button", { name: "Insert chain" })).toBeDisabled();
   await clearLog(page);
   await expect(page.getByRole("button", { name: "Mute Kick" })).toBeDisabled();
-  await expect(strip(page, "Kick").getByRole("combobox", { name: "Main output for Kick" })).toBeDisabled();
-  await expect(strip(page, "Kick").getByRole("combobox", { name: "Add send from Kick" })).toBeDisabled();
+  await expect(strip(page, "Kick").getByRole("button", { name: "Main output for Kick" })).toBeDisabled();
+  await expect(strip(page, "Kick").getByRole("button", { name: "Add send from Kick" })).toBeDisabled();
   const fader = page.getByRole("slider", { name: "Kick level" });
   await fader.focus();
   await page.keyboard.press("End");

@@ -515,6 +515,11 @@ export function App() {
           </div>
         </header>
         <main className="stage">
+          {!view && session.initialLoad !== "settled" && (
+            <div className="stage-loading" role="status">
+              {session.initialLoad === "slow" ? "Loading project…" : null}
+            </div>
+          )}
           {view && <Workspace picker={<PickerRail key={view.generation} picker={patterns} />} playlist={<Playlist rulerPosition={rulerPosition} model={playlist} patterns={patterns.state.canonical} bpm={view.bpm} beats={view.timeSignature.beats} unit={view.timeSignature.unit} notifyAudioDrop={message => toast(message, false)} />} latest={latest} subscribePlaybackStart={subscribePlaybackStart} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
         </main>
         <HintBar />

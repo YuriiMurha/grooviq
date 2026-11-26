@@ -281,6 +281,12 @@ input[type="checkbox"] {
   overflow: hidden;
 }
 
+.stage-loading {
+  margin: auto;
+  color: var(--text);
+  font-size: 14px;
+}
+
 .workspace {
   flex: 1;
   min-height: 0;
@@ -425,7 +431,7 @@ input[type="checkbox"] {
   background: var(--well);
   border-right: 1px solid var(--line);
   color: var(--faint);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   text-align: right;
 }
@@ -481,7 +487,7 @@ input[type="checkbox"] {
   background: var(--roll-key-white);
   border-bottom: 1px solid rgba(14, 17, 39, 0.25);
   color: var(--bg);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1;
 }
@@ -1345,6 +1351,15 @@ label.field {
 
   .toolbar-audio {
     gap: 8px;
+  }
+
+  /* Leave room for the project and its save state even with a long output name. */
+  .toolbar-audio .chip-name {
+    max-width: 110px;
+  }
+
+  .toolbar-audio .meter {
+    width: 56px;
   }
 
   .tone {
