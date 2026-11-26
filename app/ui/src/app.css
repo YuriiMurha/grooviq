@@ -110,9 +110,9 @@ input {
 }
 
 .tone[aria-pressed="true"] {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
+  background: var(--play);
+  border-color: var(--play);
+  color: var(--on-play);
   font-weight: 700;
 }
 
