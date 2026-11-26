@@ -117,7 +117,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
         with:
-          shared-key: ${{ runner.os == 'Windows' && 'rust-dev-drive-child' || 'rust' }}
+          shared-key: ${{ runner.os == 'Windows' && 'rust-dev-drive-v2' || 'rust' }}
           save-if: ${{ github.ref == 'refs/heads/main' || (runner.os == 'Windows' && github.head_ref == 'ci/694-dev-drive-retry') }}
           workspaces: ${{ runner.os == 'Windows' && '. -> target/cargo' || '.' }}
       - name: Verify restored Rust artifacts on the Windows Dev Drive
@@ -125,11 +125,11 @@ jobs:
         shell: pwsh
         run: >-
           node -e 'const fs = require("node:fs");
-            const resolved = fs.realpathSync("target/cargo/debug/deps");
-            if (resolved !== fs.realpathSync(process.env.DEV_DRIVE + "/target/cargo/debug/deps")) throw new Error(resolved);
-            const libraries = fs.readdirSync(resolved).filter((file) => file.endsWith(".rlib"));
+            const resolved = fs.realpathSync("target/cargo/debug/build");
+            if (resolved !== fs.realpathSync(process.env.DEV_DRIVE + "/target/cargo/debug/build")) throw new Error(resolved);
+            const libraries = fs.readdirSync(resolved, { recursive: true }).filter((file) => file.endsWith(".rlib"));
             if (!libraries.length) throw new Error("Cache restored no Rust dependency libraries");
-            console.log("Restored Rust dependency libraries on Dev Drive:", libraries.length);'
+            console.log("Restored Rust dependency libraries on Dev Drive:", libraries.length, "under", resolved, "for example", libraries[0]);'
       # `tauri-build` needs the built UI (`frontendDist`) to compile the app crate.
       - uses: actions/setup-node@v5
         with:
