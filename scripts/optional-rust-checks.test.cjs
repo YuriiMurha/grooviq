@@ -86,6 +86,7 @@ const pathCases = [
   ["dsp/benches/kernels.rs", true, true],
   ["project/src/lib.rs", false, true],
   ["app/src-tauri/src/lib.rs", false, false],
+  ["app/src-tauri2/lib.rs", true, true],
   ["tests/golden/samples/kick.wav", false, true],
   ["app/ui/src/App.tsx", false, false],
   ["docs/spec.md", false, false],
