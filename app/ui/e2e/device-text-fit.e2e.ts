@@ -42,10 +42,12 @@ async function openEditor(page: Page, name: string): Promise<Locator> {
   return dialog;
 }
 
-async function textVisibilityIssues(dialog: Locator): Promise<string[]> {
+async function inspectTextVisibility(dialog: Locator) {
   return dialog.evaluate((root) => {
     const tolerance = 1;
     const issues: string[] = [];
+    let textCount = 0;
+    let pointCount = 0;
     const describe = (el: Element) => {
       const param = el.closest("[data-param]");
       const classes = [...el.classList].map((name) => `.${name}`).join("");
@@ -69,6 +71,7 @@ async function textVisibilityIssues(dialog: Locator): Promise<string[]> {
       .map((el) => ({ el, box: el.getBoundingClientRect() }))
       .filter(({ box }) => box.width > 0 && box.height > 0);
     const checkVisibility = (el: Element, selector: string, rects: DOMRect[]) => {
+      textCount++;
       for (let bound: Element | null = el; bound && root.contains(bound); bound = bound.parentElement) {
         const css = getComputedStyle(bound);
         const mask = css.maskImage || css.getPropertyValue("-webkit-mask-image");
@@ -96,6 +99,7 @@ async function textVisibilityIssues(dialog: Locator): Promise<string[]> {
           const x = rect.left + rect.width * across;
           const y = rect.top + rect.height * down;
           let hit = document.elementFromPoint(x, y);
+          pointCount++;
           if (hit && !inEditor(hit)) hit = document.elementsFromPoint(x, y).find(inEditor) ?? null;
           if (!el.contains(hit)) occluders.add(hit);
         }
@@ -104,13 +108,13 @@ async function textVisibilityIssues(dialog: Locator): Promise<string[]> {
       for (const hit of occluders) issues.push(`${selector}: occluded by ${hit ? describe(hit) : "the viewport edge"}`);
     };
 
-    for (const el of root.querySelectorAll("*")) {
+    const checkText = (el: Element) => {
       const style = getComputedStyle(el);
-      if (style.visibility !== "visible" || el.getClientRects().length === 0) continue;
+      if (style.visibility !== "visible" || el.getClientRects().length === 0) return;
       const text = (el instanceof SVGTextElement ? el.textContent : [...el.childNodes]
         .filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(" "))
         ?.replace(/\s+/g, " ").trim();
-      if (!text) continue;
+      if (!text) return;
       const selector = `${describe(el)} ${JSON.stringify(text)}`;
 
       if (el instanceof SVGTextElement && el.ownerSVGElement) {
@@ -122,9 +126,9 @@ async function textVisibilityIssues(dialog: Locator): Promise<string[]> {
           issues.push(`${selector}: outside SVG (${spans(textBox, viewport)})`);
         }
         checkVisibility(el, selector, [textBox]);
-        continue;
+        return;
       }
-      if (!(el instanceof HTMLElement)) continue;
+      if (!(el instanceof HTMLElement)) return;
 
       const rects = [...el.childNodes].flatMap((node) => {
         if (node.nodeType !== Node.TEXT_NODE || !node.textContent?.trim()) return [];
@@ -133,7 +137,7 @@ async function textVisibilityIssues(dialog: Locator): Promise<string[]> {
         return [...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
       });
       // Closed <details> content can have a layout box in Chromium, with no rendered text rects.
-      if (rects.length === 0 || inClosedDetails(el)) continue;
+      if (rects.length === 0 || inClosedDetails(el)) return;
 
       const overflowsWidth = (rect: DOMRect, box: DOMRect) =>
         rect.left < box.left - tolerance || rect.right > box.right + tolerance;
@@ -175,13 +179,27 @@ async function textVisibilityIssues(dialog: Locator): Promise<string[]> {
           break;
         }
       }
+    };
+
+    // Decorative overlays can paint over captions even when pointer events pass through them.
+    const hitTestStyle = document.createElement("style");
+    hitTestStyle.textContent = "*, *::before, *::after { pointer-events: auto !important; }";
+    document.head.append(hitTestStyle);
+    try {
+      root.querySelectorAll("*").forEach(checkText);
+      return { issues, textCount, controlCount: controls.length, pointCount };
+    } finally {
+      hitTestStyle.remove();
     }
-    return issues;
   });
 }
 
 async function measure(dialog: Locator, state: string, findings: Set<string>) {
-  for (const issue of await textVisibilityIssues(dialog)) findings.add(`${state} | ${issue}`);
+  const { issues, textCount, controlCount, pointCount } = await inspectTextVisibility(dialog);
+  expect(textCount, `${state} | text elements measured`).toBeGreaterThan(0);
+  expect(controlCount, `${state} | interactive controls measured`).toBeGreaterThan(0);
+  expect(pointCount, `${state} | occlusion points sampled`).toBeGreaterThan(0);
+  for (const issue of issues) findings.add(`${state} | ${issue}`);
 }
 
 async function measureExtremes(dialog: Locator, state: string, findings: Set<string>) {
