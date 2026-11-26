@@ -3,8 +3,6 @@ import type { WaveformRequest } from "./waveformLevel";
 export type WaveformCacheKey = WaveformRequest & Readonly<{
   generation: number;
   asset: number;
-  /** Reuse the native request ID for repeat lookups of the same source and bucket. */
-  request: number;
 }>;
 
 export type WaveformPending<T> = Readonly<{
@@ -14,6 +12,7 @@ export type WaveformPending<T> = Readonly<{
 
 export type WaveformCache<T> = Readonly<{
   setGeneration(generation: number): void;
+  invalidateAsset(asset: number): void;
   get(key: WaveformCacheKey): T | undefined;
   /** Reserve a request slot. Settle even if the requesting view has gone away. */
   begin(key: WaveformCacheKey): WaveformPending<T> | null;
@@ -21,10 +20,12 @@ export type WaveformCache<T> = Readonly<{
 
 const MAX_ENTRIES = 64;
 const MAX_PENDING = 64;
-const SOURCE_REPLACED = "Waveform source replaced; reload";
+export function waveformSourceReplaced(error: unknown): boolean {
+  return (error instanceof Error ? error.message : error) === "Waveform source replaced; reload";
+}
 
-function cacheId({ generation, asset, request, start, end, bins }: WaveformCacheKey): string {
-  return `${generation}:${asset}:${request}:${start}:${end}:${bins}`;
+export function waveformKey({ generation, asset, start, end, bins }: WaveformCacheKey): string {
+  return `${generation}:${asset}:${start}:${end}:${bins}`;
 }
 
 export function createWaveformCache<T>(initialGeneration: number): WaveformCache<T> {
@@ -32,7 +33,14 @@ export function createWaveformCache<T>(initialGeneration: number): WaveformCache
   const entries = new Map<string, { asset: number; value: T }>();
   const pending = new Map<string, { asset: number; stale: boolean }>();
 
+  const invalidateAsset = (asset: number) => {
+    for (const [id, entry] of entries) if (entry.asset === asset) entries.delete(id);
+    // Keep reservations until the old requests settle.
+    for (const flight of pending.values()) if (flight.asset === asset) flight.stale = true;
+  };
+
   return {
+    invalidateAsset,
     setGeneration(next) {
       if (next === generation) return;
       generation = next;
@@ -41,7 +49,7 @@ export function createWaveformCache<T>(initialGeneration: number): WaveformCache
     },
     get(key) {
       if (key.generation !== generation) return undefined;
-      const id = cacheId(key);
+      const id = waveformKey(key);
       const entry = entries.get(id);
       if (!entry) return undefined;
       entries.delete(id);
@@ -50,7 +58,7 @@ export function createWaveformCache<T>(initialGeneration: number): WaveformCache
     },
     begin(key) {
       if (key.generation !== generation || pending.size >= MAX_PENDING) return null;
-      const id = cacheId(key);
+      const id = waveformKey(key);
       if (entries.has(id) || pending.has(id)) return null;
 
       const { asset } = key;
@@ -74,16 +82,7 @@ export function createWaveformCache<T>(initialGeneration: number): WaveformCache
         },
         reject(error) {
           if (!settle()) return false;
-          const message = error instanceof Error ? error.message : error;
-          if (message === SOURCE_REPLACED) {
-            for (const [entryId, entry] of entries) {
-              if (entry.asset === asset) entries.delete(entryId);
-            }
-            // Retain reservations until they settle so an invalidated request cannot overlap its retry.
-            for (const other of pending.values()) {
-              if (other.asset === asset) other.stale = true;
-            }
-          }
+          if (waveformSourceReplaced(error)) invalidateAsset(asset);
           return true;
         },
       };

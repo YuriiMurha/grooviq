@@ -56,7 +56,9 @@ export function arrangementEdit(stamp: ArrangementStamp, operations: readonly Ar
   return invoke<ArrangementReply>("arrangement_edit", { ...stamp, editsJson: encodeArrangementBatch(operations) });
 }
 export function arrangementHistory(stamp: ArrangementStamp, undo: boolean) {
-  validateStamp(stamp); return invoke<ProjectHistoryReply>("arrangement_history", { ...stamp, undo });
+  validateStamp(stamp);
+  const { generation, revision } = stamp;
+  return invoke<ProjectHistoryReply>("arrangement_history", { generation, revision, undo });
 }
 export function arrangementCurve(stamp: ArrangementStamp, clip: number) {
   validateStamp(stamp); return invoke<ArrangementStamp & { clip: number; points: readonly CurvePoint[] }>("arrangement_curve", { ...stamp, clip });

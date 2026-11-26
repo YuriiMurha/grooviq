@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { createWaveformCache, type WaveformCacheKey } from "./waveformCache";
 
-const key: WaveformCacheKey = { generation: 4, asset: 7, request: 99, start: 0, end: 1024, bins: 32 };
+const key: WaveformCacheKey = { generation: 4, asset: 7, start: 0, end: 1024, bins: 32 };
 const replaced = "Waveform source replaced; reload";
 
 it("looks up a completed waveform by all parts of its request key", () => {
@@ -10,7 +10,7 @@ it("looks up a completed waveform by all parts of its request key", () => {
   expect(cache.begin(key)?.resolve("peaks")).toBe(true);
   expect(cache.get({ ...key })).toBe("peaks");
   for (const other of [
-    { ...key, generation: 5 }, { ...key, asset: 6 }, { ...key, request: 100 },
+    { ...key, generation: 5 }, { ...key, asset: 6 },
     { ...key, start: 8 }, { ...key, end: 2048 }, { ...key, bins: 64 },
   ]) expect(cache.get(other)).toBeUndefined();
 });
@@ -42,7 +42,7 @@ it.each([replaced, new Error(replaced)])("invalidates only the replaced asset", 
   cache.begin(key)?.resolve("old");
   cache.begin(otherAsset)?.resolve("unrelated");
   const pending = cache.begin(pendingKey);
-  expect(cache.begin({ ...key, request: 100 })?.reject(error)).toBe(true);
+  expect(cache.begin({ ...key, end: 512 })?.reject(error)).toBe(true);
   expect(cache.get(key)).toBeUndefined();
   expect(cache.get(otherAsset)).toBe("unrelated");
   expect(cache.begin(pendingKey)).toBeNull();
@@ -64,13 +64,13 @@ it("ignores late replacement errors from a previous generation", () => {
 it("evicts the least recently used reply once the cache reaches its cap", () => {
   const cache = createWaveformCache<number>(4);
   for (let request = 0; request < 64; request++) {
-    expect(cache.begin({ ...key, request })?.resolve(request)).toBe(true);
+    expect(cache.begin({ ...key, start: request })?.resolve(request)).toBe(true);
   }
-  expect(cache.get({ ...key, request: 0 })).toBe(0);
-  cache.begin({ ...key, request: 64 })?.resolve(64);
-  expect(cache.get({ ...key, request: 0 })).toBe(0);
-  expect(cache.get({ ...key, request: 1 })).toBeUndefined();
-  expect(cache.get({ ...key, request: 64 })).toBe(64);
+  expect(cache.get({ ...key, start: 0 })).toBe(0);
+  cache.begin({ ...key, start: 64 })?.resolve(64);
+  expect(cache.get({ ...key, start: 0 })).toBe(0);
+  expect(cache.get({ ...key, start: 1 })).toBeUndefined();
+  expect(cache.get({ ...key, start: 64 })).toBe(64);
 });
 
 it("deduplicates in-flight work, then allows a retry after an ordinary failure", () => {
@@ -92,10 +92,10 @@ it("bounds outstanding work and admits a new request after one settles", () => {
   const cache = createWaveformCache<number>(4);
   const first = cache.begin(key);
   expect(first).not.toBeNull();
-  for (let request = 0; request < 63; request++) {
-    expect(cache.begin({ ...key, request })).not.toBeNull();
+  for (let request = 1; request < 64; request++) {
+    expect(cache.begin({ ...key, start: request })).not.toBeNull();
   }
-  const next = { ...key, request: 64 };
+  const next = { ...key, start: 64 };
   expect(cache.begin(next)).toBeNull();
   expect(first?.resolve(99)).toBe(true);
   expect(cache.begin(next)).not.toBeNull();
