@@ -89,16 +89,10 @@ test("commits each audio setting once, with one undo, and keeps the settings on 
   };
 
   await edit("gain", 2, async () => {
-    const box = await gain.boundingBox();
-    if (!box) throw new Error("Missing gain slider");
-    const y = box.y + box.height / 2;
-    await app.mouse.move(box.x + box.width / 2, y);
-    await app.mouse.down();
-    await app.mouse.move(box.x + box.width - 1, y, { steps: 5 });
+    await gain.press("End");
     expect(await calls()).toEqual(expected);
     await expect(gain).toHaveValue("2");
-    await app.mouse.move(box.x + box.width + 15, y - box.height);
-    await app.mouse.up();
+    await gain.press("Enter");
   });
   await edit("fadeIn", 44100, async () => {
     await fadeIn.press("End");
@@ -157,6 +151,24 @@ test("commits each audio setting once, with one undo, and keeps the settings on 
   await expect(fadeOut).toHaveValue("0");
   await expect(reverse).toHaveAttribute("aria-pressed", "true");
   expect(await calls()).toEqual(expected);
+});
+
+test("a pointer drag on Gain previews locally and commits once on release", async ({ app, mock, browserName }) => {
+  test.skip(browserName !== "chromium", "WebKit does not move a range input from synthesized mouse drags");
+  const { inspector } = await openInspector(app);
+  const gain = inspector.getByRole("slider", { name: "Gain", exact: true });
+  const edits = async () => (await mock.calls("arrangement_edit")).map(({ args }) => JSON.parse(String(args.editsJson)) as unknown);
+  const box = await gain.boundingBox();
+  if (!box) throw new Error("Missing gain slider");
+  const y = box.y + box.height / 2;
+  await app.mouse.move(box.x + box.width / 2, y);
+  await app.mouse.down();
+  await app.mouse.move(box.x + box.width - 1, y, { steps: 5 });
+  await expect(gain).toHaveValue("2");
+  expect(await edits()).toEqual([]);
+  await app.mouse.move(box.x + box.width + 15, y - box.height);
+  await app.mouse.up();
+  await expect.poll(edits).toEqual([[expect.objectContaining({ kind: "resize", content: expect.objectContaining({ gain: 2 }) })]]);
 });
 
 test("Escape discards a keyboard draft before Tab can commit it", async ({ app, mock }) => {
