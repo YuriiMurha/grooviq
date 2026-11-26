@@ -35,6 +35,8 @@ jobs:
       run: ${{ steps.select.outputs.result }}
     steps:
       - uses: actions/checkout@v5
+      - run: rustup toolchain install
+        timeout-minutes: 3
       - run: make optional-rust-policy-test
       - uses: actions/github-script@v8
         id: select

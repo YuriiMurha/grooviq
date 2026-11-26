@@ -1,10 +1,24 @@
 const { test } = require("node:test");
-const { join, resolve } = require("node:path");
+const { dirname, join, relative, resolve, sep } = require("node:path");
 const assert = require("node:assert/strict");
-const { loadPolicy, shouldRun } = require("./optional-rust-checks.cjs");
+const { readCargoMetadata, loadPolicy, shouldRun } = require("./optional-rust-checks.cjs");
 
-let policy;
-const load = () => policy ??= loadPolicy();
+const root = resolve("fake-workspace");
+const dep = (name, dir, kind = null) => ({ name, path: join(root, dir), kind });
+const pkg = (name, dir, dependencies = []) => ({
+  name, manifest_path: join(root, dir, "Cargo.toml"), dependencies,
+});
+const packages = [
+  pkg("grooviq-engine", "engine", [dep("dsp-alias", "dsp", "dev")]),
+  pkg("grooviq-dsp", "dsp", [dep("new-library", "tools/new-library", "build")]),
+  pkg("grooviq-golden", "tests/golden", [dep("grooviq-project", "project")]),
+  pkg("grooviq-project", "project", [dep("grooviq-engine", "engine")]),
+  pkg("new-library", "tools/new-library"),
+  pkg("grooviq-app", "app/src-tauri", [dep("grooviq-engine", "engine")]),
+];
+const fixture = { packages, workspace_root: root };
+const policy = loadPolicy(fixture);
+const load = () => policy;
 
 function request(workflow, files, overrides = {}) {
   const pullRequest = {
@@ -21,30 +35,34 @@ const file = filename => ({ filename, status: "modified" });
 const docs = [file("docs/a.md")];
 
 test("the current Cargo manifests define the optional input crates", () => {
-  const { inputs } = load();
-  assert.deepEqual([...inputs.rtsan].sort(), ["dsp", "engine"]);
-  assert.deepEqual([...inputs.perf].sort(), ["dsp", "engine", "project", "tests/golden"]);
+  const metadata = readCargoMetadata();
+  const { inputs } = loadPolicy();
+  const manifestDirs = new Map(metadata.packages.map(pkg => [pkg.name, dirname(pkg.manifest_path)]));
+  for (const [workflow, roots] of [
+    ["rtsan", ["grooviq-engine"]],
+    ["perf", ["grooviq-golden", "grooviq-dsp"]],
+  ]) {
+    // Expand all reachable manifests until another pass adds no directories.
+    const reachable = new Set(roots.map(name => manifestDirs.get(name)));
+    for (let size = 0; size < reachable.size;) {
+      size = reachable.size;
+      for (const pkg of metadata.packages.filter(pkg => reachable.has(manifestDirs.get(pkg.name)))) {
+        for (const dep of pkg.dependencies) {
+          if (dep.path) reachable.add(dep.path);
+        }
+      }
+    }
+    const dirs = new Set([...reachable].map(dir => relative(metadata.workspace_root, dir).split(sep).join("/")));
+    assert.deepEqual(inputs[workflow], dirs, workflow);
+  }
 });
 
 test("dependencies follow local paths transitively across aliases and target kinds", async () => {
-  const root = resolve("fake-workspace");
-  const dep = (name, dir, kind = null) => ({ name, path: join(root, dir), kind });
-  const pkg = (name, dir, dependencies = []) => ({
-    name, manifest_path: join(root, dir, "Cargo.toml"), dependencies,
-  });
-  const packages = [
-    pkg("grooviq-engine", "engine", [dep("dsp-alias", "dsp", "dev")]),
-    pkg("grooviq-golden", "tests/golden", [dep("grooviq-engine", "engine")]),
-    pkg("grooviq-dsp", "dsp", [dep("new-library", "tools/new-library", "build")]),
-    pkg("new-library", "tools/new-library"),
-    pkg("other", "app/src-tauri", [dep("grooviq-engine", "engine")]),
-  ];
   for (const workflow of ["rtsan", "perf"]) {
-    const load = () => loadPolicy({ packages, workspace_root: root });
-    assert.equal(await shouldRun(request(workflow, [file("tools/new-library/src/lib.rs")], { load })), true);
-    assert.equal(await shouldRun(request(workflow, [file("app/src-tauri/src/lib.rs")], { load })), false);
+    assert.equal(await shouldRun(request(workflow, [file("tools/new-library/src/lib.rs")])), true);
+    assert.equal(await shouldRun(request(workflow, [file("app/src-tauri/src/lib.rs")])), false);
     const incomplete = () => loadPolicy({
-      packages: packages.filter(pkg => pkg.name !== "new-library"), workspace_root: root,
+      ...fixture, packages: packages.filter(pkg => pkg.name !== "new-library"),
     });
     assert.equal(await shouldRun(request(workflow, docs, { load: incomplete })), true);
   }
@@ -85,7 +103,7 @@ const pathCases = [
     "Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml", ".cargo/config.toml",
     ".config/nextest.toml", "Makefile", "scripts/optional-rust-checks.cjs",
     "scripts/optional-rust-checks.test.cjs", "clippy.toml", "tests/fixtures/new.bin",
-    "future/input", "engine-other/src/lib.rs", ".github/actions/new/action.yml",
+    "future/input", "app/ui-kit/lib.rs", "docs2/build.rs", ".github/actions/new/action.yml",
   ].map(path => [path, true, true]),
 ];
 
@@ -99,7 +117,7 @@ for (const [column, workflow] of ["rtsan", "perf"].entries()) {
   test(`${workflow}: paginate all paths and read the current revision`, async () => {
     const files = Array.from({ length: 400 }, (_, i) => file(`app/ui/${i}.ts`));
     files.push(file("dsp/src/lib.rs"));
-    const args = request(workflow, files, { load: undefined });
+    const args = request(workflow, files);
     args.paginate = async (method, params) => {
       assert.equal(method, args.rest.pulls.listFiles);
       assert.deepEqual(params, { owner: "o", repo: "r", pull_number: 1, per_page: 100 });

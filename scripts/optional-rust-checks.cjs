@@ -27,14 +27,17 @@ const UNRELATED_FILES = new Set([
 const FILE_STATUSES = new Set(["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"]);
 const under = (path, dir) => path === dir || path.startsWith(`${dir}/`);
 
-function loadPolicy(metadata = JSON.parse(execFileSync("cargo", [
-  "metadata", "--no-deps", "--format-version", "1", "--locked", "--offline",
-], {
-  cwd: resolve(__dirname, ".."),
-  encoding: "utf8",
-  env: { ...process.env, PATH: [process.env.PATH, join(homedir(), ".cargo", "bin")].join(delimiter) },
-  timeout: 120_000,
-}))) {
+function readCargoMetadata() {
+  const output = execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1", "--locked", "--offline"], {
+    cwd: resolve(__dirname, ".."),
+    encoding: "utf8",
+    env: { ...process.env, PATH: [process.env.PATH, join(homedir(), ".cargo", "bin")].join(delimiter) },
+    timeout: 120_000,
+  });
+  return JSON.parse(output);
+}
+
+function loadPolicy(metadata = readCargoMetadata()) {
   const { packages, workspace_root: root } = metadata;
   const byPath = new Map(packages.map(pkg => [dirname(pkg.manifest_path), pkg]));
   const byName = new Map(packages.map(pkg => [pkg.name, pkg]));
@@ -102,4 +105,4 @@ async function shouldRun({ workflow, eventName, pullRequest, repo, rest, paginat
   }
 }
 
-module.exports = { loadPolicy, shouldRun };
+module.exports = { readCargoMetadata, loadPolicy, shouldRun };
