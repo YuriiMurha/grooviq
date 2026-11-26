@@ -43,6 +43,55 @@ fn sine(rate: f32, hz: f64, len: usize) -> Vec<f32> {
         .collect()
 }
 
+fn measure_tone(rate: f32, key: u8, source_hz: f64, output_hz: f64) -> [f64; 2] {
+    let mut s = sampler(SR, buf(rate, sine(rate, source_hz, 34_000)));
+    let (l, r) = render(&mut s, 4_080, &[on(0, key, 1.0)]);
+    [&l, &r].map(|x| {
+        // Skip the onset. The window holds a whole number of cycles at each probe frequency.
+        let window = &x[240..];
+        let (re, im) = window
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(re, im), (i, &x)| {
+                let phase = std::f64::consts::TAU * output_hz * i as f64 / SR as f64;
+                (
+                    re + x as f64 * libm::cos(phase),
+                    im + x as f64 * libm::sin(phase),
+                )
+            });
+        20.0 * libm::log10(2.0 * libm::hypot(re, im) / window.len() as f64)
+    })
+}
+
+#[test]
+fn large_pitch_ups_keep_the_upper_passband() {
+    let mut failures = Vec::new();
+    for (step, key, output_hz, max_loss) in [
+        (2.0, 72, 8_000.0, None),
+        (2.0, 72, 12_000.0, None),
+        (2.0, 72, 16_000.0, None),
+        (2.0, 72, 20_000.0, None),
+        (4.0, 84, 8_000.0, None),
+        (4.0, 84, 12_000.0, None),
+        (4.0, 84, 16_000.0, Some(1.0)),
+        (4.0, 84, 18_000.0, None),
+        (4.0, 84, 20_000.0, None),
+        (8.0, 96, 8_000.0, Some(1.0)),
+        (8.0, 96, 12_000.0, None),
+        (8.0, 96, 16_000.0, None),
+        (8.0, 96, 20_000.0, None),
+    ] {
+        let level = measure_tone(SR, key, output_hz / step, output_hz);
+        eprintln!("step {step}, {output_hz} Hz: {level:.3?} dBFS");
+        if let Some(max_loss) = max_loss
+            && !level.into_iter().all(|db| db.abs() <= max_loss)
+        {
+            failures.push((step, output_hz, level));
+        }
+    }
+    assert!(failures.is_empty(), "outside ±1 dB: {failures:?}");
+}
+
 #[test]
 fn faster_reads_reject_folded_tones() {
     let mut levels = Vec::new();
@@ -50,32 +99,12 @@ fn faster_reads_reject_folded_tones() {
         (192_000.0, 60, 89_000.0, 7_000.0, 1_000.0, 1_000.0),
         (48_000.0, 72, 21_000.0, 6_000.0, 1_000.0, 2_000.0),
         (48_000.0, 84, 21_000.0, 12_000.0, 1_000.0, 4_000.0),
+        (48_000.0, 84, 7_250.0, 19_000.0, 1_000.0, 4_000.0),
         (72_000.0, 60, 31_500.0, 16_500.0, 1_000.0, 1_000.0),
         (98_400.0, 60, 43_000.0, 5_000.0, 16_000.0, 16_000.0),
     ] {
-        let measure = |source_hz, output_hz| {
-            let mut s = sampler(SR, buf(rate, sine(rate, source_hz, 20_000)));
-            let (l, r) = render(&mut s, 5_000, &[on(0, key, 1.0)]);
-            // Skip the onset. This window contains an integer number of cycles at every
-            // measured frequency, so the two quadratures give the peak tone amplitude.
-            let amplitude = |x: &[f32]| {
-                let window = &x[240..4_080];
-                let (re, im) = window
-                    .iter()
-                    .enumerate()
-                    .fold((0.0, 0.0), |(re, im), (i, &x)| {
-                        let phase = std::f64::consts::TAU * output_hz * i as f64 / SR as f64;
-                        (
-                            re + x as f64 * libm::cos(phase),
-                            im + x as f64 * libm::sin(phase),
-                        )
-                    });
-                20.0 * libm::log10(2.0 * libm::hypot(re, im) / window.len() as f64)
-            };
-            [amplitude(&l), amplitude(&r)]
-        };
-        let alias = measure(source_hz, alias_hz);
-        let pass = measure(pass_source_hz, pass_output_hz);
+        let alias = measure_tone(rate, key, source_hz, alias_hz);
+        let pass = measure_tone(rate, key, pass_source_hz, pass_output_hz);
         eprintln!("{rate} Hz, key {key}: alias {alias:.2?} dBFS, passband {pass:.2?} dBFS");
         levels.push((rate, key, alias, pass));
     }
@@ -1288,6 +1317,8 @@ fn block_splitting_never_changes_the_output() {
         on(500, 67, 0.6),
         off(2_000, 55),
         on(2_100, 60, 0.8),
+        on(4_600, 88, 0.7),
+        off(8_000, 88),
         off(9_000, 67),
         off(12_000, 60),
     ];
