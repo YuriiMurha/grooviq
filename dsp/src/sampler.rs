@@ -1019,6 +1019,41 @@ impl Device for Sampler {
 impl Sampler {
     // Tests use eager filter coefficient updates as an oracle.
     fn render<const EAGER: bool>(&mut self, l: &mut [f32], r: &mut [f32], events: &[NoteEvent]) {
+        let mut span = if self.sample.is_some() {
+            self.voices.span()
+        } else {
+            VOICES
+        };
+        if !EAGER && events.is_empty() && span == VOICES && self.sample.is_some() {
+            let notes = &self.voices.v[..VOICES];
+            span = notes
+                .iter()
+                .rposition(|v| v.stage != Stage::Off)
+                .map_or(0, |last| last + 1);
+            // The full note loop pays off from three sounding slots. Sparse blocks keep
+            // the early Off check and can skip the unused suffix until the next event.
+            if span >= 3
+                && self.out.map(f32::to_bits) == self.c.out.map(f32::to_bits)
+                && notes[..span]
+                    .iter()
+                    .filter(|v| v.stage != Stage::Off)
+                    .nth(2)
+                    .is_some()
+            {
+                self.render_block::<EAGER, true>(l, r, events, span);
+                return;
+            }
+        }
+        self.render_block::<EAGER, false>(l, r, events, span);
+    }
+
+    fn render_block<const EAGER: bool, const NOTES_ONLY: bool>(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        events: &[NoteEvent],
+        mut span: usize,
+    ) {
         l.fill(0.0);
         r.fill(0.0);
         let n = l.len().min(r.len());
@@ -1046,13 +1081,12 @@ impl Sampler {
         let filter_on = kind != 0;
         let (env_amount, flt_sustain) = (p[FILTER_ENV], p[FLT_SUSTAIN]);
         let mut ev = events.iter().peekable();
-        // Only events (and a choke, before the block) put voices in fade slots.
-        let mut span = voices.span();
         if !EAGER {
             if filter_on && *filter_bypassed {
                 // A parameter change between ticks must use the previous tick's inputs until
                 // the next one. New notes and reset slots carry no pending inputs.
-                for v in &mut voices.v[..span] {
+                let limit = if NOTES_ONLY { VOICES } else { span };
+                for v in &mut voices.v[..limit] {
                     if let Some((octaves, damp)) = v.pending_filter.take() {
                         v.filter_coefs(octaves, damp, *sr);
                     }
@@ -1061,26 +1095,29 @@ impl Sampler {
             *filter_bypassed = !filter_on;
         }
         for f in 0..n {
-            let mut evented = false;
-            while let Some(e) = ev.next_if(|e| e.offset as usize <= f) {
-                voices.event(p, *sr, buf, e);
-                evented = true;
-            }
-            if evented {
-                span = voices.span();
+            if !NOTES_ONLY {
+                let mut evented = false;
+                while let Some(e) = ev.next_if(|e| e.offset as usize <= f) {
+                    voices.event(p, *sr, buf, e);
+                    evented = true;
+                }
+                if evented {
+                    span = voices.span();
+                }
             }
             let fade_frames = voices.fade;
             let sustain = sustain.next();
             let log2_cutoff = cutoff.next();
             let (mut sl, mut sr_) = (0.0f32, 0.0f32);
-            for v in voices.v[..span].iter_mut() {
-                if v.stage == Stage::Off {
+            let limit = if NOTES_ONLY { VOICES } else { span };
+            for v in &mut voices.v[..limit] {
+                if !NOTES_ONLY && v.stage == Stage::Off {
                     continue;
                 }
                 // Fading out (stolen, cut or choked): a straight line to silence, then the slot
                 // is free.
                 let mut fade = None;
-                if v.fade > 0 {
+                if !NOTES_ONLY && v.fade > 0 {
                     v.fade -= 1;
                     if v.fade == 0 {
                         *v = Voice::OFF;
@@ -1209,23 +1246,29 @@ impl Sampler {
                     *v = Voice::OFF;
                 }
             }
-            for ch in 0..2 {
-                let d = c.out[ch] - out[ch];
-                out[ch] = if d.abs() < 1e-6 {
-                    c.out[ch]
-                } else {
-                    out[ch] + d * *smooth
-                };
+            if !NOTES_ONLY {
+                for ch in 0..2 {
+                    let d = c.out[ch] - out[ch];
+                    out[ch] = if d.abs() < 1e-6 {
+                        c.out[ch]
+                    } else {
+                        out[ch] + d * *smooth
+                    };
+                }
             }
             l[f] = sl * out[0];
             r[f] = sr_ * out[1];
         }
         // Events past the block's end still apply (at its end).
-        for e in ev {
-            voices.event(p, *sr, buf, e);
+        if !NOTES_ONLY {
+            for e in ev {
+                voices.event(p, *sr, buf, e);
+            }
         }
     }
 }
 
+#[cfg(test)]
+mod reference;
 #[cfg(test)]
 mod tests;
