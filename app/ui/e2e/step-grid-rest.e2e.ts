@@ -128,6 +128,16 @@ test("the stopped rack adds no page callbacks over 32 quiet frames", async ({ ap
   // The position readout and master meter run in both configurations.
   await expect.poll(countCallbacks, { message: "page callbacks with the rack hidden match the count with it shown" })
     .toBe(withRack);
+
+  // Mount and unmount the grid once more: a loop that outlives its grid would add callbacks here.
+  await app.keyboard.press("F6");
+  await expect(app.getByRole("region", { name: "Channel rack" })).toBeVisible();
+  await waitFrames(app, 8);
+  await app.keyboard.press("F6");
+  await expect(app.getByRole("region", { name: "Channel rack" })).toBeHidden();
+  await waitFrames(app, 8);
+  await expect.poll(countCallbacks, { message: "a remounted and hidden grid leaves no frame loop behind" })
+    .toBe(withRack);
 });
 
 test("live playback wakes the grid, follows the playhead and clears it in one draw", async ({ app, mock }) => {
