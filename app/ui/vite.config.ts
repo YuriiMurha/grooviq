@@ -12,8 +12,8 @@ export default defineConfig(({ mode }) => ({
     outDir: "dist",
     emptyOutDir: true,
     assetsInlineLimit: 0,
-    // The piano roll bench page and the mixer's synthetic fixture, in every build but the app's.
-    rollupOptions: mode === "production" ? {} : { input: { main: "index.html", bench: "bench/roll.html", mixer: "mixer-fixture.html" } },
+    // Test and reference pages stay out of the app's production build.
+    rollupOptions: mode === "production" ? {} : { input: { main: "index.html", bench: "bench/roll.html", mixer: "mixer-fixture.html", gallery: "gallery/index.html" } },
   },
   test: {
     // Plain logic runs in Node; anything that renders React runs in jsdom.

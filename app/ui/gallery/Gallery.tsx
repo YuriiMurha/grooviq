@@ -7,6 +7,7 @@ import { RecordButton } from '../src/transport/RecordButton';
 import { KeyboardToggle } from '../src/transport/KeyboardToggle';
 import { MetronomeButton } from '../src/transport/MetronomeButton';
 import { BpmField } from '../src/transport/BpmField';
+import { ListPicker } from '../src/layout/ListPicker';
 import { OutputChip } from '../src/output/OutputChip';
 import type { Output } from '../src/audio';
 import { useLatest, type ParamControl } from '../src/devices/controls/gesture';
@@ -55,6 +56,22 @@ function Tempo() {
     <BpmField bpm={bpm} onCommit={async (next) => { setBpm(next); setCommits((count) => count + 1); return true; }} />
     <div className="gallery-fixture-witness">Local accepted value: <output aria-label="Accepted gallery tempo">{bpm.toFixed(2)}</output>
       {' · '}commits: <output aria-label="Gallery tempo commits">{commits}</output></div>
+  </>;
+}
+
+const pickerOutputs = [
+  { id: "main", name: "Main" },
+  { id: "cue", name: "Cue", disabled: true, description: "Cue is unavailable." },
+  { id: "phones", name: "Headphones" },
+];
+
+function RouteChoice() {
+  const [value, setValue] = useState("main");
+  const [commits, setCommits] = useState(0);
+  return <>
+    <ListPicker label="Gallery route" options={pickerOutputs} value={value} placeholder="Choose a route"
+      onCommit={(id) => { setValue(id); setCommits((count) => count + 1); }} />
+    <div className="gallery-fixture-witness">Commits: <output aria-label="Gallery route commits">{commits}</output></div>
   </>;
 }
 
@@ -134,7 +151,8 @@ export function Gallery() {
     <section aria-labelledby="tempo-output-heading" data-case="tempo-output">
       <h2 id="tempo-output-heading">Tempo and output status</h2>
       <div className="gallery-strip"><Reference id="transport.tempo"><Tempo /></Reference>
-        <Reference id="output.status"><OutputStatus /></Reference></div>
+        <Reference id="output.status"><OutputStatus /></Reference>
+        <Reference id="layout.list-picker"><RouteChoice /></Reference></div>
     </section>
     <footer><h2>Reference coverage</h2><p>{stateContract.disabled}</p><p>{stateContract.error}</p>
       <p>Whole-screen errors, repair, Undo, window lifetime and compact workspace geometry have separate app-fixture coverage.</p>
