@@ -18,6 +18,9 @@ mod commands;
 mod display;
 mod events;
 mod exit;
+#[cfg(feature = "ipc-contract")]
+#[doc(hidden)]
+pub mod ipc_contract;
 #[cfg(target_os = "macos")]
 mod macos_quit;
 mod menu;

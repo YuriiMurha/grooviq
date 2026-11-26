@@ -113,6 +113,7 @@ pub struct Project {
 
 /// A project's key: a root note and a scale.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-contract", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectKey {
     /// 0..=11, 0 = C.
@@ -123,6 +124,7 @@ pub struct ProjectKey {
 
 /// A time signature as it is written: `beats` / `unit`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-contract", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct TimeSignature {
     /// 1..=16.

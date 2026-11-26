@@ -6,7 +6,7 @@ function view(revision = 1, selected = 1): PatternsView {
   return { generation: 7, revision, arrangementRevision: revision, selected, patterns: [1, 2].map((id) => ({ id, name: `Pattern ${id}`, revision: 1, steps: 16 })),
     view: { generation: 7, patternRevision: revision, name: "Original", path: null, dirty: false, bpm: 120,
       timeSignature: { beats: 4, unit: 4 }, channels: [], pattern: { id: selected, name: "Pattern", steps: 16, swing: 0, cells: {} },
-      autosavedAt: null, key: null, notesRevision: 1, recording: false, canUndo: false, canRedo: false } };
+      autosavedAt: null, key: null, notesRevision: 1, recording: false, canUndo: false, canRedo: false, projectCanUndo: false, projectCanRedo: false } };
 }
 const applied = (state: PatternsView): PatternReply => ({ status: "applied", state, settlement: { recordingDisarmed: false, waiting: false } });
 

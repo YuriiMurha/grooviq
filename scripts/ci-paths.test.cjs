@@ -33,7 +33,8 @@ test("UI, Rust, and inert paths skip only unrelated checks", async () => {
 });
 
 test("shared inputs, tooling and unknown paths retain all checks", async () => {
-  for (const path of ["app/ui/e2e/mockTauri.ts", "app/ui/dist/index.html", "tests/fixtures/session-replay.json",
+  for (const path of ["app/ui/e2e/mockTauri.ts", "app/ui/dist/index.html", "app/ui/src/api/generated/contract.ts",
+    "tests/fixtures/session-replay.json",
     "app/ui/package.json", "app/ui/package-lock.json", "app/ui/index.html", "app/ui/vite.config.ts",
     "app/ui/vite.config.mts", "app/ui/vite-helpers.mjs", "app/ui/tsconfig.json", "app/ui/tsconfig.app.json",
     "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "Makefile",
