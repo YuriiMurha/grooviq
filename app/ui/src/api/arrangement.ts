@@ -28,6 +28,8 @@ export type ArrangementOperation =
   | { kind: "slice"; clip: number; tick: number; audioFirstFrames: number | null }
   | { kind: "resize"; clip: number; startTick: number; content: ClipContent }
   | { kind: "setClip"; clip: number; name: string; muted: boolean }
+  | { kind: "setAutomationPoints"; clip: number; points: readonly CurvePoint[] }
+  | { kind: "setAutomationClip"; clip: number; target: AutomationTarget; priority: number }
   | { kind: "deleteClip" | "makeUnique"; clip: number }
   | { kind: "deleteAudioAsset"; asset: number }
   | { kind: "createPattern"; name: string }
