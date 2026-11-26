@@ -102,13 +102,6 @@ jobs:
           key: loom
           workspaces: . -> target/loom
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Temporarily weaken mailbox publication for the draft probe
-        if: github.event_name == 'pull_request'
-        run: |
-          file=engine/src/rt_workers/worker.rs
-          test "$(grep -Fxc '        self.state.store(OFFERED, Ordering::Release);' "$file")" = 1
-          sed -i 's/store(OFFERED, Ordering::Release)/store(OFFERED, Ordering::Relaxed)/' "$file"
-          git diff -- "$file"
       - name: Run the worker protocol models
         env:
           CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
