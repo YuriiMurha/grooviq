@@ -84,24 +84,79 @@ test('rejects duplicate cases in the unrepeated inventory', () => {
   assert.throws(() => account(inventory, inventory, 0, [], webkit), /duplicate case/);
 });
 
-test('rejects extra projects and retried attempts in focused suites', () => {
+test('requires every listed spec to contribute cases in every selected project', () => {
+  const options = { specs: ['tiny.e2e.ts', 'nested/second.e2e.ts'] };
+  const first = [spec('webkit', 'first'), spec('chromium', 'first')];
+  const secondWebKit = { ...spec('webkit', 'second'), file: 'nested/second.e2e.ts' };
+  const secondChromium = { ...spec('chromium', 'second'), file: 'nested/second.e2e.ts' };
+  const complete = report(...first, secondWebKit, secondChromium);
+  assert.deepEqual(account(complete, complete, 0, [], options), { passed: 4, skipped: 0 });
+  const filteredOut = report(...first);
+  assert.throws(() => account(filteredOut, filteredOut, 0, [], options),
+    /spec nested\/second\.e2e\.ts selected no cases in webkit/);
+  const missingBrowser = report(...first, secondWebKit);
+  assert.throws(() => account(missingBrowser, missingBrowser, 0, [], options),
+    /spec nested\/second\.e2e\.ts selected no cases in chromium/);
+});
+
+test('rejects an unselected project in the inventory', () => {
+  const inventory = report(spec('webkit', 'selected'), spec('chromium', 'selected'));
+  assert.throws(() => account(inventory, inventory, 0, [], { projects: ['webkit'] }),
+    /unexpected project in inventory/);
+});
+
+test('rejects extra cases with all expected executions present', () => {
   const inventory = report(spec('webkit', 'selected'));
-  const extra = report(spec('webkit', 'selected'), spec('chromium', 'selected'));
-  assert.throws(() => account(inventory, extra, 0, [], webkit), /selection differs/);
+  const extra = report(spec('webkit', 'selected'), spec('webkit', 'selected', 'repeat-id'),
+    spec('chromium', 'selected'));
+  assert.throws(() => account(inventory, extra, 0, [], webkit), /extra case/);
+});
+
+test('rejects retried attempts in focused suites', () => {
+  const inventory = report(spec('webkit', 'selected'));
   const retried = spec('webkit', 'selected', 'repeat-id');
   retried.tests[0].results.push({ retry: 1, status: 'passed' });
   const actual = report(spec('webkit', 'selected'), retried);
   assert.throws(() => account(inventory, actual, 0, [], webkit), /missing attempt or retry/);
 });
 
-test('counts only the exact allowed skip for every repeat', () => {
-  const allowed = [{ file: 'tiny.e2e.ts', title: 'selected', project: 'webkit', reason: 'CDP only' }];
+test('rejects an error attached to an otherwise passing attempt', () => {
   const inventory = report(spec('webkit', 'selected'));
+  const passing = spec('webkit', 'selected');
+  passing.tests[0].results[0].errors.push({ message: 'browser error' });
+  assert.throws(() => account(inventory, report(passing), 0, [], { projects: ['webkit'] }), /attempt errors/);
+});
+
+const allowed = [{ file: 'tiny.e2e.ts', title: 'selected', project: 'webkit', reason: 'CDP only' }];
+
+function skippedSpec() {
   const skipped = spec('webkit', 'selected');
   Object.assign(skipped.tests[0], { expectedStatus: 'skipped', status: 'skipped',
     annotations: [{ type: 'skip', description: 'CDP only' }], results: [{ retry: 0, status: 'skipped' }] });
+  return skipped;
+}
+
+test('counts only the exact allowed skip for every repeat', () => {
+  const inventory = report(spec('webkit', 'selected'));
+  const skipped = skippedSpec();
   const actual = report(skipped, structuredClone(skipped));
   assert.deepEqual(account(inventory, actual, 0, allowed, webkit), { passed: 0, skipped: 2 });
   actual.suites[0].specs[1].tests[0].annotations.push({ type: 'fixme' });
   assert.throws(() => account(inventory, actual, 0, allowed, webkit), /fixme/);
+});
+
+test('rejects an allowlisted skip with a conflicting test status', () => {
+  const inventory = report(spec('webkit', 'selected'));
+  const skipped = skippedSpec();
+  skipped.tests[0].status = 'expected';
+  assert.throws(() => account(inventory, report(skipped), 0, allowed, { projects: ['webkit'] }),
+    /unapproved skip/);
+});
+
+test('rejects an extra skip reason alongside the allowlisted reason', () => {
+  const inventory = report(spec('webkit', 'selected'));
+  const skipped = skippedSpec();
+  skipped.tests[0].annotations.push({ type: 'skip', description: 'another reason' });
+  assert.throws(() => account(inventory, report(skipped), 0, allowed, { projects: ['webkit'] }),
+    /unapproved skip/);
 });

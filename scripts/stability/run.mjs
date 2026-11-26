@@ -61,11 +61,16 @@ export function cases(report) {
   return found;
 }
 
-function inventoryKeys(inventory, projects) {
+function inventoryKeys(inventory, { projects, specs = [] }) {
   const selected = cases(inventory);
   if (!selected.length) throw Error('empty stability inventory');
   for (const project of projects) {
     if (!selected.some(c => c.test.projectName === project)) throw Error(`missing ${project}`);
+    for (const spec of specs) {
+      if (!selected.some(c => c.test.projectName === project && c.spec.file === spec)) {
+        throw Error(`spec ${spec} selected no cases in ${project}`);
+      }
+    }
   }
   if (selected.some(c => !projects.includes(c.test.projectName))) throw Error('unexpected project in inventory');
   const keys = new Set(selected.map(c => c.key));
@@ -73,9 +78,9 @@ function inventoryKeys(inventory, projects) {
   return keys;
 }
 
-export function account(inventory, report, exitCode, allowedSkips = [], { projects = browsers, repeatEach = 1 } = {}) {
+export function account(inventory, report, exitCode, allowedSkips = [], { projects = browsers, specs = [], repeatEach = 1 } = {}) {
   if (exitCode !== 0 || report.errors?.length || !report.stats?.startTime || !Number.isFinite(report.stats.duration)) throw Error('incomplete or unsuccessful Playwright run');
-  const expected = inventoryKeys(inventory, projects);
+  const expected = inventoryKeys(inventory, { projects, specs });
   const actual = cases(report);
   const counts = new Map();
   for (const { key } of actual) {
@@ -190,10 +195,7 @@ export default { ...base, testDir: './e2e', testMatch: /.*\\.e2e\\.ts$/, testIgn
     // Let the verifier reject empty selections and retain the empty inventory as evidence.
     const inventory = invoke('inventory', ['--list', '--pass-with-no-tests', ...filters]);
     if (inventory.code !== 0 || inventory.report.errors?.length) throw Error('inventory failed');
-    summary.selectedCases = inventoryKeys(inventory.report, projects).size;
-    for (const spec of specs) {
-      if (!existsSync(resolve(ui, 'e2e', spec))) throw Error(`selected spec does not exist: ${spec}`);
-    }
+    summary.selectedCases = inventoryKeys(inventory.report, selection).size;
     const allowed = [{ file: 'm2-panels.e2e.ts', title: 'a_dpr_change_redraws_sharp', project: 'webkit', reason: 'changes the ratio through the Chrome DevTools Protocol' }];
     for (let i = 1; i <= repeats; i++) {
       summary.currentRepetition = i;
