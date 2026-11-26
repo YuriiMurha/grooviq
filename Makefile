@@ -1,5 +1,5 @@
 # Repeatable commands. `make help` lists them. macOS or Linux shell.
-.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan bench bench-roll-operations bench-instructions profile profile-tracy build-app install-app qa-ui qa-app
+.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan bench bench-roll-operations roll-timing-test bench-instructions profile profile-tracy build-app install-app qa-ui qa-app
 
 # rustup installs cargo into ~/.cargo/bin, which is often not on PATH.
 export PATH := $(HOME)/.cargo/bin:$(PATH)
@@ -113,7 +113,14 @@ bench: ## Render speed, block times and determinism of the reference scenes, the
 	$(CARGO) bench -p grooviq-dsp --bench kernels
 
 bench-roll-operations: ## The six piano-roll timing budgets, without work counters (run on a quiet host)
-	GROOVIQ_ROLL_PERF=1 npm --prefix $(UI) test -- --run src/roll/budgets.test.ts --maxWorkers=1 --disableConsoleIntercept
+	@set --; \
+	if [ -n "$$ROLL_TIMING_REPORT" ]; then \
+		set -- --reporter=default --reporter=json --outputFile.json="$$ROLL_TIMING_REPORT"; \
+	fi; \
+	GROOVIQ_ROLL_PERF=1 npm --prefix $(UI) test -- --run src/roll/budgets.test.ts --maxWorkers=1 --disableConsoleIntercept "$$@"
+
+roll-timing-test: ## Test evidence validation and the bounded piano-roll timing rerun
+	node --test scripts/roll-timing.test.cjs
 
 bench-instructions: ## Instruction counts (Linux only: needs valgrind and gungraun-runner)
 	$(CARGO) bench -p grooviq-golden --bench instructions

@@ -13,23 +13,28 @@ export const THEME_COLOR_TOKENS = [
   "--dev-osc1", "--dev-osc2", "--dev-filter", "--dev-amp", "--dev-lfo", "--dev-mix", "--dev-voice", "--dev-card",
 ] as const;
 
+const OFFSET_PATTERN = /^-?\d+(?:\.\d+)?(?:px)?$/;
+const RADIUS_PATTERN = /^\d+(?:\.\d+)?px$/;
+const PIXEL_PATTERNS = new Map<string, RegExp>([
+  ["--reg-x", OFFSET_PATTERN],
+  ["--reg-y", OFFSET_PATTERN],
+  ["--radius-s", RADIUS_PATTERN],
+  ["--radius-m", RADIUS_PATTERN],
+  ["--radius-l", RADIUS_PATTERN],
+]);
+export const REQUIRED_THEME_TOKENS = [...THEME_COLOR_TOKENS, ...PIXEL_PATTERNS.keys()] as const;
+
 type TokenProblem = Readonly<{ token: string; reason: "color" | "pixels" }>;
 
 /** Run once after applying a theme, never in an animation frame. */
 export function themeTokenProblems(read: (name: string) => string): TokenProblem[] {
   const problems: TokenProblem[] = [];
-  for (const token of THEME_COLOR_TOKENS) {
-    if (!parseColor(read(token))) problems.push({ token, reason: "color" });
-  }
-  for (const token of ["--reg-x", "--reg-y"]) {
-    const pixels = read(token).trim();
-    if (!/^-?\d+(?:\.\d+)?(?:px)?$/.test(pixels) || !Number.isFinite(parseFloat(pixels))) {
-      problems.push({ token, reason: "pixels" });
-    }
-  }
-  for (const token of ["--radius-s", "--radius-m", "--radius-l"]) {
-    const pixels = read(token).trim();
-    if (!/^\d+(?:\.\d+)?px$/.test(pixels) || !Number.isFinite(parseFloat(pixels))) {
+  for (const token of REQUIRED_THEME_TOKENS) {
+    const value = read(token);
+    const pixelPattern = PIXEL_PATTERNS.get(token);
+    if (!pixelPattern) {
+      if (!parseColor(value)) problems.push({ token, reason: "color" });
+    } else if (!pixelPattern.test(value.trim()) || !Number.isFinite(parseFloat(value))) {
       problems.push({ token, reason: "pixels" });
     }
   }

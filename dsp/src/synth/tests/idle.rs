@@ -58,6 +58,38 @@ fn same(a: &Synth, b: &Synth) {
 }
 
 #[test]
+fn advance_silent_matches_event_free_process_across_chunks() {
+    let (mut skip, mut full) = (Synth::new(48_000.0), Synth::new(48_000.0));
+    for synth in [&mut skip, &mut full] {
+        // Reproduce a recent release: no voices left but old scope samples and decaying peaks.
+        synth.scope.fill(0.25);
+        synth.scope_pos = SCOPE_LEN - 6;
+        synth.level_l.value = 0.73;
+        synth.level_r.value = 0.61;
+        synth.set_param(LFO_SHAPE as u32, 4.0);
+        synth.set_param(LFO_RATE as u32, 20.0);
+        synth.lfo.phase = 0.9999; // First nonempty span crosses a sample-and-hold boundary.
+        // Idle setters snap, so seed moving state after them, as if a voice just stopped.
+        synth.s_master.set(0.4);
+        synth.s_res.set(0.5);
+        synth.s_cut.set(10.0);
+        synth.s_drive.set(0.4);
+        synth.route[0].set(0.7);
+        synth.fw[0].set(0.4);
+        assert!(synth.is_silent());
+    }
+
+    for frames in [0, 13, MAX_BLOCK - 1, MAX_BLOCK, 3 * MAX_BLOCK + 7] {
+        let (mut l, mut r) = (vec![1.0; frames], vec![1.0; frames]);
+        skip.advance_silent(frames);
+        full.process(&mut l, &mut r, None, &[]);
+        assert!(!skip.fresh && !full.fresh);
+        assert!(l.iter().chain(&r).all(|x| x.to_bits() == 0));
+        same(&skip, &full);
+    }
+}
+
+#[test]
 fn idle_matches_original_preparation_and_next_note() {
     for mode in 0..3 {
         for shape in 0..5 {

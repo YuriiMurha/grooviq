@@ -2,7 +2,7 @@ import { cellPoint, colourDistance, expect, grid, pixelsAt, project, soundsFor, 
 import { boxSelect, canvas, lane, local, openRoll, stats, twoChannels } from "./rollHelpers";
 import { parseColor } from "../src/rack/palette";
 import { contrastRatio, oklabDeltaE } from "../src/theme/contrast";
-import { THEME_COLOR_TOKENS, themeTokenProblems } from "../src/theme/contract";
+import { REQUIRED_THEME_TOKENS, THEME_COLOR_TOKENS, themeTokenProblems } from "../src/theme/contract";
 import { themes, THEME_PREFERENCE_KEY } from "../src/theme/preference";
 
 const drums = project(["Kick", "Snare", "Hat"], { 1: [0, 4, 8, 12], 2: [4, 12], 3: [2, 6, 10, 14] });
@@ -68,7 +68,7 @@ for (const { id } of themes) {
           name.startsWith("--") && !defaults.style.getPropertyValue(name).trim().startsWith("var(") &&
           !overrides.some((rule) => rule.style.getPropertyValue(name).trim()));
         return { values, missingOverrides };
-      }, { names: [...THEME_COLOR_TOKENS, "--reg-x", "--reg-y", "--radius-s", "--radius-m", "--radius-l"], id });
+      }, { names: REQUIRED_THEME_TOKENS, id });
       expect(missingOverrides, `${id} supplies every non-alias token`).toEqual([]);
       expect(themeTokenProblems((name) => values[name] ?? ""), "all live theme tokens resolve").toEqual([]);
 
