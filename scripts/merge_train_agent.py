@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 
+from merge_train import Batch
 from refresh_install import LockBusy, atomic_json, atomic_text, locked, safe_path
 
 LABEL = "io.github.yuriimurha.grooviq.merge-train"
@@ -218,6 +219,8 @@ class Agent:
             return script is not None and script[2] in SNAPSHOT_FILES
         if len(args) == 3 and args[:2] == ("rev-parse", "--verify"):
             return OBJECT_REF.fullmatch(args[2]) is not None
+        if len(args) == 5 and args[:3] == ("show", "--no-patch", "--format=%B"):
+            return SHA.fullmatch(args[3]) is not None and args[4] == "--"
         if len(args) == len(FETCH) + 3 and args[:-1] == (*FETCH, "--refmap=", "origin"):
             return SHA.fullmatch(args[-1]) is not None
         if len(args) == len(ADD_WORKTREE) + 2 and args[:-2] == ADD_WORKTREE and SHA.fullmatch(args[-1]):
@@ -384,6 +387,9 @@ class Agent:
     def commit_tree(self, sha):
         return self.commit_object(sha, "^{tree}")
 
+    def commit_message(self, sha):
+        return self.git("show", "--no-patch", "--format=%B", sha, "--").decode("utf-8")
+
     def commit_object(self, sha, suffix):
         args = ("rev-parse", "--verify", sha + suffix)
         try:
@@ -417,6 +423,11 @@ class Agent:
                                   if (match := MERGED.fullmatch(line))):
             return stdout, stderr
         number, approved, parent = attempt.groups()
+        definite_rejection = re.search(
+            rf"(?m)^Merge train stopped: Stopped at #{number}: "
+            rf"(?:[^\n]*\bHTTP (?:405|409|422)\b|GitHub rejected the merge of #{number}:)",
+            stderr,
+        )
         try:
             result = subprocess.run(["gh", "api", "--method", "GET", f"repos/{REPO}/pulls/{number}"],
                                     cwd=self.repo, env=self.env, check=True, capture_output=True, timeout=30)
@@ -427,17 +438,30 @@ class Agent:
                 return "\n".join((*lines, f"Merged #{number} at {landed}", "")), stderr
             raise RuntimeError("GitHub did not yet confirm the approved squash and parent")
         except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            if definite_rejection:
+                return stdout, stderr
             return stdout, f"{stderr.rstrip()}\nUnconfirmed squash of #{number}: {error}.\n".lstrip()
 
     def record_landing(self, record):
-        merges = [match for line in record["stdout"] if (match := MERGED.fullmatch(line))]
+        tested, merges = None, []
+        for line in record["stdout"]:
+            if batch := TESTED_BATCH.fullmatch(line):
+                tested, merges = batch[1], []
+            elif match := MERGED.fullmatch(line):
+                merges.append((int(match[1]), match[2]))
         if not merges:
             return
-        batches = [match[1] for line in record["stdout"] if (match := TESTED_BATCH.fullmatch(line))]
-        tested = batches[-1] if batches else None
-        landed = merges[-1][2]
+
+        landed = merges[-1][1]
+        path = safe_path(self.landings)
+        ledger = read_text(path) or ""
+        for line in ledger.splitlines():
+            previous = json.loads(line)
+            if (previous["tested_batch"], previous["landed_tip"]) == (tested, landed):
+                return
+
         row = dict(recorded_utc=record["recorded_utc"], tested_batch=tested, landed_tip=landed,
-                   landed_prefix=[[int(match[1]), match[2]] for match in merges],
+                   landed_prefix=merges,
                    landed_tree=None, tested_tree=None, match=None, ci_run_id=None, status="partial")
         for key, sha in (("landed_tree", landed), ("tested_tree", tested)):
             if sha is not None:
@@ -452,20 +476,15 @@ class Agent:
                 row["ci_error"] = str(error)
         if row["landed_tree"] and row["tested_tree"]:
             row["match"] = row["landed_tree"] == row["tested_tree"]
-            output = record["stdout"] + record["stderr"]
-            partial = record.get("recovered_pending") or record.get("timed_out") or record["exit_code"] < 0 or any(
-                "Stopped at #" in line or line.startswith(("Recovered landed prefix", "Unconfirmed squash"))
-                for line in output
-            )
-            if not partial:
-                if row["match"] and row["ci_run_id"] is not None:
-                    row["status"] = "complete"
-                elif not row["match"]:
-                    row["status"] = "mismatch"
-        with safe_path(self.landings).open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(row) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+            try:
+                members = Batch.parse(self.commit_message(tested)).members
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                row["tested_members_error"] = str(error)
+            else:
+                if [number for number, _ in merges] == [number for number, _ in members]:
+                    row["status"] = "complete" if row["match"] else "mismatch"
+        # The tick lock serializes writers. Recovery must see a whole row or no row.
+        atomic_text(path, ledger + json.dumps(row) + "\n")
 
     def append_tick(self, record):
         path = safe_path(self.ticks)
@@ -573,11 +592,11 @@ class Agent:
                     stdout, stderr = read_tick_output(self.state / scratch)
                     stdout, stderr = self.reconcile_landing(stdout, stderr)
                 reason = ["previous tick did not finish"]
-                self.latch(saved, saved["output"] + stdout + stderr, reason)
                 record.update(recorded_utc=stamp(), exit_code=1, status="stopped", network_streak=0,
                               reason=reason, recovered_pending=True,
                               stdout=stdout.splitlines(), stderr=stderr.splitlines())
                 self.record_landing(record)
+                self.latch(saved, saved["output"] + stdout + stderr, reason)
                 self.log_output("orphaned tick output", stdout + stderr)
             self.prune_checkouts()
             return {"status": "latched"}
@@ -626,10 +645,12 @@ class Agent:
             network = (code == 1 and NETWORK_FAILURE.search(stdout + "\n" + stderr)
                        and not any(WRITE_OUTPUT.match(line) for line in stdout_lines + stderr_lines)
                        and not WRITE_ERROR.search(stderr))
+            # Keep the pending scratch recoverable until the landing is in the ledger.
+            record["stdout"] = stdout_lines
+            self.record_landing(record)
             status = self.record_result(record, f"source {revision}", code, stdout, stderr,
                                         network=network, timed_out=code == 124)
             self.record_tips(record, "after")
-            self.record_landing(record)
         return {"status": status, "exit_code": record["exit_code"], "log": str(self.log)}
 
     def record_result(self, record, source, code, stdout, stderr, *, network=False, timed_out=False):
