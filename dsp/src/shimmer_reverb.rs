@@ -3,7 +3,7 @@
 //! Fractional reads and all routing are convex (or signed sub-convex) combinations:
 //! their sup norm is <= 1. Feedback is strictly < 1 even during automation.
 //! Moving reads can alias; no alias-free or artifact-free claim is made.
-use crate::util::{Smooth, clamp_param, sane};
+use crate::util::{Smooth, clamp_param, flush_output_subnormal, sane};
 use crate::{Device, NoteEvent};
 pub const SPEC: [(f32, f32, f32); 6] = [
     (0., 1., 0.15),
@@ -185,8 +185,8 @@ impl Device for ShimmerReverb {
                 line.data[line.pos] = tiny(input[i % 2] * 0.1 + gain * route);
                 line.pos = (line.pos + 1) % line.data.len();
             }
-            *l = input[0] * (1. - c[0]) + c[0] * (taps[0] + taps[2]) * 0.5;
-            *r = input[1] * (1. - c[0]) + c[0] * (taps[1] + taps[3]) * 0.5;
+            *l = flush_output_subnormal(input[0] * (1. - c[0]) + c[0] * (taps[0] + taps[2]) * 0.5);
+            *r = flush_output_subnormal(input[1] * (1. - c[0]) + c[0] * (taps[1] + taps[3]) * 0.5);
         }
     }
     fn reset(&mut self) {
