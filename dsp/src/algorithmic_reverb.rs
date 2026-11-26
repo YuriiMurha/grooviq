@@ -1,6 +1,6 @@
 //! Original parallel acoustic networks. Fixed feedback delays keep size and model automation
 //! outside the energy storage: changing read speed inside a feedback loop can pump its tail.
-use crate::util::{DelayLine, Smooth, clamp_param, sane};
+use crate::util::{DelayLine, Smooth, clamp_param, flush_output_subnormal, sane};
 use crate::{Device, NoteEvent, db_to_gain};
 
 pub const PARAM_IDS: [&str; 13] = [
@@ -311,8 +311,8 @@ impl Device for AlgorithmicReverb {
             let mid = (out[0] + out[1]) * 0.5;
             let side = (out[0] - out[1]) * 0.5 * p[9];
             let gain = db_to_gain(p[11]);
-            *l = (dry[0] * (1. - p[10]) + (mid + side) * p[10]) * gain;
-            *r = (dry[1] * (1. - p[10]) + (mid - side) * p[10]) * gain;
+            *l = flush_output_subnormal((dry[0] * (1. - p[10]) + (mid + side) * p[10]) * gain);
+            *r = flush_output_subnormal((dry[1] * (1. - p[10]) + (mid - side) * p[10]) * gain);
         }
     }
     fn reset(&mut self) {
