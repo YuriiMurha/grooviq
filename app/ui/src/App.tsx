@@ -500,7 +500,7 @@ export function App() {
           </div>
         </header>
         <main className="stage">
-          {view && <Workspace picker={<PickerRail key={view.generation} picker={patterns} />} playlist={<Playlist rulerPosition={rulerPosition} model={playlist} patterns={patterns.state.canonical} bpm={view.bpm} beats={view.timeSignature.beats} unit={view.timeSignature.unit} />} latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
+          {view && <Workspace picker={<PickerRail key={view.generation} picker={patterns} />} playlist={<Playlist rulerPosition={rulerPosition} model={playlist} patterns={patterns.state.canonical} bpm={view.bpm} beats={view.timeSignature.beats} unit={view.timeSignature.unit} notifyAudioDrop={message => toast(message, false)} />} latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
         </main>
         <HintBar />
         <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />

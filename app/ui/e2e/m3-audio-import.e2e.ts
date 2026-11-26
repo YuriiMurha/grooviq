@@ -12,7 +12,7 @@ const tracks = [{ id: 2, name: "Audio A", color: 1, mute: false }, { id: 3, name
 const scene = project(["Kick"], {}, { nextId: 4, arrangement: { tracks, clips: [], audioAssets: [], loopRegion: null } });
 const selectName = "Selected playlist clip";
 
-test.use({ seed: { project: scene, files: soundsFor(["Kick"]) } });
+test.use({ deviceScaleFactor: 1, seed: { project: scene, files: soundsFor(["Kick"]), audioLog: [] } });
 
 function ipc<T>(app: Page, command: string, args: Record<string, unknown> = {}): Promise<T> {
   return app.evaluate(({ command, args }) => {
@@ -61,6 +61,18 @@ async function openPlaylist(app: Page, mock: Mock) {
 
 const importCall = (stamp: { generation: number; revision: number }, path = audio, track = 2, startTick = 960, name = "Break.Take.2") =>
   call("audio_import", { ...stamp, path, track, startTick, name });
+
+async function emitDrop(mock: Mock, paths: string[], position: { x: number; y: number }) {
+  const drop = JSON.stringify({ paths, position });
+  await mock.eval(`m => {
+    m.emit("tauri://drag-enter", ${drop});
+    m.emit("tauri://drag-over", ${JSON.stringify({ position })});
+    m.emit("tauri://drag-drop", ${drop});
+  }`);
+}
+
+const dropMessages = (app: Page) => app.getByRole("status", { name: "Messages" });
+const importArgs = async (mock: Mock) => (await mock.calls("audio_import")).map(({ args }) => args);
 
 test("drops one snapped edit, renders a waveform, and saves and reopens it", async ({ app, mock }) => {
   const { playlist, canvas, point } = await openPlaylist(app, mock);
@@ -115,6 +127,34 @@ test("undo removes the clip and its asset in one step", async ({ app, mock }) =>
     call("arrangement_history", { generation, revision: imported.revision, undo: true })]);
 });
 
+test("a multi-file drop imports only the first file and reports skipped files", async ({ app, mock }) => {
+  const { playlist, point } = await openPlaylist(app, mock);
+  const { generation, revision } = await arrangement(app);
+  const other = "/qa/audio/Other.wav";
+  await mock.registerAudio(audio, bytes);
+  await mock.registerAudio(other, bytes);
+  await expect(dropMessages(app)).toBeEmpty();
+  await emitDrop(mock, [audio, other], point);
+  await expect(playlist.getByRole("option", { name: "Break.Take.2 · Track 1 · 960 ticks" })).toHaveCount(1);
+  await expect(dropMessages(app)).not.toBeEmpty();
+  await displayedFrames(app);
+  expect(await importArgs(mock)).toEqual([importCall({ generation, revision }).args]);
+});
+
+test("reports a refused playlist drop while an import is held", async ({ app, mock }) => {
+  const { playlist, point } = await openPlaylist(app, mock);
+  const { generation, revision } = await arrangement(app);
+  await mock.holdAudio(audio);
+  await mock.dropAudio(audio, point, bytes);
+  await expect.poll(async () => (await arrangement(app)).pendingRequests.length).toBe(1);
+  await expect(dropMessages(app)).toBeEmpty();
+  await mock.dropAudio("/qa/audio/Other.wav", point, bytes);
+  await expect(dropMessages(app)).not.toBeEmpty();
+  expect(await importArgs(mock)).toEqual([importCall({ generation, revision }).args]);
+  await mock.releaseAudio(audio);
+  await expect(playlist.getByRole("option", { name: "Break.Take.2 · Track 1 · 960 ticks" })).toHaveCount(1);
+});
+
 test("discarding into New retires a held import before the decode finishes", async ({ app, mock }) => {
   const { playlist, point } = await openPlaylist(app, mock);
   const { generation, revision } = await arrangement(app);
@@ -157,6 +197,40 @@ const asset = { id: 4, sample: { path: "stale.wav", file: "samples/1-stale.wav" 
 const clip = { id: 5, track: 2, name: "Stored audio", startTick: 960, muted: false,
   content: { type: "audio" as const, asset: 4, sourceStart: 0, sourceEnd: sourceFrames, gain: 1, reverse: false, fadeIn: 0, fadeOut: 0 } };
 const storedArrangement = { tracks, clips: [clip], audioAssets: [asset], loopRegion: null };
+
+test("relinking to the same path refetches the cached waveform", async ({ app, mock }) => {
+  const { playlist, point } = await openPlaylist(app, mock);
+  const { generation, revision } = await arrangement(app);
+  await mock.dropAudio(audio, point, bytes);
+  await expect.poll(() => edits(mock)).toEqual([importCall({ generation, revision }), waveform(generation, 4, 1)]);
+  const before = await arrangement(app);
+  // Report the existing source as missing for one refresh, keeping its sample reference
+  // and the previously loaded waveform bucket so that relink must invalidate the cache.
+  await app.evaluate(() => {
+    const shell = (window as unknown as { __TAURI_INTERNALS__: {
+      invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>;
+    } }).__TAURI_INTERNALS__;
+    const invoke = shell.invoke;
+    shell.invoke = async (command, args) => {
+      if (command !== "arrangement_view") return invoke(command, args);
+      shell.invoke = invoke;
+      const page = await invoke(command, args) as ArrangementPage;
+      return { ...page, warnings: ["Audio asset 4 is missing; relink it to hear its clips."] };
+    };
+  });
+  await playlist.getByRole("button", { name: "Refresh playlist" }).click();
+  const relink = playlist.getByRole("button", { name: "Relink missing audio" });
+  await expect(relink).toBeEnabled();
+  await mock.registerAudio(audio, generatedWav({ rate: sourceRate, samples: Array.from({ length: sourceFrames }, () => [0, 0] as const) }));
+  await mock.eval(`m => m.queueDialog(${JSON.stringify(audio)})`);
+  await relink.click();
+  await expect(relink).toHaveCount(0);
+  expect((await arrangement(app)).audioAssets).toEqual(before.audioAssets);
+  await expect.poll(() => edits(mock)).toEqual([
+    importCall({ generation, revision }), waveform(generation, 4, 1),
+    call("audio_relink", { generation, revision: before.revision, asset: 4, path: audio }), waveform(generation, 4, 2),
+  ]);
+});
 
 test.describe("a missing audio asset", () => {
   test.use({ seed: { project: { ...scene, nextId: 6, arrangement: storedArrangement }, files: soundsFor(["Kick"]) } });
@@ -210,16 +284,24 @@ test.describe("waveform source changes during an in-flight request", () => {
 test.describe("retina input", () => {
   test.use({ deviceScaleFactor: 2 });
 
-  test("places the clip on the second track under a DPR 2 pointer", async ({ app, mock }) => {
-    const { box, playlist } = await openPlaylist(app, mock);
-    const { generation, revision } = await arrangement(app);
-    expect(await app.evaluate(() => window.devicePixelRatio)).toBe(2);
-    await mock.dropAudio(audio, { x: box.x + 108, y: box.y + 104 }, bytes);
-    await expect(playlist.getByRole("option", { name: "Break.Take.2 · Track 2 · 1920 ticks" })).toHaveCount(1);
-    await expect.poll(() => edits(mock)).toEqual([importCall({ generation, revision }, audio, 3, 1920), waveform(generation, 4, 1)]);
-    await displayedFrames(app);
-    expect(await edits(mock)).toEqual([importCall({ generation, revision }, audio, 3, 1920), waveform(generation, 4, 1)]);
-  });
+  for (const { platform, scale } of [{ platform: "MacIntel", scale: 1 }, { platform: "Win32", scale: 2 }]) {
+    test.describe(platform, () => {
+      test.beforeEach(async ({ page }) => {
+        await page.addInitScript(value => Object.defineProperty(navigator, "platform", { value }), platform);
+      });
+
+      test("places the clip on the second track under a DPR 2 pointer", async ({ app, mock }) => {
+        const { box, playlist } = await openPlaylist(app, mock);
+        const { generation, revision } = await arrangement(app);
+        expect(await app.evaluate(() => [navigator.platform, window.devicePixelRatio])).toEqual([platform, 2]);
+        await mock.registerAudio(audio, bytes);
+        await emitDrop(mock, [audio], { x: (box.x + 108) * scale, y: (box.y + 104) * scale });
+        await expect(playlist.getByRole("option", { name: "Break.Take.2 · Track 2 · 1920 ticks" })).toHaveCount(1);
+        await displayedFrames(app);
+        expect(await importArgs(mock)).toEqual([importCall({ generation, revision }, audio, 3, 1920).args]);
+      });
+    });
+  }
 });
 
 test("a drop outside the playlist goes to the rack", async ({ app, mock }) => {

@@ -5,9 +5,13 @@ export type DropPlatform = "macos" | "windows" | "linux";
 export function dropClientPoint(position: Point, devicePixelRatio: number, platform: DropPlatform): Point {
   switch (platform) {
     case "macos":
-      // Wry may label Cocoa points PhysicalPosition (#636). Until verified, fall through to physical / DPR.
-    case "windows":
+      // wry-0.57.2/src/wkwebview/drag_drop.rs sends draggingLocation() in points with only Y
+      // flipped. tauri-runtime-wry-2.12.3 wraps it as PhysicalPosition without scaling (#636).
+      return position;
     case "linux":
+      // Wry's WebKitGTK backend sends GTK logical coordinates.
+      return position;
+    case "windows":
       return { x: position.x / devicePixelRatio, y: position.y / devicePixelRatio };
   }
 }

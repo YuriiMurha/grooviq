@@ -52,6 +52,7 @@ export function usePlaylist(session: SessionAdapter) {
   useLayoutEffect(() => { binding.update(session); }, [binding, session]);
   useLayoutEffect(() => binding.mount(), [binding]);
   useEffect(() => registerSettlement(controller.settle), [controller]);
+  // Save and Open must settle admitted media edits before reading or replacing the project.
   useEffect(() => registerSettlement(controller.settleMedia), [controller]);
   useEffect(() => onProjectReplaced(controller.replaceMedia), [controller]);
   useEffect(() => onProjectReplacing(controller.retire), [controller]);

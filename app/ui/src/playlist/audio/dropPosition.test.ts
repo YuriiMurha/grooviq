@@ -5,10 +5,10 @@ import { dropClientPoint, hitAudioDrop, type DropPlatform } from "./dropPosition
 
 const platforms: DropPlatform[] = ["macos", "windows", "linux"];
 
-it.each(platforms)("converts physical drop points on %s at DPR 1 and 2", (platform) => {
+it.each(platforms)("converts native drop points on %s at DPR 1 and 2", (platform) => {
   const raw = { x: 401, y: 241 };
   expect(dropClientPoint(raw, 1, platform)).toEqual({ x: 401, y: 241 });
-  expect(dropClientPoint(raw, 2, platform)).toEqual({ x: 200.5, y: 120.5 });
+  expect(dropClientPoint(raw, 2, platform)).toEqual(platform === "windows" ? { x: 200.5, y: 120.5 } : raw);
 });
 
 const rect = { left: 40, top: 100, width: 200, height: 192 };

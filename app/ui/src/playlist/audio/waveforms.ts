@@ -39,13 +39,18 @@ export function createWaveformLoader(fetch: (request: Request) => Promise<Packet
   let visible = new Map<string, Entry>();
   let displayed: readonly Row[] = [];
 
-  const emit = () => {
+  const emit = (invalidated?: ReadonlySet<number>) => {
+    const previous = new Map(displayed.map(row => [row.clip.id, row]));
     const rows = targets.flatMap(target => {
-      const packet = visible.get(waveformKey(target.key))?.packet;
-      return packet ? [{ ...target, packet }] : [];
+      const entry = visible.get(waveformKey(target.key));
+      if (entry?.packet) return [{ ...target, packet: entry.packet }];
+      if (!entry || entry.failed || invalidated?.has(target.key.asset)) return [];
+      const last = previous.get(target.clip.id);
+      return last && last.key.generation === target.key.generation && last.key.asset === target.key.asset
+        ? [{ ...target, packet: last.packet }] : [];
     });
     if (displayed.length === rows.length && displayed.every((row, index) =>
-      row.clip === rows[index].clip && row.packet === rows[index].packet)) return;
+      row.clip === rows[index].clip && row.content === rows[index].content && row.packet === rows[index].packet)) return;
     displayed = rows;
     publish(rows);
   };
@@ -88,6 +93,7 @@ export function createWaveformLoader(fetch: (request: Request) => Promise<Packet
             candidate.failed = candidate.retried === true;
             candidate.retried = true;
           }
+          emit(new Set([entry.key.asset]));
         } else {
           const current = visible.get(waveformKey(entry.key));
           if (current) current.failed = true;
@@ -120,7 +126,7 @@ export function createWaveformLoader(fetch: (request: Request) => Promise<Packet
         const packet = cache.get(key);
         return [id, (!changed.has(key.asset) && previous.get(id)) || { key, packet: packet ?? undefined, failed: packet === null }];
       }));
-      emit();
+      emit(changed);
       pump();
     },
   };

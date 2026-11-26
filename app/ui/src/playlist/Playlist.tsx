@@ -19,11 +19,11 @@ import { PatternGroupGesture, crossedThreshold, marqueeRect, marqueeSelection, t
 import { keyboardLoop, keyboardSeek, seekTarget, LoopGesture, rulerTick } from "./ruler";
 import "./playlist.css";
 
-type Props = Readonly<{ rulerPosition: { readonly current: number | null }; model: PlaylistModel; patterns: PatternsView | null; bpm: number; beats: number; unit: number }>;
+type Props = Readonly<{ rulerPosition: { readonly current: number | null }; model: PlaylistModel; patterns: PatternsView | null; bpm: number; beats: number; unit: number; notifyAudioDrop: (message: string) => void }>;
 type Active = { gesture: PatternGesture | PatternGroupGesture; start: Point; moved: boolean; clickId: number | null; pointerId: number; stamp: ArrangementStamp; kind: GestureInput["kind"] };
 const DEFAULT_VIEW: PlaylistView = { width: 1, height: 1, scrollTick: 0, scrollTrack: 0, tickWidth: 0.05, rowHeight: 64 };
 
-export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: Props) {
+export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, notifyAudioDrop }: Props) {
   const { state, mutate, reload, seek } = model;
   const snapshot = state.snapshot;
   const barTicks = Math.max(1, Math.floor(3840 / Math.max(1, unit))) * Math.max(1, beats);
@@ -195,11 +195,20 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition }: P
       dropPreview.current = clip;
       draw.current();
     },
-    commit: (stamp, input) => {
+    report: notifyAudioDrop,
+    commit: (stamp, input, skipped) => {
       setRelinkError(null);
+      const replacements = projectGeneration();
       void model.importAudio(stamp, input).then(result => {
+        if (replacements !== projectGeneration()) return;
         const id = result.status === "applied" ? result.reply.createdIds.at(-1) : undefined;
         if (id !== undefined) setSelected({ generation: stamp.generation, ids: [id] });
+        if (result.status === "applied" && skipped > 0) {
+          const files = skipped === 1 ? "1 more file was skipped" : `${skipped} more files were skipped`;
+          notifyAudioDrop(`Imported ${input.name}. ${files}. Drop one audio file at a time.`);
+        } else if (result.status === "blocked" || result.status === "stale" || result.status === "unsettled") {
+          notifyAudioDrop("The playlist couldn’t accept audio. Try dropping it again.");
+        }
       });
     },
   });
