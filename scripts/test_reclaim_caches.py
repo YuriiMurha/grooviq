@@ -7,7 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -415,6 +415,67 @@ class ReclaimTests(unittest.TestCase):
         self.reclaim()
         self.assertTrue(target.is_dir())
 
+    def test_ancestry_command_error_keeps_cache(self):
+        target = self.worktree("candidate", detached=False)
+        self.merge_branch(target)
+
+        def runner(args, **kwargs):
+            if args[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
+            return self.run_command(args, **kwargs)
+
+        output = self.reclaim(runner=runner)
+        self.assertIn(f"Skipped {target}: PR head ancestry unavailable", output)
+        self.assertTrue(target.is_dir())
+
+    def test_successful_but_empty_or_malformed_lsof_snapshot_keeps_cache(self):
+        target = self.worktree("candidate")
+        for snapshot in ("", "p123\0\nn/without-a-descriptor\0\n"):
+            with self.subTest(snapshot=snapshot):
+                def runner(args, **kwargs):
+                    if args[0] == "lsof":
+                        return subprocess.CompletedProcess(args, 0, snapshot, "")
+                    return self.run_command(args, **kwargs)
+
+                output = self.reclaim(runner=runner)
+                self.assertIn(f"Skipped {target}: lsof snapshot empty or malformed", output)
+                self.assertTrue(target.is_dir())
+
+    def test_lsof_local_snapshot_can_include_unnamed_descriptors(self):
+        target = self.worktree("candidate")
+
+        def runner(args, **kwargs):
+            if args[0] == "lsof":
+                output = "p123\0\nfcwd\0n/\0\nf12\0n\0\n"
+                return subprocess.CompletedProcess(args, 0, output, "")
+            return self.run_command(args, **kwargs)
+
+        output = self.reclaim(apply=False, runner=runner)
+        self.assertIn("Would reclaim", output)
+        self.assertIn(str(target), output)
+        self.assertTrue(target.is_dir())
+
+    def test_cross_device_entry_inside_target_is_skipped(self):
+        target = self.worktree("candidate")
+        real_scandir = os.scandir
+
+        def stat_on_other_device(*, follow_symlinks):
+            info = (target / "artifact").lstat()
+            return SimpleNamespace(
+                st_dev=info.st_dev + 1, st_mode=info.st_mode, st_ino=info.st_ino,
+                st_nlink=info.st_nlink, st_blocks=info.st_blocks,
+            )
+
+        def scandir(path):
+            if path != target:
+                return real_scandir(path)
+            return nullcontext([SimpleNamespace(name="artifact", stat=stat_on_other_device)])
+
+        with patch("reclaim_caches.os.scandir", side_effect=scandir):
+            output = self.reclaim()
+        self.assertIn(f"Skipped {target}: contains a different filesystem", output)
+        self.assertTrue(target.is_dir())
+
     def test_nested_worktrees_keep_both_caches(self):
         outer = self.worktree("outer")
         inner = self.worktree("outer/target/inner")
@@ -495,6 +556,84 @@ class ReclaimTests(unittest.TestCase):
         self.assertTrue(target.is_dir())
         self.assertFalse(target.with_name(f".target-reclaim-{os.getpid()}").exists())
 
+    def test_failed_rename_removes_empty_reservation(self):
+        target = self.worktree("candidate")
+        with patch("reclaim_caches.os.rename", side_effect=OSError("rename failed")):
+            output = self.reclaim(expected_status=1)
+        self.assertIn("rename failed", output)
+        self.assertTrue(target.is_dir())
+        self.assertEqual(list(target.parent.glob(".target-reclaim-*")), [])
+
+    def test_wrong_inode_after_rename_is_kept_and_reported(self):
+        target = self.worktree("candidate")
+        stash = target.with_name(f".target-reclaim-{os.getpid()}")
+        real_stat = os.stat
+        mismatch_reported = False
+
+        def wrong_inode(path, *args, **kwargs):
+            nonlocal mismatch_reported
+            info = real_stat(path, *args, **kwargs)
+            if not mismatch_reported and path == stash.name and kwargs.get("dir_fd") is not None:
+                mismatch_reported = True
+                fields = list(info)
+                fields[1] = info.st_ino + 1
+                return os.stat_result(fields)
+            return info
+
+        with patch("reclaim_caches.os.stat", side_effect=wrong_inode):
+            output = self.reclaim(expected_status=1)
+        self.assertIn("target changed during rename", output)
+        self.assertIn(f"kept {stash}", output)
+        self.assertFalse(target.exists())
+        self.assertTrue((stash / "artifact").is_file())
+
+    def test_partial_rmtree_failure_is_reported_and_recovered(self):
+        target = self.worktree("candidate")
+        stash = target.with_name(f".target-reclaim-{os.getpid()}")
+        (target / "partial").touch()
+        self.age(target, target / "partial")
+
+        def fail_after_removing_one_file(path, *, dir_fd=None):
+            (target.parent / path / "partial").unlink()
+            raise OSError("partial removal")
+
+        fail_after_removing_one_file.avoids_symlink_attacks = True
+        with patch("reclaim_caches.shutil.rmtree", fail_after_removing_one_file):
+            failed = self.reclaim(expected_status=1)
+        self.assertIn(f"kept {stash}", failed)
+        self.assertFalse(target.exists())
+        self.assertTrue((stash / "artifact").is_file())
+        # This checkout predates the ignore rule and partial removal updated the mtime.
+        self.assertIn(stash.name, self.git(stash.parent, "status", "--porcelain"))
+        preview = self.reclaim(apply=False)
+        self.assertIn("Would reclaim", preview)
+        self.assertIn(str(stash), preview)
+        self.assertTrue(stash.is_dir())
+        self.assertIn(str(stash), self.reclaim())
+        self.assertFalse(stash.exists())
+
+    def test_recovery_stash_with_node_modules_is_kept(self):
+        target = self.worktree("candidate")
+        stash = target.with_name(".target-reclaim-42")
+        target.rename(stash)
+        (stash / "node_modules").mkdir()
+        output = self.reclaim()
+        self.assertIn(f"Skipped {stash}: contains node_modules", output)
+        self.assertTrue((stash / "node_modules").is_dir())
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS F_GETPATH")
+    def test_wrong_case_registered_worktree_keeps_cache(self):
+        target = self.worktree("MixedCase")
+        wrong_case = self.root / "mixedcase"
+        if not wrong_case.is_dir():
+            self.skipTest("requires a case-insensitive volume")
+        gitdir = Path(self.git(target.parent, "rev-parse", "--absolute-git-dir"))
+        (gitdir / "gitdir").write_text(f"{wrong_case / '.git'}\n")
+        self.assertIn(f"worktree {wrong_case}\n", self.git(self.main, "worktree", "list", "--porcelain"))
+        output = self.reclaim()
+        self.assertIn(f"Skipped {wrong_case / 'target'}: non-canonical path", output)
+        self.assertTrue(target.is_dir())
+
     def test_cli_and_make_accept_only_explicit_apply(self):
         target = self.worktree("candidate")
         bin_dir = self.root / "bin"
@@ -528,11 +667,34 @@ class ReclaimTests(unittest.TestCase):
         output = cli("make", "reclaim-caches", 'RECLAIM_APPLY=yes" --apply=1 #')
         self.assertIn("Would reclaim", output)
         self.assertTrue(target.is_dir())
+        for target_name, value in (
+            ("reclaim-caches", 'RECENT_MINUTES=45" --apply="1'),
+            ("disk-check", 'MIN_GIB=20" --min-gib="0'),
+        ):
+            with self.subTest(value=value):
+                result = subprocess.run(
+                    ["make", target_name, value], cwd=self.main, env=env,
+                    text=True, capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertTrue(target.is_dir())
         cli("make", "reclaim-caches", "RECLAIM_APPLY=1")
         self.assertFalse(target.exists())
 
 
 class CacheIdentityTests(unittest.TestCase):
+    def test_measurement_counts_hard_linked_blocks_once(self):
+        from reclaim_caches import measure_cache
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory).resolve()
+            artifact = target / "artifact"
+            artifact.write_bytes(os.urandom(16384))
+            os.link(artifact, target / "second-link")
+            info = target.lstat()
+            expected = (info.st_blocks + artifact.lstat().st_blocks) * 512
+            self.assertEqual(measure_cache(target, info.st_dev), (expected, None))
+
     def test_measurement_sums_allocated_blocks_without_following_symlinks(self):
         from reclaim_caches import measure_cache
 

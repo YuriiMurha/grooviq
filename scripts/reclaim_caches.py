@@ -16,9 +16,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+if sys.platform == "darwin":
+    import fcntl
+
 
 GIB = 1024**3
 RELEASE_CACHE = Path("~/Library/Caches/Grooviq/quality-release").expanduser()
+RECLAIM_PREFIX = ".target-reclaim-"
 PROBE_TIMEOUT = 10
 LSOF_TIMEOUT = 30
 
@@ -96,12 +100,19 @@ def worktree_skip_reason(run, worktree):
     ).splitlines()
     if head != worktree.head or ref != (worktree.branch or "HEAD"):
         return "worktree HEAD or branch changed"
-    if worktree.branch is None and checked(
-        run,
-        ["git", "--no-optional-locks", "status", "--porcelain", "--ignore-submodules=none"],
-        cwd=worktree.path,
-    ):
-        return "dirty detached worktree"
+    if worktree.branch is None:
+        changes = checked(
+            run,
+            ["git", "--no-optional-locks", "status", "--porcelain", "-z",
+             "--untracked-files=normal", "--ignore-submodules=none"],
+            cwd=worktree.path,
+        )
+        # Older checkouts may not yet ignore abandoned reclamation directories.
+        if any(
+            entry and not entry.startswith(f"?? {RECLAIM_PREFIX}")
+            for entry in changes.split("\0")
+        ):
+            return "dirty detached worktree"
     return None
 
 
@@ -124,25 +135,37 @@ def activity_snapshot(run, worktrees):
         return {}, "lsof snapshot unavailable"
     if result.returncode != 0 or result.stderr.strip():
         return {}, "lsof snapshot failed"
+    malformed = {}, "lsof snapshot empty or malformed"
     if not result.stdout.startswith("p") or not result.stdout.rstrip("\n").endswith("\0"):
-        return {}, "lsof snapshot empty or malformed"
+        return malformed
 
     activity = {}
     descriptor = ""
+    saw_name = False
     prefixes = tuple(str(path) for path in worktrees)
     # In NUL-delimited field mode, lsof separates process and file records with LF.
-    for field in result.stdout.split("\0"):
+    for index, field in enumerate(result.stdout.split("\0")[:-1]):
+        record_start = index == 0 or field.startswith("\n")
         field = field.removeprefix("\n")
-        if field.startswith("p"):
+        kind, value = field[:1], field[1:]
+        if kind == "p" and record_start and value.isascii() and value.isdecimal():
             descriptor = ""
-        elif field.startswith("f"):
-            descriptor = field[1:]
-        elif field.startswith("n/") and field[1:].startswith(prefixes):
-            path = Path(field[1:])
+        elif kind == "f" and record_start and value:
+            descriptor = value
+        elif kind == "n" and not record_start and descriptor:
+            # macOS can report an unnamed descriptor as an empty name field.
+            saw_name = saw_name or bool(value)
             reason = "process cwd" if descriptor == "cwd" else "open handle"
-            for parent in (path, *path.parents):
-                if parent in worktrees and (reason == "process cwd" or parent not in activity):
-                    activity[parent] = reason
+            descriptor = ""
+            if value.startswith(prefixes):
+                path = Path(value)
+                for parent in (path, *path.parents):
+                    if parent in worktrees and (reason == "process cwd" or parent not in activity):
+                        activity[parent] = reason
+        else:
+            return malformed
+    if not saw_name:
+        return malformed
 
     try:
         processes = checked(run, ["ps", "-wwaxo", "command="])
@@ -159,13 +182,26 @@ def activity_snapshot(run, worktrees):
 def cache_identity(target, info=None):
     if info is None:
         info = target.lstat()
-    if stat.S_ISDIR(info.st_mode) and target == target.resolve():
-        return info.st_dev, info.st_ino
-    return None
+    if not stat.S_ISDIR(info.st_mode) or target != target.resolve():
+        return None
+    identity = info.st_dev, info.st_ino
+    if sys.platform == "darwin":
+        fd = os.open(target, os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != identity:
+                return None
+            path = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024))
+            if os.fsdecode(path.split(b"\0", 1)[0]) != str(target):
+                return None
+        finally:
+            os.close(fd)
+    return identity
 
 
 def measure_cache(target, device):
     size = target.lstat().st_blocks * 512
+    counted_links = set()
     pending = [target]
     while pending:
         with os.scandir(pending.pop()) as entries:
@@ -175,9 +211,14 @@ def measure_cache(target, device):
                 info = entry.stat(follow_symlinks=False)
                 if info.st_dev != device:
                     return 0, "contains a different filesystem"
-                size += info.st_blocks * 512
                 if stat.S_ISDIR(info.st_mode):
                     pending.append(entry.path)
+                elif info.st_nlink > 1:
+                    inode = info.st_dev, info.st_ino
+                    if inode in counted_links:
+                        continue
+                    counted_links.add(inode)
+                size += info.st_blocks * 512
     return size, None
 
 
@@ -187,17 +228,25 @@ def remove_cache(target, identity):
         info = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
         if (info.st_dev, info.st_ino) != identity:
             return "target changed before rename"
-        renamed = f".target-reclaim-{os.getpid()}"
-        os.mkdir(renamed, dir_fd=parent_fd)
+        kept = target
+        if target.name == "target":
+            kept = target.with_name(f"{RECLAIM_PREFIX}{os.getpid()}")
+            os.mkdir(kept.name, dir_fd=parent_fd)
+            try:
+                os.rename(target.name, kept.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            except OSError:
+                os.rmdir(kept.name, dir_fd=parent_fd)
+                raise
         try:
-            os.rename(target.name, renamed, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        except OSError:
-            os.rmdir(renamed, dir_fd=parent_fd)
+            info = os.stat(kept.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (info.st_dev, info.st_ino) != identity:
+                raise OSError("target changed during rename")
+            shutil.rmtree(kept.name, dir_fd=parent_fd)
+        except OSError as error:
+            raise OSError(f"{error}; kept {kept}") from error
+        except KeyboardInterrupt:
+            print(f"Interrupted; kept {kept}", file=sys.stderr)
             raise
-        info = os.stat(renamed, dir_fd=parent_fd, follow_symlinks=False)
-        if (info.st_dev, info.st_ino) != identity:
-            raise OSError(f"target changed during rename; preserved {renamed}")
-        shutil.rmtree(renamed, dir_fd=parent_fd)
     finally:
         os.close(parent_fd)
     return None
@@ -212,7 +261,10 @@ def protected_reason(target, main_path, release_cache, worktrees):
         return "under node_modules"
     if any(target == path or target in path.parents for path in worktrees):
         return "contains a registered worktree"
-    if any(path / "target" in target.parent.parents or path / "target" == target.parent for path in worktrees):
+    if any(
+        path.parent in worktrees and (path.name == "target" or path.name.startswith(RECLAIM_PREFIX))
+        for path in (target.parent, *target.parent.parents)
+    ):
         return "inside a registered worktree's target"
     return None
 
@@ -249,13 +301,14 @@ def reclaim_caches(
                 return 0, reason
             identity = cache_identity(target, info)
             if identity is None:
-                return 0, "target is not a canonical directory"
+                return 0, "non-canonical path"
             if identity[0] != target.parent.stat().st_dev:
                 return 0, "target is on a different filesystem"
             reason = snapshot_error or activity.get(worktree.path) or worktree_skip_reason(run, worktree)
             if reason:
                 return 0, reason
-            if recently_written(run, target, recent_minutes):
+            # A partial rmtree itself updates mtimes inside an already isolated cache.
+            if target.name == "target" and recently_written(run, target, recent_minutes):
                 return 0, "recent write"
             if worktree.branch is not None:
                 reason = merge_skip_reason(run, repo, worktree, remote_url, remote_refs, main_commits)
@@ -272,7 +325,7 @@ def reclaim_caches(
             reason = worktree_skip_reason(run, worktree)
             if reason:
                 return 0, reason
-            if recently_written(run, target, recent_minutes):
+            if target.name == "target" and recently_written(run, target, recent_minutes):
                 return 0, "recent write"
             if cache_identity(target) != identity:
                 return 0, "target changed"
@@ -283,31 +336,33 @@ def reclaim_caches(
             return size, None
 
         for worktree in worktrees:
-            target = worktree.path / "target"
-            try:
-                info = target.lstat()
-            except FileNotFoundError:
-                continue
-            except OSError as error:
-                print(f"Skipped {target}: target inspection failed ({error})")
-                skipped["target inspection failed"] += 1
-                status = 1
-                continue
-            try:
-                size, reason = reclaim_target(worktree, target, info)
-            except FileNotFoundError:
-                size, reason = 0, "target or worktree disappeared"
-            except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
-                print(f"Skipped {target}: probe or removal failed ({error})")
-                skipped["probe or removal failed"] += 1
-                status = 1
-                continue
-            if reason:
-                print(f"Skipped {target}: {reason}")
-                skipped[reason] += 1
-                continue
-            print(f"{'Reclaimed' if apply else 'Would reclaim'} {size / GIB:.2f} GiB: {target}")
-            total += size
+            targets = sorted(worktree.path.glob(f"{RECLAIM_PREFIX}*"))
+            targets.append(worktree.path / "target")
+            for target in targets:
+                try:
+                    info = target.lstat()
+                except FileNotFoundError:
+                    continue
+                except OSError as error:
+                    print(f"Skipped {target}: target inspection failed ({error})")
+                    skipped["target inspection failed"] += 1
+                    status = 1
+                    continue
+                try:
+                    size, reason = reclaim_target(worktree, target, info)
+                except FileNotFoundError:
+                    size, reason = 0, "target or worktree disappeared"
+                except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
+                    print(f"Skipped {target}: probe or removal failed ({error})")
+                    skipped["probe or removal failed"] += 1
+                    status = 1
+                    continue
+                if reason:
+                    print(f"Skipped {target}: {reason}")
+                    skipped[reason] += 1
+                    continue
+                print(f"{'Reclaimed' if apply else 'Would reclaim'} {size / GIB:.2f} GiB: {target}")
+                total += size
     except (OSError, subprocess.SubprocessError, ValueError) as error:
         print(f"Warning: cache scan stopped: {error}")
         status = 1
