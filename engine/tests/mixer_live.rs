@@ -286,7 +286,7 @@ fn render_insert_scene(mix: MixSetup, inputs: Vec<[Vec<f32>; 2]>, frames: usize)
     c.set_mix(mix).unwrap();
     c.send(Command::Play).unwrap();
     let mut out = vec![0.0; frames * 2];
-    for block in out.chunks_exact_mut(N * 2) {
+    for block in out.as_chunks_mut::<{ N * 2 }>().0 {
         p.process(block, 2);
     }
     assert_eq!(frames % N, 0);
@@ -330,7 +330,13 @@ fn render_direct_insert(
     let mut device = grooviq_dsp::create_insert(kind, SR, seed, params).unwrap();
     // The engine state uses the default 140 BPM, including for tempo-synced effects.
     device.set_tempo(EngineState::default().bpm);
-    for (block, (l, r)) in l.chunks_exact_mut(N).zip(r.chunks_exact_mut(N)).enumerate() {
+    for (block, (l, r)) in l
+        .as_chunks_mut::<N>()
+        .0
+        .iter_mut()
+        .zip(r.as_chunks_mut::<N>().0.iter_mut())
+        .enumerate()
+    {
         let key = key.map(|(kl, kr)| {
             let frames = block * N..(block + 1) * N;
             (&kl[frames.clone()], &kr[frames])
