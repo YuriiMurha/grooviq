@@ -171,18 +171,28 @@ fn comparison_accepts_crlf_and_rejects_shape_and_file_inventory_changes() {
 #[test]
 fn update_replaces_stale_contents_and_removes_obsolete_files() {
     let expected = tempfile::tempdir().unwrap();
-    let checkout = tempfile::tempdir().unwrap();
     let source = "export type Reply = { frames: number };\n";
     write_contract(expected.path(), source).unwrap();
-    fs::write(checkout.path().join(FILE), "stale").unwrap();
-    fs::write(checkout.path().join("obsolete.ts"), source).unwrap();
-    assert!(
-        compare(expected.path(), checkout.path())
-            .unwrap_err()
-            .contains("inventory differs")
-    );
+    for existing_name in [FILE, "Contract.ts"] {
+        let checkout = tempfile::tempdir().unwrap();
+        fs::write(checkout.path().join(existing_name), "stale").unwrap();
+        fs::write(checkout.path().join("obsolete.ts"), source).unwrap();
+        assert!(
+            compare(expected.path(), checkout.path())
+                .unwrap_err()
+                .contains("inventory differs")
+        );
 
-    update_contract(checkout.path(), source).unwrap();
+        update_contract(checkout.path(), source).unwrap();
 
-    compare(expected.path(), checkout.path()).unwrap();
+        assert_eq!(
+            inventory(checkout.path()).unwrap(),
+            BTreeSet::from([PathBuf::from(FILE)]),
+            "updating over {existing_name}"
+        );
+        assert_eq!(
+            fs::read(checkout.path().join(FILE)).unwrap(),
+            source.as_bytes()
+        );
+    }
 }

@@ -185,14 +185,14 @@ fn write_contract(directory: &Path, contract: &str) -> Result<(), String> {
 fn update_contract(directory: &Path, contract: &str) -> Result<(), String> {
     fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     let existing = inventory(directory)?;
-    write_contract(directory, contract)?;
+    // Prune case variants before writing on case-insensitive filesystems.
     for file in existing {
         if file != Path::new(FILE) {
             let path = directory.join(file);
             fs::remove_file(&path).map_err(|error| format!("{}: {error}", path.display()))?;
         }
     }
-    Ok(())
+    write_contract(directory, contract)
 }
 
 fn inventory(directory: &Path) -> Result<BTreeSet<PathBuf>, String> {
