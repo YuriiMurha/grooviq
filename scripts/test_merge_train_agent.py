@@ -720,6 +720,21 @@ class AgentTests(unittest.TestCase):
         self.agent.commit_object.assert_called_once_with(LANDED, "^")
         self.assertEqual(json.loads(self.agent.landings.read_text())["landed_prefix"], [[12, LANDED]])
 
+    def test_orphaned_two_member_batch_with_one_landing_is_partial(self):
+        self.agent.set_order(f"batch=2\n{ORDER}14={NEXT}\n")
+        self.scratch.mkdir()
+        self.agent.latch({}, "", ["tick in progress"], pending=True, scratch=self.scratch.name)
+        (self.scratch / "stdout").write_text(
+            f"Tested batch {TESTED}\nSquash attempt #12 {HEAD} after {NEXT}\nMerged #12 at {LANDED}\n"
+        )
+        self.agent.commit_tree = Mock(side_effect={LANDED: TREE, TESTED: HEAD}.__getitem__)
+        self.agent.ci_run_id = Mock(return_value=123)
+        self.assertEqual(self.agent.tick()["status"], "latched")
+        row = json.loads(self.agent.landings.read_text())
+        self.assertEqual(row["landed_prefix"], [[12, LANDED]])
+        self.assertFalse(row["match"])
+        self.assertEqual(row["status"], "partial")
+
     def test_reconcile_landing_refuses_unexpected_parent(self):
         stdout = f"Tested batch {TESTED}\nSquash attempt #12 {HEAD} after {NEXT}\n"
         pull = {"merged": True, "merge_commit_sha": LANDED, "head": {"sha": HEAD}, "base": {"ref": "main"}}
@@ -935,6 +950,12 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(error.exception.path, train_lock)
         self.launchctl.assert_not_called()
         self.assertFalse(self.agent.plist.exists())
+
+    def test_enable_reports_saved_approved_heads_in_priority_order(self):
+        self.publish(self.reviewed_sources())
+        expected = [f"14={NEXT}", f"12={HEAD}"]
+        self.agent.set_order(f"# priority\nbatch=2\n{expected[0]} # first\n\n{expected[1]}\n")
+        self.assertEqual(self.agent.enable().get("order_entries"), expected)
 
     def test_reenable_reports_latch_and_explicit_resume_runs_next_tick(self):
         self.publish(self.reviewed_sources())

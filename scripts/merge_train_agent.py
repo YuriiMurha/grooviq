@@ -453,7 +453,7 @@ class Agent:
         if row["landed_tree"] and row["tested_tree"]:
             row["match"] = row["landed_tree"] == row["tested_tree"]
             output = record["stdout"] + record["stderr"]
-            partial = record.get("timed_out") or record["exit_code"] < 0 or any(
+            partial = record.get("recovered_pending") or record.get("timed_out") or record["exit_code"] < 0 or any(
                 "Stopped at #" in line or line.startswith(("Recovered landed prefix", "Unconfirmed squash"))
                 for line in output
             )
@@ -482,7 +482,8 @@ class Agent:
             line = json.dumps(record) + "\n"
             if len(line.encode("utf-8")) > TICK_LINE_BYTES:
                 bounded = {key: record[key] for key in ("recorded_utc", "status", "exit_code",
-                           "network_streak", "order_sha256", "timed_out", "before", "after") if key in record}
+                           "network_streak", "order_sha256", "timed_out", "recovered_pending",
+                           "before", "after") if key in record}
                 if "reason" in record:
                     bounded["reason"] = [line[:384] for line in record["reason"][:20]]
                 if "agent_error" in record:
@@ -574,7 +575,8 @@ class Agent:
                 reason = ["previous tick did not finish"]
                 self.latch(saved, saved["output"] + stdout + stderr, reason)
                 record.update(recorded_utc=stamp(), exit_code=1, status="stopped", network_streak=0,
-                              reason=reason, stdout=stdout.splitlines(), stderr=stderr.splitlines())
+                              reason=reason, recovered_pending=True,
+                              stdout=stdout.splitlines(), stderr=stderr.splitlines())
                 self.record_landing(record)
                 self.log_output("orphaned tick output", stdout + stderr)
             self.prune_checkouts()
@@ -693,8 +695,10 @@ class Agent:
         stable_repo = safe_path(common.parent)
         with locked(self.control_lock), locked(self.tick_lock), locked(common / "merge-train.lock"):
             stop = read_text(self.stopped)
+            entries, _ = parse_order(read_text(self.order) or "")
             revision = self.refresh_main()
-            outcome = {"status": "enabled", "interval_seconds": INTERVAL, "source_sha": revision}
+            outcome = {"status": "enabled", "interval_seconds": INTERVAL, "source_sha": revision,
+                       "order_entries": entries}
             if stop is not None:
                 if json.loads(stop).get("pending"):
                     outcome["next_step"] = ("Run make merge-train-agent-tick to recover the pending tick. "

@@ -944,7 +944,11 @@ class CliTests(unittest.TestCase):
                 self.assertIn("make merge-train-order", stderr.getvalue())
                 self.assertIn("make merge-train-agent-disable", stderr.getvalue())
                 self.assertIn("make merge-train ORDER=", stderr.getvalue())
-                self.assertRegex(stderr.getvalue(), "make merge-train-agent-enable.*make merge-train-agent-resume")
+                self.assertRegex(
+                    stderr.getvalue(),
+                    "make merge-train ORDER=.*make merge-train-order ORDER=.*heads still approved"
+                    ".*make merge-train-agent-enable.*make merge-train-agent-resume",
+                )
                 tick.assert_not_called()
                 disabled.touch()
                 self.assertEqual(train.main(), 0)
