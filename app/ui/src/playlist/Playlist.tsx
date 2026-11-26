@@ -212,11 +212,12 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
         if (result.status === "blocked" || result.status === "stale" || result.status === "unsettled") {
           notifyAudioDrop("The playlist couldn’t accept audio. Try dropping it again.");
         } else if (skipped > 0) {
-          // The first file's own outcome is shown elsewhere; always say the others were not tried.
+          // A refusal or an unconfirmed readback reports the first file itself (native may still
+          // have applied it), so this note only says the others were never tried.
           const files = skipped === 1 ? "1 more file was skipped" : `${skipped} more files were skipped`;
           notifyAudioDrop(result.status === "applied"
             ? `Imported ${input.name}. ${files}. Drop one audio file at a time.`
-            : `${input.name} wasn’t imported, and ${files}. Drop one audio file at a time.`);
+            : `${files}. Drop one audio file at a time.`);
         }
       });
     },

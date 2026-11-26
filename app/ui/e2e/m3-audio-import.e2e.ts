@@ -32,10 +32,10 @@ const playback = (cmd: string, args: Record<string, unknown>) =>
 const editCommands = ["audio_import", "audio_relink", "audio_cancel", "audio_cancel_ticket", "arrangement_edit",
   "arrangement_waveform", "arrangement_history", "channel_add", "project_save", "project_save_as", "project_open", "project_new"];
 
-// The UI picks a fresh random ticket per import or relink (#629); pin its range, then compare
-// every other argument exactly.
+// Native refuses an import or relink without a ticket (#629), and the UI picks a fresh random
+// one per call: require its range, then compare every other argument exactly.
 function withoutTicket(cmd: string, args: Record<string, unknown>) {
-  if ((cmd !== "audio_import" && cmd !== "audio_relink") || !("ticket" in args)) return args;
+  if (cmd !== "audio_import" && cmd !== "audio_relink") return args;
   const { ticket, ...rest } = args;
   expect(Number.isSafeInteger(ticket) && (ticket as number) > 0).toBe(true);
   return rest;
@@ -145,6 +145,23 @@ test("a multi-file drop imports only the first file and reports skipped files", 
   await expect(dropMessages(app)).toBeEmpty();
   await emitDrop(mock, [audio, other], point);
   await expect(playlist.getByRole("option", { name: "Break.Take.2 · Track 1 · 960 ticks" })).toHaveCount(1);
+  await expect(dropMessages(app)).not.toBeEmpty();
+  await displayedFrames(app);
+  expect(await importArgs(mock)).toEqual([importCall({ generation, revision }).args]);
+});
+
+test("a refused multi-file drop still reports the skipped files", async ({ app, mock }) => {
+  const { playlist, point } = await openPlaylist(app, mock);
+  const { generation, revision } = await arrangement(app);
+  const other = "/qa/audio/Other.wav";
+  await mock.registerAudio(audio, bytes);
+  await mock.registerAudio(other, bytes);
+  await mock.holdAudio(audio);
+  await emitDrop(mock, [audio, other], point);
+  await expect.poll(async () => (await arrangement(app)).pendingRequests.length).toBe(1);
+  await expect(dropMessages(app)).toBeEmpty();
+  await mock.refuseAudio(audio);
+  await expect(playlist.getByRole("alert")).toContainText(/decode|sound/i);
   await expect(dropMessages(app)).not.toBeEmpty();
   await displayedFrames(app);
   expect(await importArgs(mock)).toEqual([importCall({ generation, revision }).args]);
@@ -297,7 +314,7 @@ test.describe("waveform source changes during an in-flight request", () => {
     const replacement = "/qa/new/stale.wav";
     await mock.registerAudio(replacement, generatedWav({ rate: sourceRate, samples: Array.from({ length: sourceFrames }, () => [0, 0] as const) }));
     const args = { generation: before.generation, revision: before.revision, asset: 4, path: replacement };
-    expect(await ipc(app, "audio_relink", args)).toMatchObject({ status: "applied" });
+    expect(await ipc(app, "audio_relink", { ...args, ticket: 1 })).toMatchObject({ status: "applied" });
     await mock.releaseWaveform(1);
     await expect.poll(() => edits(mock)).toEqual([
       waveform(before.generation, 4, 1), call("audio_relink", args), waveform(before.generation, 4, 2),
