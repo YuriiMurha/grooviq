@@ -1,6 +1,6 @@
 //! The native mixer boundary. Session owns admission, publication and shared Undo.
 use crate::{Audio, lock};
-use grooviq_engine::InstrumentKind;
+use grooviq_engine::{BLOCK, InstrumentKind, mixer as engine_mixer};
 use grooviq_project::{
     mixer::{EFFECTS, Insert, Level, Limits, Mixer, Send, SourceKey, Tap, Track},
     mixer_edit::{CreatedId, IdRef, MixerAck, MixerEdit, MixerView},
@@ -19,9 +19,17 @@ pub struct MixerSnapshot {
     generation: u64,
     revision: u64,
     mixer: Mixer,
+    // None means the binding must disable route choices.
+    route_inputs: Option<Vec<RouteInput>>,
     sources: Vec<SourceChoice>,
     effects: &'static [&'static str],
     unsupported: UnsupportedControls,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct RouteInput {
+    track: u32,
+    from: Vec<u32>,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -47,6 +55,37 @@ struct UnsupportedControls {
     detector: &'static str,
 }
 
+fn compile_route_inputs(mixer: &Mixer) -> Result<Vec<RouteInput>, engine_mixer::CompileError> {
+    // Match the live topology budget. Descriptors carry no device or buffer preparation.
+    let budget = engine_mixer::Budget {
+        block_frames: BLOCK as u32,
+        ..Default::default()
+    };
+    let compiled = engine_mixer::compile(&mixer.descriptors(), budget)?;
+    let wire_id = |id: engine_mixer::MixerTrackId| {
+        u32::try_from(id.0).map_err(|_| engine_mixer::CompileError::Overflow)
+    };
+    // The compiler emits tracks in ID order. Its inputs without a track are source assignments.
+    compiled
+        .tracks
+        .into_iter()
+        .map(|track| {
+            let mut from = track
+                .inputs
+                .into_iter()
+                .filter_map(|input| input.from)
+                .map(wire_id)
+                .collect::<Result<Vec<_>, _>>()?;
+            from.sort_unstable();
+            from.dedup();
+            Ok(RouteInput {
+                track: wire_id(track.track.id)?,
+                from,
+            })
+        })
+        .collect()
+}
+
 fn snapshot_with_view(session: &Session, view: MixerView) -> MixerSnapshot {
     let project = session.project();
     // These display labels come from legacy sources, outside the mixer's string budget.
@@ -69,10 +108,18 @@ fn snapshot_with_view(session: &Session, view: MixerView) -> MixerSnapshot {
             instrument: None,
         }))
         .collect();
+    let route_inputs = match compile_route_inputs(&view.mixer) {
+        Ok(inputs) => Some(inputs),
+        Err(error) => {
+            eprintln!("Mixer route inputs unavailable: {error:?}");
+            None
+        }
+    };
     MixerSnapshot {
         generation: view.generation,
         revision: view.revision,
         mixer: view.mixer,
+        route_inputs,
         sources,
         effects: &EFFECTS,
         unsupported: UnsupportedControls {
@@ -615,6 +662,99 @@ mod tests {
         assert_eq!(snapshot(session), before);
         assert_eq!(session.history_usage(), history);
         assert_eq!(session.view().dirty, dirty);
+    }
+
+    #[test]
+    fn snapshot_projects_compiler_predecessors_in_track_id_order() {
+        let (mut session, mut processor) = setup();
+        assert_eq!(
+            serde_json::to_value(snapshot(&session)).unwrap()["routeInputs"],
+            json!([{"track": 0, "from": []}])
+        );
+        let detector = track(&mut session, "Detector");
+        let zero_send = track(&mut session, "Zero send");
+        let main = track(&mut session, "Main");
+        let bus = track(&mut session, "Bus");
+        session.add_synth_channel("Init", Instant::now()).unwrap();
+        let source = SourceKey::Channel(session.project().channels[0].id);
+        processor.process(&mut [0.0; 128], 2);
+        let before = session.mixer_view();
+        let ack = session
+            .edit_mixer(
+                before.generation,
+                before.revision,
+                vec![
+                    MixerEdit::SetOutput {
+                        track: IdRef::Id(main),
+                        output: IdRef::Id(bus),
+                    },
+                    MixerEdit::CreateSend {
+                        from: IdRef::Id(zero_send),
+                        to: IdRef::Id(bus),
+                        tap: Tap::Post,
+                        gain: 0.0,
+                    },
+                    MixerEdit::CreateSend {
+                        from: IdRef::Id(detector),
+                        to: IdRef::Id(0),
+                        tap: Tap::Pre,
+                        gain: 0.25,
+                    },
+                    MixerEdit::AddInsert {
+                        track: IdRef::Id(bus),
+                        index: 0,
+                        device: "comp".into(),
+                        params: default_bank("comp").unwrap(),
+                        preset: None,
+                    },
+                    MixerEdit::SetSidechain {
+                        previous: None,
+                        from: IdRef::Id(detector),
+                        to: IdRef::Created(3),
+                        tap: Tap::Pre,
+                    },
+                    MixerEdit::Assign {
+                        source,
+                        destination: IdRef::Id(zero_send),
+                    },
+                ],
+                Instant::now(),
+            )
+            .unwrap();
+        let state = snapshot(&session);
+        assert_eq!(
+            (state.generation, state.revision),
+            (ack.state.generation, ack.state.revision)
+        );
+        assert_eq!(state.mixer.destination(source), zero_send);
+        let expected = json!([
+            {"track": 0, "from": [detector, zero_send, bus]},
+            {"track": detector, "from": []},
+            {"track": zero_send, "from": []},
+            {"track": main, "from": []},
+            {"track": bus, "from": [detector, zero_send, main]},
+        ]);
+        assert_eq!(
+            serde_json::to_value(state).unwrap()["routeInputs"],
+            expected
+        );
+
+        let mut reordered = session.mixer_view();
+        reordered.mixer.tracks.reverse();
+        reordered.mixer.sends.reverse();
+        assert_eq!(
+            serde_json::to_value(snapshot_with_view(&session, reordered)).unwrap()["routeInputs"],
+            expected
+        );
+    }
+
+    #[test]
+    fn snapshot_marks_unavailable_routes_explicitly_when_compilation_fails() {
+        let (session, _processor) = setup();
+        let mut view = session.mixer_view();
+        view.mixer.tracks.clear();
+        let packet = serde_json::to_value(snapshot_with_view(&session, view)).unwrap();
+        assert_eq!(packet.get("routeInputs"), Some(&Value::Null));
     }
 
     #[test]

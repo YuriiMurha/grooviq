@@ -23,6 +23,7 @@ const snapshot: MixerSnapshot = {
     sources: [{ source: { channel: 7 }, destination: 2 }],
     nextTrackId: 3, nextInsertId: 9, nextSendId: 4,
   },
+  routeInputs: [{ track: 0, from: [2] }, { track: 2, from: [] }],
   sources: [
     { source: { channel: 7 }, name: "Synth", instrument: "synth" },
     { source: { audioTrack: 7 }, name: "Audio", instrument: null },
@@ -38,6 +39,38 @@ const detail: MixerInsertDetail = {
 describe("mixer wire", () => {
   it("keeps Rust controls and equal IDs in distinct source namespaces", () => {
     expect(decodeMixerSnapshot(snapshot)).toEqual(snapshot);
+  });
+
+  it("preserves unavailable route inputs through a snapshot and an authoritative refusal", () => {
+    const state = { ...snapshot, routeInputs: null };
+    expect(decodeMixerSnapshot(state).routeInputs).toBeNull();
+    const reply = { status: "refused", state, changed: false, createdIds: [], message: "Mixer changed." };
+    expect(decodeMixerEditReply(reply, stamp)).toEqual(reply);
+  });
+
+  it("requires canonical rows for the stamped tracks and only known predecessor IDs", () => {
+    const [masterInputs, busInputs] = snapshot.routeInputs ?? [];
+    const third = { ...bus, id: 8 };
+    const state = { ...snapshot, mixer: { ...snapshot.mixer, tracks: [bus, third, master], nextTrackId: 9 } };
+    const thirdInputs = { track: 8, from: [] };
+    const valid = { ...state, routeInputs: [{ track: 0, from: [2, 8] }, busInputs, thirdInputs] };
+    expect(decodeMixerSnapshot(valid)).toEqual(valid);
+    for (const routeInputs of [
+      undefined, {}, [], [masterInputs], [busInputs, masterInputs, thirdInputs],
+      [masterInputs, busInputs, busInputs],
+      [masterInputs, busInputs, { track: 9, from: [] }],
+      [masterInputs, busInputs, { track: 2 ** 32, from: [] }],
+      [masterInputs, busInputs, { track: 8, from: null }],
+      [masterInputs, busInputs, { track: 8, from: ["2"] }],
+      [masterInputs, busInputs, { track: 8, from: [2 ** 32] }],
+      [masterInputs, busInputs, { track: 8, from: [0] }],
+      [masterInputs, busInputs, { track: 8, from: [8] }],
+      [masterInputs, busInputs, { track: 8, from: [9] }],
+      [{ track: 0, from: [2, 2] }, busInputs, thirdInputs],
+      [{ track: 0, from: [8, 2] }, busInputs, thirdInputs],
+    ]) {
+      expect(() => decodeMixerSnapshot({ ...state, routeInputs })).toThrow(/mixer snapshot/i);
+    }
   });
 
   it("rejects malformed controls, seeds, and identities instead of normalizing them", () => {

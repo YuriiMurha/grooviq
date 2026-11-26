@@ -52,8 +52,11 @@ type MixerState = Readonly<{
   nextInsertId: number;
   nextSendId: number;
 }>;
+export type MixerRouteInput = Readonly<{ track: number; from: readonly number[] }>;
 export type MixerSnapshot = ArrangementStamp & Readonly<{
   mixer: MixerState;
+  /** Compiler predecessors per track in ID order. Disable routing choices when null. */
+  routeInputs: readonly MixerRouteInput[] | null;
   sources: readonly MixerSource[];
   effects: readonly string[];
   unsupported: MixerUnsupported;
@@ -171,9 +174,24 @@ function isUnsupported(raw: unknown): raw is MixerUnsupported {
   return isRecord(raw) && isString(raw.mute) && isString(raw.solo) && isString(raw.bypass) && isString(raw.detector);
 }
 
+function isRouteInput(raw: unknown): raw is MixerRouteInput {
+  return isRecord(raw) && isId(raw.track) && isArrayOf(raw.from, isPositiveId);
+}
+
+function isRouteInputs(raw: unknown, tracks: readonly MixerTrack[]): raw is readonly MixerRouteInput[] | null {
+  if (raw === null) return true;
+  if (!isArrayOf(raw, isRouteInput) || raw.length !== tracks.length) return false;
+  const ids = new Set(tracks.map(({ id }) => id));
+  if (!ids.has(0) || ids.size !== tracks.length) return false;
+  // Check the projection's identities and order. Native compilation owns edge validity.
+  return raw.every(({ track, from }, index) => ids.has(track) && (index === 0 || raw[index - 1].track < track)
+    && from.every((id, at) => ids.has(id) && id !== track && (at === 0 || from[at - 1] < id)));
+}
+
 function isSnapshot(raw: unknown): raw is MixerSnapshot {
   return isRecord(raw) && isNatural(raw.generation) && isNatural(raw.revision) && isState(raw.mixer)
-    && isArrayOf(raw.sources, isSource) && isArrayOf(raw.effects, isString) && isUnsupported(raw.unsupported);
+    && isArrayOf(raw.sources, isSource) && isArrayOf(raw.effects, isString) && isUnsupported(raw.unsupported)
+    && isRouteInputs(raw.routeInputs, raw.mixer.tracks);
 }
 
 export function decodeMixerSnapshot(raw: unknown): MixerSnapshot {
