@@ -196,8 +196,8 @@ jobs:
       matrix:
         browser: [webkit, chromium]
     runs-on: ubuntu-latest
-    # 4 setup + 9 suite + 3 diagnostics + 1 container minute.
-    timeout-minutes: 17
+    # 4 setup + 12 suite + 3 diagnostics + 1 container minute.
+    timeout-minutes: 20
     container:
       # Keep this version equal to @playwright/test in app/ui/package-lock.json.
       image: mcr.microsoft.com/playwright:v1.64.1-noble
@@ -217,9 +217,11 @@ jobs:
       - run: npm ci
         timeout-minutes: 2
       # Leave room for diagnostics; container initialization also uses the job budget.
+      # Temporary headroom: WebKit reached the 9-minute limit at case 526 of 527 (#648).
+      # Sharding per browser (#648) restores 9 minutes.
       - name: Discover full inventory and run browser
         id: suite
-        timeout-minutes: 9
+        timeout-minutes: 12
         env:
           GROOVIQ_E2E_JSON: ${{ github.workspace }}/app/ui/browser-accounting/report.json
         run: |
