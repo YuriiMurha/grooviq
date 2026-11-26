@@ -940,6 +940,15 @@ fn a_new_rate_mid_play_neither_replays_nor_skips_a_note() {
         .find(|f| f % BLOCK as u64 == BLOCK as u64 - 1)
         .expect("a tick one frame before a block start")
         + 1;
+    // At the lower rate, resampling changes the click's peak. Measure an isolated
+    // note at each rate so the assertion below still detects double-triggered notes.
+    let single_note_peak = |rate| {
+        let mut single = state.clone();
+        single.pattern.notes.truncate(1);
+        play(single, rate, &[], 1)[0]
+    };
+    let at_old_rate = single_note_peak(44_100.0);
+    let at_new_rate = single_note_peak(22_050.0);
     let (mut c, mut p) = engine_with(cfg(44_100.0), state);
     c.send(Command::Play).unwrap();
     let total = switch as usize + 20_000;
@@ -965,7 +974,10 @@ fn a_new_rate_mid_play_neither_replays_nor_skips_a_note() {
     assert_eq!(got, expected);
     let l = left(&out);
     assert!(
-        got.iter().all(|&f| l[f as usize] == 1.0),
+        got.iter().all(|&f| {
+            let peak = if f < switch { at_old_rate } else { at_new_rate };
+            l[f as usize] == peak
+        }),
         "one voice per onset"
     );
 }

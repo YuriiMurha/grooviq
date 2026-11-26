@@ -73,6 +73,7 @@ function rig() {
     effects.push("native-edit"); snapshot = { ...snapshot, revision: 10 };
     return { status: "applied", generation: 2, revision: 10, request: null, createdIds: [20], changed: true, reload: false, message: null, warnings: [] };
   };
+  let audioImport: PlaylistAdapter["importAudio"] = async () => { throw new Error("Unexpected import"); };
   let read = async (): Promise<ArrangementPage> => { effects.push("read-arrangement"); return snapshot; };
   let sources = async () => ({ generation: snapshot.generation, arrangementRevision: snapshot.revision,
     patterns: [{ id: 7, name: "Clip source", revision: 1, steps: 16 }, { id: 8, name: "Other pattern", revision: 1, steps: 4 }] });
@@ -91,6 +92,7 @@ function rig() {
     seek: (stamp, tick) => seekNative(stamp, tick),
     readPage: () => read(), edit: (_stamp, ops) => invoke(ops),
     selectPattern: (base, pattern) => select(base, pattern),
+    importAudio: (stamp, input) => audioImport(stamp, input), relinkAudio: async () => { throw new Error("Unexpected relink"); },
     readProject: async () => { effects.push("read-project"); return project(); },
     publishProject: (_view, at) => { if (!current || at.generation !== 2) return false; effects.push("publish-project"); return true; },
     changed: state => { effects.push("publish-controller"); views.push(state); },
@@ -98,7 +100,7 @@ function rig() {
   const adapter = { ...baseAdapter, readPatterns: bank };
   const controller = new PlaylistController(adapter);
   cleanups.push(registerSettlement(() => queue.flush()), registerSettlement(controller.settle));
-  return { controller, effects, views, readQueue: (fn: typeof readQueue) => { readQueue = fn; }, seekNative: (fn: typeof seekNative) => { seekNative = fn; }, current: (v: boolean) => { current = v; }, blocked: (v: boolean) => { blocked = v; },
+  return { controller, effects, views, audioImport: (fn: typeof audioImport) => { audioImport = fn; }, readQueue: (fn: typeof readQueue) => { readQueue = fn; }, seekNative: (fn: typeof seekNative) => { seekNative = fn; }, current: (v: boolean) => { current = v; }, blocked: (v: boolean) => { blocked = v; },
     seekBlocked: (v: boolean) => { seekBlocked = v; },
     invoke: (fn: typeof invoke) => { invoke = fn; }, read: (fn: typeof read) => { read = fn; },
     sources: (fn: typeof sources) => { sources = fn; }, replaceSnapshot: (v: ArrangementPage) => { snapshot = v; },
@@ -385,4 +387,60 @@ it("refuses a stale revision before admitting a seek", async () => {
   const r = rig(); await r.controller.reload();
   await r.controller.seek({ generation: 2, revision: 8 }, 960);
   expect(r.effects).not.toContain("native-seek");
+});
+
+describe("playlist audio admission and publication", () => {
+  const input = { track: 11, startTick: 960, name: "Break", path: "/qa/Break.wav" };
+  const applied: ArrangementReply = { status: "applied", generation: 2, revision: 10,
+    request: 1, createdIds: [20, 21], changed: true, reload: false, message: null, warnings: [] };
+
+  it("admits only one decode, keeps Save waiting and publishes the accepted project", async () => {
+    const r = rig();
+    const decode = deferred<ArrangementReply>();
+    await r.controller.reload();
+    r.audioImport(() => { r.effects.push("native-import"); return decode.promise; });
+    const first = r.controller.importAudio(r.controller.state.snapshot!, input);
+    expect(r.controller.state.media).toBe("import");
+    const duplicate = r.controller.importAudio(r.controller.state.snapshot!, input);
+    expect(await Promise.race([duplicate, Promise.resolve("pending")])).toEqual({ status: "blocked" });
+    const settled = r.controller.settleMedia();
+    await Promise.resolve();
+    expect(await Promise.race([settled, Promise.resolve("pending")])).toBe("pending");
+    r.replaceSnapshot({ ...page(), revision: 10 });
+    decode.resolve(applied);
+    expect(await first).toEqual({ status: "applied", reply: applied });
+    expect(await settled).toBe(true);
+    expect(r.effects.filter(effect => effect === "native-import" || effect === "publish-project")).toEqual(["native-import", "publish-project"]);
+    expect(r.controller.state.media).toBeNull();
+  });
+
+  it("keeps the previous snapshot and settles after a refused decode", async () => {
+    const r = rig();
+    await r.controller.reload();
+    const snapshot = r.controller.state.snapshot!;
+    r.audioImport(async () => ({ ...applied, status: "refused", revision: 9, createdIds: [], changed: false,
+      reload: true, message: "Decode failed" }));
+    expect((await r.controller.importAudio(snapshot, input)).status).toBe("refused");
+    expect(r.controller.state).toMatchObject({ snapshot, media: null, requiresRefresh: false, message: "Decode failed" });
+    expect(r.effects).not.toContain("publish-project");
+    expect(await r.controller.settleMedia()).toBe(true);
+  });
+
+  it("discards an old acknowledgement after replacement without delaying the new project", async () => {
+    const r = rig();
+    const decode = deferred<ArrangementReply>();
+    const invoked = deferred<void>();
+    await r.controller.reload();
+    r.audioImport(() => { invoked.resolve(); return decode.promise; });
+    const first = r.controller.importAudio(r.controller.state.snapshot!, input);
+    await invoked.promise;
+    r.current(false);
+    r.controller.retire();
+    r.controller.retireMedia();
+    expect(await r.controller.settleMedia()).toBe(true);
+    decode.resolve(applied);
+    expect(await first).toEqual({ status: "stale" });
+    expect(r.controller.state.snapshot).toBeNull();
+    expect(r.effects).not.toContain("publish-project");
+  });
 });

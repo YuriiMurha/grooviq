@@ -9,10 +9,12 @@ export type PlaylistScene = Readonly<{
   /** A native clip index is transformed in the shader; -1 draws a local copy/place preview. */
   preview: { index: number; clip: RenderClip } | null;
   group?: GroupPreview | null;
+  drop?: RenderClip | null;
 }>;
 export interface PlaylistRenderer {
   readonly kind: "webgl2" | "canvas2d";
   setClips(clips: readonly RenderClip[]): void;
+  setWaveforms(bars: Float32Array): void;
   setGroupSelection(ids: ReadonlySet<number>): void;
   draw(scene: PlaylistScene, palette: PlaylistPalette): void;
   dispose(): void;
@@ -36,6 +38,7 @@ uniform int selected;
 uniform int dragIndex;
 uniform vec4 drag;
 uniform int groupPass;
+uniform bool waveformPass;
 uniform vec3 groupOffset;
 out vec2 local;
 out vec2 extent;
@@ -47,10 +50,16 @@ void main(){
   float x=((r.x-camera.x)*4096.0+r.y-camera.y)*tickWidth;
   vec2 pixels=vec2(max(1.0,r.w*tickWidth),min(42.0,rowHeight-22.0));
   vec2 position=vec2(x,(r.z-scrollRow)*rowHeight+18.0)+corner*pixels;
+  if(waveformPass){
+    float top=(r.z-scrollRow)*rowHeight+30.0;
+    float y=top+(1.0-style.y)*13.0;
+    pixels=vec2(max(1.0,r.w*tickWidth),max(1.0,(style.y-style.x)*13.0));
+    position=vec2(x,y)+corner*pixels;
+  }
   gl_Position=vec4(position/size*vec2(2.0,-2.0)+vec2(-1.0,1.0),0.0,1.0);
   if(groupPass==2 && !member) gl_Position=vec4(2.0,2.0,0.0,1.0);
   local=corner*pixels;extent=pixels;
-  flags=vec4(style.x,float(gl_InstanceID==selected || member),style.z,style.w);
+  flags=waveformPass?vec4(style.z,0.0,style.w,0.0):vec4(style.x,float(gl_InstanceID==selected || member),style.z,style.w);
 }`;
 const FRAGMENT = `#version 300 es
 precision highp float;
@@ -60,9 +69,15 @@ flat in vec4 flags;
 uniform vec4 inks[6];
 uniform vec4 selection;
 uniform float dpr;
+uniform bool waveformPass;
 out vec4 color;
 void main(){
   vec4 ink=inks[clamp(int(flags.x+0.5),0,5)];
+  if(waveformPass){
+    float alpha=flags.z>0.5?0.25:0.85;
+    color=vec4(ink.rgb*alpha,alpha);
+    return;
+  }
   float edge=min(min(local.x,extent.x-local.x),min(local.y,extent.y-local.y));
   bool outline=edge<(flags.y>0.5?2.0:1.0);
   float opacity=flags.z>0.5?0.28:1.0;
@@ -113,11 +128,11 @@ function gpu(canvas: HTMLCanvasElement): PlaylistRenderer | null {
   const gl = canvas.getContext("webgl2", { antialias: false, alpha: false }); if (!gl) return null;
   const program = programFor(gl, VERTEX, FRAGMENT), grid = programFor(gl, GRID_VERTEX, GRID_FRAGMENT);
   if (!program || !grid) { if (program) gl.deleteProgram(program); if (grid) gl.deleteProgram(grid); return null; }
-  const vao = gl.createVertexArray(), vertices = gl.createBuffer(), instances = gl.createBuffer(), previewBuffer = gl.createBuffer(), membership = gl.createBuffer();
-  if (!vao || !vertices || !instances || !previewBuffer || !membership) {
-    if (vao) gl.deleteVertexArray(vao); for (const b of [vertices, instances, previewBuffer, membership]) if (b) gl.deleteBuffer(b); gl.deleteProgram(program); gl.deleteProgram(grid); return null;
+  const vao = gl.createVertexArray(), vertices = gl.createBuffer(), instances = gl.createBuffer(), previewBuffer = gl.createBuffer(), membership = gl.createBuffer(), waveforms = gl.createBuffer();
+  if (!vao || !vertices || !instances || !previewBuffer || !membership || !waveforms) {
+    if (vao) gl.deleteVertexArray(vao); for (const b of [vertices, instances, previewBuffer, membership, waveforms]) if (b) gl.deleteBuffer(b); gl.deleteProgram(program); gl.deleteProgram(grid); return null;
   }
-  const uniforms = Object.fromEntries(["size", "camera", "scrollRow", "tickWidth", "rowHeight", "selected", "dragIndex", "drag", "groupPass", "groupOffset", "inks[0]", "selection", "dpr"].map(name => [name, gl.getUniformLocation(program, name)]));
+  const uniforms = Object.fromEntries(["size", "camera", "scrollRow", "tickWidth", "rowHeight", "selected", "dragIndex", "drag", "waveformPass", "groupPass", "groupOffset", "inks[0]", "selection", "dpr"].map(name => [name, gl.getUniformLocation(program, name)]));
   const gridUniforms = Object.fromEntries(["size", "phase", "barPixels", "rowPixels", "dpr", "ground", "line"].map(name => [name, gl.getUniformLocation(grid, name)]));
   gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vertices);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1]), gl.STATIC_DRAW);
@@ -130,6 +145,7 @@ function gpu(canvas: HTMLCanvasElement): PlaylistRenderer | null {
   };
   const packed = (clip: RenderClip): number[] => [...splitTick(clip.startTick), clip.trackIndex, clip.lengthTicks, clip.ink, 0, Number(clip.muted), Number(clip.kind !== "pattern")];
   let clips: readonly RenderClip[] = [];
+  let waveformCount = 0;
   let groupIds: ReadonlySet<number> = new Set();
   const uploadMembership = () => {
     const flags = new Uint8Array(clips.length);
@@ -145,6 +161,11 @@ function gpu(canvas: HTMLCanvasElement): PlaylistRenderer | null {
       clips.forEach((clip, i) => data.set(packed(clip), i * 8));
       gl.bindBuffer(gl.ARRAY_BUFFER, instances); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
       uploadMembership();
+    },
+    setWaveforms(bars) {
+      waveformCount = bars.length / 8;
+      gl.bindBuffer(gl.ARRAY_BUFFER, waveforms);
+      gl.bufferData(gl.ARRAY_BUFFER, bars, gl.STATIC_DRAW);
     },
     setGroupSelection(ids) { groupIds = ids; uploadMembership(); },
     draw(scene, palette) {
@@ -168,6 +189,7 @@ function gpu(canvas: HTMLCanvasElement): PlaylistRenderer | null {
         const high = Math.floor(group.deltaTicks / 4096);
         gl.uniform3f(uniforms.groupOffset, high, group.deltaTicks - high * 4096, group.deltaTracks);
       }
+      gl.uniform1i(uniforms.waveformPass, 0);
       gl.uniform1i(uniforms.groupPass, group?.kind === "move" ? 1 : 0);
       bindInstances(instances);
       gl.bindBuffer(gl.ARRAY_BUFFER, membership);
@@ -177,15 +199,26 @@ function gpu(canvas: HTMLCanvasElement): PlaylistRenderer | null {
         gl.uniform1i(uniforms.groupPass, 2);
         gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, clips.length);
       }
-      if (preview?.index === -1) {
-        gl.uniform1i(uniforms.groupPass, 0);
-        gl.disableVertexAttribArray(3); gl.vertexAttrib1f(3, 0);
-        gl.uniform1i(uniforms.dragIndex, -1); gl.uniform1i(uniforms.selected, 0);
-        gl.bindBuffer(gl.ARRAY_BUFFER, previewBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(packed(preview.clip)), gl.DYNAMIC_DRAW);
-        bindInstances(previewBuffer); gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, 1);
+      gl.uniform1i(uniforms.groupPass, 0);
+      gl.disableVertexAttribArray(3); gl.vertexAttrib1f(3, 0);
+      gl.uniform1i(uniforms.dragIndex, -1);
+      if (waveformCount) {
+        gl.uniform1i(uniforms.waveformPass, 1);
+        bindInstances(waveforms);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, waveformCount);
+        gl.uniform1i(uniforms.waveformPass, 0);
       }
+      const drawPreview = (clip: RenderClip) => {
+        gl.uniform1i(uniforms.selected, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, previewBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(packed(clip)), gl.DYNAMIC_DRAW);
+        bindInstances(previewBuffer);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, 1);
+      };
+      if (preview?.index === -1) drawPreview(preview.clip);
+      if (scene.drop) drawPreview(scene.drop);
     },
-    dispose() { for (const b of [vertices, instances, previewBuffer, membership]) gl.deleteBuffer(b); gl.deleteVertexArray(vao); gl.deleteProgram(program); gl.deleteProgram(grid); gl.getExtension("WEBGL_lose_context")?.loseContext(); },
+    dispose() { for (const b of [vertices, instances, previewBuffer, membership, waveforms]) gl.deleteBuffer(b); gl.deleteVertexArray(vao); gl.deleteProgram(program); gl.deleteProgram(grid); gl.getExtension("WEBGL_lose_context")?.loseContext(); },
   };
 }
 function fallback(canvas: HTMLCanvasElement): PlaylistRenderer | null {
@@ -193,7 +226,32 @@ function fallback(canvas: HTMLCanvasElement): PlaylistRenderer | null {
   let clips: readonly RenderClip[] = [];
   let groupIds: ReadonlySet<number> = new Set();
   const css = (c: Rgba, alpha = c[3]) => `rgba(${c.slice(0, 3).map(n => Math.round(n * 255)).join(",")},${alpha})`;
-  return { kind: "canvas2d", setClips: next => { clips = next; }, setGroupSelection: ids => { groupIds = ids; }, dispose() {}, draw(scene, palette) {
+  const waveformLayer = document.createElement("canvas");
+  const waveCtx = waveformLayer.getContext("2d");
+  let waves: Float32Array<ArrayBufferLike> = new Float32Array(0);
+  let layerKey = "";
+  const drawWaveforms = (scene: PlaylistScene, palette: PlaylistPalette) => {
+    if (!waveCtx || waves.length === 0) return;
+    const view = scene.view;
+    const key = JSON.stringify([view, scene.dpr, palette.inks]);
+    if (layerKey !== key) {
+      layerKey = key;
+      waveformLayer.width = canvas.width;
+      waveformLayer.height = canvas.height;
+      waveCtx.setTransform(scene.dpr, 0, 0, scene.dpr, 0, 0);
+      for (let index = 0; index < waves.length; index += 8) {
+        const x = (waves[index] * 4096 + waves[index + 1] - view.scrollTick) * view.tickWidth;
+        const y = (waves[index + 2] - view.scrollTrack) * view.rowHeight + 30 + (1 - waves[index + 5]) * 13;
+        waveCtx.fillStyle = css(palette.inks[waves[index + 6]] ?? FALLBACK, waves[index + 7] ? 0.25 : 0.85);
+        waveCtx.fillRect(x, y, Math.max(1, waves[index + 3] * view.tickWidth),
+          Math.max(1, (waves[index + 5] - waves[index + 4]) * 13));
+      }
+    }
+    ctx.drawImage(waveformLayer, 0, 0, canvas.width / scene.dpr, canvas.height / scene.dpr);
+  };
+  return { kind: "canvas2d", setClips: next => { clips = next; },
+    setWaveforms: next => { waves = next; layerKey = ""; },
+    setGroupSelection: ids => { groupIds = ids; }, dispose() {}, draw(scene, palette) {
     const v = scene.view; ctx.setTransform(scene.dpr, 0, 0, scene.dpr, 0, 0); ctx.fillStyle = css(palette.bg); ctx.fillRect(0, 0, v.width, v.height);
     ctx.strokeStyle = css(palette.line); ctx.lineWidth = 1;
     const step = scene.barTicks * v.tickWidth / 4;
@@ -212,7 +270,9 @@ function fallback(canvas: HTMLCanvasElement): PlaylistRenderer | null {
     clips.forEach((clip, index) => draw(scene.preview?.index === index ? scene.preview.clip : clip,
       index === scene.selected || member(clip), group?.kind === "move" && member(clip) ? group : undefined));
     if (group?.kind === "copy") for (const clip of clips) if (member(clip)) draw(clip, true, group);
+    drawWaveforms(scene, palette);
     if (scene.preview?.index === -1) draw(scene.preview.clip, true);
+    if (scene.drop) draw(scene.drop, true);
   } };
 }
 /** Try a detached canvas first: a failed GL context must not consume the 2D fallback canvas. */

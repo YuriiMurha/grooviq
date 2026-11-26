@@ -1,9 +1,10 @@
 //! Sampler: plays one sample per instance, pitched by key.
 //!
 //! Each note picks a region of the sample (`start`..`end`, optionally reversed), plays it at a
-//! rate set at note-on (`source_rate / engine_rate * 2^(semitones / 12)`) through a cubic
-//! Hermite read, and shapes it with an attack/decay/sustain/release envelope. In one-shot mode a
-//! note plays to the end of its region and ignores note-off; in gate mode note-off releases it.
+//! rate set at note-on (`source_rate / engine_rate * 2^(semitones / 12)`) and shapes it with an
+//! attack/decay/sustain/release envelope. Reads use cubic Hermite up to a step of 1.09 and
+//! crossfade to a low-pass FIR by 1.25. A one-shot note plays to the end of its region and
+//! ignores note-off. In gate mode note-off releases it.
 //! Loop mode repeats the region's tail (from `loop_start`, a fraction of the played region in
 //! play order) until note-off, then releases, also in one-shot mode. Each voice runs a 12 dB/oct
 //! state-variable filter (low-, high- or band-pass) whose cutoff follows its own envelope and
@@ -22,6 +23,8 @@
 //! refreshed from inputs sampled every 16 frames counted from each note's start, so the output
 //! never depends on how the blocks are split. Real-time: `process` and `set_param` never allocate; `set_sample`
 //! hands the previous buffer back so the caller frees it elsewhere.
+
+mod resample;
 
 use crate::api::{Device, NoteEvent};
 use crate::util::clamp_param;
@@ -945,7 +948,7 @@ fn coefs(p: &[f32; PARAMS], sr: f32) -> Coefs {
 
 /// Cubic Hermite read of one channel at `pos`, sample index `k` read from `index(k)` (frames
 /// outside the sample read as zero). At an integer position it returns that sample itself.
-#[inline]
+#[cfg(test)]
 fn hermite(x: &[f32], pos: f64, index: impl Fn(i64) -> i64) -> f32 {
     let n = x.len() as i64;
     let i = pos.floor() as i64;
@@ -1178,12 +1181,7 @@ impl Sampler {
                         }
                     }
                 }
-                let (mut xl, mut xr) = if v.looping {
-                    let at = |k| v.loop_index(k);
-                    (hermite(&buf.l, v.pos, at), hermite(&buf.r, v.pos, at))
-                } else {
-                    (hermite(&buf.l, v.pos, |k| k), hermite(&buf.r, v.pos, |k| k))
-                };
+                let (mut xl, mut xr) = resample::read(buf, v);
                 if filter_on {
                     xl = v.filter(0, kind, xl);
                     xr = v.filter(1, kind, xr);

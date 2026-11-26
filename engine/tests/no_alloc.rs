@@ -374,6 +374,36 @@ fn tone_sample(len: usize) -> Arc<SampleBuf> {
 }
 
 #[test]
+fn band_limited_sampler_loop_never_allocates_on_the_audio_thread() {
+    let mut params = grooviq_dsp::sampler::SPEC.map(|(_, _, default)| default);
+    params[5] = 1.0; // reverse
+    params[15] = 1.0; // loop
+    let state = EngineState {
+        channels: vec![ChannelSetup::sampler(
+            ChannelId(1),
+            Some(tone_sample(512)),
+            params.to_vec(),
+            ChannelMix::default(),
+        )],
+        ..EngineState::default()
+    };
+    let (mut c, mut p) = engine_with(EngineConfig { sample_rate: SR }, state);
+    c.send(Command::ChannelNote {
+        channel: ChannelId(1),
+        key: 84, // step 4, through the reverse loop seam on every other block
+        velocity: 1.0,
+        on: true,
+        id: NoteId(1),
+    })
+    .unwrap();
+    let mut out = [0.0; 128];
+    for _ in 0..8 {
+        realtime(|| p.process(&mut out, 2));
+    }
+    assert!(out.iter().any(|x| x.abs() > 0.1), "the loop still plays");
+}
+
+#[test]
 fn channel_messages_never_allocate_on_the_audio_thread() {
     let setup = |id, sample: &Arc<SampleBuf>| {
         ChannelSetup::sampler(

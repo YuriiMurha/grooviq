@@ -57,6 +57,17 @@ const XFADE_MS: f32 = 50.0;
 /// Longest delay: a half note at 20 BPM. The constructor adds the interpolation margin.
 const MAX_MS: f32 = 6000.0;
 
+#[inline]
+fn flush_output_subnormal(sample: f32) -> f32 {
+    let bits = sample.to_bits();
+    if bits & 0x7f80_0000 == 0 {
+        // Exponent zero covers subnormals and signed zero. Keep the sign bit.
+        f32::from_bits(bits & 0x8000_0000)
+    } else {
+        sample
+    }
+}
+
 pub struct Delay {
     sr: f32,
     buf: [DelayLine; 2],
@@ -262,8 +273,9 @@ impl Device for Delay {
             self.buf[1].push(flush(soft_limit(wr)));
             let dg = self.dry_g.next();
             let wg = self.wet_g.next();
-            l[i] = xl * dg + fl * wg;
-            r[i] = xr * dg + fr * wg;
+            // The f64 filter tail can narrow to subnormal f32, and the mix can create more.
+            l[i] = flush_output_subnormal(xl * dg + fl * wg);
+            r[i] = flush_output_subnormal(xr * dg + fr * wg);
         }
         self.in_m.update(pin, n, self.sr);
         self.out_m
@@ -295,6 +307,91 @@ impl Device for Delay {
             2 => self.effective_ms(),
             3 => self.high_cut_hz,
             _ => 0.0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The pre-flush static sample path. Fixed parameters remove smoothing and crossfades.
+    fn static_reference(delay: &mut Delay, xl: f32, xr: f32) -> (f32, f32) {
+        let dl = delay.buf[0].read_frac(delay.ta - 1.0);
+        let dr = delay.buf[1].read_frac(delay.ta - 1.0);
+        let fl = delay.st_hi[0].run(&delay.c_hi, delay.st_lo[0].run(&delay.c_lo, dl as f64)) as f32;
+        let fr = delay.st_hi[1].run(&delay.c_hi, delay.st_lo[1].run(&delay.c_lo, dr as f64)) as f32;
+        let fb = delay.fb.cur;
+        let (wl, wr) = if delay.pingpong {
+            (mid(xl, xr) + fb * fr, fb * fl)
+        } else {
+            (xl + fb * fl, xr + fb * fr)
+        };
+        delay.buf[0].push(flush(soft_limit(wl)));
+        delay.buf[1].push(flush(soft_limit(wr)));
+        (
+            xl * delay.dry_g.cur + fl * delay.wet_g.cur,
+            xr * delay.dry_g.cur + fr * delay.wet_g.cur,
+        )
+    }
+
+    #[test]
+    fn static_output_preserves_every_non_subnormal_bit() {
+        for (low_cut, high_cut, mix) in [(20.0, 20_000.0, 0.25), (2000.0, 1000.0, 1.0)] {
+            for pingpong in [false, true] {
+                let configured = || {
+                    let mut delay = Delay::new(48_000.0);
+                    for (param, value) in [
+                        (0, 0.0),
+                        (2, 20.05),
+                        (3, 0.95),
+                        (4, f32::from(pingpong)),
+                        (5, low_cut),
+                        (6, high_cut),
+                        (7, mix),
+                    ] {
+                        delay.set_param(param, value);
+                    }
+                    delay
+                };
+                let mut reference = configured();
+                let mut delay = configured();
+
+                for start in (0..8192).step_by(128) {
+                    let mut left = [0.0; 128];
+                    let mut right = [0.0; 128];
+                    if start == 0 {
+                        left[0] = 0.8;
+                        // At full wet, the tiny dry gain can create a subnormal before any echo.
+                        left[1] = 2.0 * f32::MIN_POSITIVE;
+                        right[3] = -0.3;
+                    }
+                    let expected: [(f32, f32); 128] = std::array::from_fn(|i| {
+                        static_reference(&mut reference, left[i], right[i])
+                    });
+                    delay.process(&mut left, &mut right, None, &[]);
+                    for (i, ((l, r), (old_l, old_r))) in
+                        left.into_iter().zip(right).zip(expected).enumerate()
+                    {
+                        for (channel, (actual, prior)) in
+                            [(l, old_l), (r, old_r)].into_iter().enumerate()
+                        {
+                            let matches = if prior.is_subnormal() {
+                                actual == 0.0
+                            } else {
+                                actual.to_bits() == prior.to_bits()
+                            };
+                            assert!(
+                                matches,
+                                "cuts={low_cut}/{high_cut}, mix={mix}, ping-pong={pingpong}, frame={}, channel={channel}, actual={:#010x}, reference={:#010x}",
+                                start + i,
+                                actual.to_bits(),
+                                prior.to_bits()
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }
