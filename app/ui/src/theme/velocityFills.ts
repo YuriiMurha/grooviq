@@ -30,10 +30,10 @@ function canvasFills(ink: Rgb, quiet: number): Rgb[] {
 }
 
 function webglFills(ink: Rgb, quiet: number): Rgb[] {
-  // WebGL2 converts the highp shader output to framebuffer bytes. Float32 mix,
-  // multiplication and conversion can split a shared half-byte boundary differently
-  // across browsers. Allow either adjacent byte within four Float32 ulps at 1.0.
-  const tolerance = 4 * 2 ** -23 * 255;
+  // WebGL2 converts the highp shader output to framebuffer bytes, and drivers may round
+  // a value near a half-byte boundary either way: D3D11 (WebView2 on Windows) allows a
+  // 0.6 ULP float-to-UNORM tolerance. Allow either adjacent byte within 0.1 of one.
+  const tolerance = 0.1;
   const channels = ink.map((channel) => channel * 255);
   const boundaries = new Set([quiet, 1]);
   for (const channel of channels) {

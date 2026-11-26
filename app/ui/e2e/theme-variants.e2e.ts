@@ -125,15 +125,11 @@ for (const { id } of themes) {
       }
       for (const state of ["--select", "--grid-focus", "--roll-select"]) {
         const outline = rgb(state);
+        // Slide notes (second inks) are velocity-scaled the same way as normal notes.
         for (const ink of inks) {
-          const fill = rgb(ink);
-          if (ink.endsWith("b")) {
-            expect(oklabDeltaE(outline, fill), `${state} versus ${ink} in OKLab`).toBeGreaterThanOrEqual(0.10);
-          } else {
-            const nearest = Math.min(...roundedVelocityFills(fill, quietNoteStrength, renderer).map(([r, g, b]) =>
-              oklabDeltaE(outline, [r / 255, g / 255, b / 255])));
-            expect(nearest, `${state} versus ${ink} velocity shades in OKLab`).toBeGreaterThanOrEqual(0.10);
-          }
+          const nearest = Math.min(...roundedVelocityFills(rgb(ink), quietNoteStrength, renderer).map(([r, g, b]) =>
+            oklabDeltaE(outline, [r / 255, g / 255, b / 255])));
+          expect(nearest, `${state} versus ${ink} velocity shades in OKLab`).toBeGreaterThanOrEqual(0.10);
         }
       }
       for (const state of ["--grid-playhead", "--roll-playhead"]) {
