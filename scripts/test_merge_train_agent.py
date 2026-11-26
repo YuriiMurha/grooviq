@@ -389,6 +389,23 @@ class AgentTests(unittest.TestCase):
         self.agent.record_landing(replay)
         self.assertEqual(self.agent.landings.read_bytes(), recovered)
 
+    def test_replay_upgrades_a_legacy_partial_row_with_matching_trees(self):
+        self.landed_tick()
+        legacy = {
+            "recorded_utc": "first", "tested_batch": TESTED, "landed_tip": LANDED,
+            "landed_prefix": [[12, LANDED]], "landed_tree": TREE, "tested_tree": TREE,
+            "match": True, "ci_run_id": 123, "status": "partial",
+        }
+        self.agent.landings.write_text(json.dumps(legacy) + "\n")
+        self.agent.record_landing({
+            "recorded_utc": "replay", "recovered_pending": True,
+            "stdout": [f"Tested batch {TESTED}", f"Merged #12 at {LANDED}"],
+        })
+
+        rows = [json.loads(line) for line in self.agent.landings.read_text().splitlines()]
+        self.assertEqual(rows, [{**legacy, "status": "complete"}])
+        self.agent.commit_message.assert_called_once_with(TESTED)
+
     def test_landing_replay_keeps_incomplete_coverage_and_tree_mismatch_truthful(self):
         for matches in (True, False):
             with self.subTest(matching_trees=matches):

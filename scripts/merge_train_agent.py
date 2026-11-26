@@ -488,7 +488,6 @@ class Agent:
                        landed_prefix=merges,
                        landed_tree=None, tested_tree=None, match=None, ci_run_id=None, status="partial")
         # Git objects are immutable. Only retry evidence the previous read could not verify.
-        check_members = row["status"] == "partial" and (row["match"] is None or "tested_members_error" in row)
         for key, sha in (("landed_tree", landed), ("tested_tree", tested)):
             if sha is not None and row[key] is None:
                 try:
@@ -504,7 +503,8 @@ class Agent:
                 row["ci_error"] = str(error)
             else:
                 row.pop("ci_error", None)
-        if check_members and row["landed_tree"] and row["tested_tree"]:
+        # Older partial rows could record matching trees without verifying membership.
+        if row["status"] == "partial" and row["landed_tree"] and row["tested_tree"]:
             row["match"] = row["landed_tree"] == row["tested_tree"]
             try:
                 members = Batch.parse(self.commit_message(tested)).members
