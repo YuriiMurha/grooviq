@@ -59,6 +59,53 @@ test("rejects an important value that would bypass a later override", () => {
   expect(() => parseThemeDeclarations(css, testSelector)).toThrow("--ink must not use !important");
 });
 
+test("rejects an escaped custom-property name that would override a plain name", () => {
+  const css = `${testSelector} { --ink-1: #123; --ink\\-1: #456; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported CSS escape while reading ${testSelector}`);
+});
+
+test.each([
+  ["line feed", "\n"],
+  ["carriage return", "\r"],
+  ["form feed", "\f"],
+])("rejects a string with a raw %s before a later quote", (_, newline) => {
+  const css = `${testSelector} { --font: "broken${newline}; --ink-1: #456; --font: "fallback; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unterminated CSS string while reading ${testSelector}`);
+});
+
+test("rejects a stray quote at the end of a value", () => {
+  const css = `${testSelector} { --font: fallback'; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unterminated CSS string while reading ${testSelector}`);
+});
+
+test.each([
+  "url(a/*b*/c)",
+  'URL("a")',
+])("rejects %s before interpreting its contents", (value) => {
+  const css = `${testSelector} { --image: ${value}; --ink-1: #123; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported CSS url() while reading ${testSelector}`);
+});
+
+test("rejects an escaped important annotation that would bypass a later override", () => {
+  const css = `${testSelector} { --ink-1: #456 !\\important; --ink-1: #123; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported CSS escape while reading ${testSelector}`);
+});
+
+test("rejects an unsupported declaration", () => {
+  const css = `${testSelector} { --ink-1: #123; color: red; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported declaration "color: red" while reading ${testSelector}`);
+});
+
+test("rejects an unterminated comment", () => {
+  const css = `${testSelector} { --ink-1: #123 /* }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unterminated CSS comment while reading ${testSelector}`);
+});
+
+test("keeps escaped quotes and url() text inside strings", () => {
+  const css = `${testSelector} { --font: "a\\"url(b)"; --ink-1: #123; }`;
+  expect(parseThemeDeclarations(css, testSelector).get("--font")).toBe('"a\\"url(b)"');
+});
+
 test("rejects a theme selector inside a conditional rule", () => {
   const css = `@media (prefers-color-scheme: light) { ${testSelector} { --ink: #123; } }`;
   expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`${testSelector} must be a top-level rule`);
