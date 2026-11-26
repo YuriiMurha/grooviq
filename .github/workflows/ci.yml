@@ -10,9 +10,10 @@ permissions:
 
 concurrency:
   # Main pushes share one group without cancel-in-progress: a started run always finishes (rust-cache
-  # saves only on main), and each newly queued run replaces the pending one, in queue-arrival order, so
-  # one running and one pending at most (#693). The tested record for a batch tip is its
-  # merge-train/batch run on the same tree. PRs and merge-train/batch: per ref, cancel older.
+  # saves only on main), and each newly queued run replaces the pending one in queue-arrival order, so
+  # at most one runs and one waits (#693). A batch tip, even main's latest tree, may get no main run
+  # until a later push. That is not a gap: its tested record is the merge-train/batch run on the same
+  # tree plus the train's tree-equality check. PRs and merge-train/batch: per ref, cancel older.
   group: >-
     ci-${{ github.workflow }}-${{ github.event.pull_request.number ||
     github.ref }}
