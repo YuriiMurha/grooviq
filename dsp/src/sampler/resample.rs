@@ -4,19 +4,22 @@ use super::{SampleBuf, Voice};
 
 include!(concat!(env!("OUT_DIR"), "/sampler-fir.rs"));
 
-type Phase = [f32; TAPS];
-type Band = [Phase; PHASES + 1];
+type Band<const N: usize> = [[f32; N]; PHASES + 1];
 
-static FIR: [Band; BANDS + 1] = {
+const SHORT_BANDS: usize = BANDS + 1 - JOIN_BAND;
+static FIR: [Band<TAPS>; SHORT_BANDS] = read_bands::<TAPS, SHORT_BANDS>(0);
+static FIR_WIDE: [Band<WIDE_TAPS>; JOIN_BAND + 1] =
+    read_bands::<WIDE_TAPS, { JOIN_BAND + 1 }>(size_of::<[Band<TAPS>; SHORT_BANDS]>());
+
+const fn read_bands<const N: usize, const COUNT: usize>(mut offset: usize) -> [Band<N>; COUNT] {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/sampler-fir.bin"));
-    let mut table = [[[0.0; TAPS]; PHASES + 1]; BANDS + 1];
+    let mut table = [[[0.0; N]; PHASES + 1]; COUNT];
     let mut band = 0;
-    let mut offset = 0;
-    while band <= BANDS {
+    while band < COUNT {
         let mut phase = 0;
         while phase <= PHASES {
             let mut tap = 0;
-            while tap < TAPS {
+            while tap < N {
                 table[band][phase][tap] = f32::from_le_bytes([
                     bytes[offset],
                     bytes[offset + 1],
@@ -31,7 +34,7 @@ static FIR: [Band; BANDS + 1] = {
         band += 1;
     }
     table
-};
+}
 
 /// Keep detune and 48 kHz sources at 44.1 kHz on the exact cubic path. Fade to the FIR as
 /// the step increases so a glide does not abruptly change the interpolator's gain.
@@ -98,43 +101,57 @@ fn band_limited(sample: &SampleBuf, voice: &Voice, step: f64) -> (f32, f32) {
 
 #[inline(never)]
 fn sinc(sample: &SampleBuf, voice: &Voice, step: f64) -> (f32, f32) {
-    let pos = voice.pos.floor();
-    let first = pos as i64 - (TAPS / 2 - 1) as i64;
-    let phase = (voice.pos - pos) * PHASES as f64;
-    let phase_index = phase as usize;
-    let phase_mix = f32x4::splat((phase - phase_index as f64) as f32);
-
-    // Put the center of the FIR transition below the destination Nyquist. Limit the
-    // offset at very high steps so the cutoff keeps tracking the available bandwidth.
+    // The band index follows destination Nyquist. The narrow bands use wider kernels
+    // with a transition closer to Nyquist than this nominal cutoff.
     let nyquist = 0.5 / step;
     let cutoff = nyquist - 0.025_f64.min(nyquist * 0.25);
     let band = cutoff * (2 * BANDS) as f64;
     let band_index = band as usize;
     let band_mix = f32x4::splat((band - band_index as f64) as f32);
+    if band_index < JOIN_BAND {
+        convolve(sample, voice, &FIR_WIDE, band_index, band_mix)
+    } else {
+        convolve(sample, voice, &FIR, band_index - JOIN_BAND, band_mix)
+    }
+}
+
+#[inline(always)]
+fn convolve<const N: usize>(
+    sample: &SampleBuf,
+    voice: &Voice,
+    fir: &[Band<N>],
+    band_index: usize,
+    band_mix: f32x4,
+) -> (f32, f32) {
+    let pos = voice.pos.floor();
+    let first = pos as i64 - (N / 2 - 1) as i64;
+    let phase = (voice.pos - pos) * PHASES as f64;
+    let phase_index = phase as usize;
+    let phase_mix = f32x4::splat((phase - phase_index as f64) as f32);
     let kernels = [
-        &FIR[band_index][phase_index],
-        &FIR[band_index][phase_index + 1],
-        &FIR[band_index + 1][phase_index],
-        &FIR[band_index + 1][phase_index + 1],
+        &fir[band_index][phase_index],
+        &fir[band_index][phase_index + 1],
+        &fir[band_index + 1][phase_index],
+        &fir[band_index + 1][phase_index + 1],
     ];
 
-    let mut edge_l = [0.0; TAPS];
-    let mut edge_r = [0.0; TAPS];
+    let mut edge_l = [0.0; N];
+    let mut edge_r = [0.0; N];
     let first_f = first as f64;
-    let last_f = first_f + (TAPS - 1) as f64;
+    let last_f = first_f + (N - 1) as f64;
     let contiguous = first_f >= voice.start
         && last_f < voice.end
         && (!voice.looping || (first_f >= voice.lo && last_f < voice.hi));
     let (l, r) = if contiguous
         && let first = first as usize
-        && let Some(l) = sample.l.get(first..first + TAPS)
-        && let Some(r) = sample.r.get(first..first + TAPS)
+        && let Some(l) = sample.l.get(first..first + N)
+        && let Some(r) = sample.r.get(first..first + N)
     {
         (l, r)
     } else {
         let lo = voice.start.ceil() as i64;
         let hi = voice.end.ceil() as i64 - 1;
-        for i in 0..TAPS {
+        for i in 0..N {
             let k = first + i as i64;
             let k = if voice.looping {
                 voice.loop_index(k)
@@ -303,6 +320,34 @@ mod tests {
             actual.0, pure.0,
             "step 1.2499 must still blend in the cubic read"
         );
+    }
+
+    #[test]
+    fn changing_fir_width_keeps_the_read_continuous() {
+        let l: Vec<f32> = (0..128).map(|i| libm::sinf(i as f32 * 0.98)).collect();
+        let sample = SampleBuf {
+            rate: 48_000.0,
+            r: l.iter().map(|&x| -x * 0.5).collect(),
+            l,
+        };
+        // Hold source phase fixed. At this step the nominal cutoff lies exactly on the
+        // shared row. Sweeping through it must preserve the kernel's gain and alignment.
+        let join_step = 80.0 / 29.0;
+        for pos in [0.25, 64.25, 127.25] {
+            let mut voice = Voice {
+                pos,
+                end: sample.len() as f64,
+                step: join_step - 0.000_001,
+                ..Voice::OFF
+            };
+            let (before_l, before_r) = read(&sample, &voice);
+            voice.step = join_step + 0.000_001;
+            let (after_l, after_r) = read(&sample, &voice);
+            assert!(
+                (after_l - before_l).abs().max((after_r - before_r).abs()) < 1e-5,
+                "read jumped at pos {pos}: ({before_l}, {before_r}) to ({after_l}, {after_r})"
+            );
+        }
     }
 
     #[test]
