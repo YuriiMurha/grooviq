@@ -91,13 +91,16 @@ jobs:
           unset GOLDEN_UPDATE SONG_M3_UPDATE
           log=$(mktemp)
           trap 'rm -f "$log"' EXIT
-          cargo test -p grooviq-golden --profile dist --locked 2>&1 | tee "$log"
+          # Same triple as the installer, so the check covers the code generation that ships.
+          cargo test -p grooviq-golden --profile dist --locked --target ${{ matrix.target }} 2>&1 | tee "$log"
           passed=$(awk '/^test result: ok\. [0-9]+ passed;/ { total += $4 } END { print total + 0 }' "$log")
-          if (( passed == 0 )); then
-            echo 'No dist golden tests passed.' >&2
+          # song_m3 holds the only byte check of the production export path.
+          song=$(awk '/^ *(Running|Doc-tests) / { song = /song_m3/ } song && /^test result: ok\./ { print $4 }' "$log")
+          if (( passed == 0 || ${song:-0} < 3 )); then
+            echo "Dist golden tests passed: ${passed}, song_m3: ${song:-none}; expected song_m3 >= 3." >&2
             exit 1
           fi
-          echo "Dist golden tests passed: $passed"
+          echo "Dist golden tests passed: $passed (song_m3: $song)"
       # No signing secrets until #50. The CLI comes from the locked UI package.
       # No release inputs: build jobs cannot create or modify GitHub releases.
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
