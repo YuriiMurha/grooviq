@@ -161,16 +161,21 @@ test("a pointer drag on Gain previews locally and commits once on release", asyn
   const box = await gain.boundingBox();
   if (!box) throw new Error("Missing gain slider");
   const y = box.y + box.height / 2;
-  // Press on the thumb (gain 1 sits mid-track), then move the value the way a drag does.
-  // WebKit automation does not move a range input from synthesized mouse moves, so the
-  // drag's value changes are dispatched as the input events the browser itself would fire.
-  await app.mouse.move(box.x + box.width / 2, y);
+  if (clip.content.type !== "audio") throw new Error("Expected an audio clip");
+  // Press on the thumb at the clip's current gain (0..2 across the track), then move the value
+  // the way a drag does. WebKit automation does not move a range input from synthesized mouse
+  // moves, so the drag's value changes are dispatched as the input events the browser fires.
+  await app.mouse.move(box.x + box.width * (clip.content.gain / 2), y);
   await app.mouse.down();
-  await gain.evaluate((input: HTMLInputElement) => {
-    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-    for (const value of ["1.5", "2"]) { set?.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); }
-  });
-  await expect(gain).toHaveValue("2");
+  for (const value of ["1.5", "2"]) {
+    await gain.evaluate((input: HTMLInputElement, next) => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, next);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, value);
+    // The rendered preview follows the drag, not only the DOM value.
+    await expect(gain).toHaveAttribute("aria-valuetext", value);
+    expect(await edits()).toEqual([]);
+  }
   // Leaving the slider while the button is held must not commit either.
   await app.mouse.move(box.x + box.width + 15, y - box.height);
   expect(await edits()).toEqual([]);
