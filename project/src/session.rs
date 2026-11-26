@@ -1536,7 +1536,6 @@ impl Session {
         self.project = candidate;
         if invalidates_arrangement_history {
             self.arrangement_history.clear();
-            self.trim_history = Default::default();
         }
         self.patterns_revision += 1;
         self.changed(true, now);
