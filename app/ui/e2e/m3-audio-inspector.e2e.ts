@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import type { ArrangementPage, AudioContent } from "../src/api/arrangement";
 import { expect, generatedWav, project, soundsFor, test } from "./fixture";
 
@@ -35,7 +35,7 @@ test.afterEach(async ({ mock }) => {
     (["channel_note", "test_tone", "channel_preview"].includes(cmd) && args.on === true))).toEqual([]);
 });
 
-test("commits each audio setting once, with one undo, and keeps the settings on reopen", async ({ app, mock }) => {
+async function openInspector(app: Page) {
   await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
   await app.keyboard.press("F5");
   const playlist = app.getByRole("region", { name: "Playlist", exact: true });
@@ -44,6 +44,13 @@ test("commits each audio setting once, with one undo, and keeps the settings on 
   const select = () => playlist.getByRole("combobox", { name: "Selected playlist clip" }).selectOption("5");
   await select();
   const inspector = playlist.getByRole("group", { name: "Audio clip inspector" });
+  return { canvas, select, inspector };
+}
+
+const slider = (inspector: Locator, name: string) => inspector.getByRole("slider", { name, exact: true });
+
+test("commits each audio setting once, with one undo, and keeps the settings on reopen", async ({ app, mock }) => {
+  const { canvas, select, inspector } = await openInspector(app);
   const gain = inspector.getByRole("slider", { name: "Gain", exact: true });
   const fadeIn = inspector.getByRole("slider", { name: "Fade in", exact: true });
   const fadeOut = inspector.getByRole("slider", { name: "Fade out", exact: true });
@@ -96,7 +103,18 @@ test("commits each audio setting once, with one undo, and keeps the settings on 
   await edit("fadeIn", 44100, async () => {
     await fadeIn.press("End");
     expect(await calls()).toEqual(expected);
-    await fadeIn.press("Enter");
+    const count = (await mock.calls("arrangement_edit")).length;
+    await mock.eval('m => m.holdCommand("arrangement_edit")');
+    try {
+      await fadeIn.press("Enter");
+      await expect.poll(async () => (await mock.calls("arrangement_edit")).length).toBe(count + 1);
+      await expect(canvas).toHaveAttribute("aria-disabled", "true");
+      await expect(fadeIn).toBeFocused();
+    } finally {
+      await mock.eval('m => m.releaseCommand("arrangement_edit")');
+    }
+    await expect(canvas).toHaveAttribute("aria-disabled", "false");
+    await expect(fadeIn).toBeFocused();
   });
   await edit("fadeOut", 0, async () => {
     await fadeOut.press("Home");
@@ -126,7 +144,6 @@ test("commits each audio setting once, with one undo, and keeps the settings on 
   await expect.poll(async () => (await mock.view()).path).toBe(path);
   await expect.poll(calls).toEqual(expected);
 
-  // A draft on the old project must be discarded on replacement.
   await fadeOut.press("End");
   await expect(fadeOut).toHaveValue("44100");
   await app.keyboard.press("ControlOrMeta+o");
@@ -140,4 +157,73 @@ test("commits each audio setting once, with one undo, and keeps the settings on 
   await expect(fadeOut).toHaveValue("0");
   await expect(reverse).toHaveAttribute("aria-pressed", "true");
   expect(await calls()).toEqual(expected);
+});
+
+test("Escape discards a keyboard draft before Tab can commit it", async ({ app, mock }) => {
+  const { inspector } = await openInspector(app);
+  const fadeIn = slider(inspector, "Fade in");
+  await fadeIn.press("End");
+  await expect(fadeIn).toHaveValue("44100");
+  await fadeIn.press("Escape");
+  await fadeIn.press("Tab");
+  await expect(fadeIn).toHaveValue("441");
+  expect(await mock.calls("arrangement_edit")).toEqual([]);
+});
+
+test("the first slider step after global undo starts from the restored value", async ({ app, mock }) => {
+  const { canvas, inspector } = await openInspector(app);
+  const fadeIn = slider(inspector, "Fade in");
+  await fadeIn.press("End");
+  await fadeIn.press("Enter");
+  await expect.poll(async () => (await arrangement(app)).clips[0].content).toMatchObject({ fadeIn: 44100 });
+  await expect(canvas).toHaveAttribute("aria-disabled", "false");
+  await fadeIn.press("Home");
+  await expect(fadeIn).toHaveValue("0");
+  await app.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => (await mock.calls("arrangement_history")).length).toBe(1);
+  await expect(fadeIn).toHaveValue("441");
+  await expect(canvas).toHaveAttribute("aria-disabled", "false");
+  await expect(fadeIn).toBeFocused();
+  await app.keyboard.press("ArrowRight");
+  await expect(fadeIn).toHaveValue("442");
+  await app.keyboard.press("Enter");
+  await expect.poll(async () => (await arrangement(app)).clips[0].content).toMatchObject({ fadeIn: 442 });
+  expect(await mock.calls("arrangement_edit")).toHaveLength(2);
+});
+
+test("a pending project replacement discards the old draft and blocks new slider input", async ({ app, mock }) => {
+  const { canvas, inspector } = await openInspector(app);
+  const fadeIn = slider(inspector, "Fade in");
+  const count = (await mock.calls("pattern_edit")).length;
+  await mock.eval('m => m.holdCommand("pattern_edit")');
+  try {
+    await fadeIn.press("End");
+    await expect(fadeIn).toHaveValue("44100");
+    await app.keyboard.press("ControlOrMeta+n");
+    // Hold replacement in preflight, before it retires the old playlist.
+    await expect.poll(async () => (await mock.calls("pattern_edit")).length).toBe(count + 1);
+    await expect(canvas).toHaveAttribute("aria-disabled", "false");
+    await expect(fadeIn).toHaveValue("441");
+    await fadeIn.press("Home");
+    await expect(fadeIn).toHaveValue("441");
+    await fadeIn.press("Enter");
+    expect(await mock.calls("arrangement_edit")).toEqual([]);
+  } finally {
+    await mock.eval('m => m.releaseCommand("pattern_edit")');
+  }
+  await expect(inspector).toHaveCount(0);
+  expect(await mock.calls("arrangement_edit")).toEqual([]);
+});
+
+test("opening a modal discards the slider draft on focus transfer", async ({ app, mock }) => {
+  const { inspector } = await openInspector(app);
+  const fadeIn = slider(inspector, "Fade in");
+  await fadeIn.press("End");
+  await expect(fadeIn).toHaveValue("44100");
+  await app.keyboard.press("ControlOrMeta+r");
+  const dialog = app.getByRole("dialog", { name: "Export WAV" });
+  await expect(dialog).toBeVisible();
+  await expect(fadeIn).not.toBeFocused();
+  await expect(fadeIn).toHaveValue("441");
+  expect(await mock.calls("arrangement_edit")).toEqual([]);
 });

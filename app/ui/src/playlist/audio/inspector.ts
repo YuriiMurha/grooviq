@@ -1,16 +1,24 @@
-import type { ArrangementOperation, ArrangementPage, AudioContent, ClipSummary } from "../../api/arrangement";
+import type { ArrangementOperation, ArrangementPage, ArrangementStamp, AudioContent, ClipSummary } from "../../api/arrangement";
 import { NOTE_NAMES, scaleLabel } from "../../roll/scales";
 import { audioDurationTicks } from "./geometry";
 
 export type InspectorClip = Pick<ClipSummary, "id" | "startTick"> & { content: AudioContent };
 export type InspectorAsset = ArrangementPage["audioAssets"][number];
 export type SliderField = "gain" | "fadeIn" | "fadeOut";
+export type SliderDraft = { field: SliderField; value: number; stamp: ArrangementStamp };
 export type InspectorResize = Extract<ArrangementOperation, { kind: "resize" }>;
 export type InspectorEdit = { field: SliderField; value: number } | { field: "reverse"; value: boolean };
 
 export const clipFrames = (content: AudioContent) => content.sourceEnd - content.sourceStart;
 export const MAX_GAIN = 2;
 const clamp = (value: number, max: number) => Math.min(max, Math.max(0, value));
+
+export const sameInspectorStamp = (a: ArrangementStamp, b: ArrangementStamp) =>
+  a.generation === b.generation && a.revision === b.revision;
+
+export function sliderDraftAt(draft: SliderDraft | null, field: SliderField, stamp: ArrangementStamp): SliderDraft | null {
+  return draft?.field === field && sameInspectorStamp(draft.stamp, stamp) ? draft : null;
+}
 
 export function audioInspectorEdit(clip: InspectorClip, edit: InspectorEdit): InspectorResize | null {
   const { content } = clip;

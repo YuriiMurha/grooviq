@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AudioContent } from "../../api/arrangement";
-import { audioInspectorEdit, audioInspectorInfo, formatFade } from "./inspector";
+import { audioInspectorEdit, audioInspectorInfo, formatFade, sliderDraftAt, type SliderDraft } from "./inspector";
 
 const content: AudioContent = {
   type: "audio", asset: 4, sourceStart: 22050, sourceEnd: 66150,
@@ -10,6 +10,15 @@ const clip = { id: 5, startTick: 960, content };
 const asset = { sourceRate: 44100, sourceFrames: 88200, originalTempo: 99.5, originalKey: { root: 1, scale: "minor" } };
 
 describe("audio inspector edits", () => {
+  it("only carries a draft forward for the same slider and arrangement revision", () => {
+    const stamp = { generation: 1, revision: 3 };
+    const draft: SliderDraft = { field: "fadeIn", value: 10, stamp };
+    expect(sliderDraftAt(draft, "fadeIn", stamp)).toBe(draft);
+    expect(sliderDraftAt(draft, "fadeOut", stamp)).toBeNull();
+    expect(sliderDraftAt(draft, "fadeIn", { ...stamp, revision: 4 })).toBeNull();
+    expect(sliderDraftAt(draft, "fadeIn", { ...stamp, generation: 2 })).toBeNull();
+  });
+
   it.each([[1.25, 1.25], [-1, 0], [3, 2]])("maps gain %s to %s, preserving the clip and source bounds", (input, gain) => {
     expect(audioInspectorEdit(clip, { field: "gain", value: input })).toEqual({
       kind: "resize", clip: 5, startTick: 960, content: { ...content, gain },
@@ -46,6 +55,12 @@ describe("audio inspector display", () => {
     expect(formatFade(441, 44100)).toBe("10 ms");
     expect(formatFade(1, 44100)).toBe("0.023 ms");
     expect(formatFade(44100, 44100)).toBe("1000 ms");
+    expect(formatFade(480, 48000)).toBe("10 ms");
+  });
+
+  it("uses the asset's 48 kHz rate for seconds", () => {
+    expect(audioInspectorInfo({ ...content, sourceEnd: content.sourceStart + 48000 },
+      { ...asset, sourceRate: 48000 }, 120, 4, 4).seconds).toBe("1 s");
   });
 
   it("keeps one second of audio at 44.1 kHz while the timeline duration changes with tempo and meter", () => {
