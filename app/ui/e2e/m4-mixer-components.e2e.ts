@@ -232,7 +232,7 @@ test("visible sends use host options and send their own pre/post, amount and rem
   const amount = echo.getByRole("slider", { name: "Send to Echo amount" });
   await expect(amount).toHaveAttribute("aria-valuetext", "0%");
   await amount.press("PageUp");
-  await expect(amount).toHaveAttribute("aria-valuetext", "10%");
+  await expect(amount).toHaveAttribute("aria-valuetext", "40%");
   await add.press("Enter");
   await expect(addList).toBeHidden();
   await echo.getByRole("button", { name: "Remove send to Echo" }).press("Enter");
@@ -246,10 +246,28 @@ test("visible sends use host options and send their own pre/post, amount and rem
   expect(cmds).toEqual([
     { type: "setSendPre", nodeId: "n-snare", sendId: expect.any(String), pre: true },
     { type: "addSend", nodeId: "n-snare", destinationId: "n-echo", pre: false, amount: 0 },
-    { type: "param", target: echoAmount?.target, value: expect.closeTo(0.1, 5), phase: "commit" },
+    { type: "param", target: echoAmount?.target, value: expect.closeTo(0.4, 5), phase: "commit" },
     { type: "removeSend", nodeId: "n-snare", sendId: echoAmount?.target.kind === "send" ? echoAmount.target.sendId : "" },
     { type: "removeSend", nodeId: "n-snare", sendId: expect.any(String) },
   ]);
+});
+
+test("a saved send above unity takes keyboard edits up to 4", async ({ fixture }) => {
+  const page = await fixture("?above-unity=1");
+  const amount = strip(page, "Snare").getByRole("slider", { name: "Send to Room amount" });
+  await expect(amount).toHaveAttribute("aria-valuetext", "125%");
+  for (const displayed of ["165%", "205%", "245%", "285%", "325%", "365%", "400%"]) {
+    await amount.press("PageUp");
+    await expect(amount).toHaveAttribute("aria-valuetext", displayed);
+  }
+  await amount.press("PageUp");
+  await expect(amount).toHaveAttribute("aria-valuetext", "400%");
+  expect(await log(page)).toEqual(
+    [1.65, 2.05, 2.45, 2.85, 3.25, 3.65, 4].map((value) => ({
+      type: "param", phase: "commit", target: { kind: "send", nodeId: "n-snare", sendId: expect.any(String) },
+      value: expect.closeTo(value, 5),
+    })),
+  );
 });
 
 const routeHandle = (page: Page, name: string) => strip(page, name).getByRole("button", { name: `Add send from ${name}` });

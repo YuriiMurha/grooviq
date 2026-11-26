@@ -133,7 +133,7 @@ function initial(): State {
     ];
     tracks[0].outputId = tracks[1].outputId = "n-drums";
     tracks[2].outputId = tracks[3].outputId = tracks[4].outputId = "n-music";
-    tracks[1].sends = [{ id: uid("send"), destinationId: "n-air", amount: 0.16, pre: false }];
+    tracks[1].sends = [{ id: uid("send"), destinationId: "n-air", amount: q.has("above-unity") ? 1.25 : 0.16, pre: false }];
     tracks[2].sends = [{ id: uid("send"), destinationId: "n-air", amount: 0.12, pre: false }];
     tracks[4].sends = [{ id: uid("send"), destinationId: "n-air", amount: 0.24, pre: false }];
     tracks[5].sends = [{ id: uid("send"), destinationId: "n-echo", amount: 0.19, pre: false }];

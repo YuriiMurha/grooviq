@@ -6,7 +6,8 @@ use crate::channel::ChannelNode;
 use crate::command::{Command, Msg, Trash, rebuilt_queue};
 use crate::graph::{Graph, ramp_len};
 use crate::live::{LiveShared, LiveSnapshot};
-use crate::mixer::memory::MixerMemory;
+use crate::mixer::{MASTER, MixerTrackId, memory::MixerMemory};
+use crate::mixer_meter::{MIXER_METER_MAX_TRACKS, MeterGraph, MixerMeter};
 use crate::processor::AudioProcessor;
 use crate::record::RecordEvent;
 use crate::state::{
@@ -915,6 +916,42 @@ impl Controller {
             debug_assert!(sent.is_ok(), "{sent:?}");
         }
         Ok(())
+    }
+
+    /// Renews the visible-track lease for half a second of rendered audio and reads a
+    /// completed capture for this selection and the current mix and graph. First takes up
+    /// to 64 distinct known non-Master IDs in caller order, then canonicalizes their order.
+    /// An empty selection cancels the lease. Call off the audio thread.
+    ///
+    /// A pending graph or selection, a fault, or a racing publication can return `None`.
+    /// When callbacks stall the frame clock also stalls: displays can expire a capture by
+    /// tracking how long its `frames` value has stayed unchanged.
+    pub fn mixer_meter(&mut self, tracks: &[MixerTrackId]) -> Option<MixerMeter> {
+        let mut selected = [MASTER; MIXER_METER_MAX_TRACKS];
+        let mut count = 0;
+        if let crate::mixer::MixSetup::Routed(_) = &self.state.mix {
+            for &id in tracks {
+                if id != MASTER && !selected[..count].contains(&id) && self.state.mix.has_track(id)
+                {
+                    selected[count] = id;
+                    count += 1;
+                    if count == selected.len() {
+                        break;
+                    }
+                }
+            }
+        }
+        let selected = &mut selected[..count];
+        selected.sort_unstable();
+        self.live.mixer_meter.poll(
+            MeterGraph {
+                revision: self.mix_revision,
+                epoch: self.graph_epoch,
+            },
+            self.live.frame_clock(),
+            (self.sample_rate * 0.5) as u64,
+            selected,
+        )
     }
 
     /// The latest live state.

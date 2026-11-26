@@ -1878,6 +1878,7 @@ export function installMockTauri(seed: MockSeed): void {
     } catch (error) { return { status: "refused", generation: s.generation, revision: arrangementRevision, changed: false, request: null, createdIds: [], reload: true, message: String(error), warnings: [] }; }
   };
   const nativeArrangementOnly = () => { throw "Arrangement/media commands are not simulated by this browser fixture; use native offline acceptance."; };
+  const nativeMixerOnly = () => { throw "Mixer commands require a generated mixer fixture or native offline acceptance."; };
   type RawArgs = Record<string, unknown>;
   type RawHandler = (args: RawArgs) => unknown;
   type MockCommands = {
@@ -1898,6 +1899,10 @@ export function installMockTauri(seed: MockSeed): void {
     arrangement_mode: workspaceMode,
     arrangement_loop: nativeArrangementOnly,
     arrangement_seek: seekArrangementTransport,
+    mixer_view: nativeMixerOnly,
+    mixer_edit: nativeMixerOnly,
+    mixer_insert_detail: nativeMixerOnly,
+    mixer_meter: nativeMixerOnly,
     // Native menu state has no platform menu in this headless fixture.
     edit_history_enabled: () => null,
     // commands.rs
@@ -2422,6 +2427,9 @@ export function installMockTauri(seed: MockSeed): void {
     arrangement_mode: { generation: u64, revision: u64, mode: (value) => value === "pattern" || value === "song" ? null : "expected pattern or song" },
     arrangement_history: { generation: u64, revision: u64, undo: bool },
     arrangement_edit: { generation: u64, revision: u64, editsJson: str },
+    mixer_edit: { requestJson: str },
+    mixer_insert_detail: { generation: u64, revision: u64, track: u32, insert: u32 },
+    mixer_meter: { generation: u64, revision: u64, tracks: list(u32) },
     audio_import: { generation: u64, revision: u64, track: u32, startTick: u64, name: str, path: str, ticket: wireU64 },
     audio_relink: { generation: u64, revision: u64, asset: u32, path: str, ticket: wireU64 },
     audio_cancel: { request: wireU64 },

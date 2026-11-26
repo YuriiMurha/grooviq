@@ -185,6 +185,10 @@ export type DeferredCommands = {
   metronome_set: "notes";
   midi_inputs: "MIDI";
   midi_set_enabled: "MIDI";
+  mixer_edit: "mixer";
+  mixer_insert_detail: "mixer";
+  mixer_meter: "mixer";
+  mixer_view: "mixer";
   notes_edit: "notes";
   notes_redo: "notes";
   notes_undo: "notes";
