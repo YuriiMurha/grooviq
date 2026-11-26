@@ -27,17 +27,20 @@ export function createMixerMeters(
     for (const listener of clipListeners) listener();
   }
 
-  function resetRows() {
+  function resetRows(keepClips?: ReadonlySet<number>) {
     rows.clear();
     advancedAt = -Infinity;
     // A lease can survive a selection change that never made an IPC call. Clip times
     // from the previously displayed block or earlier still belong to that old selection.
     clipFloor = lastFrame;
     latestClip.clear();
-    if (clipped.size > 0) {
-      clipped.clear();
-      notifyClips();
+    let changed = false;
+    for (const track of clipped) {
+      if (keepClips?.has(track)) continue;
+      clipped.delete(track);
+      changed = true;
     }
+    if (changed) notifyClips();
   }
 
   function accept(input: MixerMeterRequest, frame: MixerMeterCapture | null) {
@@ -98,11 +101,12 @@ export function createMixerMeters(
     const ids = [...visible].sort((left, right) => left - right);
     if (active !== null && sameMixerMeterStamp(active, stamp)
       && active.tracks.length === ids.length && active.tracks.every((track, index) => track === ids[index])) return;
-    if (generation !== stamp.generation) lastFrame = 0n;
+    const sameGeneration = generation === stamp.generation;
+    if (!sameGeneration) lastFrame = 0n;
     generation = stamp.generation;
     cancellation = null;
     active = { generation: stamp.generation, revision: stamp.revision, tracks: ids };
-    resetRows();
+    resetRows(sameGeneration ? visible : undefined);
   }
 
   return {

@@ -159,4 +159,33 @@ describe("visible mixer meter cache", () => {
       ...stamp, tracks: [...Array.from({ length: 63 }, (_, index) => index + 1), 70],
     });
   });
+
+  it("keeps clip latches on surviving visible tracks when the view changes", async () => {
+    const transport = vi.fn<(input: MixerMeterRequest) => Promise<MixerMeterCapture | null>>();
+    const meters = createMixerMeters(transport, () => 0);
+    const listener = vi.fn();
+    const unsubscribe = meters.subscribeClips(listener);
+    const input = { ...stamp, tracks: [2, 7] };
+    meters.setVisible(stamp, input.tracks);
+    transport.mockResolvedValueOnce(capture(input, 128n, 64n));
+    await meters.poll();
+    expect(meters.isClipped(2)).toBe(true);
+    expect(meters.isClipped(7)).toBe(true);
+
+    meters.setVisible(stamp, [7, 8]);
+    expect(meters.read(7)).toBeNull();
+    expect(meters.isClipped(2)).toBe(false);
+    expect(meters.isClipped(7)).toBe(true);
+    expect(meters.isClipped(8)).toBe(false);
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    meters.setVisible({ ...stamp, revision: stamp.revision + 1 }, [7, 8]);
+    expect(meters.isClipped(7)).toBe(true);
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    meters.setVisible(replacement, [7, 8]);
+    expect(meters.isClipped(7)).toBe(false);
+    expect(listener).toHaveBeenCalledTimes(3);
+    unsubscribe();
+  });
 });
