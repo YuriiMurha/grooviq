@@ -33,7 +33,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: test-instruction-profiles test-merge-train e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles test-merge-train ci-paths-test e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
@@ -61,14 +61,14 @@ check-changed: ## Only the checks the changes against origin/main need (ARGS=--p
 	node scripts/check-changed.mjs $(ARGS)
 
 .PHONY: replay replay-update
-replay: ui-install ## Compare the real offline Session and both browser mocks against the shared command transcript
+replay: ## Compare the real offline Session and MIDI hub against both browser mocks
+replay-update: ## Regenerate the real Session and MIDI transcripts intentionally, then verify both browser mocks
+replay replay-update: ui-install
+	npm --prefix $(UI) run build
+	$(if $(filter replay-update,$@),GROOVIQ_UPDATE_REPLAY=1 node scripts/semantic-replay.mjs)
 	node scripts/semantic-replay.mjs
 	npm --prefix $(UI) exec -- playwright install chromium webkit
 	npm --prefix $(UI) run e2e -- --config playwright.replay.config.ts
-
-replay-update: ## Regenerate the real-Session transcript intentionally, then verify both browser mocks
-	GROOVIQ_UPDATE_REPLAY=1 node scripts/semantic-replay.mjs
-	$(MAKE) replay
 
 qa-ui: ui-install ## Playwright on the web build with the mock engine (WebKit and Chromium); shots in app/ui/e2e-results
 	cd $(UI) && npx playwright install chromium webkit && npm run e2e
@@ -185,6 +185,10 @@ export-budget: ## Optimized 8-second PCM24 export with the original 4-second bud
 optional-rust-policy-test: ## Test optional Rust CI selection and conservative failure fallback
 	node --test scripts/optional-rust-checks.test.cjs
 
+.PHONY: ci-paths-test
+ci-paths-test: ## Test CI path selection and conservative failure fallback
+	node --test scripts/ci-paths.test.cjs
+
 .PHONY: rerun-no-runner-test
 rerun-no-runner-test: ## Test the macOS runner acquisition retry policy
 	node --test scripts/rerun-no-runner.test.cjs
@@ -230,6 +234,10 @@ e2e-diagnostics-test: ## Test bounded timeout-surviving e2e diagnostics (Node on
 .PHONY: e2e-browser-results-test
 e2e-browser-results-test: ## Test complete browser CI accounting (Node only)
 	node --test scripts/e2e-browser-results.test.mjs
+
+.PHONY: test-perf-fetch
+test-perf-fetch: ## Exercise bounded benchmark dependency setup without Cargo or network
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_perf_fetch.py -v
 
 .PHONY: bench-mixer
 bench-mixer: ## Static mixer kernel render timings at 64/128 frames (smoke only, no deadline claim)

@@ -1,11 +1,9 @@
 //! The macOS app menu: standard items with contextual history, guarded Quit and refresh rate.
 //!
-//! The standard menu's Quit (Cmd+Q) is the native `terminate:` item, and tao 0.37 has no
-//! `applicationShouldTerminate:` handler, so it ends the app at once: no `ExitRequested`, no
-//! "Save changes?". Ours is a plain item that calls `AppHandle::exit`, which raises a
-//! preventable `RunEvent::ExitRequested` (tauri 2.12 `AppHandle::exit` -> `request_exit` ->
-//! `Message::RequestExit` -> `ExitRequested { code: Some(0) }`), so the run loop holds it
-//! like a window close while there are unsaved changes.
+//! Our Quit item (Cmd+Q) calls `AppHandle::exit`. The run loop holds its preventable
+//! `RunEvent::ExitRequested` like a window close while there are unsaved changes.
+//! Dock Quit, app-switcher Quit and logout reach the same guard through the Cocoa delegate
+//! method installed by `macos_quit`.
 //!
 //! The menu is described as data ([`spec`]) so the tests can check it without a running app;
 //! [`build`] turns the description into Tauri's menu. Other platforms keep no app menu.
