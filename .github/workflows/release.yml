@@ -84,17 +84,31 @@ jobs:
       - run: rustup target add ${{ matrix.target }}
       - run: npm ci
         working-directory: app/ui
+      - name: Verify dist golden renders
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset GOLDEN_UPDATE SONG_M3_UPDATE
+          log=$(mktemp)
+          trap 'rm -f "$log"' EXIT
+          cargo test -p grooviq-golden --profile dist --locked 2>&1 | tee "$log"
+          passed=$(awk '/^test result: ok\. [0-9]+ passed;/ { total += $4 } END { print total + 0 }' "$log")
+          if (( passed == 0 )); then
+            echo 'No dist golden tests passed.' >&2
+            exit 1
+          fi
+          echo "Dist golden tests passed: $passed"
       # No signing secrets until #50. The CLI comes from the locked UI package.
       # No release inputs: build jobs cannot create or modify GitHub releases.
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         with:
           projectPath: app/src-tauri
           tauriScript: npm --prefix ../ui run tauri
-          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} -- --locked
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} -- --locked --profile dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: installer-${{ matrix.bundle }}
-          path: target/${{ matrix.target }}/release/bundle/${{ matrix.bundle }}/*.${{ matrix.extension }}
+          path: target/${{ matrix.target }}/dist/bundle/${{ matrix.bundle }}/*.${{ matrix.extension }}
           if-no-files-found: error
           retention-days: 7
 

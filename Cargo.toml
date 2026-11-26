@@ -41,3 +41,9 @@ opt-level = 2
 
 [profile.dev.package.zlib-rs]
 opt-level = 2
+
+# Shrink installer binaries. #124 measured no speed gain, so release keeps thin LTO.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
