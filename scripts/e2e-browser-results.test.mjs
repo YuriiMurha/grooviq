@@ -90,7 +90,7 @@ for (const [name, mutate, error] of [
     x.splice(1, 1);
   }, /missing shard.*webkit/],
   ['duplicate shard index', x => { x[1].shard.index = 1; }, /duplicate shard index.*webkit/],
-  ['mixed totals', x => { x[1].shard.total = 3; }, /mixed shard totals.*webkit/],
+  ['mixed totals', x => { x[0].shard.total = 1; }, /mixed shard totals.*webkit/],
   ['duplicate case across shards', x => {
     x[1].report.suites[0].specs.push(x[0].report.suites[0].specs[0]);
   }, /duplicate case/],
@@ -113,6 +113,7 @@ for (const [name, mutate, error] of [
   ['stale run in a shard', x => { x[1].run = '124'; }, /stale run/],
   ['stale attempt in a shard', x => { x[1].attempt = '2'; }, /stale attempt/],
   ['failed shard outcome', x => { x[1].outcome = 'failure'; }, /external suite step did not succeed/],
+  ['cancelled shard outcome', x => { x[1].outcome = 'cancelled'; }, /webkit shard 2\/2.*cancelled/],
   ['unexpected browser receipt', x => x.push({ ...x[0], project: 'firefox' }), /unexpected project/],
 ]) test(`reject ${name}`, () => {
   const receipts = shardedFixture();
@@ -129,6 +130,21 @@ for (const shard of [null, {}, { index: '2', total: 2 }, { index: 1.5, total: 2 
     assert.throws(() => validate(receipts, meta, 'success'), /invalid shard/);
   });
 }
+
+test('reject three shards even when all three reports cover the inventory', () => {
+  const receipts = shardedFixture();
+  const third = structuredClone(receipts[0].report.suites[0].specs[0]);
+  third.title = 'third case';
+  for (const r of receipts) {
+    r.inventory.suites[0].specs.push(third);
+    if (r.project === 'webkit') r.shard.total = 3;
+  }
+  const extraShard = structuredClone(receipts[0]);
+  extraShard.shard.index = 3;
+  extraShard.report.suites[0].specs = [third];
+  receipts.push(extraShard);
+  assert.throws(() => validate(receipts, meta, 'success'), /invalid shard/);
+});
 
 const script = fileURLToPath(new URL('./e2e-browser-results.mjs', import.meta.url));
 function cli(...args) {
@@ -152,9 +168,8 @@ for (const sharded of [false, true]) {
   test(`receipt and aggregate CLI accept ${sharded ? 'downloaded shards' : 'legacy browser directories'}`, t => {
     const root = accountingDir(t);
     for (const { project, shard, inventory, report: results } of sharded ? shardedFixture() : fixture()) {
-      const name = shard ? `e2e-accounting-${project}-${shard.index}of${shard.total}-123-1` : project;
-      const dir = join(root, name);
-      mkdirSync(dir);
+      const dir = shard ? join(root, project, `${shard.index}-of-${shard.total}`) : join(root, project);
+      mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, 'inventory.json'), JSON.stringify(inventory));
       writeFileSync(join(dir, 'report.json'), JSON.stringify(results));
       const result = cli('receipt', dir, project, ...(shard ? [shard.index, shard.total].map(String) : []));
@@ -168,7 +183,7 @@ for (const sharded of [false, true]) {
 
 test('receipt CLI rejects incomplete or invalid shard arguments', t => {
   const root = accountingDir(t);
-  for (const args of [['2'], ['3', '2'], ['0x2', '2']]) {
+  for (const args of [['2'], ['3', '2'], ['0x2', '2'], ['1', '3']]) {
     const result = cli('receipt', root, 'webkit', ...args);
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /invalid shard/);
@@ -179,8 +194,22 @@ test('aggregate refuses a symlink at a downloaded shard directory', t => {
   const root = accountingDir(t);
   const target = accountingDir(t);
   writeFileSync(join(target, 'receipt.json'), JSON.stringify(shardedFixture()[0]));
-  symlinkSync(target, join(root, 'e2e-accounting-webkit-1of2-123-1'), 'dir');
+  mkdirSync(join(root, 'webkit'));
+  symlinkSync(target, join(root, 'webkit', '1-of-2'), 'dir');
   const result = cli('aggregate', root);
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /symlink/);
+});
+
+test('aggregate rejects a shard receipt downloaded into a mismatched directory', t => {
+  const root = accountingDir(t);
+  for (const r of shardedFixture()) {
+    const index = r.project === 'webkit' ? 3 - r.shard.index : r.shard.index;
+    const dir = join(root, r.project, `${index}-of-2`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'receipt.json'), JSON.stringify(r));
+  }
+  const result = cli('aggregate', root);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /receipt does not match.*webkit\/1-of-2/);
 });

@@ -43,9 +43,12 @@ function cases(report) {
   return found;
 }
 function checkedShard(shard) {
-  requireThat(Number.isSafeInteger(shard?.index) && Number.isSafeInteger(shard?.total) &&
-    shard.index >= 1 && shard.index <= shard.total, 'invalid shard index or total');
+  requireThat((shard?.total === 1 || shard?.total === 2) && Number.isSafeInteger(shard.index) &&
+    shard.index >= 1 && shard.index <= shard.total, 'invalid shard index or total (expected 1 or 2 shards)');
   return shard;
+}
+function receiptShard(receipt) {
+  return Object.hasOwn(receipt, 'shard') ? checkedShard(receipt.shard) : { index: 1, total: 1 };
 }
 function validateCase(project, spec, t) {
   requireThat(Array.isArray(t.results) && t.results.length === 1 && t.results[0].retry === 0, 'missing/retried result');
@@ -60,7 +63,7 @@ export function validate(receipts, meta, dependency) {
   for (const project of projects) {
     const matches = receipts.filter(r => r.project === project);
     requireThat(matches.length > 0, `missing shard receipts for ${project}`);
-    const shards = matches.map(r => Object.hasOwn(r, 'shard') ? checkedShard(r.shard) : { index: 1, total: 1 });
+    const shards = matches.map(receiptShard);
     const { total } = shards[0];
     requireThat(shards.every(s => s.total === total), `mixed shard totals for ${project}`);
     requireThat(new Set(shards.map(s => s.index)).size === shards.length, `duplicate shard index for ${project}`);
@@ -68,8 +71,10 @@ export function validate(receipts, meta, dependency) {
 
     let expected;
     const seen = new Set();
-    for (const r of matches) {
-      requireThat(r.outcome === 'success', 'external suite step did not succeed');
+    for (const [position, r] of matches.entries()) {
+      const { index } = shards[position];
+      requireThat(r.outcome === 'success',
+        `${project} shard ${index}/${total}: external suite step did not succeed (outcome: ${r.outcome ?? 'missing'})`);
       for (const field of ['head', 'workflow', 'run', 'attempt']) requireThat(typeof meta[field] === 'string' && meta[field].length > 0 && r[field] === meta[field], `stale ${field}`);
       const inventory = cases(r.inventory);
       const keys = JSON.stringify([...inventory.keys()].sort());
@@ -89,12 +94,26 @@ export function validate(receipts, meta, dependency) {
   }
 }
 function readReceipts(root) {
-  rejectSymlinks(resolve(root), 'symlink in accounting path');
-  // Download each e2e-accounting-<browser>-<i>of<N>-<run>-<attempt> artifact into its own directory.
-  const artifact = /^e2e-accounting-(webkit|chromium)-[0-9]+of[0-9]+-[0-9]+-[0-9]+$/;
-  return readdirSync(root)
-    .filter(name => projects.includes(name) || artifact.test(name))
-    .map(name => readJSON(root, `${name}/receipt.json`));
+  const base = resolve(root);
+  rejectSymlinks(base, 'symlink in accounting path');
+  const downloaded = readdirSync(base);
+  const receipts = [];
+  // Download e2e-accounting-<browser>-<i>-of-<n>-<run>-<attempt> into <browser>/<i>-of-<n>/.
+  for (const project of projects.filter(p => downloaded.includes(p))) {
+    const directory = resolve(base, project);
+    rejectSymlinks(directory, 'symlink in accounting path');
+    for (const name of readdirSync(directory)) {
+      const legacy = name === 'receipt.json';
+      if (!legacy && !/^\d+-of-\d+$/.test(name)) continue;
+      const file = legacy ? `${project}/receipt.json` : `${project}/${name}/receipt.json`;
+      const receipt = readJSON(base, file);
+      requireThat(receipt?.project === project, `receipt does not match ${file}`);
+      const { index, total } = receiptShard(receipt);
+      requireThat((legacy ? '1-of-1' : name) === `${index}-of-${total}`, `receipt does not match ${file}`);
+      receipts.push(receipt);
+    }
+  }
+  return receipts;
 }
 function metadata() {
   return { head: process.env.GITHUB_SHA, workflow: process.env.GITHUB_WORKFLOW_SHA, run: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT };
