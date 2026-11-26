@@ -226,8 +226,9 @@ struct ContentFields {
 }
 #[derive(Deserialize)]
 #[serde(transparent)]
-struct Points(
-    #[serde(deserialize_with = "bounded::<_, _, MAX_AUTOMATION_POINTS>")] Vec<AutomationPoint>,
+pub(crate) struct Points(
+    #[serde(deserialize_with = "bounded::<_, _, MAX_AUTOMATION_POINTS>")]
+    pub(crate)  Vec<AutomationPoint>,
 );
 fn required<T, E: Error>(value: Option<T>, name: &'static str) -> Result<T, E> {
     value.ok_or_else(|| E::missing_field(name))
