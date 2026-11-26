@@ -14,8 +14,19 @@ fn setup(d: &std::path::Path) -> project::session::Session {
     project::save(&p, &f, &path).unwrap();
     let loaded = project::load(&path).unwrap();
     let mut reopened = loaded.project.clone();
-    for asset in &mut reopened.arrangement.audio_assets {
-        asset.sample.file = None;
+    for sample in reopened
+        .channels
+        .iter_mut()
+        .filter_map(|channel| channel.sample.as_mut())
+        .chain(
+            reopened
+                .arrangement
+                .audio_assets
+                .iter_mut()
+                .map(|asset| &mut asset.sample),
+        )
+    {
+        sample.file = None;
     }
     assert!(
         reopened == p,
@@ -77,6 +88,97 @@ fn verify_update_guard(dir: &std::path::Path) {
     assert!(frozen.join("000.zlib").is_file());
 }
 
+fn verify_sampler_and_automation_signals(dir: &std::path::Path, full_wav: &[u8]) {
+    use project::{AutomationTarget, ClipContent};
+    use std::sync::atomic::AtomicBool;
+
+    // At 120 BPM and 48 kHz each tick is 25 stereo frames.
+    const FRAMES_PER_TICK: usize = 25;
+    const SECTION_TICKS: u64 = 1920;
+    let mut full = hound::WavReader::new(std::io::Cursor::new(full_wav)).unwrap();
+    full.seek(song::SAMPLER_SECTION_TICK as u32 * FRAMES_PER_TICK as u32)
+        .unwrap();
+    let reference: Vec<f32> = full
+        .samples::<f32>()
+        .take(SECTION_TICKS as usize * FRAMES_PER_TICK * 2)
+        .map(Result::unwrap)
+        .collect();
+
+    let (p, files) = song::fixture();
+    let project_path = dir.join("sampler-control.grooviq");
+    let wav_path = dir.join("sampler-control.wav");
+    let render = |p: &project::Project| {
+        project::save(p, &files, &project_path).unwrap();
+        let (state, _) = song::open(&project_path).export_selection(false).unwrap();
+        let options = engine::ExportOptions {
+            song_region: Some(engine::SongLoop {
+                start_tick: song::SAMPLER_SECTION_TICK,
+                end_tick: song::SAMPLER_SECTION_TICK + SECTION_TICKS,
+            }),
+            ..song::options()
+        };
+        engine::export_wav(
+            state,
+            &options,
+            &wav_path,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        grooviq_golden::read_wav(&wav_path)
+    };
+    grooviq_golden::compare_exact(&render(&p), &reference)
+        .expect("bounded export must match the full golden in the sampler section");
+
+    let check = |target, control: &project::Project, from_tick, to_tick| {
+        let alternate = render(control);
+        let window = from_tick * FRAMES_PER_TICK * 2..to_tick * FRAMES_PER_TICK * 2;
+        let peak_delta = reference[window.clone()]
+            .iter()
+            .zip(&alternate[window])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            peak_delta > 0.01,
+            "neutralising {target} must change audible samples (peak delta {peak_delta})"
+        );
+    };
+
+    let mut untrimmed = p.clone();
+    let sampler = untrimmed
+        .channels
+        .iter_mut()
+        .find(|channel| channel.instrument == engine::InstrumentKind::Sampler)
+        .unwrap();
+    sampler.sampler.remove("end");
+    // The first note passes the trimmed end before either automation clip starts.
+    check("sampler end", &untrimmed, 440, 700);
+
+    let mut manual_volume = p.clone();
+    manual_volume.arrangement.clips.retain(|clip| {
+        !matches!(
+            clip.content,
+            ClipContent::Automation {
+                target: AutomationTarget::ChannelVolume { .. },
+                ..
+            }
+        )
+    });
+    check("ChannelVolume", &manual_volume, 868, 1068);
+
+    let mut manual_gain = p;
+    manual_gain.arrangement.clips.retain(|clip| {
+        !matches!(
+            clip.content,
+            ClipContent::Automation {
+                target: AutomationTarget::InstrumentParam { .. },
+                ..
+            }
+        )
+    });
+    check("InstrumentParam", &manual_gain, 1444, 1644);
+}
+
 #[test]
 fn complete_song_bytes_roundtrip_and_full_callback_partitions() {
     let d = tempfile::tempdir().unwrap();
@@ -106,6 +208,7 @@ fn complete_song_bytes_roundtrip_and_full_callback_partitions() {
     assert_eq!(report.frames, song::FRAMES as u64);
     assert_eq!(r.duration() as usize, song::FRAMES);
     assert_eq!(r.spec().sample_format, hound::SampleFormat::Float);
+    verify_sampler_and_automation_signals(d.path(), &bytes);
     update_reference(
         &refs(),
         &bytes,

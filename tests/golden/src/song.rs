@@ -10,6 +10,7 @@ use std::{
 pub mod storage;
 pub const FRAMES: usize = 8_640_000;
 pub const END_TICK: u64 = 345_600;
+pub const SAMPLER_SECTION_TICK: u64 = 336_000;
 
 pub fn fixture() -> (Project, HashMap<u32, SampleFile>) {
     let mut p = Project::new();
@@ -188,6 +189,99 @@ pub fn fixture() -> (Project, HashMap<u32, SampleFile>) {
         });
         id += 1;
     }
+    // The gap before bar 88 keeps the new notes out of the earlier benchmark windows.
+    let mut sampler: Channel = serde_json::from_value(serde_json::json!({
+        "id": 4, "name": "Reeds", "color": 4, "instrument": "sampler",
+        "volume": 0.8, "sampler": {"end": 0.375}
+    }))
+    .unwrap();
+    let sample = files[&22].clone();
+    sampler.sample = Some(SampleRef {
+        path: sample.name.clone().into(),
+        file: None,
+    });
+    files.insert(sampler.id, sample);
+    let mut phrase = Pattern::new(5, "Reeds");
+    for (i, tick) in [0, 768, 1344].into_iter().enumerate() {
+        phrase.notes.push(Note {
+            id: i as u32 + 1,
+            channel: sampler.id,
+            tick,
+            length: 240,
+            key: 72,
+            velocity: 0.8,
+            slide: false,
+        });
+    }
+    phrase.next_note_id = 4;
+    p.arrangement.clips.push(Clip {
+        id,
+        track: 10,
+        name: phrase.name.clone(),
+        start_tick: SAMPLER_SECTION_TICK,
+        muted: false,
+        content: ClipContent::Pattern {
+            pattern: phrase.id,
+            offset_tick: 0,
+            length_ticks: 1920,
+        },
+    });
+    p.patterns.push(phrase);
+
+    for (i, (name, tick, target, from, to)) in [
+        (
+            "Reed level",
+            768,
+            AutomationTarget::ChannelVolume {
+                channel: sampler.id,
+            },
+            0.25,
+            0.5,
+        ),
+        (
+            "Reed gain",
+            1344,
+            AutomationTarget::InstrumentParam {
+                channel: sampler.id,
+                instrument: "sampler".into(),
+                param: "gain".into(),
+            },
+            -18.0,
+            -6.0,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = id + i as u32 + 1;
+        p.arrangement.clips.push(Clip {
+            id,
+            track: 12,
+            name: name.into(),
+            start_tick: SAMPLER_SECTION_TICK + tick,
+            muted: false,
+            content: ClipContent::Automation {
+                target,
+                priority: 3900 + i as u32,
+                offset_tick: 0,
+                length_ticks: 384,
+                points: vec![
+                    AutomationPoint {
+                        tick: 0,
+                        value: from,
+                        mode: SegmentMode::Linear,
+                    },
+                    AutomationPoint {
+                        tick: 384,
+                        value: to,
+                        mode: SegmentMode::Hold,
+                    },
+                ]
+                .into(),
+            },
+        });
+    }
+    p.channels.push(sampler);
     p.next_id = 4000;
     p.validate_arrangement().unwrap();
     (p, files)
