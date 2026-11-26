@@ -13,6 +13,7 @@
 //! released.
 
 use super::{OutputChoice, OutputEvent, OutputInfo, OutputMonitor, lock};
+use crate::controller::ReconfigureError;
 use crate::{AudioProcessor, BLOCK, Command, Controller, EngineConfig, LiveShared};
 use std::cell::UnsafeCell;
 use std::collections::{HashSet, VecDeque};
@@ -219,6 +220,12 @@ struct Open {
     /// Its device, with the rate it really runs at.
     info: OutputInfo,
     since: Instant,
+}
+
+#[derive(Debug)]
+enum OpenError {
+    Output(String),
+    Reconfigure(ReconfigureError),
 }
 
 /// When the target may be tried again.
@@ -441,6 +448,22 @@ impl State {
         self.monitor.set_guard(shared.guard.load(Ordering::Acquire));
         let devices = self.backend.outputs();
         let mut events = self.monitor.tick(&devices);
+        // A refused move can leave the monitor targeting a different device than the open stream.
+        if let Some(open) = &self.open {
+            events.retain_mut(|event| {
+                let (OutputEvent::Opened(to) | OutputEvent::Switched { to, .. }) = event else {
+                    return true;
+                };
+                if to.id == open.info.id {
+                    return false;
+                }
+                *event = OutputEvent::Switched {
+                    from: open.info.clone(),
+                    to: to.clone(),
+                };
+                true
+            });
+        }
         let target = self.monitor.current().cloned();
         let target_id = target.as_ref().map(|t| t.id.clone());
         if target_id != self.target {
@@ -463,12 +486,8 @@ impl State {
                 target.sample_rate = open.info.sample_rate;
                 open.info = target;
             }
-            Some(target) => {
-                self.close(slot);
-                if self.retry.due(now) {
-                    self.try_open(&target, slot, &mut events);
-                }
-            }
+            Some(target) if self.retry.due(now) => self.try_open(&target, slot, &mut events),
+            Some(_) => {}
         }
         if let Some(processor) = self.processor.as_mut() {
             // No stream owns it: deliver retained take boundaries even with no callback
@@ -507,7 +526,9 @@ impl State {
         slot: &Arc<AudioSlot>,
         events: &mut Vec<OutputEvent>,
     ) {
-        let opened = self.open_stream(target, slot);
+        let previous = self.open.take();
+        self.close(slot);
+        let opened = self.open_stream(target, slot, None);
         // After the open, which may itself take a second or two: the wait before the next try
         // starts from here.
         let now = Instant::now();
@@ -529,13 +550,27 @@ impl State {
                     }
                 }
                 if std::mem::take(&mut self.owed) && !announced {
-                    events.push(OutputEvent::Opened(info.clone()));
+                    events.push(match previous {
+                        Some(old) => OutputEvent::Switched {
+                            from: old.info,
+                            to: info.clone(),
+                        },
+                        None => OutputEvent::Opened(info.clone()),
+                    });
                 }
                 self.reported.remove(&info.id);
                 self.open = Some(Open { info, since: now });
             }
             Err(error) => {
                 self.close(slot);
+                let restore = matches!(
+                    error,
+                    OpenError::Reconfigure(ReconfigureError::MixRefused(_))
+                );
+                let error = match error {
+                    OpenError::Output(message) => message,
+                    OpenError::Reconfigure(error) => error.to_string(),
+                };
                 // Nothing plays there: hold back the claim until it does.
                 let claimed = events.len();
                 events.retain(|e| {
@@ -550,6 +585,19 @@ impl State {
                     });
                 }
                 self.retry.failed(now);
+                if restore && let Some(old) = previous {
+                    // Mixer admission leaves the processor at its previous rate. Keep
+                    // the previous endpoint playing while the requested one waits.
+                    match self.open_stream(&old.info, slot, Some(old.info.sample_rate)) {
+                        Ok(info) => {
+                            self.open = Some(Open {
+                                info,
+                                since: old.since,
+                            })
+                        }
+                        Err(_) => self.close(slot),
+                    }
+                }
             }
         }
     }
@@ -560,20 +608,33 @@ impl State {
         &mut self,
         target: &OutputInfo,
         slot: &Arc<AudioSlot>,
-    ) -> Result<OutputInfo, String> {
+        restore_rate: Option<u32>,
+    ) -> Result<OutputInfo, OpenError> {
         // Failures of earlier streams no longer matter.
         slot.failed.store(false, Ordering::Release);
-        let rate = self.backend.open(target, Arc::clone(slot))?;
+        let rate = self
+            .backend
+            .open(target, Arc::clone(slot))
+            .map_err(OpenError::Output)?;
+        if restore_rate.is_some_and(|old| old != rate) {
+            return Err(OpenError::Output(format!(
+                "previous stream now uses {rate} Hz"
+            )));
+        }
         let config = EngineConfig {
             sample_rate: rate as f32,
         };
         // A physical stream cannot follow the config's clamping: reject it while the slot
         // is still silent, before taking or rebuilding the parked processor.
         if config.rate() != config.sample_rate {
-            return Err(format!("unsupported actual output sample rate: {rate} Hz"));
+            return Err(OpenError::Output(format!(
+                "unsupported actual output sample rate: {rate} Hz"
+            )));
         }
         let Some(mut processor) = self.processor.take() else {
-            return Err("the output has no processor to play".into());
+            return Err(OpenError::Output(
+                "the output has no processor to play".into(),
+            ));
         };
         {
             let mut controller = lock(&self.controller);
@@ -581,7 +642,7 @@ impl State {
                 && let Err(error) = controller.try_reconfigure(&mut processor, config)
             {
                 self.processor = Some(processor);
-                return Err(error.to_string());
+                return Err(OpenError::Reconfigure(error));
             }
         }
         slot.put(processor);
@@ -843,7 +904,7 @@ mod tests {
             is_default: true,
             sample_rate: 44_100,
         };
-        assert!(state.open_stream(&target, &slot).is_err());
+        assert!(state.open_stream(&target, &slot, None).is_err());
         assert!(state.processor.is_some());
         assert!(slot.claim_control().processor().is_none());
         assert_eq!(lock(&controller).sample_rate(), 48_000.0);
@@ -853,7 +914,7 @@ mod tests {
 
         // The failed construction left both the processor and tone available for retry.
         assert_eq!(
-            state.open_stream(&target, &slot).unwrap().sample_rate,
+            state.open_stream(&target, &slot, None).unwrap().sample_rate,
             44_100
         );
         assert_eq!(lock(&controller).sample_rate(), 44_100.0);
@@ -936,6 +997,117 @@ mod tests {
         state.processor.as_mut().unwrap().process(&mut out, 2);
         assert!(out.iter().any(|&sample| sample != 0.0));
         assert_eq!(c.live().faults, 0);
+    }
+
+    #[test]
+    fn mixer_memory_refusal_keeps_the_previous_output_until_retry() {
+        struct FakeOutputs(Vec<OutputInfo>);
+        impl OutputBackend for FakeOutputs {
+            fn outputs(&self) -> Vec<OutputInfo> {
+                self.0.clone()
+            }
+
+            fn open(&mut self, info: &OutputInfo, _: Arc<AudioSlot>) -> Result<u32, String> {
+                Ok(info.sample_rate)
+            }
+
+            fn close(&mut self) {}
+        }
+
+        let device = |id: &str, sample_rate| OutputInfo {
+            id: id.into(),
+            name: id.into(),
+            kind: super::super::OutputKind::Headphones,
+            is_default: id == "old",
+            sample_rate,
+        };
+        let (old, new) = (device("old", 48_000), device("new", 96_000));
+        let alternate = device("alternate", 48_000);
+        let (mut c, p) = crate::engine_with(
+            EngineConfig {
+                sample_rate: 48_000.0,
+            },
+            crate::EngineState {
+                mix: crate::controller::restricted_rate_test_mix(),
+                ..crate::EngineState::default()
+            },
+        );
+        c.set_mixer_memory_limit(0);
+        let slot = Arc::new(AudioSlot::new(c.live_shared()));
+        let controller = Arc::new(Mutex::new(c));
+        let shared = Shared {
+            state: Mutex::new(State {
+                backend: Box::new(FakeOutputs(vec![
+                    old.clone(),
+                    new.clone(),
+                    alternate.clone(),
+                ])),
+                controller: Arc::clone(&controller),
+                monitor: OutputMonitor::new(OutputChoice::SystemDefault, true),
+                processor: Some(p),
+                open: None,
+                target: None,
+                retry: Retry::default(),
+                owed: false,
+                reported: HashSet::new(),
+            }),
+            seen: Mutex::default(),
+            requested: Mutex::new(None),
+            guard: AtomicBool::new(true),
+            pending: Mutex::default(),
+            on_event: Mutex::new(Box::new(|_| {})),
+            delivering: Mutex::new(None),
+            slot,
+            quit: AtomicBool::new(false),
+        };
+        let mut state = lock(&shared.state);
+        assert_eq!(state.look(&shared), [OutputEvent::Opened(old.clone())]);
+        *lock(&shared.requested) = Some(OutputChoice::Device(new.id.clone()));
+        assert!(
+            matches!(&state.look(&shared)[..], [OutputEvent::OpenFailed { output, .. }] if output == &new)
+        );
+        assert_eq!(lock(&shared.seen).current.as_ref(), Some(&old));
+        assert_eq!(lock(&controller).sample_rate(), 48_000.0);
+        let before = lock(&controller).live().frames;
+        shared.slot.process(&mut [0.0; BLOCK * 2], 2);
+        assert!(lock(&controller).live().frames > before);
+        assert!(state.look(&shared).is_empty() && state.open.is_some());
+
+        *lock(&shared.requested) = Some(OutputChoice::Device(old.id.clone()));
+        let events = state.look(&shared);
+        assert!(
+            events.is_empty(),
+            "reselecting the restored output emitted {events:?}"
+        );
+        assert_eq!(lock(&shared.seen).current.as_ref(), Some(&old));
+
+        *lock(&shared.requested) = Some(OutputChoice::Device(new.id.clone()));
+        assert!(
+            matches!(&state.look(&shared)[..], [OutputEvent::OpenFailed { output, .. }] if output == &new)
+        );
+        *lock(&shared.requested) = Some(OutputChoice::Device(alternate.id.clone()));
+        assert_eq!(
+            state.look(&shared),
+            [OutputEvent::Switched {
+                from: old,
+                to: alternate.clone()
+            }]
+        );
+        *lock(&shared.requested) = Some(OutputChoice::Device(new.id.clone()));
+        assert!(
+            matches!(&state.look(&shared)[..], [OutputEvent::OpenFailed { output, .. }] if output == &new)
+        );
+        lock(&controller).set_mixer_memory_limit(crate::mixer::Budget::default().memory_bytes);
+        state.retry.not_before = None;
+        assert_eq!(
+            state.look(&shared),
+            [OutputEvent::Switched {
+                from: alternate,
+                to: new.clone()
+            }]
+        );
+        assert_eq!(lock(&shared.seen).current.as_ref(), Some(&new));
+        assert_eq!(lock(&controller).sample_rate(), 96_000.0);
     }
 
     #[test]

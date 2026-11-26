@@ -147,11 +147,15 @@ impl Graph {
 
     fn apply_mix(&mut self, install: &mut crate::mixer::live::MixInstall) {
         if let (Some(new), Some(old)) = (install.live.as_mut(), self.mix.as_mut()) {
-            new.adopt(old, &install.transfers, &install.params);
+            new.adopt(old, &install.changes);
         }
         std::mem::swap(&mut self.mix, &mut install.live);
         self.mix_revision = install.revision;
         install.installed = true;
+    }
+
+    pub(crate) fn take_faulted_mix(&mut self) -> Option<Box<crate::mixer::live::LiveMix>> {
+        self.mix.take()
     }
 
     pub(crate) fn synth_meter(&self, instance: u64) -> Option<crate::SynthMeter> {

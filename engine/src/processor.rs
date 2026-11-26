@@ -274,6 +274,9 @@ impl AudioProcessor {
         let start = self.clock;
         let end = start + BLOCK as u64;
         self.retry_trash();
+        if self.faulted {
+            self.retire_faulted_mix();
+        }
         let count = self.drain(start, end);
         let region = self.graph.song_loop;
         let signature = (
@@ -927,6 +930,25 @@ impl AudioProcessor {
         }
     }
 
+    /// A detached processor may never get another callback to return these payloads.
+    /// The controller empties trash first and exclusively owns the processor here.
+    pub(crate) fn return_detached_trash(&mut self) {
+        self.retry_trash();
+        if self.faulted {
+            drop(self.graph.take_faulted_mix());
+        }
+    }
+
+    // The faulted graph is already silent. Return its mixer to make room for a rebuild
+    // under the shared limit. As with installs, a parked return is still charged.
+    fn retire_faulted_mix(&mut self) {
+        if self.unsent.is_none()
+            && let Some(mix) = self.graph.take_faulted_mix()
+        {
+            self.discard(Trash::FaultedMix(mix));
+        }
+    }
+
     fn retry_trash(&mut self) {
         if let Some(old) = self.unsent.take()
             && let Err(PushError::Full(old)) = self.trash.push(old)
@@ -1288,9 +1310,14 @@ mod tests {
             generation,
             base,
             revision,
-            live: crate::mixer::live::prepare(&tone_mix(), SR, &[]).unwrap(),
-            transfers: vec![],
-            params: vec![],
+            live: crate::mixer::live::prepare(
+                &tone_mix(),
+                SR,
+                std::iter::empty(),
+                &Default::default(),
+            )
+            .unwrap(),
+            changes: Default::default(),
             installed: false,
         }))
     }

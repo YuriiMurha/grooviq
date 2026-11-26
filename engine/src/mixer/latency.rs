@@ -72,7 +72,7 @@ pub enum LatencyError {
 
 /// Where a compensation delay sits. Zero-frame entries are kept so every logical point
 /// has exactly one well-defined descriptor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PdcPoint {
     /// An audible input (main, send or source) before the track's gather.
     Audible { track: MixerTrackId, input: InputId },
