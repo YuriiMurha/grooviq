@@ -10,8 +10,9 @@ permissions:
 
 concurrency:
   # Main pushes share one group without cancel-in-progress: a started run always finishes (rust-cache
-  # saves only on main), and a newer push replaces only the pending one, so a train batch of N squash
-  # commits runs at most twice, the first and the tip (#693). PRs and merge-train/batch: per ref, cancel older.
+  # saves only on main), and each newly queued run replaces the pending one, in queue-arrival order, so
+  # one running and one pending at most (#693). The tested record for a batch tip is its
+  # merge-train/batch run on the same tree. PRs and merge-train/batch: per ref, cancel older.
   group: >-
     ci-${{ github.workflow }}-${{ github.event.pull_request.number ||
     github.ref }}
