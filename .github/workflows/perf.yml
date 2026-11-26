@@ -1,6 +1,6 @@
 name: perf
 
-# Speed numbers for every change, in each job's summary and as artifacts. Timings on shared
+# Speed numbers for benchmark inputs, in each job's summary and as artifacts. Timings on shared
 # runners are noisy, so they never fail a job; the render benchmark fails only when a scene's
 # bits depend on the block size. Instruction counts are exact: that job fails when a benchmark
 # runs more than 1 % more instructions than on the pull request's base. None of these jobs is
@@ -50,6 +50,8 @@ jobs:
       run: ${{ steps.select.outputs.result }}
     steps:
       - uses: actions/checkout@v5
+      - run: rustup toolchain install
+        timeout-minutes: 3
       - run: make optional-rust-policy-test
       - uses: actions/github-script@v8
         id: select
@@ -57,6 +59,7 @@ jobs:
           script: |
             const { shouldRun } = require('./scripts/optional-rust-checks.cjs');
             return await shouldRun({
+              workflow: 'perf',
               eventName: context.eventName,
               pullRequest: context.payload.pull_request,
               repo: context.repo,
@@ -134,7 +137,7 @@ jobs:
 
   # The same scene must render the same bits on every platform (the export rule).
   determinism:
-    if: ${{ !inputs.capture_only }}
+    if: ${{ !inputs.capture_only && !cancelled() && needs.bench.result == 'success' }}
     name: determinism (macOS vs Windows)
     needs: bench
     runs-on: ubuntu-latest
@@ -182,6 +185,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+      - name: Key the Rust cache on the root manifest
+        shell: bash
+        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
       - name: Valgrind and ALSA headers
         run: |
           sudo apt-get update -qq
