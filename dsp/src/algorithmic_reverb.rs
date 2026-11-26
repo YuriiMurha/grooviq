@@ -208,6 +208,8 @@ impl AlgorithmicReverb {
     pub fn new(sample_rate: f32) -> Self {
         Self::with_seed(sample_rate, 0xA17E_2026)
     }
+    /// Only the seed's low 16 bits set where the modulation starts (also on `reset`), so give a
+    /// seed that is uniform in its low bits (random or hashed, never a counter or raw index).
     pub fn with_seed(sample_rate: f32, seed: u64) -> Self {
         let sr = if sample_rate.is_finite() {
             sample_rate.clamp(22050., 192000.)

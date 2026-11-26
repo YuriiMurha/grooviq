@@ -1,6 +1,7 @@
 use grooviq_dsp::{
     Device, EFFECTS, InsertError, create, create_insert, db_to_gain, is_stepped,
     max_latency_frames, max_memory_bytes, param_ids, param_spec, preset, presets,
+    sample_rate_range,
 };
 
 #[global_allocator]
@@ -351,6 +352,65 @@ fn every_effect_starts_at_the_requested_values() {
             assert!(
                 first_blocks(fresh.as_mut()) == first_blocks(snapped.as_mut()),
                 "{id} glides from its defaults at {params:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_sample_rate_ranges_match_the_registry_contract() {
+    for id in EFFECTS {
+        let expected = match id {
+            "algorithmic_reverb" | "bitcrusher" | "character_delay" | "drum_shaper"
+            | "fattener" | "lofi_colour" | "saturation" | "shimmer_reverb" => (22_050.0, 192_000.0),
+            "comp" | "delay" | "drive" | "eq" | "limiter" | "ott" | "reverb" | "utility" => {
+                (8_000.0, 384_000.0)
+            }
+            _ => panic!("Missing expected native rate range for {id}"),
+        };
+        assert_eq!(sample_rate_range(id), Some(expected), "{id}");
+    }
+}
+
+#[test]
+fn unknown_insert_has_no_sample_rate_range() {
+    assert_eq!(sample_rate_range("unknown"), None);
+}
+
+#[test]
+fn insert_admission_matches_the_inclusive_native_sample_rate_range() {
+    for id in EFFECTS {
+        let (lo, hi) = sample_rate_range(id).unwrap_or_else(|| panic!("Missing range for {id}"));
+        let params = defaults(id);
+        for sr in [lo, hi] {
+            assert!(
+                create_insert(id, sr, 1, &params).is_ok(),
+                "create {id} at {sr}"
+            );
+            assert!(
+                max_memory_bytes(id, sr).is_ok(),
+                "memory bound for {id} at {sr}"
+            );
+            assert!(
+                max_latency_frames(id, sr).is_some(),
+                "latency bound for {id} at {sr}"
+            );
+        }
+        for sr in [lo.next_down(), hi.next_up()] {
+            assert_eq!(
+                create_insert(id, sr, 1, &params).err(),
+                Some(InsertError::InvalidSampleRate),
+                "create {id} at {sr}"
+            );
+            assert_eq!(
+                max_memory_bytes(id, sr),
+                Err(InsertError::InvalidSampleRate),
+                "memory bound for {id} at {sr}"
+            );
+            assert_eq!(
+                max_latency_frames(id, sr),
+                None,
+                "latency bound for {id} at {sr}"
             );
         }
     }

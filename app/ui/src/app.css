@@ -112,7 +112,7 @@ input {
 .tone[aria-pressed="true"] {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--well);
+  color: var(--on-accent);
   font-weight: 700;
 }
 
@@ -1036,7 +1036,7 @@ input[type="checkbox"] {
 .transport-btn.play {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--well);
+  color: var(--on-accent);
   box-shadow: var(--reg-x) var(--reg-y) 0 var(--ink-1b);
 }
 
@@ -1232,7 +1232,7 @@ input[type="checkbox"] {
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--well);
+  color: var(--on-accent);
   font-weight: 700;
 }
 

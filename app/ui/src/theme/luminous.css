@@ -10,7 +10,7 @@
   --muted: #b9bdc9;
   --faint: #a1a6b4;
   --accent: #f6f3ec;
-  --select: #47b9ff; /* a clearer blue edge next to the periwinkle channel */
+  --select: #008cff; /* cool blue, distinct from the aqua and periwinkle inks */
   --ok: #5fe3b8;
   --error: #ff787f;
   --ink-1: #ff8b78; --ink-1b: #f0476d;
@@ -42,7 +42,7 @@
   --roll-line: rgba(255, 255, 255, 0.028);
   --roll-beat: rgba(255, 255, 255, 0.075);
   --roll-bar: rgba(255, 255, 255, 0.17);
-  --roll-box: rgba(71, 185, 255, 0.10);
+  --roll-box: rgba(0, 140, 255, 0.10); /* --select at 10%, resolved for the canvas */
   --roll-key-white: #dcdee4;
   --roll-key-black: #23252c;
   --roll-key-held: #147bbd;

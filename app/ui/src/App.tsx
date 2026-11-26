@@ -82,6 +82,12 @@ export function App() {
   const playGuard = useRef(new PlayGuard());
   const [latencyFrames, setLatencyFrames] = useState<number | null>(null);
   const latest = useRef<LiveFrame | null>(null);
+  const playbackStarts = useRef(new Set<() => void>());
+  const subscribePlaybackStart = useCallback((wake: () => void) => {
+    const listeners = playbackStarts.current;
+    listeners.add(wake);
+    return () => { listeners.delete(wake); };
+  }, []);
   const rulerPosition = useRef<number | null>(null);
   const [meterHistory] = useState(() => new MeterHistory());
   const meterContext = useRef<MeterContext>({});
@@ -121,6 +127,7 @@ export function App() {
   const { view } = session;
   const patterns = usePatterns({ view, publishPatterns: session.publishPatterns, enqueue: session.enqueue, run: session.context.run });
   const playlist = usePlaylist(session);
+  const { invalidateWaveforms } = playlist;
   useEffect(() => onProjectReplacing(() => { rulerPosition.current = null; }), []);
 
   // A project that is replaced must not go on playing, nor keep notes held on its channels.
@@ -140,6 +147,7 @@ export function App() {
     stopIfPlaying,
     unsettled: () => session.unsettled() || rollEditsUnsettled() || patterns.unsettled() || playlist.unsettled(),
     settle: settleProjectEdits,
+    settleReplacement: () => settleProjectEdits(playlist.settleMedia),
   });
   const { perform, modalOpen } = flows;
 
@@ -224,13 +232,13 @@ export function App() {
       stamp: arrangementView,
       invoke: arrangementHistory,
       // Native view adoption + synchronous roll invalidation happen in session.history.
-      refresh: async () => {},
+      refresh: async effect => { if (effect.kind === "arrangement") invalidateWaveforms(); },
     }).then((reply) => {
       if (!current()) return;
       if (reply.status === "refused") toast(reply.message, true);
       else if (reply.status === "unsettled") toast("Pending edits were refused. History was not changed.", true);
     }, (error: unknown) => { if (current()) toast(errorText(error), true); });
-  }, [session, toast]);
+  }, [session, toast, invalidateWaveforms]);
   useEffect(() => trackDrags(window), []);
   const menuHistoryAction = useRef(stepHistory);
   useLayoutEffect(() => { menuHistoryAction.current = stepHistory; }, [stepHistory]);
@@ -375,6 +383,7 @@ export function App() {
           if (frame.playing) {
             // A Play the UI did not send (another window): followed on the edge.
             if (before?.playing !== true) {
+              playbackStarts.current.forEach((wake) => wake());
               playingRef.current = true;
               setPlaying(true);
             }
@@ -498,7 +507,7 @@ export function App() {
           </div>
         </header>
         <main className="stage">
-          {view && <Workspace picker={<PickerRail key={view.generation} picker={patterns} />} playlist={<Playlist rulerPosition={rulerPosition} model={playlist} patterns={patterns.state.canonical} bpm={view.bpm} beats={view.timeSignature.beats} unit={view.timeSignature.unit} />} latest={latest} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
+          {view && <Workspace picker={<PickerRail key={view.generation} picker={patterns} />} playlist={<Playlist rulerPosition={rulerPosition} model={playlist} patterns={patterns.state.canonical} bpm={view.bpm} beats={view.timeSignature.beats} unit={view.timeSignature.unit} notifyAudioDrop={message => toast(message, false)} />} latest={latest} subscribePlaybackStart={subscribePlaybackStart} sampleRate={sampleRate} onError={rackError} keyboard={keyboard} releaseKeys={releaseKeys} />}
         </main>
         <HintBar />
         <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />

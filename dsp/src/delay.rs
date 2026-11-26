@@ -7,6 +7,9 @@
 //! fractional samples exactly. The feedback path (and the wet output) runs through 12 dB/oct
 //! low/high cuts and a soft safety limiter. Ping-pong feeds the mono input into the left line
 //! and crosses the feedback, so echoes alternate L, R, L...
+//!
+//! Scalar meter 3 reports the active wet-path high cut in Hz, including log2 smoothing and the
+//! sample-rate cap from [`crate::effective_high_cut`].
 
 use crate::api::{Device, NoteEvent};
 use crate::util::*;
@@ -54,6 +57,17 @@ const XFADE_MS: f32 = 50.0;
 /// Longest delay: a half note at 20 BPM. The constructor adds the interpolation margin.
 const MAX_MS: f32 = 6000.0;
 
+#[inline]
+fn flush_output_subnormal(sample: f32) -> f32 {
+    let bits = sample.to_bits();
+    if bits & 0x7f80_0000 == 0 {
+        // Exponent zero covers subnormals and signed zero. Keep the sign bit.
+        f32::from_bits(bits & 0x8000_0000)
+    } else {
+        sample
+    }
+}
+
 pub struct Delay {
     sr: f32,
     buf: [DelayLine; 2],
@@ -73,6 +87,7 @@ pub struct Delay {
     hi: Smooth,
     c_lo: Coefs,
     c_hi: Coefs,
+    high_cut_hz: f32,
     st_lo: [Biquad; 2],
     st_hi: [Biquad; 2],
     dry_g: Smooth,
@@ -118,6 +133,7 @@ impl Delay {
             hi: Smooth::new(12.8, 15.0, ctrl_rate),
             c_lo: Coefs::IDENTITY,
             c_hi: Coefs::IDENTITY,
+            high_cut_hz: 0.0,
             st_lo: [Biquad::default(); 2],
             st_hi: [Biquad::default(); 2],
             dry_g: Smooth::new(1.0, 15.0, sr),
@@ -156,7 +172,9 @@ impl Delay {
         let sr = self.sr as f64;
         let q = std::f64::consts::FRAC_1_SQRT_2;
         self.c_lo = Coefs::highpass(libm::exp2f(self.lo.next()) as f64, q, sr);
-        self.c_hi = Coefs::lowpass((libm::exp2f(self.hi.next()) as f64).min(0.45 * sr), q, sr);
+        let high_cut_hz = effective_high_cut(libm::exp2f(self.hi.next()) as f64, sr);
+        self.c_hi = Coefs::lowpass(high_cut_hz, q, sr);
+        self.high_cut_hz = high_cut_hz as f32;
     }
 
     fn snap_all(&mut self) {
@@ -255,8 +273,9 @@ impl Device for Delay {
             self.buf[1].push(flush(soft_limit(wr)));
             let dg = self.dry_g.next();
             let wg = self.wet_g.next();
-            l[i] = xl * dg + fl * wg;
-            r[i] = xr * dg + fr * wg;
+            // The f64 filter tail can narrow to subnormal f32, and the mix can create more.
+            l[i] = flush_output_subnormal(xl * dg + fl * wg);
+            r[i] = flush_output_subnormal(xr * dg + fr * wg);
         }
         self.in_m.update(pin, n, self.sr);
         self.out_m
@@ -279,11 +298,14 @@ impl Device for Delay {
         self.fresh = true;
     }
 
+    /// 0–1: input/output peaks in dB. 2: effective delay time in ms.
+    /// 3: active wet-path high cut in Hz.
     fn meter(&self, index: u32) -> f32 {
         match index {
             0 => self.in_m.db(),
             1 => self.out_m.db(),
             2 => self.effective_ms(),
+            3 => self.high_cut_hz,
             _ => 0.0,
         }
     }
@@ -305,14 +327,91 @@ mod tests {
             delay.set_param(0, SPEC[0].1);
             delay.set_param(1, SPEC[1].1);
             delay.set_tempo(SPEC[8].0);
-            // The ring also limits the target before the interpolation read.
-            let expected = 6.0 * sr;
-            assert!(
-                (delay.target - expected).abs() < 1.0,
-                "synced target at {sr} Hz: {} frames, expected {expected}",
-                delay.target
-            );
+            // The ring must hold the whole target: any clamp, even a sub-frame one, changes
+            // the sound, so the target must equal the unclamped synced delay exactly.
+            let unclamped = delay.effective_ms() * 0.001 * delay.sr;
+            assert_eq!(delay.target, unclamped, "synced target clamped at {sr} Hz");
             delay.process(&mut [0.25], &mut [-0.25], None, &[]);
+        }
+    }
+
+    // The pre-flush static sample path. Fixed parameters remove smoothing and crossfades.
+    fn static_reference(delay: &mut Delay, xl: f32, xr: f32) -> (f32, f32) {
+        let dl = delay.buf[0].read_frac(delay.ta - 1.0);
+        let dr = delay.buf[1].read_frac(delay.ta - 1.0);
+        let fl = delay.st_hi[0].run(&delay.c_hi, delay.st_lo[0].run(&delay.c_lo, dl as f64)) as f32;
+        let fr = delay.st_hi[1].run(&delay.c_hi, delay.st_lo[1].run(&delay.c_lo, dr as f64)) as f32;
+        let fb = delay.fb.cur;
+        let (wl, wr) = if delay.pingpong {
+            (mid(xl, xr) + fb * fr, fb * fl)
+        } else {
+            (xl + fb * fl, xr + fb * fr)
+        };
+        delay.buf[0].push(flush(soft_limit(wl)));
+        delay.buf[1].push(flush(soft_limit(wr)));
+        (
+            xl * delay.dry_g.cur + fl * delay.wet_g.cur,
+            xr * delay.dry_g.cur + fr * delay.wet_g.cur,
+        )
+    }
+
+    #[test]
+    fn static_output_preserves_every_non_subnormal_bit() {
+        for (low_cut, high_cut, mix) in [(20.0, 20_000.0, 0.25), (2000.0, 1000.0, 1.0)] {
+            for pingpong in [false, true] {
+                let configured = || {
+                    let mut delay = Delay::new(48_000.0);
+                    for (param, value) in [
+                        (0, 0.0),
+                        (2, 20.05),
+                        (3, 0.95),
+                        (4, f32::from(pingpong)),
+                        (5, low_cut),
+                        (6, high_cut),
+                        (7, mix),
+                    ] {
+                        delay.set_param(param, value);
+                    }
+                    delay
+                };
+                let mut reference = configured();
+                let mut delay = configured();
+
+                for start in (0..8192).step_by(128) {
+                    let mut left = [0.0; 128];
+                    let mut right = [0.0; 128];
+                    if start == 0 {
+                        left[0] = 0.8;
+                        // At full wet, the tiny dry gain can create a subnormal before any echo.
+                        left[1] = 2.0 * f32::MIN_POSITIVE;
+                        right[3] = -0.3;
+                    }
+                    let expected: [(f32, f32); 128] = std::array::from_fn(|i| {
+                        static_reference(&mut reference, left[i], right[i])
+                    });
+                    delay.process(&mut left, &mut right, None, &[]);
+                    for (i, ((l, r), (old_l, old_r))) in
+                        left.into_iter().zip(right).zip(expected).enumerate()
+                    {
+                        for (channel, (actual, prior)) in
+                            [(l, old_l), (r, old_r)].into_iter().enumerate()
+                        {
+                            let matches = if prior.is_subnormal() {
+                                actual == 0.0
+                            } else {
+                                actual.to_bits() == prior.to_bits()
+                            };
+                            assert!(
+                                matches,
+                                "cuts={low_cut}/{high_cut}, mix={mix}, ping-pong={pingpong}, frame={}, channel={channel}, actual={:#010x}, reference={:#010x}",
+                                start + i,
+                                actual.to_bits(),
+                                prior.to_bits()
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }

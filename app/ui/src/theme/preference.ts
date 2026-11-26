@@ -3,6 +3,8 @@ export const themes = [
   { id: "riso", name: "Riso Ink" },
   { id: "taste", name: "Taste" },
   { id: "luminous", name: "Luminous" },
+  { id: "slate-system", name: "Slate System" },
+  { id: "console", name: "Console" },
 ] as const;
 export type ThemeId = typeof themes[number]["id"];
 export const DEFAULT_THEME: ThemeId = "riso";
