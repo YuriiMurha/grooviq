@@ -153,8 +153,7 @@ test("commits each audio setting once, with one undo, and keeps the settings on 
   expect(await calls()).toEqual(expected);
 });
 
-test("a pointer drag on Gain previews locally and commits once on release", async ({ app, mock, browserName }) => {
-  test.skip(browserName !== "chromium", "WebKit does not move a range input from synthesized mouse drags");
+test("a pointer drag on Gain previews locally and commits once on release", async ({ app, mock }) => {
   const { inspector } = await openInspector(app);
   const gain = inspector.getByRole("slider", { name: "Gain", exact: true });
   const edits = async () => (await mock.calls("arrangement_edit")).map(({ args }) => JSON.parse(String(args.editsJson)) as unknown);
@@ -162,9 +161,15 @@ test("a pointer drag on Gain previews locally and commits once on release", asyn
   const box = await gain.boundingBox();
   if (!box) throw new Error("Missing gain slider");
   const y = box.y + box.height / 2;
+  // Press on the thumb (gain 1 sits mid-track), then move the value the way a drag does.
+  // WebKit automation does not move a range input from synthesized mouse moves, so the
+  // drag's value changes are dispatched as the input events the browser itself would fire.
   await app.mouse.move(box.x + box.width / 2, y);
   await app.mouse.down();
-  await app.mouse.move(box.x + box.width - 1, y, { steps: 5 });
+  await gain.evaluate((input: HTMLInputElement) => {
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    for (const value of ["1.5", "2"]) { set?.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); }
+  });
   await expect(gain).toHaveValue("2");
   // Leaving the slider while the button is held must not commit either.
   await app.mouse.move(box.x + box.width + 15, y - box.height);
