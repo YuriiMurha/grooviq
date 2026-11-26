@@ -43,8 +43,10 @@ function cases(report) {
   return found;
 }
 function checkedShard(shard) {
-  requireThat((shard?.total === 1 || shard?.total === 2) && Number.isSafeInteger(shard.index) &&
-    shard.index >= 1 && shard.index <= shard.total, 'invalid shard index or total (expected 1 or 2 shards)');
+  const total = shard?.total;
+  requireThat(Number.isSafeInteger(total) && total >= 1 && total <= 16 &&
+    Number.isSafeInteger(shard.index) && shard.index >= 1 && shard.index <= total,
+  'invalid shard index or total (expected an integer total from 1 to 16)');
   return shard;
 }
 function receiptShard(receipt) {

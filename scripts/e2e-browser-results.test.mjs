@@ -55,22 +55,24 @@ test('one passing case cannot cover two discovered cases', () => {
  assert.throws(()=>validate(x,meta,'success'),/coverage|missing/);
 });
 
-function shardedFixture() {
+function shardedFixture(total = 2) {
   const receipts = fixture();
   for (const receipt of receipts) {
     for (const suite of receipt.inventory.suites) {
-      const second = structuredClone(suite.specs[0]);
-      second.title = 'second case';
-      suite.specs.push(second);
+      for (let index = 2; index <= total; index++) {
+        const spec = structuredClone(suite.specs[0]);
+        spec.title = `case ${index}`;
+        suite.specs.push(spec);
+      }
     }
-    receipt.shard = { index: 1, total: 2 };
   }
-  return receipts.flatMap(first => {
-    const second = structuredClone(first);
-    second.shard.index = 2;
-    second.report.suites[0].specs[0].title = 'second case';
-    return [first, second];
-  });
+  return receipts.flatMap(receipt => Array.from({ length: total }, (_, offset) => {
+    const shard = structuredClone(receipt);
+    const index = offset + 1;
+    shard.shard = { index, total };
+    if (index > 1) shard.report.suites[0].specs[0].title = `case ${index}`;
+    return shard;
+  }));
 }
 
 test('each browser can report two disjoint shards in any order', () => {
@@ -122,7 +124,8 @@ for (const [name, mutate, error] of [
 });
 
 for (const shard of [null, {}, { index: '2', total: 2 }, { index: 1.5, total: 2 },
-  { index: 0, total: 2 }, { index: 3, total: 2 }, { index: 2, total: 0 },
+  { index: 0, total: 2 }, { index: 3, total: 2 }, { index: 1, total: 0 },
+  { index: 2, total: 2.5 }, { index: 2, total: '2' },
   { index: 2, total: Number.MAX_SAFE_INTEGER + 1 }]) {
   test(`reject invalid shard ${JSON.stringify(shard)}`, () => {
     const receipts = shardedFixture();
@@ -131,19 +134,14 @@ for (const shard of [null, {}, { index: '2', total: 2 }, { index: 1.5, total: 2 
   });
 }
 
-test('reject three shards even when all three reports cover the inventory', () => {
-  const receipts = shardedFixture();
-  const third = structuredClone(receipts[0].report.suites[0].specs[0]);
-  third.title = 'third case';
-  for (const r of receipts) {
-    r.inventory.suites[0].specs.push(third);
-    if (r.project === 'webkit') r.shard.total = 3;
-  }
-  const extraShard = structuredClone(receipts[0]);
-  extraShard.shard.index = 3;
-  extraShard.report.suites[0].specs = [third];
-  receipts.push(extraShard);
-  assert.throws(() => validate(receipts, meta, 'success'), /invalid shard/);
+for (const total of [3, 16]) {
+  test(`each browser can report ${total} disjoint shards`, () => {
+    assert.doesNotThrow(() => validate(shardedFixture(total), meta, 'success'));
+  });
+}
+
+test('reject 17 shards despite complete case coverage', () => {
+  assert.throws(() => validate(shardedFixture(17), meta, 'success'), /invalid shard/);
 });
 
 const script = fileURLToPath(new URL('./e2e-browser-results.mjs', import.meta.url));
@@ -183,7 +181,7 @@ for (const sharded of [false, true]) {
 
 test('receipt CLI rejects incomplete or invalid shard arguments', t => {
   const root = accountingDir(t);
-  for (const args of [['2'], ['3', '2'], ['0x2', '2'], ['1', '3']]) {
+  for (const args of [['2'], ['3', '2'], ['0x2', '2'], ['1', '17']]) {
     const result = cli('receipt', root, 'webkit', ...args);
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /invalid shard/);
