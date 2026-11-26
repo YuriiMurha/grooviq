@@ -1,77 +1,24 @@
 //! Thin native adapters. No UI workflow or gesture policy; blocking work owns no Session lock.
-use crate::{Audio, lock};
+use crate::{
+    Audio,
+    arrangement_core::{self, Reply, prepare_media, reply},
+    lock,
+};
 use grooviq_project::{
     ClipContent,
     arrangement_edit::{self, ArrangementAck},
-    audio_assets::AudioAssets,
-    session::{MediaTarget, Session},
+    session::MediaTarget,
 };
-use serde::Serialize;
-use std::{path::PathBuf, sync::Mutex, time::Instant};
+use std::time::Instant;
 use tauri::{State, ipc::Response};
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Reply {
-    status: &'static str,
-    generation: u64,
-    revision: u64,
-    request: Option<u64>,
-    created_ids: Vec<u32>,
-    changed: bool,
-    reload: bool,
-    message: Option<String>,
-    warnings: Vec<String>,
-}
-fn reply(s: &Session, result: Result<ArrangementAck, String>, request: Option<u64>) -> Reply {
-    let v = s.arrangement_view();
-    match result {
-        Ok(ack) => Reply {
-            status: "applied",
-            generation: v.generation,
-            revision: v.revision,
-            request,
-            created_ids: ack.created_ids,
-            changed: ack.changed,
-            reload: false,
-            message: None,
-            warnings: s.media_warnings(),
-        },
-        Err(message) => Reply {
-            status: "refused",
-            generation: v.generation,
-            revision: v.revision,
-            request,
-            created_ids: vec![],
-            changed: false,
-            reload: true,
-            message: Some(message),
-            warnings: s.media_warnings(),
-        },
-    }
-}
-/// No curve arrays in paginated summaries or mutation replies.
+
 #[tauri::command]
 pub fn arrangement_view(
     audio: State<'_, Audio>,
     offset: usize,
     limit: usize,
 ) -> Result<serde_json::Value, String> {
-    if limit == 0 || limit > 1024 {
-        return Err("Read 1..1024 clips per page".into());
-    }
-    let s = lock(&audio.session);
-    let p = s.project();
-    let clips:Vec<_>=p.arrangement.clips.iter().skip(offset).take(limit).map(|c|{
-  let content=match &c.content{
-   ClipContent::Pattern{pattern,offset_tick,length_ticks}=>serde_json::json!({"type":"pattern","pattern":pattern,"offsetTick":offset_tick,"lengthTicks":length_ticks}),
-   ClipContent::Audio{asset,source_start,source_end,gain,reverse,fade_in,fade_out}=>serde_json::json!({"type":"audio","asset":asset,"sourceStart":source_start,"sourceEnd":source_end,"gain":gain,"reverse":reverse,"fadeIn":fade_in,"fadeOut":fade_out}),
-   ClipContent::Automation{target,priority,offset_tick,length_ticks,points}=>serde_json::json!({"type":"automation","target":target,"priority":priority,"offsetTick":offset_tick,"lengthTicks":length_ticks,"pointCount":points.len()}),
-  };serde_json::json!({"id":c.id,"track":c.track,"name":c.name,"startTick":c.start_tick,"muted":c.muted,"content":content})
- }).collect();
-    let stamp = s.arrangement_view();
-    Ok(
-        serde_json::json!({"generation":stamp.generation,"revision":stamp.revision,"offset":offset,"total":p.arrangement.clips.len(),"clips":clips,"tracks":p.arrangement.tracks,"audioAssets":p.arrangement.audio_assets,"loopRegion":p.arrangement.loop_region,"playMode":p.play_mode,"songError":s.song_error(),"pendingRequests":s.pending_media_requests(),"warnings":s.media_warnings()}),
-    )
+    arrangement_core::arrangement_view(&audio.session, offset, limit)
 }
 #[tauri::command]
 pub fn arrangement_edit(
@@ -80,13 +27,7 @@ pub fn arrangement_edit(
     revision: u64,
     edits_json: String,
 ) -> Reply {
-    let ops = arrangement_edit::parse_batch(&edits_json);
-    let mut s = lock(&audio.session);
-    let result = ops.and_then(|ops| {
-        s.edit_arrangement(generation, revision, ops, Instant::now())
-            .map_err(|e| e.message)
-    });
-    reply(&s, result, None)
+    arrangement_core::arrangement_edit(&audio.session, generation, revision, &edits_json)
 }
 #[tauri::command]
 pub fn arrangement_history(
@@ -95,15 +36,7 @@ pub fn arrangement_history(
     revision: u64,
     undo: bool,
 ) -> serde_json::Value {
-    let mut s = lock(&audio.session);
-    match s.step_project_history(generation, revision, undo, Instant::now()) {
-        Ok(ack) => {
-            serde_json::json!({"status":"applied","generation":ack.state.generation,"revision":ack.state.revision,"effect":ack.effect})
-        }
-        Err(e) => {
-            serde_json::json!({"status":"refused","generation":e.state.generation,"revision":e.state.revision,"message":e.message,"reload":true})
-        }
-    }
+    arrangement_core::arrangement_history(&audio.session, generation, revision, undo)
 }
 #[tauri::command]
 pub fn arrangement_curve(
@@ -132,98 +65,6 @@ pub fn arrangement_curve(
         Err("Not an automation clip".into())
     }
 }
-fn submit_media(
-    session: &std::sync::Mutex<Session>,
-    assets: &grooviq_project::audio_assets::AudioAssets,
-    intent: &grooviq_project::session::MediaIntent,
-    file: grooviq_project::SampleFile,
-) -> Result<grooviq_project::audio_assets::AssetRequest, String> {
-    let mut s = lock(session);
-    s.check_media_intent(intent)?;
-    let request = assets
-        .submit_cancellable(
-            0,
-            intent.key(),
-            intent.request(),
-            file,
-            intent.cancellation(),
-        )
-        .map_err(|e| format!("Media preparation refused: {e:?}"))?;
-    if let Err(e) = s.accept_media_request(intent) {
-        request.cancel();
-        return Err(e);
-    }
-    Ok(request)
-}
-fn publish_received(
-    s: &mut Session,
-    intent: &grooviq_project::session::MediaIntent,
-    prepared: std::sync::Arc<grooviq_project::audio_assets::PreparedAudio>,
-) -> Result<ArrangementAck, String> {
-    s.publish_media(intent, prepared, Instant::now())
-}
-async fn prepare(
-    audio: &Audio,
-    generation: u64,
-    revision: u64,
-    target: MediaTarget,
-    path: String,
-    ticket: u64,
-) -> Reply {
-    prepare_media(
-        &audio.session,
-        &audio.assets,
-        generation,
-        revision,
-        target,
-        path,
-        ticket,
-    )
-    .await
-}
-async fn prepare_media(
-    session: &Mutex<Session>,
-    assets: &AudioAssets,
-    generation: u64,
-    revision: u64,
-    target: MediaTarget,
-    path: String,
-    ticket: u64,
-) -> Reply {
-    let (intent, budget) = {
-        let mut s = lock(session);
-        let intent = match s.media_intent(generation, revision, target) {
-            Ok(intent) => intent,
-            Err(e) => return reply(&s, Err(e), None),
-        };
-        if let Err(e) = s.register_media_ticket(ticket, &intent) {
-            return reply(&s, Err(e), None);
-        }
-        (intent, s.media_budget())
-    };
-    let prepared = async {
-        let path = PathBuf::from(path);
-        let file = tauri::async_runtime::spawn_blocking(move || {
-            grooviq_project::read_sample_file_budgeted(&path, &budget).map_err(|e| e.to_string())
-        })
-        .await
-        .map_err(|e| e.to_string())??;
-        let request = submit_media(session, assets, &intent, file)?;
-        tauri::async_runtime::spawn_blocking(move || request.receive())
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("Media preparation failed: {e:?}"))
-    }
-    .await;
-    let mut s = lock(session);
-    let result = prepared.and_then(|prepared| publish_received(&mut s, &intent, prepared));
-    if result.is_err() {
-        s.cancel_media_request(intent.request());
-    }
-    // Identity-checked: a replacement may have cleared this ticket and a new import reused it.
-    s.release_media_ticket(ticket, &intent);
-    reply(&s, result, Some(intent.request()))
-}
 #[tauri::command]
 #[expect(
     clippy::too_many_arguments,
@@ -239,8 +80,9 @@ pub async fn audio_import(
     path: String,
     ticket: u64,
 ) -> Result<Reply, String> {
-    Ok(prepare(
-        &audio,
+    Ok(prepare_media(
+        &audio.session,
+        &audio.assets,
         generation,
         revision,
         MediaTarget::Import {
@@ -262,8 +104,9 @@ pub async fn audio_relink(
     path: String,
     ticket: u64,
 ) -> Result<Reply, String> {
-    Ok(prepare(
-        &audio,
+    Ok(prepare_media(
+        &audio.session,
+        &audio.assets,
         generation,
         revision,
         MediaTarget::Relink { asset },
@@ -274,11 +117,11 @@ pub async fn audio_relink(
 }
 #[tauri::command]
 pub fn audio_cancel(audio: State<'_, Audio>, request: u64) -> bool {
-    lock(&audio.session).cancel_media_request(request)
+    arrangement_core::audio_cancel(&audio.session, request)
 }
 #[tauri::command]
 pub fn audio_cancel_ticket(audio: State<'_, Audio>, ticket: u64) -> bool {
-    lock(&audio.session).cancel_media_ticket(ticket)
+    arrangement_core::audio_cancel_ticket(&audio.session, ticket)
 }
 #[tauri::command]
 pub async fn arrangement_waveform(
@@ -290,32 +133,17 @@ pub async fn arrangement_waveform(
     end: usize,
     bins: usize,
 ) -> Result<Response, String> {
-    let (sample, peaks) = lock(&audio.session).waveform_source(generation, asset)?;
-    if start >= end || end > sample.len() || bins == 0 || bins > 16384 || bins > end - start {
-        return Err("Invalid waveform range or bin count".into());
-    }
-    if generation > 9_007_199_254_740_991 || request > 9_007_199_254_740_991 {
-        return Err("Invalid waveform identity".into());
-    }
-    let budget = lock(&audio.session).media_budget();
-    let identity = sample.clone();
-    let bytes = tauri::async_runtime::spawn_blocking(move || {
-        let peaks = if let Some(peaks) = peaks {
-            peaks
-        } else {
-            grooviq_engine::waveform::PeakPyramid::budgeted(sample, &budget)?
-        };
-        peaks
-            .encode(generation, request, asset, start, end, bins)
-            .map_err(|_| "Invalid waveform range or bins".to_string())
-    })
+    arrangement_core::arrangement_waveform(
+        &audio.session,
+        generation,
+        asset,
+        request,
+        start,
+        end,
+        bins,
+    )
     .await
-    .map_err(|e| e.to_string())??;
-    let current = lock(&audio.session).waveform_source(generation, asset)?.0;
-    if !std::sync::Arc::ptr_eq(&identity, &current) {
-        return Err("Waveform source replaced; reload".into());
-    }
-    Ok(Response::new(bytes))
+    .map(Response::new)
 }
 #[tauri::command]
 pub fn arrangement_mode(
@@ -374,6 +202,8 @@ pub fn arrangement_seek(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arrangement_core::{publish_received, submit_media};
+    use grooviq_project::session::Session;
     use grooviq_project::{
         SampleFile, arrangement_edit::ArrangementEdit, audio_assets::AudioAssets,
     };

@@ -293,3 +293,23 @@ impl Device for Drive {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn longest_dry_tap_fits_at_native_rate_limits() {
+        for sr in [8_000.0, 384_000.0] {
+            let mut drive = Drive::new(sr);
+            drive.set_param(5, SPEC[5].1);
+            drive.set_param(3, 0.0);
+            let mut left = [0.0; LAT_4X + 1];
+            let mut right = left;
+            left[0] = 0.25;
+            right[0] = -0.25;
+            drive.process(&mut left, &mut right, None, &[]);
+            assert_eq!([left[LAT_4X], right[LAT_4X]], [0.25, -0.25]);
+        }
+    }
+}

@@ -74,7 +74,7 @@ impl ChannelMix {
     }
 
     /// Left and right gains: volume times the pan law, or silence when not `audible`.
-    pub(crate) fn gains(self, audible: bool) -> [f32; 2] {
+    pub fn gains(self, audible: bool) -> [f32; 2] {
         if !audible {
             return [0.0; 2];
         }

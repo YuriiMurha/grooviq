@@ -79,6 +79,7 @@ pub struct ExportReport {
 #[derive(Debug)]
 pub enum ExportError {
     Io(io::Error),
+    InsertRate(crate::mixer::UnsupportedInsertRate),
     Cancelled,
 }
 
@@ -86,6 +87,7 @@ impl fmt::Display for ExportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(e) => write!(f, "The WAV file could not be written: {e}."),
+            Self::InsertRate(e) => write!(f, "{e}."),
             Self::Cancelled => write!(f, "The export was cancelled."),
         }
     }
@@ -95,6 +97,7 @@ impl std::error::Error for ExportError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
+            Self::InsertRate(e) => Some(e),
             Self::Cancelled => None,
         }
     }
@@ -187,13 +190,20 @@ pub fn export_wav_with(
     if cancel.load(Ordering::Relaxed) {
         return Err(ExportError::Cancelled);
     }
+    let config = EngineConfig {
+        sample_rate: options.sample_rate as f32,
+    };
+    state
+        .mix
+        .check_sample_rate(config.rate())
+        .map_err(ExportError::InsertRate)?;
     // Leftovers of writers that died, never anything else (see `leftover`); best effort.
     let _ = remove_stale_owned(path, ".part");
     // A name of our own, locked while this export writes: no other export, and no cleanup, can
     // take it, and an old file of the same name in the folder is none of our business.
     let part = create_owned_temp(path, ".part")?;
     // From here the part file is ours, and goes on any error.
-    let result = write_part(state, options, &part.file, progress, cancel, files)
+    let result = write_part(state, config, options, &part.file, progress, cancel, files)
         .and_then(|report| {
             // On disk before it takes the final name: a power cut must not leave a complete
             // name on a file whose bytes never landed.
@@ -215,15 +225,13 @@ pub fn export_wav_with(
 /// Renders and writes the whole file to `part` (the caller syncs it).
 fn write_part(
     state: EngineState,
+    config: EngineConfig,
     options: &ExportOptions,
     part: &File,
     progress: &mut dyn FnMut(f32),
     cancel: &AtomicBool,
     files: &dyn PartFiles,
 ) -> Result<ExportReport, ExportError> {
-    let config = EngineConfig {
-        sample_rate: options.sample_rate as f32,
-    };
     // The rate the engine really runs at, which the file must say.
     let rate = config.rate();
     let mut state = state;

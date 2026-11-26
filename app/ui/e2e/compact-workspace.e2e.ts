@@ -98,7 +98,7 @@ test.describe("compact workspace metadata", () => {
   test("Output pointer, Escape and actual-opener focus return including WebKit body fallback", async ({ app }) => {
     await bothPanes(app);
     const output = app.locator("button.chip[aria-haspopup='dialog']");
-    const dialog = app.getByRole("dialog", { name: "Audio output" });
+    const dialog = app.getByRole("dialog", { name: "Settings" });
     await output.focus();
     await output.click();
     await expect(dialog).toBeVisible();

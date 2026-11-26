@@ -86,6 +86,7 @@ const pathCases = [
   ["dsp/benches/kernels.rs", true, true],
   ["project/src/lib.rs", false, true],
   ["app/src-tauri/src/lib.rs", false, false],
+  ["app/src-tauri2/lib.rs", true, true],
   ["tests/golden/samples/kick.wav", false, true],
   ["app/ui/src/App.tsx", false, false],
   ["docs/spec.md", false, false],
@@ -317,6 +318,7 @@ test("roll selects the UI timing inputs and unknown paths", async () => {
     ".github/workflows/perf.yml", "Makefile", "scripts/optional-rust-checks.cjs",
     "scripts/optional-rust-checks.test.cjs", "scripts/roll-timing.cjs", "scripts/roll-timing.test.cjs",
     "app/ui/new-config", "scripts/new-script.cjs", "future/input", "tests/fixtures/new.json",
+    "app/src-tauri2/lib.rs",
   ]) {
     assert.equal(await shouldRun(request("roll", [...docs, file(path)])), true, path);
   }

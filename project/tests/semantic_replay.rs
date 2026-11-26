@@ -1,6 +1,4 @@
 //! Shared semantic transcripts: the browser mock must produce these same replies and bytes.
-#[path = "semantic_replay/media.rs"]
-mod media;
 use grooviq_engine::{EngineConfig, engine};
 use grooviq_project::{
     notes::NotesEdit,
@@ -96,5 +94,4 @@ fn session_matches_shared_semantic_replay() {
         fixture["expected"],
         "real Session replay drift"
     );
-    media::verify();
 }

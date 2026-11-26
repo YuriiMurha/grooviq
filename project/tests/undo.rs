@@ -371,7 +371,7 @@ fn history_is_capped_at_200() {
 }
 
 #[test]
-fn open_new_and_channel_removal_clear_the_history() {
+fn opening_a_project_or_starting_new_clears_the_history() {
     // Open.
     let (mut session, _, _, ch, _) = three_notes();
     add_notes(&mut session, vec![melodic(ch, 0, 70)]);
@@ -409,16 +409,6 @@ fn open_new_and_channel_removal_clear_the_history() {
         .open_recovered(None, loaded, decoded, Instant::now())
         .unwrap();
     assert!(!session.view().can_undo);
-
-    // Removing a channel (even another one).
-    let (mut session, _, _, ch, _) = three_notes();
-    let other = add_synth(&mut session);
-    add_notes(&mut session, vec![melodic(ch, 0, 70)]);
-    session
-        .apply(Edit::RemoveChannel { channel: other }, Instant::now())
-        .unwrap();
-    assert!(!session.view().can_undo);
-    assert_eq!(session.undo_notes(Instant::now()).unwrap(), None);
 }
 
 #[test]
@@ -736,8 +726,10 @@ fn removing_a_channel_mid_take_starts_afresh() {
         .apply(Edit::RemoveChannel { channel: other }, Instant::now())
         .unwrap();
     record_chord(&mut session, &controller, &mut processor, ch, &[72]).unwrap();
-    assert_eq!(undo_all(&mut session), 1);
+    undo(&mut session);
     assert_eq!(keys(&session), vec![60, 62, 64, 70]);
+    undo(&mut session);
+    assert_eq!(keys(&session), vec![60, 62, 64]);
 }
 
 #[test]

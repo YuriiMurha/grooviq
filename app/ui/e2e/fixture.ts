@@ -115,7 +115,9 @@ export interface Mock {
   registerAudio: (path: string, bytes: number[] | null) => Promise<void>;
   /** Generate and register a WAV, then drop it at CSS client coordinates. */
   dropAudio: (path: string, client: { x: number; y: number }, bytes?: number[]) => Promise<void>;
-  holdAudio: (path: string) => Promise<void>;
+  holdAudioRead: (path: string) => Promise<void>;
+  releaseAudioRead: (path: string) => Promise<void>;
+  holdAudio: (path: string, phase?: "worker" | "publication") => Promise<void>;
   releaseAudio: (path: string) => Promise<void>;
   refuseAudio: (path: string) => Promise<void>;
   holdWaveform: (request: number) => Promise<void>;
@@ -176,7 +178,9 @@ export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; app: Page
         await registerAudio(path, bytes);
         await evalIn(`(m) => m.drag(${JSON.stringify([path])}, true, ${JSON.stringify(client)})`);
       },
-      holdAudio: (path) => evalIn(`(m) => m.holdAudio(${JSON.stringify(path)})`),
+      holdAudioRead: (path) => evalIn(`(m) => m.holdAudioRead(${JSON.stringify(path)})`),
+      releaseAudioRead: (path) => evalIn(`(m) => m.releaseAudioRead(${JSON.stringify(path)})`),
+      holdAudio: (path, phase = "worker") => evalIn(`(m) => m.holdAudio(${JSON.stringify(path)}, ${JSON.stringify(phase)})`),
       releaseAudio: (path) => evalIn(`(m) => m.releaseAudio(${JSON.stringify(path)})`),
       refuseAudio: (path) => evalIn(`(m) => m.refuseAudio(${JSON.stringify(path)})`),
       holdWaveform: (request) => evalIn(`(m) => m.holdWaveform(${JSON.stringify(request)})`),

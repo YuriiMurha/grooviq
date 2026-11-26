@@ -2,7 +2,8 @@ name: perf
 
 # Speed numbers for benchmark inputs. Render timing is informational; roll timing retries a
 # budget failure once. Instruction counts are exact: that job fails when a benchmark runs
-# more than 1 % more instructions than on the pull request's base. None is a required check.
+# more than 1 % more instructions than on the merge commit's first parent (the base branch
+# tip GitHub merged onto). None is a required check.
 
 on:
   push:
@@ -212,6 +213,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
       - name: Key the Rust cache on the root manifest
         shell: bash
         run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
@@ -235,13 +238,28 @@ jobs:
           if [ "$(gungraun-runner --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
             cargo install gungraun-runner --version "$version" --locked
           fi
-      - name: Baseline (the pull request's base)
+      - name: Baseline (the merge commit's first parent)
         if: github.event_name == 'pull_request'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          read -r -a parents <<< "$(git show -s --format=%P HEAD)"
+          BASE_SHA=$(git rev-parse --verify HEAD^1 2>/dev/null) || BASE_SHA=unavailable
+          printf '%s\n' '### Instruction comparison revisions' '' \
+            "- BASE \`$BASE_SHA\`" "- HEAD \`$HEAD_SHA\`" "- PR head \`$PR_HEAD_SHA\`" '' |
+            tee -a "$GITHUB_STEP_SUMMARY"
+          reason=
+          if [ "${#parents[@]}" -ne 2 ] || [ "$BASE_SHA" = unavailable ]; then
+            reason="expected a merge commit with two parents available in the checkout."
+          elif ! second_parent=$(git rev-parse --verify HEAD^2 2>/dev/null) || [ "$second_parent" != "$PR_HEAD_SHA" ]; then
+            reason="the merge commit's second parent (${second_parent:-unavailable}) does not match the PR head."
+          fi
+          if [ -n "$reason" ]; then
+            echo "::error::Skipping comparison: $reason"
+            echo "Skipping comparison: $reason" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           overlay=$(mktemp -d)
           paths=(tests/golden/benches/instructions.rs tests/golden/benches/support/synth_workload.rs tests/golden/benches/support/sampler_workload.rs)
           for path in "${paths[@]}"; do
@@ -286,7 +304,7 @@ jobs:
             echo "## Instruction counts (Callgrind)"
             echo
             if [ -n "$BASELINE" ]; then
-              echo "Compared with the pull request's base; more than 1 % more instructions fails this job."
+              echo "Compared with the merge commit's first parent; more than 1 % more instructions fails this job."
             else
               echo "No base to compare with."
             fi

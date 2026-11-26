@@ -92,7 +92,7 @@ pub fn engine_state(
     project: &Project,
     samples: &HashMap<u32, Arc<SampleBuf>>,
 ) -> Result<EngineState, MixerError> {
-    crate::mixer::require_runtime_support(project)?;
+    let mix = crate::mixer_compile::compile_mix(project)?;
     let channels = channel_setups(project, samples);
 
     let pattern = project
@@ -113,6 +113,7 @@ pub fn engine_state(
         channels,
         pattern,
         time_signature: time_signature(project),
+        mix,
         ..EngineState::default()
     })
 }

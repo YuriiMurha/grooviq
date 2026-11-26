@@ -17,30 +17,44 @@ use crate::controller::ControlError;
 use grooviq_dsp::Device;
 use std::collections::BTreeMap;
 
-/// Built-in devices a mixer insert may hold. The index is the transfer identity's kind.
-/// Instruments (synth, sampler) are sources, never inserts.
-const KINDS: [&str; 16] = [
-    "lofi_colour",
-    "bitcrusher",
-    "eq",
-    "fattener",
-    "comp",
-    "limiter",
-    "drive",
-    "saturation",
-    "drum_shaper",
-    "reverb",
-    "shimmer_reverb",
-    "algorithmic_reverb",
-    "character_delay",
-    "delay",
-    "ott",
-    "utility",
-];
-
+/// Built-in effect ids, in the registry's order.
 pub fn insert_kinds() -> &'static [&'static str] {
-    &KINDS
+    &grooviq_dsp::EFFECTS
 }
+
+/// Declares one built-in insert without constructing DSP. The registry bounds use fixed
+/// state sizes or rounded durations in frames, including power-of-two ring capacities.
+/// Limiter lookahead grows by the same conversion. The native upper rate therefore bounds
+/// these payloads and latencies for every admitted rate and parameter bank.
+///
+/// This charges one prepared graph for device payloads, including constructor scratch. It
+/// does not measure allocator overhead or simultaneous live, queued and retiring graphs.
+pub fn describe_builtin_insert(insert: InsertId, kind: &str) -> Option<super::Insert> {
+    let (_, highest_rate) = grooviq_dsp::sample_rate_range(kind)?;
+    Some(super::Insert {
+        id: insert,
+        latency_frames: grooviq_dsp::max_latency_frames(kind, highest_rate)?,
+        memory_bytes: grooviq_dsp::max_memory_bytes(kind, highest_rate).ok()?,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnsupportedInsertRate {
+    kind: String,
+    rate: f32,
+}
+
+impl std::fmt::Display for UnsupportedInsertRate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Mixer insert {} cannot run at {} Hz",
+            self.kind, self.rate
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedInsertRate {}
 
 /// How the engine's sources reach the output.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -84,11 +98,12 @@ impl RoutedMix {
         }
         let mut kinds = Vec::with_capacity(devices.len());
         for d in &mut devices {
-            let kind = KINDS
+            let kind = insert_kinds()
                 .iter()
                 .position(|k| *k == d.kind)
                 .ok_or(ControlError::Rejected)?;
-            let spec = grooviq_dsp::param_spec(KINDS[kind]).ok_or(ControlError::Rejected)?;
+            let spec =
+                grooviq_dsp::param_spec(insert_kinds()[kind]).ok_or(ControlError::Rejected)?;
             if d.params.iter().take(spec.len()).any(|v| !v.is_finite()) {
                 return Err(ControlError::Rejected);
             }
@@ -122,6 +137,22 @@ impl RoutedMix {
 }
 
 impl MixSetup {
+    /// Checks this mix against the actual engine rate before replacing a project or exporting.
+    pub fn check_sample_rate(&self, rate: f32) -> Result<(), UnsupportedInsertRate> {
+        if let Self::Routed(mix) = self
+            && let Some(device) = mix.devices.iter().find(|d| {
+                grooviq_dsp::sample_rate_range(&d.kind)
+                    .is_none_or(|(min, max)| !(min..=max).contains(&rate))
+            })
+        {
+            return Err(UnsupportedInsertRate {
+                kind: device.kind.clone(),
+                rate,
+            });
+        }
+        Ok(())
+    }
+
     /// Where the mix sends `source`, if it names it.
     pub(crate) fn destination(&self, source: SourceId) -> Option<MixerTrackId> {
         match self {
@@ -141,11 +172,20 @@ impl MixSetup {
         &self,
         channels: &[crate::ChannelSetup],
     ) -> Result<(), ControlError> {
-        self.validate()?;
+        self.validate_for_channels(channels.iter().map(|c| c.id))
+    }
+
+    /// Checks a logical mix and reserves one route per channel for its eventual fade.
+    /// Construction and verification of actual devices still happen on live preparation.
+    pub fn validate_for_channels(
+        &self,
+        channels: impl IntoIterator<Item = crate::ChannelId>,
+    ) -> Result<(), ControlError> {
         if let Self::Routed(mix) = self {
+            mix.checked()?;
             let mut mixer = mix.mixer.clone();
             for (alias, c) in (0u64..).zip(channels) {
-                if let Some(destination) = self.destination(SourceId::Channel(u64::from(c.id.0))) {
+                if let Some(destination) = self.destination(SourceId::Channel(u64::from(c.0))) {
                     mixer.sources.push(Source {
                         id: SourceId::Instance(alias),
                         destination,
@@ -203,28 +243,9 @@ fn budget() -> Budget {
     }
 }
 
-fn construct(kind: &str, seed: u64, rate: f32) -> Option<Box<dyn Device>> {
-    // The persisted seed is u64. Fold both halves for devices with a 32-bit RNG,
-    // preserving existing low-only seeds while making high bits affect their stream.
-    let narrow = seed as u32 ^ (seed >> 32) as u32;
-    match kind {
-        "bitcrusher" => Some(Box::new(grooviq_dsp::bitcrusher::Bitcrusher::with_seed(
-            rate, narrow,
-        ))),
-        "lofi_colour" => Some(Box::new(grooviq_dsp::lofi_colour::LofiColour::with_seed(
-            rate, narrow,
-        ))),
-        "character_delay" => Some(Box::new(
-            grooviq_dsp::character_delay::CharacterDelay::with_seed(rate, seed),
-        )),
-        "shimmer_reverb" => Some(Box::new(
-            grooviq_dsp::shimmer_reverb::ShimmerReverb::with_seed(rate, seed),
-        )),
-        "algorithmic_reverb" => Some(Box::new(
-            grooviq_dsp::algorithmic_reverb::AlgorithmicReverb::with_seed(rate, seed),
-        )),
-        _ => grooviq_dsp::create(kind, rate),
-    }
+fn construct(device: &InsertDevice, rate: f32) -> Result<Box<dyn Device>, ControlError> {
+    grooviq_dsp::create_insert(&device.kind, rate, device.seed, &device.params)
+        .map_err(|_| ControlError::Rejected)
 }
 
 /// A prepared routed mix: the kernel, its pulled source buffers, and the checked device
@@ -263,6 +284,9 @@ pub(crate) fn prepare(
     let MixSetup::Routed(mix) = setup else {
         return Ok(None);
     };
+    setup
+        .check_sample_rate(rate)
+        .map_err(|_| ControlError::Rejected)?;
     let (devices, kinds) = mix.checked()?;
     let mut mixer = mix.mixer.clone();
     mixer
@@ -281,10 +305,7 @@ pub(crate) fn prepare(
         .collect();
     let mut bindings = Vec::with_capacity(devices.len());
     for (d, kind) in devices.iter().zip(kinds) {
-        let mut device = construct(&d.kind, d.seed, rate).ok_or(ControlError::Rejected)?;
-        for (index, value) in (0u32..).zip(&d.params) {
-            device.set_param(index, *value);
-        }
+        let device = construct(d, rate)?;
         // Uncompensated stage: the device's actual latency must stay within its declaration.
         if device.latency_frames() > declared[&d.insert] {
             return Err(ControlError::Rejected);
@@ -420,6 +441,29 @@ mod tests {
     }
 
     #[test]
+    fn built_in_declarations_cover_sampled_native_rates_and_widest_limiter_latency() {
+        for kind in insert_kinds() {
+            let declared = describe_builtin_insert(InsertId(1), kind).unwrap();
+            for rate in [
+                8000.0, 22050.0, 44100.0, 48000.0, 96000.0, 192000.0, 384000.0,
+            ] {
+                if let Some(latency) = grooviq_dsp::max_latency_frames(kind, rate) {
+                    assert!(declared.latency_frames >= latency, "{kind} at {rate}");
+                    let payload = grooviq_dsp::max_memory_bytes(kind, rate).unwrap();
+                    assert!(declared.memory_bytes >= payload, "{kind} at {rate}");
+                }
+            }
+        }
+        // The limiter's widest 1.5 ms lookahead is 576 frames, with one frame on the input.
+        assert_eq!(
+            describe_builtin_insert(InsertId(99), "limiter")
+                .unwrap()
+                .latency_frames,
+            575
+        );
+    }
+
+    #[test]
     fn insert_factory_honors_every_seeded_device_and_both_seed_halves() {
         let cases: [(&str, &[(u32, f32)]); 5] = [
             (
@@ -440,8 +484,23 @@ mod tests {
         for (kind, params) in cases {
             let mut expected = Vec::new();
             for seed in [123, 456, (1_u64 << 32) | 123] {
-                let reference = render(oracle(kind, seed), params);
-                let actual = render(construct(kind, seed, 48000.0).unwrap(), params);
+                let mut full: Vec<_> = grooviq_dsp::param_spec(kind)
+                    .unwrap()
+                    .iter()
+                    .map(|&(_, _, default)| default)
+                    .collect();
+                for &(index, value) in params {
+                    full[index as usize] = value;
+                }
+                let bank: Vec<_> = (0u32..).zip(full.iter().copied()).collect();
+                let reference = render(oracle(kind, seed), &bank);
+                let device = InsertDevice {
+                    insert: InsertId(1),
+                    kind: kind.into(),
+                    seed,
+                    params: full,
+                };
+                let actual = render(construct(&device, 48000.0).unwrap(), &[]);
                 assert_eq!(
                     actual.iter().zip(&reference).position(|(a, b)| a != b),
                     None,

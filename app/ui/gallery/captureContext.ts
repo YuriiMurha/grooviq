@@ -59,7 +59,7 @@ export function captureContext() {
   const context = {
     head, branch, dirtyPaths: dirty.split("\n").filter(Boolean), dirtyPatchSha256: hash(patch),
     capturedSourceScope: paths, sourceFingerprint: hash(JSON.stringify(sources)), sources,
-    theme: { id: "riso", tokens: filePin(resolve(ui, "src/theme/riso.css")), fonts },
+    fonts,
     seed: { ...seed, sha256: hash(JSON.stringify(seed)) },
     host: { platform: platform(), release: release() },
     readOnlyGitCommands: commands,
