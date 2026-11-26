@@ -240,6 +240,219 @@ fn comp_params(threshold: f32) -> Vec<f32> {
     p
 }
 
+fn render_insert_scene(mix: MixSetup, inputs: Vec<[Vec<f32>; 2]>, frames: usize) -> Vec<f32> {
+    let mut assets = Vec::new();
+    let mut clips = Vec::new();
+    let mut routes = Vec::new();
+    for (index, [l, r]) in inputs.into_iter().enumerate() {
+        let id = index as u32 + 1;
+        let source_frames = l.len() as u64;
+        assets.push(AudioAsset {
+            id,
+            source_rate: SR as u32,
+            source_frames,
+            decoded: Some(Arc::new(SampleBuf { rate: SR, l, r })),
+        });
+        clips.push(AudioClip {
+            id,
+            asset: id,
+            start_tick: 0,
+            source_start: 0,
+            source_end: source_frames,
+            gain: 1.0,
+            reverse: false,
+            fade_in: 0,
+            fade_out: 0,
+        });
+        routes.push((id, u64::from(id)));
+    }
+    let (audio, diagnostics) = AudioSchedule::build(assets, clips).unwrap();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let config = EngineConfig { sample_rate: SR };
+    let (mut c, mut p) = engine_with(
+        config,
+        EngineState {
+            playback_mode: PlaybackMode::Song,
+            song: SongData {
+                audio: audio.with_tracks(&routes).unwrap(),
+                end_tick: 100_000,
+                end_frame: 2_500_000,
+                frame_rate: SR,
+                ..SongData::default()
+            },
+            ..EngineState::default()
+        },
+    );
+    c.set_mix(mix).unwrap();
+    c.send(Command::Play).unwrap();
+    let mut out = vec![0.0; frames * 2];
+    for block in out.chunks_exact_mut(N * 2) {
+        p.process(block, 2);
+    }
+    assert_eq!(frames % N, 0);
+    let health = c.check_health();
+    assert!(health.is_empty(), "{health:?}");
+    out
+}
+
+fn single_insert_mix(kind: &str, seed: u64, params: &[f32]) -> RoutedMix {
+    let insert = InsertId(10);
+    let mut program = track(1, Some(0), &[]);
+    program
+        .inserts
+        .push(describe_builtin_insert(insert, kind).unwrap());
+    RoutedMix {
+        mixer: Mixer {
+            tracks: vec![track(0, None, &[]), program],
+            sources: vec![Source {
+                id: SourceId::AudioTrack(1),
+                destination: MixerTrackId(1),
+            }],
+            ..Mixer::default()
+        },
+        gains: vec![],
+        devices: vec![InsertDevice {
+            insert,
+            kind: kind.into(),
+            seed,
+            params: params.to_vec(),
+        }],
+    }
+}
+
+fn render_direct_insert(
+    kind: &str,
+    seed: u64,
+    params: &[f32],
+    [mut l, mut r]: [Vec<f32>; 2],
+    key: Option<(&[f32], &[f32])>,
+) -> Vec<f32> {
+    let mut device = grooviq_dsp::create_insert(kind, SR, seed, params).unwrap();
+    // The engine state uses the default 140 BPM, including for tempo-synced effects.
+    device.set_tempo(EngineState::default().bpm);
+    for (block, (l, r)) in l.chunks_exact_mut(N).zip(r.chunks_exact_mut(N)).enumerate() {
+        let key = key.map(|(kl, kr)| {
+            let frames = block * N..(block + 1) * N;
+            (&kl[frames.clone()], &kr[frames])
+        });
+        device.process(l, r, key, &[]);
+    }
+    // Master sums the insert output into a zeroed buffer. This canonicalizes signed zero.
+    l.into_iter()
+        .zip(r)
+        .flat_map(|(l, r)| [0.0 + l, 0.0 + r])
+        .collect()
+}
+
+#[test]
+fn routed_compressor_uses_the_stereo_key_max_without_mixing_in_the_key() {
+    let frames = 128 * N;
+    let program_end = frames / 2;
+    let program = [0.125, -0.0625].map(|level| {
+        let mut channel = vec![0.0; frames];
+        channel[..program_end].fill(level);
+        channel
+    });
+    let key: Vec<f32> = (0..frames)
+        .map(|frame| if frame % 2 == 0 { 0.5 } else { -0.5 })
+        .collect();
+    let silence = vec![0.0; frames];
+    let params = comp_params(-24.0);
+    let mut mix = single_insert_mix("comp", 0, &params);
+    mix.mixer.tracks.push(track(2, Some(0), &[]));
+    mix.mixer.sources.push(Source {
+        id: SourceId::AudioTrack(2),
+        destination: MixerTrackId(2),
+    });
+    // The pre-fader key reaches the detector while the key track's output is silent.
+    mix.mixer.sidechains.push(Sidechain {
+        from: MixerTrackId(2),
+        to: InsertId(10),
+        tap: Tap::PreFader,
+    });
+    mix.gains.push(TrackGain {
+        track: MixerTrackId(2),
+        left: 0.0,
+        right: 0.0,
+    });
+    let render_key = |left: &[f32], right: &[f32]| {
+        render_insert_scene(
+            MixSetup::Routed(mix.clone()),
+            vec![program.clone(), [left.to_vec(), right.to_vec()]],
+            frames,
+        )
+    };
+
+    let unkeyed = render_key(&silence, &silence);
+    let dry: Vec<_> = (0..frames)
+        .flat_map(|frame| [program[0][frame], program[1][frame]])
+        .collect();
+    assert_eq!(same_bits(&unkeyed, &dry), None, "silent key");
+
+    // The detector takes max(abs(HPF(left)), abs(HPF(right))) before the RMS stage.
+    // One copy of the waveform therefore gives the same gain as two identical copies.
+    let expected = render_direct_insert("comp", 0, &params, program.clone(), Some((&key, &key)));
+    for (channel, peak) in [0.125, 0.0625].into_iter().enumerate() {
+        let ducked = expected[2 * (program_end - 1) + channel].abs();
+        assert!(
+            ducked > 0.0 && ducked < peak * 0.5,
+            "channel {channel} is audibly ducked"
+        );
+    }
+    for (label, l, r) in [
+        ("left only", &key, &silence),
+        ("right only", &silence, &key),
+        ("symmetric", &key, &key),
+    ] {
+        let actual = render_key(l, r);
+        assert!(
+            actual[2 * program_end..].iter().all(|&s| s == 0.0),
+            "{label} key leaked while the program was silent"
+        );
+        assert_eq!(same_bits(&actual, &expected), None, "{label} key");
+    }
+}
+
+#[test]
+fn every_builtin_insert_matches_its_direct_impulse_on_the_live_path() {
+    // Capture the initial impulse, uncompensated device latency and time-based tails.
+    let frames = SR as usize;
+    let mut impulse = [vec![0.0; frames], vec![0.0; frames]];
+    impulse[0][0] = 0.6875;
+    impulse[1][0] = -0.28125;
+    let dry: Vec<_> = (0..frames)
+        .flat_map(|frame| [impulse[0][frame], impulse[1][frame]])
+        .collect();
+    let seed = 0x0000_abcd_1234_5678;
+    for kind in grooviq_dsp::EFFECTS {
+        let mut params = defaults(kind);
+        // Engage the otherwise transparent controls and expose the seeded crusher.
+        let overrides: &[(usize, f32)] = match kind {
+            "bitcrusher" => &[(0, 4.0), (1, 12.0), (2, 0.5), (3, 0.4), (4, 1.0)],
+            "comp" => &[(0, -24.0), (2, 0.05)],
+            "drum_shaper" => &[(4, 0.5)],
+            "eq" => &[(0, 1.0), (3, 6.0)],
+            "fattener" => &[(0, 0.6)],
+            "lofi_colour" => &[(0, 0.7), (1, 0.5)],
+            "saturation" => &[(1, 6.0)],
+            "utility" => &[(0, -6.0), (1, 0.25)],
+            _ => &[],
+        };
+        for &(index, value) in overrides {
+            params[index] = value;
+        }
+        let expected = render_direct_insert(kind, seed, &params, impulse.clone(), None);
+        assert!(audible(&expected), "{kind}: silent reference");
+        assert_ne!(same_bits(&expected, &dry), None, "{kind}: dry reference");
+        let actual = render_insert_scene(
+            MixSetup::Routed(single_insert_mix(kind, seed, &params)),
+            vec![impulse.clone()],
+            frames,
+        );
+        assert_eq!(same_bits(&actual, &expected), None, "{kind}: sample index");
+    }
+}
+
 /// T1: channel 3 + playlist track 2, seeded algorithmic reverb.
 /// T2: channel 7 + playlist track 5 + the synth, compressor keyed from T1 pre-fader.
 /// T3: reverb return fed by a post-fader send from T2.
@@ -1451,6 +1664,7 @@ fn a_plainly_added_routed_channel_gets_its_fade_route_and_must_be_routed() {
     assert!(c.state().channels.is_empty());
 }
 
+#[cfg(feature = "test-hooks")]
 #[test]
 fn retiring_an_older_graph_keeps_fades_of_the_newer_one() {
     let (mut c, mut p) = engine_with(
