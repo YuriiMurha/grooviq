@@ -50,7 +50,6 @@ pub enum MixerEdit {
         device: String,
         params: Vec<f32>,
         preset: Option<String>,
-        seed: u64,
     },
     RemoveInsert {
         insert: IdRef,
@@ -64,7 +63,6 @@ pub enum MixerEdit {
         insert: IdRef,
         params: Vec<f32>,
         preset: Option<String>,
-        seed: u64,
     },
     CreateSend {
         from: IdRef,
@@ -140,6 +138,15 @@ fn sidechain(m: &Mixer, value: &Sidechain) -> Result<usize, String> {
         .iter()
         .position(|s| s == value)
         .ok_or_else(|| "Unknown mixer sidechain".into())
+}
+
+// SplitMix64 spreads monotonically allocated IDs across the seed bits. Algorithmic Reverb
+// uses only the low 16 bits, and hydrated inserts must keep whatever seed they stored.
+fn insert_seed(id: u32) -> u64 {
+    let mut z = u64::from(id).wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 fn check_label(name: &str) -> Result<(), String> {
@@ -317,7 +324,6 @@ pub fn apply(
                 device,
                 params,
                 preset,
-                seed,
             } => {
                 let at = track(m, track_id(reference)?)?;
                 check_params(&device, &params, preset.as_deref())?;
@@ -332,7 +338,7 @@ pub fn apply(
                         device,
                         params,
                         preset,
-                        seed,
+                        seed: insert_seed(id),
                         bypass: false,
                     },
                 );
@@ -363,14 +369,12 @@ pub fn apply(
                 insert: reference,
                 params,
                 preset,
-                seed,
             } => {
                 let (t, i) = insert(m, insert_id(reference)?)?;
                 let i = &mut m.tracks[t].inserts[i];
                 check_params(&i.device, &params, preset.as_deref())?;
                 i.params = params;
                 i.preset = preset;
-                i.seed = seed;
                 None
             }
             MixerEdit::CreateSend {
@@ -447,4 +451,31 @@ pub fn apply(
         .enumerate()
         .filter_map(|(at, id)| id.map(|id| (at, id)))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn added_inserts_use_splitmix64_reference_seeds() {
+        let mut project = Project::new();
+        let ops = (0..2)
+            .map(|index| MixerEdit::AddInsert {
+                track: IdRef::Id(MASTER),
+                index,
+                device: "utility".into(),
+                params: vec![0.0, 0.0, 1.0, 0.0, 0.0],
+                preset: None,
+            })
+            .collect();
+        apply(&mut project, ops).unwrap();
+        let seeds = project.mixer.tracks[0]
+            .inserts
+            .iter()
+            .map(|insert| insert.seed)
+            .collect::<Vec<_>>();
+        assert_eq!(seeds, [0x910a_2dec_8902_5cc1, 0x9758_35de_1c97_56ce]);
+        assert_eq!(insert_seed(u32::MAX - 1), 0x0f90_d8fa_cbff_ba22);
+    }
 }

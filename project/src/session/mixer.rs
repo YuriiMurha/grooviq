@@ -29,12 +29,17 @@ impl Session {
                 .filter(|c| !before.contains(&c.id.0))
                 .collect()
         };
-        lock(&self.controller).set_sources_and_mix(SourceEdit {
-            remove,
-            add,
-            timeline: Some(Self::timeline(candidate, song.clone())),
-            mix,
-        })?;
+        {
+            let mut controller = lock(&self.controller);
+            mix.check_sample_rate(controller.sample_rate())
+                .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
+            controller.set_sources_and_mix(SourceEdit {
+                remove,
+                add,
+                timeline: Some(Self::timeline(candidate, song.clone())),
+                mix,
+            })?;
+        }
         self.compiled_song = song;
         self.song_error = None;
         Ok(())

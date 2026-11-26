@@ -961,3 +961,562 @@ fn mixer_mute_and_solo_each_refuse_compile_and_save() {
         assert!(grooviq_project::validate_save(&project, &HashMap::new()).is_err());
     }
 }
+
+const BIT_SEED: u64 = 0x9758_35de_1c97_56ce;
+const BIT_PARAMS: [f32; 6] = [4.0, 11.0, 0.35, 0.4, 1.0, 0.8];
+const UTIL_PARAMS: [f32; 5] = [-7.0, -0.25, 1.25, 0.0, 1.0];
+const COMP_PARAMS: [f32; 9] = [-35.0, 8.0, 0.1, 25.0, 0.0, 0.0, 1.0, 1.0, 25.0];
+
+fn set_params(device: &mut impl grooviq_dsp::Device, params: &[f32]) {
+    for (index, &value) in (0..).zip(params) {
+        device.set_param(index, value);
+    }
+}
+
+fn manual_chain(seed: u64, params: [f32; 6]) -> Vec<f32> {
+    use grooviq_dsp::{Device, bitcrusher::Bitcrusher, comp::Comp, utility::Utility};
+    let folded = (seed % 4_294_967_296) as u32 ^ (seed / 4_294_967_296) as u32;
+    let mut bitcrusher = Bitcrusher::with_seed(48_000.0, folded);
+    let mut utility = Utility::new(48_000.0);
+    let mut compressor = Comp::new(48_000.0);
+    set_params(&mut bitcrusher, &params);
+    set_params(&mut utility, &UTIL_PARAMS);
+    set_params(&mut compressor, &COMP_PARAMS);
+
+    let mut expected = Vec::with_capacity(FRAMES * 2);
+    for from in (0..FRAMES).step_by(64) {
+        let mut left =
+            std::array::from_fn::<_, 64, _>(|i| f32::from(pcm_sample(from + i)) / 32768.0);
+        let mut right = left;
+        bitcrusher.process(&mut left, &mut right, None, &[]);
+        utility.process(&mut left, &mut right, None, &[]);
+        // The main bus is silent. Its pre-fader send feeds the return at 0.75, while the
+        // pre-fader sidechain drives the compressor at the bus's full signal level.
+        let mut audio_l = left.map(|v| v * 0.75);
+        let mut audio_r = right.map(|v| v * 0.75);
+        compressor.process(&mut audio_l, &mut audio_r, Some((&left, &right)), &[]);
+        for (l, r) in audio_l.into_iter().zip(audio_r) {
+            expected.extend([l, r]);
+        }
+    }
+    expected
+}
+
+fn configure_chain(session: &mut Session) {
+    use grooviq_project::mixer::Tap;
+    let result = mixer(
+        session,
+        vec![
+            Op::CreateTrack {
+                name: "Chain".into(),
+                output: IdRef::Id(0),
+            },
+            Op::CreateTrack {
+                name: "Return".into(),
+                output: IdRef::Id(0),
+            },
+            Op::Assign {
+                source: SourceKey::AudioTrack(2),
+                destination: IdRef::Created(0),
+            },
+            Op::SetFader {
+                track: IdRef::Created(0),
+                level: Level::Silence,
+                pan: 0.0,
+            },
+            Op::AddInsert {
+                track: IdRef::Created(0),
+                index: 0,
+                device: "utility".into(),
+                params: UTIL_PARAMS.to_vec(),
+                preset: None,
+            },
+            Op::AddInsert {
+                track: IdRef::Created(0),
+                index: 0,
+                device: "bitcrusher".into(),
+                params: BIT_PARAMS.to_vec(),
+                preset: Some("Label only".into()),
+            },
+            Op::AddInsert {
+                track: IdRef::Created(1),
+                index: 0,
+                device: "comp".into(),
+                params: COMP_PARAMS.to_vec(),
+                preset: None,
+            },
+            Op::CreateSend {
+                from: IdRef::Created(0),
+                to: IdRef::Created(1),
+                tap: Tap::Pre,
+                gain: 0.75,
+            },
+            Op::SetSidechain {
+                previous: None,
+                from: IdRef::Created(0),
+                to: IdRef::Created(6),
+                tap: Tap::Pre,
+            },
+        ],
+    );
+    assert_eq!(
+        result.created_ids,
+        [
+            (0, CreatedId::Track(1)),
+            (1, CreatedId::Track(2)),
+            (4, CreatedId::Insert(1)),
+            (5, CreatedId::Insert(2)),
+            (6, CreatedId::Insert(3)),
+            (7, CreatedId::Send(1)),
+        ]
+    );
+}
+
+#[test]
+fn a_seeded_chain_matches_its_manual_render_through_edit_history_save_and_recovery() {
+    let (c, mut processor) = engine::engine(engine::EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let c = Arc::new(Mutex::new(c));
+    let mut session = Session::new(c.clone());
+    let loaded = audio_fixture(true);
+    let decoded = grooviq_project::decode_samples(&loaded);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Song.grooviq");
+    session.open(&path, loaded, decoded).unwrap();
+    processor.process(&mut [0.0; 128], 2);
+    let dry = sound(&session);
+    configure_chain(&mut session);
+    let first = manual_chain(BIT_SEED, BIT_PARAMS);
+    assert!(first.iter().any(|x| x.abs() > 1e-4));
+    assert_ne!(first, dry);
+    assert_eq!(sound(&session), first);
+
+    let mut params = BIT_PARAMS;
+    params[0] = 8.0;
+    mixer(
+        &mut session,
+        vec![Op::SetInsert {
+            insert: IdRef::Id(2),
+            params: params.to_vec(),
+            preset: Some("Name only".into()),
+        }],
+    );
+    let edited = manual_chain(BIT_SEED, params);
+    assert_ne!(first, edited);
+    assert_ne!(manual_chain(0, params), edited);
+    assert_eq!(sound(&session), edited);
+    history(&mut session, true);
+    assert_eq!(sound(&session), first);
+    history(&mut session, true);
+    assert_eq!(sound(&session), dry);
+    let m = &session.project().mixer;
+    assert_eq!(
+        (m.next_track_id, m.next_insert_id, m.next_send_id),
+        (3, 4, 2)
+    );
+    history(&mut session, false);
+    history(&mut session, false);
+    assert_eq!(sound(&session), edited);
+
+    let mix = session.project().mixer.clone();
+    let job = session.begin_save(Some(&path)).unwrap();
+    let written = job.write(&dir.path().join("backups"));
+    session.end_save(&job, written).unwrap();
+    let loaded = grooviq_project::load(&path).unwrap();
+    assert_eq!(loaded.project.mixer, mix);
+    let decoded = grooviq_project::decode_samples(&loaded);
+    session.open(&path, loaded, decoded).unwrap();
+    assert_eq!(sound(&session), edited);
+
+    let recovery_root = dir.path().join("recovery");
+    let (recovery, _) = grooviq_project::recovery::RecoveryDir::start(&recovery_root).unwrap();
+    recovery
+        .write_autosave(session.project(), &job.samples, Some(&path))
+        .unwrap();
+    drop(recovery);
+    let (_recovery, entries) =
+        grooviq_project::recovery::RecoveryDir::start(&recovery_root).unwrap();
+    let [entry] = entries.as_slice() else {
+        panic!("expected one recovery file")
+    };
+    let recovered = grooviq_project::load(&entry.file).unwrap();
+    assert_eq!(recovered.project.mixer, mix);
+    let decoded = grooviq_project::decode_samples(&recovered);
+    session
+        .open_recovered(
+            entry.original.as_deref(),
+            recovered,
+            decoded,
+            Instant::now(),
+        )
+        .unwrap();
+    assert_eq!(sound(&session), edited);
+
+    let options = engine::ExportOptions {
+        sample_rate: 48_000,
+        format: engine::WavFormat::Float32,
+        max_tail_seconds: 0.0,
+        ..Default::default()
+    };
+    let before = (
+        session.view(),
+        session.mixer_view(),
+        c.lock().unwrap().state().clone(),
+    );
+    let output = dir.path().join("Song.wav");
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    assert!(
+        engine::export_wav(
+            session.checked_export_state().unwrap(),
+            &engine::ExportOptions {
+                sample_rate: 384_000,
+                ..options
+            },
+            &output,
+            &mut |_| {},
+            &cancel,
+        )
+        .is_err()
+    );
+    assert!(!output.exists());
+    assert_eq!(
+        (
+            session.view(),
+            session.mixer_view(),
+            c.lock().unwrap().state().clone()
+        ),
+        before
+    );
+    let report = engine::export_wav(
+        session.checked_export_state().unwrap(),
+        &options,
+        &output,
+        &mut |_| {},
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(report.frames, FRAMES as u64);
+    let bytes = std::fs::read(&output).unwrap();
+    let data = bytes.windows(4).position(|w| w == b"data").unwrap() + 8;
+    let exported: Vec<_> = bytes[data..]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .copied()
+        .map(f32::from_le_bytes)
+        .collect();
+    assert_eq!(exported, edited);
+}
+
+#[test]
+fn replacing_the_mix_preserves_the_delay_line_of_a_surviving_insert() {
+    let (c, mut processor) = engine::engine(engine::EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let c = Arc::new(Mutex::new(c));
+    let mut session = Session::new(c);
+    let loaded = audio_fixture(true);
+    let decoded = grooviq_project::decode_samples(&loaded);
+    session
+        .open("initial.grooviq".as_ref(), loaded, decoded)
+        .unwrap();
+    mixer(
+        &mut session,
+        vec![Op::AddInsert {
+            track: IdRef::Id(0),
+            index: 0,
+            device: "delay".into(),
+            params: vec![0.0, 4.0, 40.0, 0.35, 0.0, 20.0, 7000.0, 1.0, 120.0],
+            preset: None,
+        }],
+    );
+    session.play().unwrap();
+    let mut before = vec![0.0; FRAMES * 2];
+    processor.process(&mut before, 2);
+    assert!(
+        before.iter().all(|x| x.abs() < 1e-6),
+        "wet-only delay starts beyond the input"
+    );
+    mixer(
+        &mut session,
+        vec![Op::SetFader {
+            track: IdRef::Id(0),
+            level: Level::Db(-3.0),
+            pan: -1.0,
+        }],
+    );
+    let mut tail = vec![0.0; 2048 * 2];
+    processor.process(&mut tail, 2);
+    assert!(tail.as_chunks::<2>().0.iter().any(|f| f[0].abs() > 1e-3));
+    assert!(tail.as_chunks::<2>().0.iter().all(|f| f[1] == 0.0));
+}
+
+#[test]
+fn undo_budget_charges_nested_insert_metadata_before_engine_admission() {
+    let make = || {
+        let (c, _) = engine::engine(engine::EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        let c = Arc::new(Mutex::new(c));
+        (Session::new(c.clone()), c)
+    };
+    let ops = |label: &str| {
+        (0..16)
+            .map(|index| Op::AddInsert {
+                track: IdRef::Id(0),
+                index,
+                device: "utility".into(),
+                params: UTIL_PARAMS.to_vec(),
+                preset: Some(label.into()),
+            })
+            .collect()
+    };
+    let (mut short, _) = make();
+    mixer(&mut short, ops("small"));
+    let minimal_bytes = short.history_usage().2;
+
+    let (mut long, ctl) = make();
+    long.set_history_limits(grooviq_project::HistoryLimits {
+        bytes: minimal_bytes,
+        ..Default::default()
+    });
+    let v = long.mixer_view();
+    let state = ctl.lock().unwrap().state().clone();
+    let long_label = "x".repeat(256);
+    let error = long
+        .edit_mixer(v.generation, v.revision, ops(&long_label), Instant::now())
+        .unwrap_err();
+    assert!(error.to_string().contains("history budget"), "{error}");
+    assert_eq!(long.mixer_view(), v);
+    assert_eq!(long.history_usage().0, 0);
+    assert_eq!(ctl.lock().unwrap().state(), &state);
+}
+
+#[test]
+fn a_handwritten_v4_file_opens_only_at_a_supported_rate() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Manual.grooviq");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    zip.start_file("project.json", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(
+        br#"{
+        "format": "grooviq-project", "version": 4, "name": "Recorded session",
+        "mixer": {
+            "mode": "routed",
+            "tracks": [{
+                "id": 0, "name": "Main", "level": {"db": -2.5}, "pan": -0.25,
+                "inserts": [{
+                    "id": 8, "device": "bitcrusher", "seed": "18446744073709551614",
+                    "params": [4.0, 11.0, 0.35, 0.4, 1.0, 0.8]
+                }]
+            }],
+            "nextTrackId": 1, "nextInsertId": 9, "nextSendId": 1
+        }
+    }"#,
+    )
+    .unwrap();
+    zip.finish().unwrap();
+
+    let open = |s: &mut Session| {
+        let loaded = grooviq_project::load(&path).unwrap();
+        let decoded = grooviq_project::decode_samples(&loaded);
+        s.open(&path, loaded, decoded)
+    };
+    let (c, _p) = engine::engine(engine::EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let mut native = Session::new(Arc::new(Mutex::new(c)));
+    open(&mut native).unwrap();
+    let v = native.mixer_view();
+    assert_eq!(v.mixer.tracks[0].inserts[0].seed, u64::MAX - 1);
+    assert_eq!(v.mixer.tracks[0].inserts[0].params, BIT_PARAMS);
+    let mut changed_params = BIT_PARAMS;
+    changed_params[0] = 8.0;
+    mixer(
+        &mut native,
+        vec![Op::SetInsert {
+            insert: IdRef::Id(8),
+            params: changed_params.to_vec(),
+            preset: Some("Keep the imported seed".into()),
+        }],
+    );
+    assert_eq!(
+        native.project().mixer.tracks[0].inserts[0].seed,
+        u64::MAX - 1
+    );
+    history(&mut native, true);
+    history(&mut native, false);
+    assert_eq!(
+        native.project().mixer.tracks[0].inserts[0].seed,
+        u64::MAX - 1
+    );
+
+    let (c, _p) = engine::engine(engine::EngineConfig {
+        sample_rate: 8_000.0,
+    });
+    let ctl = Arc::new(Mutex::new(c));
+    let mut limited = Session::new(ctl.clone());
+    limited.add_synth_channel("Init", Instant::now()).unwrap();
+    limited.set_recording(true).unwrap();
+    let before = (
+        limited.view(),
+        limited.mixer_view(),
+        ctl.lock().unwrap().state().clone(),
+    );
+    for recover in [false, true] {
+        let loaded = grooviq_project::load(&path).unwrap();
+        let decoded = grooviq_project::decode_samples(&loaded);
+        let result = if recover {
+            limited.open_recovered(Some(&path), loaded, decoded, Instant::now())
+        } else {
+            limited.open(&path, loaded, decoded)
+        };
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("bitcrusher") && error.contains("8000"),
+            "{error}"
+        );
+        assert_eq!(
+            (
+                limited.view(),
+                limited.mixer_view(),
+                ctl.lock().unwrap().state().clone()
+            ),
+            before
+        );
+    }
+    let stamp = limited.mixer_view();
+    let err = limited
+        .edit_mixer(
+            stamp.generation,
+            stamp.revision,
+            vec![Op::AddInsert {
+                track: IdRef::Id(0),
+                index: 0,
+                device: "bitcrusher".into(),
+                params: BIT_PARAMS.to_vec(),
+                preset: None,
+            }],
+            Instant::now(),
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("bitcrusher"));
+    assert_eq!(
+        (
+            limited.view(),
+            limited.mixer_view(),
+            ctl.lock().unwrap().state().clone()
+        ),
+        before
+    );
+}
+
+#[test]
+fn saving_a_mix_refuses_inserts_whose_full_rate_payload_exceeds_the_graph_budget() {
+    use grooviq_project::mixer::{Insert, MixerError};
+    let mut project = Project::new();
+    project.mixer.mode = Mode::Routed;
+    project.mixer.next_insert_id = 34;
+    // Even the legacy 384 kHz Delay has two 2^21-sample float rings; 33 are over 512 MiB.
+    // No DSP should be constructed to reject this shape.
+    let params = vec![0.0, 4.0, 40.0, 0.35, 0.0, 20.0, 7000.0, 1.0, 120.0];
+    project.mixer.tracks[0].inserts = (1..=33)
+        .map(|id| Insert {
+            id,
+            device: "delay".into(),
+            params: params.clone(),
+            preset: None,
+            seed: u64::from(id),
+            bypass: false,
+        })
+        .collect();
+    project.validate_mixer().unwrap();
+    assert!(matches!(
+        grooviq_project::mixer_compile::compile_mix(&project),
+        Err(MixerError::Graph(_))
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large.grooviq");
+    assert!(grooviq_project::save(&project, &HashMap::new(), &path).is_err());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn reverb_seeds_survive_insert_undo_redo_and_exact_reopen_export() {
+    let (c, _processor) = engine::engine(engine::EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let mut session = Session::new(Arc::new(Mutex::new(c)));
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("reverbs.grooviq");
+    let loaded = audio_fixture(true);
+    let decoded = grooviq_project::decode_samples(&loaded);
+    session.open(&project_path, loaded, decoded).unwrap();
+
+    let params: Vec<_> = grooviq_dsp::algorithmic_reverb::SPEC
+        .iter()
+        .map(|&(_, _, default)| default)
+        .collect();
+    for index in 0..2 {
+        mixer(
+            &mut session,
+            vec![Op::AddInsert {
+                track: IdRef::Id(0),
+                index,
+                device: "algorithmic_reverb".into(),
+                params: params.clone(),
+                preset: None,
+            }],
+        );
+    }
+    let seeds = |s: &Session| {
+        s.project().mixer.tracks[0]
+            .inserts
+            .iter()
+            .map(|insert| insert.seed)
+            .collect::<Vec<_>>()
+    };
+    let expected = seeds(&session);
+    assert_ne!(expected[0] & 0xffff, expected[1] & 0xffff);
+    assert!(expected.iter().all(|&seed| seed > 1_u64 << 53));
+    history(&mut session, true);
+    assert_eq!(seeds(&session), [expected[0]]);
+    history(&mut session, false);
+    assert_eq!(seeds(&session), expected);
+
+    let export = |s: &Session, filename: &str| {
+        let path = dir.path().join(filename);
+        let options = engine::ExportOptions {
+            sample_rate: 48_000,
+            format: engine::WavFormat::Float32,
+            max_tail_seconds: 0.25,
+            ..Default::default()
+        };
+        let report = engine::export_wav(
+            s.checked_export_state().unwrap(),
+            &options,
+            &path,
+            &mut |_| {},
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(report.frames > FRAMES as u64, "rendered reverb tail");
+        std::fs::read(path).unwrap()
+    };
+    let before = export(&session, "before.wav");
+    let job = session.begin_save(Some(&project_path)).unwrap();
+    let result = job.write(&dir.path().join("backups"));
+    session.end_save(&job, result).unwrap();
+
+    let loaded = grooviq_project::load(&project_path).unwrap();
+    let decoded = grooviq_project::decode_samples(&loaded);
+    session.open(&project_path, loaded, decoded).unwrap();
+    assert_eq!(seeds(&session), expected);
+    assert!(
+        export(&session, "after.wav") == before,
+        "reopened export bytes differ"
+    );
+}

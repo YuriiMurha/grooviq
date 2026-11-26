@@ -29,15 +29,27 @@ pub fn compile_mix(project: &Project) -> Result<engine::MixSetup, MixerError> {
     }
     let mut tracks = Vec::with_capacity(mixer.tracks.len());
     let mut gains = Vec::with_capacity(mixer.tracks.len());
+    let mut devices = Vec::new();
     for track in &mixer.tracks {
-        if let Some(insert) = track.inserts.first() {
-            return Err(MixerError::UnsupportedInsert(insert.id));
+        let mut inserts = Vec::with_capacity(track.inserts.len());
+        for insert in &track.inserts {
+            let id = engine::InsertId(insert.id.into());
+            inserts.push(
+                engine::describe_builtin_insert(id, &insert.device)
+                    .ok_or(MixerError::UnsupportedInsert(insert.id))?,
+            );
+            devices.push(engine::InsertDevice {
+                insert: id,
+                kind: insert.device.clone(),
+                seed: insert.seed,
+                params: insert.params.clone(),
+            });
         }
         let id = engine::MixerTrackId(track.id.into());
         tracks.push(engine::Track {
             id,
             output: track.output.map(|id| engine::MixerTrackId(id.into())),
-            inserts: Vec::new(),
+            inserts,
         });
         let volume = match track.level {
             Level::Db(db) => grooviq_dsp::db_to_gain(db),
@@ -106,7 +118,7 @@ pub fn compile_mix(project: &Project) -> Result<engine::MixSetup, MixerError> {
             sources,
         },
         gains,
-        devices: Vec::new(),
+        devices,
     });
     mix.validate_for_channels(
         project

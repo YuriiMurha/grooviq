@@ -29,24 +29,7 @@ pub const LEVEL_DB: (f32, f32) = (-60.0, 6.0);
 /// The largest send gain (linear, about +12 dB).
 pub const MAX_SEND_GAIN: f32 = 4.0;
 /// The built-in effects an insert may hold (instruments are not inserts).
-pub const EFFECTS: [&str; 16] = [
-    "algorithmic_reverb",
-    "bitcrusher",
-    "character_delay",
-    "comp",
-    "delay",
-    "drive",
-    "drum_shaper",
-    "eq",
-    "fattener",
-    "limiter",
-    "lofi_colour",
-    "ott",
-    "reverb",
-    "saturation",
-    "shimmer_reverb",
-    "utility",
-];
+pub use grooviq_dsp::EFFECTS;
 
 /// How much a mixer may hold. These bound the file model; they say nothing about the memory or
 /// latency of prepared devices, which the runtime admits separately.

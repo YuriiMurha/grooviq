@@ -2986,10 +2986,13 @@ impl Session {
     ) -> Result<(), SessionError> {
         // Before anything changes: the generic song fallback below must never take a mixer
         // the engine cannot play and open it dry.
-        crate::mixer::require_runtime_support(&project).map_err(mixer_error)?;
+        let mut state = engine_state(&project, &decoded).map_err(mixer_error)?;
+        state
+            .mix
+            .check_sample_rate(lock(&self.controller).sample_rate())
+            .map_err(|e| SessionError::InvalidValue(e.to_string()))?;
         self.settle_recording()?;
         self.admit_media(&files, &decoded)?;
-        let mut state = engine_state(&project, &decoded).map_err(mixer_error)?;
         let (song, error) =
             match crate::compile_song::compile_song(&project, &decoded, None, self.song_note_limit)
             {
