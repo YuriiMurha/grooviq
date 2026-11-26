@@ -318,6 +318,7 @@ test("roll selects the UI timing inputs and unknown paths", async () => {
     ".github/workflows/perf.yml", "Makefile", "scripts/optional-rust-checks.cjs",
     "scripts/optional-rust-checks.test.cjs", "scripts/roll-timing.cjs", "scripts/roll-timing.test.cjs",
     "app/ui/new-config", "scripts/new-script.cjs", "future/input", "tests/fixtures/new.json",
+    "app/src-tauri2/lib.rs",
   ]) {
     assert.equal(await shouldRun(request("roll", [...docs, file(path)])), true, path);
   }
