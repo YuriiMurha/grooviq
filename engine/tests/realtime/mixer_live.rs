@@ -359,6 +359,7 @@ fn full_fading_room_returns_removed_nodes_under_guard() {
 /// A source transaction reaching a faulted graph is refused whole inside the callback and
 /// returns every owned node in its envelope.
 #[test]
+#[cfg(feature = "test-hooks")]
 fn faulted_graph_returns_refused_sources_under_guard() {
     let mut initial = mix(0);
     let MixSetup::Routed(routed) = &mut initial else {

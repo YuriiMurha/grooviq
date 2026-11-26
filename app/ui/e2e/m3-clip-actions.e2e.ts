@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import type { ArrangementPage } from "../src/api/arrangement";
 import type { ProjectView } from "../src/api/project";
 import { expect, project, soundsFor, test } from "./fixture";
@@ -22,6 +22,10 @@ function ipc<T>(page: Page, command: string, args: Record<string, unknown> = {})
 }
 const state = (app: Page) => ipc<ArrangementPage>(app, "arrangement_view", { offset: 0, limit: 256 });
 const view = (app: Page) => ipc<ProjectView>(app, "project_view");
+const clipPicker = (panel: Locator) => panel.getByRole("button", { name: /^Selected playlist clip:/ });
+const clipList = (panel: Locator) => panel.getByRole("listbox", { name: "Selected playlist clip" });
+const originalClip = "Original instance · Track 1 · 960 ticks";
+const linkedClip = "Linked instance · Track 1 · 6720 ticks";
 async function observation(app: Page) {
   const arrangement = await state(app), current = await view(app);
   return { clips: arrangement.clips, tracks: arrangement.tracks, dirty: current.dirty,
@@ -34,11 +38,62 @@ async function selected(app: Page) {
   const canvas = panel.getByRole("application", { name: "Playlist clips" });
   await expect(canvas).toHaveAttribute("aria-disabled", "false");
   await expect(panel.getByRole("status")).toHaveText("2 clips");
-  await panel.getByRole("combobox", { name: "Selected playlist clip" }).selectOption("3");
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("3");
+  await clipPicker(panel).click();
+  await clipList(panel).getByRole("option", { name: originalClip, exact: true }).click();
+  await expect(clipPicker(panel)).toHaveAccessibleName(`Selected playlist clip: ${originalClip}`);
   expect((await state(app)).clips.map(clip => clip.id)).toEqual([3, 4]);
   return { panel, canvas };
 }
+
+test("playlist picker arrows leave selection unchanged until Enter or click", async ({ app, mock }) => {
+  await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
+  await app.keyboard.press("F5");
+  const panel = app.getByRole("region", { name: "Playlist", exact: true });
+  await expect(panel.getByRole("application", { name: "Playlist clips" })).toHaveAttribute("aria-disabled", "false");
+  const picker = clipPicker(panel);
+  const list = clipList(panel);
+  const label = (value: string) => `Selected playlist clip: ${value}`;
+  await expect(picker).toHaveAccessibleName(label("None"));
+  const selectionChanges = await picker.evaluateHandle(element => {
+    const previousValues: (string | null)[] = [];
+    const observer = new MutationObserver(records => previousValues.push(...records.map(record => record.oldValue)));
+    observer.observe(element, { attributes: true, attributeFilter: ["aria-label"], attributeOldValue: true });
+    return previousValues;
+  });
+  const changes = () => selectionChanges.jsonValue();
+  // Moving focus refreshes the native menu's Undo/Redo state.
+  const commands = async () => (await mock.calls()).filter(({ cmd }) => cmd !== "edit_history_enabled");
+  const calls = await commands();
+  await picker.focus();
+  for (const name of ["None", originalClip]) {
+    await app.keyboard.press("ArrowDown");
+    await expect(panel.getByText("0 selected", { exact: true })).toBeVisible();
+    const option = list.getByRole("option", { name, exact: true });
+    const id = await option.getAttribute("id");
+    expect(id).toBeTruthy();
+    await expect(list).toHaveAttribute("aria-activedescendant", id ?? "");
+    expect(await changes()).toEqual([]);
+    expect(await commands()).toEqual(calls);
+  }
+  await app.keyboard.press("Enter");
+  await expect(list).toBeHidden();
+  await expect(panel.getByText("1 selected", { exact: true })).toBeVisible();
+  await expect(picker).toHaveAccessibleName(label(originalClip));
+  expect(await changes()).toEqual([label("None")]);
+  expect(await commands()).toEqual(calls);
+
+  const choose = async (name: string) => {
+    await picker.click();
+    await list.getByRole("option", { name, exact: true }).click();
+    await expect(list).toBeHidden();
+  };
+  await choose(originalClip);
+  expect(await changes()).toEqual([label("None")]);
+  await choose(linkedClip);
+  await expect(picker).toHaveAccessibleName(label(linkedClip));
+  expect(await changes()).toEqual([label("None"), label(originalClip)]);
+  expect(await commands()).toEqual(calls);
+});
 
 test("mute affects only the selected linked instance and global Undo/Redo restores exact content", async ({ app, mock }) => {
   const { panel } = await selected(app);
@@ -74,13 +129,13 @@ test("deleting a selected clip leaves its track, linked copy and source and clea
   const allocation = await mock.eval<number>("m => m.state.project.nextId");
   await panel.getByRole("button", { name: "Delete selected clip", exact: true }).click();
   await expect.poll(async () => (await state(app)).clips).toEqual([before.clips[1]]);
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("");
+  await expect(clipPicker(panel)).toHaveAccessibleName("Selected playlist clip: None");
   await expect(panel.getByRole("button", { name: "Delete selected clip", exact: true })).toBeDisabled();
   expect((await state(app)).tracks).toEqual(before.tracks);
   expect(await mock.eval("m => m.state.project.pattern")).toEqual(source);
   await app.keyboard.press("ControlOrMeta+z");
   await expect.poll(async () => (await state(app)).clips).toEqual(before.clips);
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("");
+  await expect(clipPicker(panel)).toHaveAccessibleName("Selected playlist clip: None");
   await app.keyboard.press("ControlOrMeta+Shift+z");
   await expect.poll(async () => (await state(app)).clips).toEqual([before.clips[1]]);
   expect(await mock.eval<number>("m => m.state.project.nextId")).toBe(allocation);
@@ -129,7 +184,7 @@ test("typing and non-playlist Delete input do not remove the selected clip", asy
   const calls = (await mock.calls("arrangement_edit")).length;
   const bpm = app.getByRole("textbox", { name: "BPM", exact: true });
   await bpm.focus(); await bpm.press("End"); await bpm.press("Backspace"); await bpm.press("Escape");
-  await panel.getByRole("combobox", { name: "Selected playlist clip" }).focus();
+  await clipPicker(panel).focus();
   await app.keyboard.press("Delete");
   expect((await state(app)).clips).toEqual(before.clips);
   expect(await mock.calls("arrangement_edit")).toHaveLength(calls);
@@ -161,7 +216,7 @@ test("Save waits for an admitted delete and persists the accepted arrangement", 
   await mock.eval("m => m.holdCommand('arrangement_edit')");
   await panel.getByRole("button", { name: "Delete selected clip", exact: true }).click();
   await expect.poll(async () => (await mock.calls("arrangement_edit")).length).toBe(1);
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("3");
+  await expect(clipPicker(panel)).toHaveAccessibleName(`Selected playlist clip: ${originalClip}`);
   expect((await state(app)).clips).toEqual(before.clips);
   await mock.eval(`m => m.queueDialog('${path}')`); await app.keyboard.press("ControlOrMeta+s");
   expect(await mock.calls("project_save_as")).toHaveLength(0);
@@ -184,7 +239,7 @@ test("refused delete keeps clip selection and history and prevents the waiting S
   expect((await state(app)).tracks).toEqual(before.tracks);
   expect(await view(app)).toMatchObject({ generation: initial.generation, dirty: initial.dirty,
     projectCanUndo: initial.projectCanUndo, projectCanRedo: initial.projectCanRedo });
-  await expect(panel.getByRole("combobox", { name: "Selected playlist clip" })).toHaveValue("3");
+  await expect(clipPicker(panel)).toHaveAccessibleName(`Selected playlist clip: ${originalClip}`);
   expect(await mock.calls("project_save_as")).toHaveLength(0);
 });
 

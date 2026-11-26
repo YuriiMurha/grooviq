@@ -47,7 +47,8 @@ export const stateContract = {
   error: "Not applicable: these leaf APIs do not own error presentation. App repair/refusal surfaces have separate coverage.",
 } as const;
 
-export const themes = [
-  ...shippedThemes.map((theme) => ({ ...theme, status: "implemented" as const, tokens: `src/theme/${theme.id}.css` })),
-  { id: "industrial", name: "Industrial", status: "proposed", tokens: null },
-] as const;
+export const themes = shippedThemes.map((theme) => ({
+  ...theme,
+  status: "implemented" as const,
+  tokens: `src/theme/${theme.id}.css`,
+}));

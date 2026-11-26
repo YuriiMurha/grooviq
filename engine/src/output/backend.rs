@@ -966,7 +966,7 @@ mod tests {
             events,
             [OutputEvent::OpenFailed {
                 output: target,
-                error: "Mixer insert bitcrusher cannot run at 16000 Hz".into(),
+                error: "Mixer insert bitcrusher (22050–192000 Hz) cannot run at 16000 Hz".into(),
             }]
         );
         assert!(state.open.is_none());

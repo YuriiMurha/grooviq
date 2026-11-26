@@ -4,18 +4,22 @@ import argparse
 from dataclasses import dataclass
 import fcntl
 import json
+import math
 from os import EX_TEMPFAIL
 from pathlib import Path
 import re
 import subprocess
 import sys
 import time
+from urllib.parse import urlencode
 from uuid import uuid4
 
 REPO = "YuriiMurha/grooviq"
 LABEL = "merge-train"
 AUTO_MERGE = "BYPASS risk: GitHub auto-merge is enabled"
 ACTIONS_APP = 15368
+ACTIONS_RUN_URL = f"https://github.com/{REPO}/actions/runs/"
+ACTIONS_JOB_LINK = re.compile(rf"{re.escape(ACTIONS_RUN_URL)}([1-9][0-9]*)(?:/job/([1-9][0-9]*))?")
 REQUIRED = ("rust (macos-latest)", "rust (windows-latest)", "ui")
 SELECTOR = "changes"
 PENDING = {None, "queued", "in_progress", "pending", "requested", "waiting"}
@@ -24,7 +28,27 @@ SHA = re.compile(r"[a-f0-9]{40}")
 ENTRY = re.compile(r"([1-9][0-9]*)=([a-f0-9]{40})")
 MEMBER = re.compile(r"Train-(PR|Suspect): ([1-9][0-9]*) ([a-f0-9]{40})")
 MAIN_REF = "refs/heads/main"
-BATCH_REF = "refs/heads/merge-train/batch"
+BATCH_BRANCH = "merge-train/batch"
+BATCH_REF = f"refs/heads/{BATCH_BRANCH}"
+AGENT_LABEL = "io.github.yuriimurha.grooviq.merge-train"
+ATTENDED_TRAIN = ("Run make merge-train-agent-disable, then make merge-train ORDER=… with approved heads, "
+                  "then make merge-train-order ORDER=… with the heads still approved, "
+                  "make merge-train-agent-enable, and make merge-train-agent-resume.")
+FAILED_TRAIN_GUIDANCE = (ATTENDED_TRAIN + " To drop suspects from the order, use make merge-train-order, "
+                         "then make merge-train-agent-resume.")
+E2E_READ_ERRORS = (OSError, subprocess.SubprocessError, ValueError)
+E2E_HOLD_GUIDANCE = ("Review the archived evidence. Repair and requalify the affected heads, "
+                     "or record a scoped infrastructure false alarm. "
+                     f"Then use the attended hold workflow. {ATTENDED_TRAIN}")
+
+
+class TickDeadline(RuntimeError):
+    """The unattended tick reached a safe stopping point after its deadline."""
+
+
+def check_deadline(deadline, operation):
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TickDeadline(f"tick deadline reached before {operation}.")
 
 
 @dataclass
@@ -231,8 +255,8 @@ def print_landed(members):
         print(f"Merged #{number} at {head}")
 
 
-def report_landed(repo, members, *, show_merges=True):
-    landed, unknown = [], []
+def report_landed(repo, members, *, confirmed=(), show_merges=True):
+    landed, unknown = list(confirmed), []
     for number, _ in members:
         try:
             pr = repo.pull(number)
@@ -245,7 +269,7 @@ def report_landed(repo, members, *, show_merges=True):
             print(f"Could not verify #{number}: {error_detail(error)}.")
             unknown.append(number)
     if show_merges:
-        print_landed(landed)
+        print_landed(landed[len(confirmed):])
     prefix = ", ".join(f"#{number} at {head}" for number, head in landed)
     unconfirmed = ", ".join(f"#{number}" for number in unknown)
     return f"Merged so far: {prefix or 'none confirmed'}." + (
@@ -253,13 +277,16 @@ def report_landed(repo, members, *, show_merges=True):
     )
 
 
-def squash(repo, git, active, number, head, expected_main):
+def squash(repo, git, active, number, head, expected_main, *, agent_deadline=None):
     for attempt in range(4):
         main, current = git.refs()
         if main != expected_main:
             raise RuntimeError("main moved before squash")
         if current != active:
             raise RuntimeError("batch branch moved before squash")
+        check_deadline(agent_deadline, f"squash of #{number}")
+        if agent_deadline is not None:
+            print(f"Squash attempt #{number} {head} after {expected_main}")
         try:
             return repo.merge(number, head)
         except Exception as error:
@@ -328,25 +355,40 @@ def recover_prefix(repo, git, active, batch, main, pulls, mismatch_file, ack_mis
     return matched, visible[matched:]
 
 
-def merge_batch(repo, git, active, batch, order, mismatch_file):
+def merge_batch(repo, git, active, batch, order, mismatch_file, *, agent_deadline=None):
     for number, head in batch.members:
         reason = hold_reason(repo.pull(number), head, order.get(number))
         if reason:
             raise RuntimeError(f"Held #{number} before merge: {reason}.")
     git.verify_chain(active, batch)
     print(f"Tested batch {active}")
+    if agent_deadline is not None:
+        check_deadline(agent_deadline, "checking aggregate e2e")
+        # This is a snapshot. Failures published after the lookup can escape detection.
+        try:
+            failed_run = repo.failed_e2e_run(active)
+        except E2E_READ_ERRORS:
+            print(f"Could not read advisory aggregate e2e evidence for batch {active}.", file=sys.stderr)
+            failed_run = None
+        if failed_run:
+            raise RuntimeError(f"Held batch {active}: aggregate e2e reported failure at {failed_run}\n"
+                               f"{E2E_HOLD_GUIDANCE}")
     merged = []
     expected_main = batch.base
     try:
         for number, head in batch.members:
-            expected_main = squash(repo, git, active, number, head, expected_main)
+            check_deadline(agent_deadline, f"squash of #{number}")
+            expected_main = squash(repo, git, active, number, head, expected_main,
+                                   agent_deadline=agent_deadline)
             merged.append((number, expected_main))
+            print_landed(merged[-1:])
         main, current = git.refs()
+    except TickDeadline:
+        raise
     except (Exception, KeyboardInterrupt) as error:
-        report = report_landed(repo, batch.members)
+        report = report_landed(repo, batch.members[len(merged):], confirmed=merged)
         raise RuntimeError(f"Stopped at #{number}: {error_detail(error)}. {report}") from error
 
-    print_landed(merged)
     try:
         verify_landed_tree(git, active, main, active, mismatch_file)
         if current != active:
@@ -357,7 +399,7 @@ def merge_batch(repo, git, active, batch, order, mismatch_file):
     return main
 
 
-def tick(repo, git, order, limit=4, *, mismatch_file=None, ack_mismatch=None):
+def tick(repo, git, order, limit=4, *, mismatch_file=None, ack_mismatch=None, agent_deadline=None):
     if not order:
         raise RuntimeError("ORDER requires at least one approved PR head.")
     if limit < 1:
@@ -412,6 +454,9 @@ def tick(repo, git, order, limit=4, *, mismatch_file=None, ack_mismatch=None):
         if not changed and all(eligible(repo, candidate, order, base) for candidate in batch.members):
             failures, cancelled, pending = check_status(repo, active, scope="batch")
             if failures:
+                if agent_deadline is not None:
+                    raise RuntimeError(f"Held batch {active}: failed required checks ({failures}). "
+                                       f"{FAILED_TRAIN_GUIDANCE}")
                 main_hold = main_check_hold(repo, base)
                 if main_hold:
                     print(f"Waiting on batch {active}: {main_hold}.")
@@ -432,7 +477,9 @@ def tick(repo, git, order, limit=4, *, mismatch_file=None, ack_mismatch=None):
                 print(f"Waiting for batch {active} ({numbers(batch.members)}).")
                 return
             else:
-                base = merge_batch(repo, git, active, batch, order, mismatch_file)
+                base = merge_batch(repo, git, active, batch, order, mismatch_file,
+                                   agent_deadline=agent_deadline)
+                check_deadline(agent_deadline, "rebuilding the batch after landing")
                 order = {n: sha for n, sha in order.items() if (n, sha) not in batch.members}
             build_batch(repo, git, base, active, order, limit, suspects=batch.suspects)
             return
@@ -440,6 +487,9 @@ def tick(repo, git, order, limit=4, *, mismatch_file=None, ack_mismatch=None):
 
 
 class GitHub:
+    def __init__(self, *, hold_rejections=False):
+        self.hold_rejections = hold_rejections
+
     def api(self, path, *, method="GET", body=None, paginate=False):
         argv = ["gh", "api", "--method", method, f"repos/{REPO}/{path}"]
         if paginate:
@@ -470,27 +520,86 @@ class GitHub:
         if len(contexts) != len(REQUIRED) or set(contexts) != {(name, ACTIONS_APP) for name in REQUIRED}:
             raise RuntimeError("Main's required-check policy must match the three GitHub Actions checks.")
 
-    def checks(self, sha):
+    def check_runs(self, sha):
         pages = self.api(f"commits/{sha}/check-runs?filter=latest&per_page=100", paginate=True)
-        checks = {}
         for page in pages:
-            for check in page["check_runs"]:
-                name = check["name"]
-                if ((name in REQUIRED or name == SELECTOR) and check["head_sha"] == sha
-                        and (check.get("app") or {}).get("id") == ACTIONS_APP):
-                    if name in checks:
-                        if name != SELECTOR:
-                            raise RuntimeError(f"Ambiguous required check {name} on {sha}.")
-                        checks[name] = None, ""
-                        continue
-                    state = check["conclusion"] if check["status"] == "completed" else check["status"]
-                    if state is None and name != SELECTOR:
-                        raise RuntimeError(f"Missing conclusion for completed check {name} on {sha}.")
-                    url = check.get("details_url") or check.get("html_url") or ""
-                    checks[name] = state, url.split("/job/", 1)[0]
+            yield from page["check_runs"]
+
+    def checks(self, sha):
+        checks = {}
+        for check in self.check_runs(sha):
+            name = check["name"]
+            if ((name in REQUIRED or name == SELECTOR) and check["head_sha"] == sha
+                    and (check.get("app") or {}).get("id") == ACTIONS_APP):
+                if name in checks:
+                    if name != SELECTOR:
+                        raise RuntimeError(f"Ambiguous required check {name} on {sha}.")
+                    checks[name] = None, ""
+                    continue
+                state = check["conclusion"] if check["status"] == "completed" else check["status"]
+                if state is None and name != SELECTOR:
+                    raise RuntimeError(f"Missing conclusion for completed check {name} on {sha}.")
+                url = check.get("details_url") or check.get("html_url") or ""
+                checks[name] = state, url.split("/job/", 1)[0]
         return checks
 
+    def failed_e2e_run(self, sha):
+        candidates = set()
+        for check in self.check_runs(sha):
+            if (check.get("name") != "e2e" or check.get("head_sha") != sha
+                    or (check.get("app") or {}).get("id") != ACTIONS_APP
+                    or check.get("status") != "completed" or check.get("conclusion") != "failure"):
+                continue
+            link = ACTIONS_JOB_LINK.fullmatch(check.get("details_url") or "")
+            if link and (link[2] is None or int(link[2]) == check.get("id")):
+                candidates.add((int(link[1]), (check.get("check_suite") or {}).get("id"), check.get("id")))
+        if not candidates:
+            return None
+
+        def read_confirmation(path, run_ids):
+            try:
+                return self.api(path)
+            except E2E_READ_ERRORS as error:
+                # Keep the observed failure in the stop record. Raw transport errors
+                # would send the agent through its transient-network retry path.
+                links = ", ".join(f"{ACTIONS_RUN_URL}{run_id}" for run_id in sorted(run_ids))
+                raise RuntimeError(
+                    f"Held batch {sha}: aggregate e2e reported failure at {links}; "
+                    f"current-attempt verification unavailable.\n{E2E_HOLD_GUIDANCE}"
+                ) from error
+
+        # The Checks API can expose history for the same SHA. Confirm the suite and latest job
+        # against the batch push's CI workflow. An ambiguous push or job is insufficient evidence.
+        query = urlencode({"branch": BATCH_BRANCH, "event": "push", "head_sha": sha, "per_page": 1})
+        runs = read_confirmation(f"actions/workflows/ci.yml/runs?{query}",
+                                 {run_id for run_id, _, _ in candidates})
+        if runs["total_count"] != 1 or len(runs["workflow_runs"]) != 1:
+            return None
+        run = runs["workflow_runs"][0]
+        if (run.get("head_sha") != sha or run.get("head_branch") != BATCH_BRANCH
+                or run.get("event") != "push" or run.get("path") != ".github/workflows/ci.yml"):
+            return None
+        run_id, suite_id, attempt = run["id"], run["check_suite_id"], run["run_attempt"]
+        if not any(candidate[:2] == (run_id, suite_id) for candidate in candidates):
+            return None
+
+        jobs = read_confirmation(f"actions/runs/{run_id}/jobs?filter=latest&per_page=100", (run_id,))
+        if jobs["total_count"] != len(jobs["jobs"]):
+            return None
+        aggregate = [job for job in jobs["jobs"] if job.get("name") == "e2e"]
+        if len(aggregate) != 1:
+            return None
+        job = aggregate[0]
+        if ((run_id, suite_id, job.get("id")) in candidates and job.get("head_sha") == sha
+                and job.get("run_id") == run_id and job.get("run_attempt") == attempt
+                and job.get("status") == "completed" and job.get("conclusion") == "failure"):
+            return f"{ACTIONS_RUN_URL}{run_id}"
+        return None
+
     def reject(self, number, sha, reason):
+        if self.hold_rejections:
+            raise RuntimeError(f"Held #{number}: {reason}. {FAILED_TRAIN_GUIDANCE}")
+
         def still_current():
             pr = self.pull(number)
             return pr["state"] == "open" and pr["head"]["sha"] == sha and labelled(pr)
@@ -519,12 +628,18 @@ class GitHub:
         return head
 
 
+def git_command(hooks):
+    return ["git"] if hooks else ["git", "-c", "core.hooksPath=/dev/null"]
+
+
 class Git:
-    def __init__(self, cwd=None):
+    def __init__(self, cwd=None, *, hooks=True, agent_deadline=None):
         self.cwd = cwd
+        self.agent_deadline = agent_deadline
+        self.command = git_command(hooks)
 
     def run(self, *args, check=True):
-        return subprocess.run(["git", *args], cwd=self.cwd, check=check,
+        return subprocess.run([*self.command, *args], cwd=self.cwd, check=check,
                               capture_output=True, text=True, timeout=90)
 
     def remote_refs(self, *refs):
@@ -593,6 +708,7 @@ class Git:
             parent = commit
 
     def publish(self, head, expected):
+        check_deadline(self.agent_deadline, "publishing the batch")
         print(f"Attempting Git push {BATCH_REF}", file=sys.stderr)
         self.run("push", "origin", f"{head}:{BATCH_REF}", f"--force-with-lease={BATCH_REF}:{expected}")
 
@@ -603,11 +719,15 @@ def main():
                         help="priority PR numbers and exact approved heads")
     parser.add_argument("--batch", type=int, default=4, help="maximum members per batch")
     parser.add_argument("--ack-mismatch", metavar="SHA", help="acknowledge an investigated tree mismatch")
+    parser.add_argument("--agent-deadline", type=float, help=argparse.SUPPRESS)
     try:
         args = parser.parse_args()
     except SystemExit as error:
         return int(bool(error.code))
+    unattended = args.agent_deadline is not None
     try:
+        if unattended and not math.isfinite(args.agent_deadline):
+            raise ValueError("The agent deadline must be finite.")
         order = parse_order(args.order)
         if not order:
             raise ValueError("ORDER requires at least one approved PR head.")
@@ -619,7 +739,7 @@ def main():
 
     try:
         common_dir = subprocess.check_output(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True,
+            [*git_command(not unattended), "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True,
         ).strip()
         with (Path(common_dir) / "merge-train.lock").open("a") as lock:
             try:
@@ -627,9 +747,21 @@ def main():
             except BlockingIOError:
                 print("Merge train busy: another tick holds the lock.")
                 return EX_TEMPFAIL
-            tick(GitHub(), Git(), order, args.batch,
+            if not unattended:
+                home = Path.home()
+                plist = home / "Library/LaunchAgents" / f"{AGENT_LABEL}.plist"
+                disabled = home / "Library/Application Support/Grooviq Ops/merge-train/disabled"
+                if plist.is_file() and not disabled.exists():
+                    raise RuntimeError("The merge-train agent owns the approved order. "
+                                       "Use make merge-train-order and make merge-train-agent-tick. "
+                                       f"For an attended run: {ATTENDED_TRAIN}")
+            git = Git(hooks=not unattended, agent_deadline=args.agent_deadline)
+            tick(GitHub(hold_rejections=unattended), git, order, args.batch,
                  mismatch_file=Path(common_dir) / "merge-train-mismatch",
-                 ack_mismatch=args.ack_mismatch)
+                 ack_mismatch=args.ack_mismatch, agent_deadline=args.agent_deadline)
+    except TickDeadline as error:
+        print(f"Merge train stopped: {error}", file=sys.stderr)
+        return 124
     except (OSError, subprocess.SubprocessError, RuntimeError, ValueError, KeyError) as error:
         print(f"Merge train stopped: {error_detail(error)}", file=sys.stderr)
         return 1

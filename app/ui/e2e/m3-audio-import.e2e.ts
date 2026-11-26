@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import type { ProjectView } from "../src/api/project";
 import type { ArrangementPage } from "../src/api/arrangement";
 import { expect, generatedWav, pixelsAt, project, soundsFor, test, type Mock } from "./fixture";
@@ -11,6 +11,15 @@ const bytes = generatedWav({ rate: sourceRate, samples: Array.from({ length: sou
 const tracks = [{ id: 2, name: "Audio A", color: 1, mute: false }, { id: 3, name: "Audio B", color: 2, mute: false }];
 const scene = project(["Kick"], {}, { nextId: 4, arrangement: { tracks, clips: [], audioAssets: [], loopRegion: null } });
 const selectName = "Selected playlist clip";
+const clipPicker = (playlist: Locator) => playlist.getByRole("button", { name: /^Selected playlist clip:/ });
+const clipOption = (playlist: Locator, name: string) => playlist.getByRole("listbox", { name: selectName }).getByRole("option", { name, exact: true });
+
+async function expectClipOption(playlist: Locator, name: string) {
+  await expect(playlist.getByRole("status")).toHaveText("1 clips");
+  await clipPicker(playlist).click();
+  await expect(clipOption(playlist, name)).toBeVisible();
+  await playlist.page().keyboard.press("Escape");
+}
 
 test.use({ deviceScaleFactor: 1, seed: { project: scene, files: soundsFor(["Kick"]), audioLog: [] } });
 
@@ -98,8 +107,7 @@ test("drops one snapped edit, renders a waveform, and saves and reopens it", asy
   await mock.eval('m => m.emit("tauri://drag-leave", null)');
   await expect.poll(() => pixelsAt(app, canvas, [{ x: 56, y: 42 }])).toEqual(background);
   await mock.dropAudio(audio, point, bytes);
-  await expect(playlist.getByRole("combobox", { name: selectName })).toHaveValue("5");
-  await expect(playlist.getByRole("option", { name: "Break.Take.2 · Track 1 · 960 ticks" })).toHaveCount(1);
+  await expect(clipPicker(playlist)).toHaveAccessibleName("Selected playlist clip: Break.Take.2 · Track 1 · 960 ticks");
   await expect.poll(() => edits(mock)).toEqual([importCall({ generation, revision }), waveform(generation, 4, 1)]);
   await expect.poll(() => pixelsAt(app, canvas, [{ x: 56, y: 42 }])).not.toEqual(background);
   const peakPixels = await pixelsAt(app, canvas, [{ x: 56, y: 39 }, { x: 56, y: 43 }]);
@@ -109,7 +117,7 @@ test("drops one snapped edit, renders a waveform, and saves and reopens it", asy
   await expect.poll(async () => (await mock.view()).path).toBe(saved);
   await app.keyboard.press("ControlOrMeta+o");
   await expect.poll(async () => (await mock.view()).generation).toBe(generation + 1);
-  await expect(playlist.getByRole("option", { name: "Break.Take.2 · Track 1 · 960 ticks" })).toHaveCount(1);
+  await expectClipOption(playlist, "Break.Take.2 · Track 1 · 960 ticks");
   const reopened = await arrangement(app);
   expect(reopened.audioAssets[0]).toMatchObject({ id: 4, sample: { file: "samples/2-Break.Take.2.wav" } });
   expect(reopened.warnings).toEqual([]);
@@ -144,7 +152,7 @@ test("a multi-file drop imports only the first file and reports skipped files", 
   await mock.registerAudio(other, bytes);
   await expect(dropMessages(app)).toBeEmpty();
   await emitDrop(mock, [audio, other], point);
-  await expect(playlist.getByRole("option", { name: "Break.Take.2 · Track 1 · 960 ticks" })).toHaveCount(1);
+  await expectClipOption(playlist, "Break.Take.2 · Track 1 · 960 ticks");
   await expect(dropMessages(app)).not.toBeEmpty();
   await displayedFrames(app);
   expect(await importArgs(mock)).toEqual([importCall({ generation, revision }).args]);
@@ -178,7 +186,7 @@ test("reports a refused playlist drop while an import is held", async ({ app, mo
   await expect(dropMessages(app)).not.toBeEmpty();
   expect(await importArgs(mock)).toEqual([importCall({ generation, revision }).args]);
   await mock.releaseAudio(audio);
-  await expect(playlist.getByRole("option", { name: "Break.Take.2 · Track 1 · 960 ticks" })).toHaveCount(1);
+  await expectClipOption(playlist, "Break.Take.2 · Track 1 · 960 ticks");
 });
 
 test("discarding into New retires a held import before the decode finishes", async ({ app, mock }) => {
@@ -223,7 +231,6 @@ test("a refused decode preserves the project, history and selection", async ({ a
   const { playlist, point } = await openPlaylist(app, mock);
   const before = await arrangement(app);
   const view = await ipc<ProjectView>(app, "project_view");
-  const selection = await playlist.getByRole("combobox", { name: selectName }).inputValue();
   await mock.holdAudio(audio);
   await mock.dropAudio(audio, point, bytes);
   await expect.poll(async () => (await arrangement(app)).pendingRequests.length).toBe(1);
@@ -232,7 +239,7 @@ test("a refused decode preserves the project, history and selection", async ({ a
   await expect(playlist.getByRole("status")).toHaveText("0 clips");
   expect(await arrangement(app)).toEqual(before);
   expect(await ipc<ProjectView>(app, "project_view")).toEqual(view);
-  await expect(playlist.getByRole("combobox", { name: selectName })).toHaveValue(selection);
+  await expect(clipPicker(playlist)).toHaveAccessibleName("Selected playlist clip: None");
   await displayedFrames(app);
   expect(await edits(mock)).toEqual([importCall({ generation: before.generation, revision: before.revision })]);
 });
@@ -284,7 +291,8 @@ test.describe("a missing audio asset", () => {
     const { playlist } = await openPlaylist(app, mock);
     const before = await arrangement(app);
     expect(before.warnings).toEqual(["Audio asset 4 is missing; relink it to hear its clips."]);
-    await playlist.getByRole("combobox", { name: selectName }).selectOption("5");
+    await clipPicker(playlist).click();
+    await clipOption(playlist, "Stored audio · Track 1 · 960 ticks").click();
     await mock.registerAudio(audio, bytes);
     await mock.eval(`m => m.queueDialog(${JSON.stringify(audio)})`);
     const relink = playlist.getByRole("button", { name: "Relink missing audio" });
@@ -341,7 +349,7 @@ test.describe("retina input", () => {
         expect(await app.evaluate(() => [navigator.platform, window.devicePixelRatio])).toEqual([platform, 2]);
         await mock.registerAudio(audio, bytes);
         await emitDrop(mock, [audio], { x: (box.x + 108) * scale, y: (box.y + 104) * scale });
-        await expect(playlist.getByRole("option", { name: "Break.Take.2 · Track 2 · 1920 ticks" })).toHaveCount(1);
+        await expectClipOption(playlist, "Break.Take.2 · Track 2 · 1920 ticks");
         await displayedFrames(app);
         expect(await importArgs(mock)).toEqual([importCall({ generation, revision }, audio, 3, 1920).args]);
       });

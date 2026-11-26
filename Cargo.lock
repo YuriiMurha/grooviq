@@ -1489,12 +1489,14 @@ name = "grooviq-engine"
 version = "0.1.0"
 dependencies = [
  "assert_no_alloc",
+ "audio_thread_priority",
  "cpal",
  "divan",
  "getrandom 0.4.3",
  "grooviq-dsp",
  "hound",
  "libm",
+ "loom",
  "objc2-core-audio",
  "objc2-core-foundation",
  "rtrb",

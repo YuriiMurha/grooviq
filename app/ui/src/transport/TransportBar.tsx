@@ -1,11 +1,13 @@
 import type { ReactNode, RefObject } from "react";
 import type { ProjectView } from "../api/project";
+import { ListPicker } from "../layout/ListPicker";
 import type { LiveFrame } from "../live/decode";
 import { BpmField } from "./BpmField";
 import { PositionReadout } from "./PositionReadout";
 
 const UNITS = [2, 4, 8, 16];
 const BEATS_MAX = 16;
+const signatureOption = (value: number) => ({ id: String(value), name: String(value) });
 
 interface Props {
   view: ProjectView;
@@ -59,34 +61,30 @@ export function TransportBar({ view, playing, latest, sampleRate, playMode, onPl
       {modeControls}
       <div className="tempo">
         <BpmField bpm={view.bpm} onCommit={onTempo} />
-        <span className="field-caption tempo-caption">
+        <div className="field-caption tempo-caption">
           BPM
-          <select
-            aria-label="Beats per bar"
-            data-hint="How many beats make a bar."
-            value={beats}
-            onChange={(e) => onSignature(Number(e.target.value), unit)}
-          >
-            {beatChoices.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
+          <div className="signature-choice" data-hint="How many beats make a bar.">
+            <ListPicker
+              className="signature-trigger"
+              label="Beats per bar"
+              options={beatChoices.map(signatureOption)}
+              value={String(beats)}
+              placeholder={String(beats)}
+              onCommit={(id) => onSignature(Number(id), unit)}
+            />
+          </div>
           /
-          <select
-            aria-label="Beat note value"
-            data-hint="Which note value is one beat: 4 is a quarter note, 8 an eighth."
-            value={unit}
-            onChange={(e) => onSignature(beats, Number(e.target.value))}
-          >
-            {unitChoices.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
-        </span>
+          <div className="signature-choice" data-hint="Which note value is one beat: 4 is a quarter note, 8 an eighth.">
+            <ListPicker
+              className="signature-trigger"
+              label="Beat note value"
+              options={unitChoices.map(signatureOption)}
+              value={String(unit)}
+              placeholder={String(unit)}
+              onCommit={(id) => onSignature(beats, Number(id))}
+            />
+          </div>
+        </div>
       </div>
       <PositionReadout latest={latest} bpm={view.bpm} signature={view.timeSignature} sampleRate={sampleRate} playMode={playMode} />
     </div>

@@ -1399,7 +1399,7 @@ mod tests {
         assert!(matches!(&error, ReconfigureError::InsertRate(_)));
         assert_eq!(
             error.to_string(),
-            "Mixer insert bitcrusher cannot run at 16000 Hz"
+            "Mixer insert bitcrusher (22050–192000 Hz) cannot run at 16000 Hz"
         );
         assert_eq!(c.sample_rate(), 48_000.0);
         assert_eq!(

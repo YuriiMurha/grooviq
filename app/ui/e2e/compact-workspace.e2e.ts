@@ -64,8 +64,9 @@ test.describe("compact project identity", () => {
       ...["Play", "Stop", "Record", "Metronome", "Typing keyboard", "Test tone"]
         .map((name) => toolbar.getByRole("button", { name })),
       output,
-      ...["Playback", "Beats per bar", "Beat note value"]
-        .map((name) => toolbar.getByRole("combobox", { name })),
+      toolbar.getByRole("combobox", { name: "Playback" }),
+      toolbar.getByRole("button", { name: /^Beats per bar:/ }),
+      toolbar.getByRole("button", { name: /^Beat note value:/ }),
       toolbar.getByRole("textbox", { name: "BPM" }),
       toolbar.getByRole("timer", { name: "Position" }),
       toolbar.getByRole("img", { name: "Master level meter" }),

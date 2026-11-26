@@ -151,6 +151,51 @@ test("keyboard uses live ticks; native failures do not dirty or create history",
   expect(await mock.calls("arrangement_edit")).toHaveLength(0);
 });
 
+test("playlist seek uses the current arrangement revision after a playback mode switch", async ({ app, mock }) => {
+  await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
+  const nativeMode = app.getByRole("combobox", { name: "Playback mode", exact: true });
+  const pickerMode = app.getByRole("button", { name: /^Playback mode:/ });
+  const mode = nativeMode.or(pickerMode);
+  const changeMode = async (name: "Pattern" | "Song") => {
+    if (await nativeMode.count()) {
+      await nativeMode.selectOption({ label: name });
+    } else {
+      await pickerMode.click();
+      await app.getByRole("listbox", { name: "Playback mode", exact: true }).getByRole("option", { name, exact: true }).click();
+    }
+  };
+  await expect(mode).toBeEnabled();
+  await app.keyboard.press("F5");
+  const ruler = app.getByRole("group", { name: "Playlist seek ruler" });
+  await expect(ruler).toHaveAttribute("aria-disabled", "false");
+
+  const stamp = () => mock.eval<ArrangementStamp>("m => { const { generation, revision } = m.workspaceSnapshot(); return { generation, revision }; }");
+  const initial = await stamp();
+  await changeMode("Pattern");
+  await expect(mode).toBeEnabled();
+  await expect.poll(stamp).toEqual({ ...initial, revision: initial.revision + 1 });
+
+  const views = (await mock.calls("project_view")).length;
+  await mock.eval("m => m.holdCommand('project_view')");
+  try {
+    await changeMode("Song");
+    await expect(mode).toBeDisabled();
+    await expect.poll(async () => (await mock.calls("project_view")).length).toBeGreaterThan(views);
+    // Let project-view effects run in the input event that releases the held native readback.
+    await mock.eval("m => window.addEventListener('click', () => m.releaseCommand('project_view'), { once: true })");
+    await app.getByRole("heading", { name: "Patterns", exact: true }).click();
+  } finally {
+    await mock.eval("m => m.releaseCommand('project_view')");
+  }
+  await expect(mode).toBeEnabled();
+  const current = { ...initial, revision: initial.revision + 2 };
+  await expect.poll(stamp).toEqual(current);
+  await expect(ruler).toHaveAttribute("aria-disabled", "false");
+  await ruler.press("Home");
+  await expect.poll(async () => (await mock.calls("arrangement_seek")).map((call) => call.args))
+    .toEqual([{ ...current, tick: 0 }]);
+});
+
 for (const reason of ["capture loss", "replacement"] as const) test(`held click cancels on ${reason}`, async ({ app, mock }) => {
   await expect(app.getByRole("complementary", { name: "Patterns" })).toHaveAttribute("aria-busy", "false");
   await app.keyboard.press("F5");

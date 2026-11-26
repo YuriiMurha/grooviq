@@ -11,6 +11,18 @@ pub fn flush(x: f32) -> f32 {
     (x + 1.0e-18) - 1.0e-18
 }
 
+/// Flushes only subnormal output samples, preserving signed zero and all normal samples.
+#[inline]
+pub(crate) fn flush_output_subnormal(sample: f32) -> f32 {
+    let bits = sample.to_bits();
+    if bits & 0x7f80_0000 == 0 {
+        // Exponent zero covers subnormals and signed zero. Keep the sign bit.
+        f32::from_bits(bits & 0x8000_0000)
+    } else {
+        sample
+    }
+}
+
 /// f64 variant of [`flush`] (flushes below ~1e-216, far above the f64 denormal range).
 #[inline(always)]
 pub fn flush64(x: f64) -> f64 {

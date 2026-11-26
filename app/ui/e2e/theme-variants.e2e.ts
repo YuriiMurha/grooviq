@@ -51,8 +51,7 @@ for (const { id } of themes) {
       return Object.fromEntries(["--solo", "--mute", "--ok", "--warn"].map((name) => [name, style.getPropertyValue(name)]));
     });
     const bytes = (name: string) => themeRgb(values, name).map((channel) => 255 * channel);
-    const otherRoles = id === "slate-system" ? ["--mute", "--ok", "--warn"] : ["--mute", "--ok"];
-    for (const other of otherRoles) {
+    for (const other of ["--mute", "--ok", "--warn"]) {
       expect(colourDistance(bytes("--solo"), bytes(other)), `--solo versus ${other}`).toBeGreaterThanOrEqual(48);
     }
     const soloColor = `rgb(${bytes("--solo").map(Math.round).join(", ")})`;
@@ -151,11 +150,13 @@ for (const { id } of themes) {
         expect(colourDistance(bytes("--play"), bytes("--accent")), "Console Play versus primary accent").toBeGreaterThanOrEqual(48);
       }
       const sectionInks = ["--dev-osc1", "--dev-osc2", "--dev-filter", "--dev-amp", "--dev-lfo", "--dev-mix", "--dev-voice"];
+      const cardColor = rgb("--dev-card");
       for (const [index, ink] of sectionInks.entries()) {
+        // Slate System's existing cobalt Voice caption falls below 4.5:1. See #792.
+        if (id !== "slate-system" || ink !== "--dev-voice") {
+          expect(contrastRatio(rgb(ink), cardColor), `${ink} caption over --dev-card`).toBeGreaterThanOrEqual(4.5);
+        }
         for (const other of sectionInks.slice(index + 1)) {
-          // These two shipped pairs fail both thresholds. See #767.
-          if (ink === "--dev-amp" && ((id === "riso" && other === "--dev-voice") ||
-            (id === "slate-system" && other === "--dev-lfo"))) continue;
           const distance = colourDistance(bytes(ink), bytes(other));
           const deltaE = oklabDeltaE(rgb(ink), rgb(other));
           expect(distance >= 48 || deltaE >= 0.10,

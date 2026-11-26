@@ -57,7 +57,10 @@ async function setup(app: Page, mock: Mock) {
   const box = await canvas.boundingBox();
   if (!box) throw new Error("Missing playlist canvas");
   const expected: EditCall[] = [];
-  const select = (id: number) => playlist.getByRole("combobox", { name: "Selected playlist clip" }).selectOption(String(id));
+  const select = async (name: string) => {
+    await playlist.getByRole("button", { name: /^Selected playlist clip:/ }).click();
+    await playlist.getByRole("listbox", { name: "Selected playlist clip" }).getByRole("option", { name, exact: true }).click();
+  };
   const drag = async (x: number, y: number, endX: number, endY = y, alt = false) => {
     if (alt) await app.keyboard.down("Alt");
     await app.mouse.move(box.x + x, box.y + y);
@@ -101,14 +104,14 @@ test.afterEach(async ({ mock }) => {
 
 test("trims the left edge and the reversed right edge, then slices at the grid", async ({ app, mock }) => {
   const { playlist, box, select, drag, edit, undo } = await setup(app, mock);
-  await select(5);
+  await select("Break · Track 1 · 960 ticks");
   const leftContent = { ...audio, sourceStart: 8000 };
   const beforeLeft = await edit([{ kind: "resize", clip: 5, startTick: 1920, content: leftContent }],
     () => drag(50, 42, 98));
   expect((await arrangement(app)).clips[0]).toMatchObject({ startTick: 1920, content: leftContent });
   await undo(beforeLeft);
 
-  await select(6);
+  await select("Reverse · Track 1 · 3840 ticks");
   const rightContent = { ...reversed, sourceStart: 8000 };
   const beforeRight = await edit([{ kind: "resize", clip: 6, startTick: 3840, content: rightContent }],
     () => drag(286, 42, 238));
@@ -137,7 +140,7 @@ test("moves and Alt-copies audio, then saves and reopens a trimmed clip", async 
   expect((await arrangement(app)).clips.at(-1)).toMatchObject({ track: 2, startTick: 1920, content: audio });
   await undo(beforeCopy);
 
-  await select(5);
+  await select("Break · Track 1 · 960 ticks");
   await edit([{ kind: "resize", clip: 5, startTick: 1920, content: { ...audio, sourceStart: 8000 } }],
     () => drag(50, 42, 98));
   const saved = await arrangement(app);
