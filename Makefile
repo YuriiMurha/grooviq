@@ -27,6 +27,16 @@ test-merge-train: ## Test ordered protected merges without calling GitHub
 test-pre-commit: ## Exercise staged conflict checks in disposable Git repositories
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_pre_commit.py -v
 
+.PHONY: reclaim-caches disk-check test-reclaim-caches
+reclaim-caches: ## Preview idle worktree target cleanup (RECLAIM_APPLY=1 deletes, RECENT_MINUTES=45)
+	@python3 -B scripts/reclaim_caches.py reclaim-caches $(if $(filter command line,$(origin RECLAIM_APPLY)),--apply="$$RECLAIM_APPLY") --recent-minutes="$${RECENT_MINUTES:-45}"
+
+disk-check: ## Require free space on the repo volume (MIN_GIB=20)
+	@python3 -B scripts/reclaim_caches.py disk-check --min-gib="$${MIN_GIB:-20}"
+
+test-reclaim-caches: ## Exercise cache reclamation in temporary repositories
+	python3 -B -m unittest discover -s scripts -p test_reclaim_caches.py -v
+
 ui-install: ## Install the UI's locked dependencies (npm ci)
 	npm --prefix $(UI) ci --no-audit --no-fund
 

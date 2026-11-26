@@ -80,6 +80,11 @@ function setup(
   const fallback = recorder();
   const failingGl = vi.fn<(canvas: HTMLCanvasElement) => GridRenderer | null>(() => null);
   const latest = opts.latest ?? createRef<LiveFrame | null>();
+  let playbackStart: (() => void) | undefined;
+  const subscribePlaybackStart = (wake: () => void) => {
+    playbackStart = wake;
+    return () => { playbackStart = undefined; };
+  };
   const errors: string[] = [];
   const { unmount } = render(
     <>
@@ -90,6 +95,7 @@ function setup(
             pattern={v.pattern}
             bpm={v.bpm}
             latest={latest}
+            subscribePlaybackStart={subscribePlaybackStart}
             sampleRate={48000}
             createRenderer={opts.renderer === false ? undefined : opts.glFails ? failingGl : rec.factory}
             createFallbackRenderer={opts.renderer === false ? undefined : fallback.factory}
@@ -99,7 +105,7 @@ function setup(
       <HintBar />
     </>,
   );
-  return { rec, fallback, failingGl, latest, errors, unmount, engine: engine.current };
+  return { rec, fallback, failingGl, latest, errors, unmount, engine: engine.current, startPlayback: () => playbackStart?.() };
 }
 
 /** The grid once it is on screen and its effects (renderer, a 2D swap) have run: the first view
@@ -281,7 +287,7 @@ describe("StepGrid", () => {
       outputLatencyFrames: latency,
       positionTicks: BigInt(ticks),
     });
-    const { rec } = setup(project([KICK]), { latest });
+    const { rec, startPlayback } = setup(project([KICK]), { latest });
     await grid();
     nextFrame();
     const first = rec.draws.length;
@@ -291,6 +297,7 @@ describe("StepGrid", () => {
     expect(rec.draws.length).toBe(first); // nothing changed
 
     latest.current = frame(240 + 10);
+    startPlayback();
     nextFrame();
     expect(rec.draws.length).toBe(first + 1);
     expect(flagsIn(rec.draws.at(-1)!, 0, 1) & FLAG_PLAYHEAD).toBe(FLAG_PLAYHEAD);

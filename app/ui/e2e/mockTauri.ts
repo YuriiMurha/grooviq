@@ -1511,6 +1511,7 @@ export function installMockTauri(seed: MockSeed): void {
     audio_import: nativeArrangementOnly,
     audio_relink: nativeArrangementOnly,
     audio_cancel: nativeArrangementOnly,
+    audio_cancel_ticket: nativeArrangementOnly,
     arrangement_waveform: nativeArrangementOnly,
     arrangement_mode: workspaceMode,
     arrangement_loop: nativeArrangementOnly,

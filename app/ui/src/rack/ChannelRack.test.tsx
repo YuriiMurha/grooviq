@@ -43,7 +43,7 @@ function setup(view: ProjectView) {
   const user = userEvent.setup();
   const result = render(
     <Session onError={(m) => errors.push(m)}>
-      {() => <ChannelRack latest={createRef<LiveFrame | null>()} sampleRate={48000} createRenderer={quiet} />}
+      {() => <ChannelRack latest={createRef<LiveFrame | null>()} subscribePlaybackStart={() => () => {}} sampleRate={48000} createRenderer={quiet} />}
     </Session>,
   );
   return { user, errors, engine: mocks.engine, ...result };
