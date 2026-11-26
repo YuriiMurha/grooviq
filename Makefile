@@ -37,7 +37,7 @@ merge-train-agent-resume: ## Clear the agent stop record after investigating it
 	$(REFRESH_PYTHON) -B scripts/merge_train_agent.py resume
 
 merge-train-agent-tick: ## Run the same guarded tick that launchd runs
-	$(REFRESH_PYTHON) -B scripts/merge_train_agent.py tick
+	$(REFRESH_PYTHON) -S -B scripts/merge_train_agent.py tick
 
 merge-train-agent-ledger: ## Print landed merge-train batches as Markdown rows
 	@$(REFRESH_PYTHON) -B scripts/merge_train_agent.py ledger

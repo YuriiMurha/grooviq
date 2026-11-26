@@ -1,9 +1,11 @@
 """Offline merge-train scheduler tests with temporary homes and repositories."""
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 import hashlib
+import io
 import json
 from pathlib import Path
 import plistlib
+import signal
 import subprocess
 import sys
 import tempfile
@@ -240,6 +242,137 @@ class AgentTests(unittest.TestCase):
         record = json.loads(self.agent.ticks.read_text())
         self.assertIsNone(record["after"])
         self.assertIn("connection unavailable", record["after_error"])
+
+    def test_stop_file_skips_before_reading_order_or_taking_tick_lock(self):
+        stop = self.agent.home / ".grooviq-train" / "STOP"
+        stop.parent.mkdir(parents=True)
+        stop.touch()
+        self.assertEqual(self.agent.tick()["status"], "skipped: STOP file")
+        record = json.loads(self.agent.ticks.read_text())
+        self.assertEqual((record["status"], record["exit_code"]), ("skipped: STOP file", 0))
+        self.assertEqual(list(self.agent.state.iterdir()), [self.agent.ticks])
+        self.agent.refresh_main.assert_not_called()
+        self.agent.remote_tips.assert_not_called()
+        self.agent.checkout.assert_not_called()
+        self.agent.run_tick.assert_not_called()
+
+    def test_help_and_status_show_emergency_disable_command(self):
+        command = "launchctl bootout gui/$(id -u)/io.github.yuriimurha.grooviq.merge-train"
+        for args in (["--help"], ["status"]):
+            with self.subTest(args=args), patch.object(sys, "argv", ["agent", *args]), \
+                    patch.object(sys, "platform", "darwin"), patch.object(agent_module, "Agent", return_value=self.agent), \
+                    redirect_stdout(io.StringIO()) as output:
+                if args == ["--help"]:
+                    with self.assertRaises(SystemExit) as exit_status:
+                        agent_module.main()
+                    self.assertEqual(exit_status.exception.code, 0)
+                else:
+                    self.assertEqual(agent_module.main(), 0)
+                self.assertIn(command, output.getvalue().splitlines())
+
+    def test_nonzero_exits_except_tempfail_latch_with_stderr_tail(self):
+        self.agent.set_order(ORDER)
+        for code in (1, 2, 124, -9):
+            with self.subTest(code=code):
+                self.agent.run_tick.return_value = subprocess.CompletedProcess(
+                    [], code, "unrelated stdout\n", "old stderr\n" * 30 + "latest stderr\n"
+                )
+                self.assertEqual(self.agent.tick()["status"], "stopped")
+                record = json.loads(self.agent.ticks.read_text().splitlines()[-1])
+                self.assertEqual(record["exit_code"], code)
+                self.assertEqual(record["reason"][-1], "latest stderr")
+                self.assertLess(len(record["reason"]), 30)
+                self.assertEqual(self.agent.tick()["status"], "latched")
+                self.agent.resume()
+
+    def test_network_failures_latch_after_three_and_clean_ticks_reset_streak(self):
+        self.agent.set_order(ORDER)
+        results = [
+            (75, "gh: service unavailable (HTTP 503)", "skipped: busy"),
+            (0, "Connection reset by peer", "completed"),
+            (0, "waiting", "completed"),
+            (0, "HTTP/2 502", "completed"),
+            (75, "Could not resolve host: github.com", "skipped: busy"),
+            (0, "connection timed out", "stopped"),
+        ]
+        for code, message, status in results:
+            self.agent.run_tick.return_value = subprocess.CompletedProcess([], code, "", message)
+            self.assertEqual(self.agent.tick()["status"], status)
+            self.assertEqual(self.agent.stopped.exists(), status == "stopped")
+        records = [json.loads(line) for line in self.agent.ticks.read_text().splitlines()]
+        self.assertEqual([record["network_streak"] for record in records], [1, 2, 0, 1, 2, 3])
+        self.assertIn("connection timed out", records[-1]["reason"])
+        self.assertEqual(self.agent.tick()["status"], "latched")
+        self.agent.resume()
+        self.assertEqual(self.agent.tick()["status"], "completed")
+
+    def test_snapshot_failure_latches_and_records_git_stderr(self):
+        self.agent.set_order(ORDER)
+        self.agent.refresh_main.side_effect = subprocess.CalledProcessError(
+            128, ["git", "fetch"], stderr=b"fatal: authentication failed\n"
+        )
+        self.assertEqual(self.agent.tick()["status"], "error")
+        self.assertEqual(self.agent.tick()["status"], "latched")
+        record = json.loads(self.agent.ticks.read_text())
+        self.assertEqual(record["exit_code"], 128)
+        self.assertEqual(record["reason"], ["fatal: authentication failed"])
+        self.agent.run_tick.assert_not_called()
+
+    def test_checkout_cleanup_failure_keeps_one_row_with_train_evidence(self):
+        self.agent.set_order(ORDER)
+        @contextmanager
+        def checkout(_):
+            yield self.root / "checkout", self.root / "train.py"
+            raise RuntimeError("checkout cleanup failed")
+
+        self.agent.checkout = checkout
+        self.assertEqual(self.agent.tick()["status"], "error")
+        self.assertEqual(self.agent.tick()["status"], "latched")
+        records = [json.loads(line) for line in self.agent.ticks.read_text().splitlines()]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["exit_code"], 0)
+        self.assertEqual(records[0]["stdout"], ["waiting"])
+        self.assertIn("checkout cleanup failed", records[0]["agent_error"])
+
+    def test_timed_out_train_is_killed_as_a_group_and_latched(self):
+        self.agent.set_order(ORDER)
+        self.agent.run_tick = agent_module.Agent.run_tick.__get__(self.agent)
+        process = Mock(pid=321, returncode=-signal.SIGKILL)
+        process.communicate.side_effect = [subprocess.TimeoutExpired("fixture", 600), ("partial", "last error")]
+        with patch.object(agent_module.subprocess, "Popen") as popen, \
+                patch.object(agent_module.os, "killpg") as kill:
+            popen.return_value.__enter__.return_value = process
+            self.assertEqual(self.agent.tick()["status"], "stopped")
+        self.assertEqual(process.communicate.call_args_list[0].kwargs, {"timeout": 600})
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        kill.assert_called_once_with(321, signal.SIGKILL)
+        record = json.loads(self.agent.ticks.read_text())
+        self.assertTrue(record["timed_out"])
+        self.assertIn("last error", record["reason"])
+        self.assertTrue(self.agent.stopped.exists())
+
+    def test_git_allow_list_rejects_github_writes_before_subprocess(self):
+        self.assertEqual(set(agent_module.GIT_COMMANDS), {
+            ("remote", "get-url"), ("fetch",), ("rev-parse",), ("show",), ("ls-remote",),
+            ("-c", "core.hooksPath=/dev/null", "worktree", "add"), ("worktree", "remove"),
+        })
+        with patch.object(agent_module.subprocess, "run") as runner:
+            for args in (("push", "origin", "main"), ("remote", "set-url"), ("worktree", "prune")):
+                with self.subTest(args=args), self.assertRaisesRegex(RuntimeError, "not allowed"):
+                    self.agent.git(*args)
+            runner.assert_not_called()
+        self.assertEqual(agent_module.CI_RUN_COMMAND[:3], ("gh", "run", "list"))
+
+    def test_foreground_tick_shows_stdout_and_stderr(self):
+        self.agent.set_order(ORDER)
+        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 0, "train stdout\n", "train stderr\n")
+        with patch.object(sys, "argv", ["agent", "tick"]), patch.object(sys, "platform", "darwin"), \
+                patch.object(agent_module, "Agent", return_value=self.agent), \
+                redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(agent_module.main(), 0)
+        self.assertIn("train stdout", output.getvalue())
+        self.assertIn("train stderr", errors.getvalue())
+        self.agent.run_tick.assert_called_once()
 
     def test_ci_run_lookup_selects_the_exact_commit(self):
         runs = json.dumps([
