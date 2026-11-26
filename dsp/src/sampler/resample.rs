@@ -10,6 +10,10 @@ const SHORT_BANDS: usize = BANDS + 1 - JOIN_BAND;
 static FIR: [Band<TAPS>; SHORT_BANDS] = read_bands::<TAPS, SHORT_BANDS>(0);
 static FIR_WIDE: [Band<WIDE_TAPS>; JOIN_BAND + 1] =
     read_bands::<WIDE_TAPS, { JOIN_BAND + 1 }>(size_of::<[Band<TAPS>; SHORT_BANDS]>());
+static FIR_EXTREME: [Band<EXTREME_TAPS>; EXTREME_JOIN_BAND + 1] =
+    read_bands::<EXTREME_TAPS, { EXTREME_JOIN_BAND + 1 }>(
+        size_of::<[Band<TAPS>; SHORT_BANDS]>() + size_of::<[Band<WIDE_TAPS>; JOIN_BAND + 1]>(),
+    );
 
 const fn read_bands<const N: usize, const COUNT: usize>(mut offset: usize) -> [Band<N>; COUNT] {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/sampler-fir.bin"));
@@ -109,10 +113,23 @@ fn sinc(sample: &SampleBuf, voice: &Voice, step: f64) -> (f32, f32) {
     let band_index = band as usize;
     let band_mix = f32x4::splat((band - band_index as f64) as f32);
     if band_index < JOIN_BAND {
-        convolve(sample, voice, &FIR_WIDE, band_index, band_mix)
+        // The shared row is wide band 6, at step 8. Keep that row on the old path.
+        if band < EXTREME_JOIN_BAND as f64 / EXTREME_SUBDIVISIONS as f64 {
+            sinc_extreme(sample, voice, band)
+        } else {
+            convolve(sample, voice, &FIR_WIDE, band_index, band_mix)
+        }
     } else {
         convolve(sample, voice, &FIR, band_index - JOIN_BAND, band_mix)
     }
+}
+
+#[inline(never)]
+fn sinc_extreme(sample: &SampleBuf, voice: &Voice, band: f64) -> (f32, f32) {
+    let band = band * EXTREME_SUBDIVISIONS as f64;
+    let index = band as usize;
+    let mix = f32x4::splat((band - index as f64) as f32);
+    convolve(sample, voice, &FIR_EXTREME, index, mix)
 }
 
 #[inline(always)]
@@ -332,21 +349,22 @@ mod tests {
         };
         // Hold source phase fixed. At this step the nominal cutoff lies exactly on the
         // shared row. Sweeping through it must preserve the kernel's gain and alignment.
-        let join_step = 80.0 / 29.0;
-        for pos in [0.25, 64.25, 127.25] {
-            let mut voice = Voice {
-                pos,
-                end: sample.len() as f64,
-                step: join_step - 0.000_001,
-                ..Voice::OFF
-            };
-            let (before_l, before_r) = read(&sample, &voice);
-            voice.step = join_step + 0.000_001;
-            let (after_l, after_r) = read(&sample, &voice);
-            assert!(
-                (after_l - before_l).abs().max((after_r - before_r).abs()) < 1e-5,
-                "read jumped at pos {pos}: ({before_l}, {before_r}) to ({after_l}, {after_r})"
-            );
+        for join_step in [80.0 / 29.0, 8.0] {
+            for pos in [0.0, 0.25, 64.25, 127.25] {
+                let mut voice = Voice {
+                    pos,
+                    end: sample.len() as f64,
+                    step: join_step - 0.000_001,
+                    ..Voice::OFF
+                };
+                let (before_l, before_r) = read(&sample, &voice);
+                voice.step = join_step + 0.000_001;
+                let (after_l, after_r) = read(&sample, &voice);
+                assert!(
+                    (after_l - before_l).abs().max((after_r - before_r).abs()) < 1e-5,
+                    "read jumped at step {join_step}, pos {pos}: ({before_l}, {before_r}) to ({after_l}, {after_r})"
+                );
+            }
         }
     }
 

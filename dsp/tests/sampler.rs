@@ -44,7 +44,9 @@ fn sine(rate: f32, hz: f64, len: usize) -> Vec<f32> {
 }
 
 fn measure_tone(rate: f32, key: u8, source_hz: f64, output_hz: f64) -> [f64; 2] {
-    let mut s = sampler(SR, buf(rate, sine(rate, source_hz, 34_000)));
+    // Keep enough source audio for the full measurement, including at high playback steps.
+    let frames = (34_000.0_f32 * (rate / SR).max(1.0)) as usize;
+    let mut s = sampler(SR, buf(rate, sine(rate, source_hz, frames)));
     let (l, r) = render(&mut s, 4_080, &[on(0, key, 1.0)]);
     [&l, &r].map(|x| {
         // Skip the onset. The window holds a whole number of cycles at each probe frequency.
@@ -61,6 +63,29 @@ fn measure_tone(rate: f32, key: u8, source_hz: f64, output_hz: f64) -> [f64; 2] 
             });
         20.0 * libm::log10(2.0 * libm::hypot(re, im) / window.len() as f64)
     })
+}
+
+#[test]
+fn extreme_steps_reject_folds_and_keep_the_passband() {
+    let mut failures = Vec::new();
+    for (rate, max_fold) in [(192_000.0, -93.0), (384_000.0, -69.0)] {
+        let fold = measure_tone(rate, 84, 9_000.0, 12_000.0);
+        eprintln!("{rate} Hz, +24 st: 12 kHz fold {fold:.2?} dBFS");
+        if !fold.into_iter().all(|db| db <= max_fold) {
+            failures.push((rate, 12_000.0, fold));
+        }
+        for hz in [2_000.0, 4_000.0, 8_000.0] {
+            let pass = measure_tone(rate, 84, hz / 4.0, hz);
+            eprintln!("{rate} Hz, +24 st: wanted {hz} Hz {pass:.2?} dBFS");
+            if !pass.into_iter().all(|db| db.abs() <= 0.25) {
+                failures.push((rate, hz, pass));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "outside fold/passband bounds: {failures:?}"
+    );
 }
 
 #[test]
@@ -135,32 +160,40 @@ fn faster_reads_keep_trimmed_stereo_edges_isolated() {
     let mut r = vec![-1.0; 512];
     l[128..384].fill(-0.75);
     r[128..384].fill(0.5);
-    let source = Arc::new(SampleBuf { rate: SR, l, r });
-    for reverse in [0.0, 1.0] {
-        let mut s = sampler(SR, Arc::clone(&source));
-        s.set_param(p("start"), 0.25);
-        s.set_param(p("end"), 0.75);
-        s.set_param(p("reverse"), reverse);
-        let (l, r) = render(&mut s, 128, &[on(0, 84, 1.0)]);
-        // The selected 256 frames play in 64 output frames. Padding the FIR with
-        // adjacent material would leak the opposite-polarity samples into the edges.
-        assert!(l[..64].iter().all(|&x| (x + 0.75).abs() < 1e-6));
-        assert!(r[..64].iter().all(|&x| (x - 0.5).abs() < 1e-6));
-        assert!(l[64..].iter().chain(&r[64..]).all(|&x| x == 0.0));
+    for ratio in [1, 4, 8] {
+        let source = Arc::new(SampleBuf {
+            rate: SR * ratio as f32,
+            l: l.clone(),
+            r: r.clone(),
+        });
+        let frames = 64 / ratio;
+        for reverse in [0.0, 1.0] {
+            let mut s = sampler(SR, Arc::clone(&source));
+            s.set_param(p("start"), 0.25);
+            s.set_param(p("end"), 0.75);
+            s.set_param(p("reverse"), reverse);
+            let (l, r) = render(&mut s, 128, &[on(0, 84, 1.0)]);
+            // Padding the FIR with adjacent material would leak opposite-polarity samples.
+            assert!(l[..frames].iter().all(|&x| (x + 0.75).abs() < 1e-6));
+            assert!(r[..frames].iter().all(|&x| (x - 0.5).abs() < 1e-6));
+            assert!(l[frames..].iter().chain(&r[frames..]).all(|&x| x == 0.0));
+        }
     }
 }
 
 #[test]
 fn fir_loop_matches_unrolled_audio_in_both_directions() {
     let source = noise(512);
-    for rate in [72_000.0, 192_000.0] {
+    for rate in [72_000.0, 192_000.0, 792_000.0, 1_536_000.0] {
+        let read_frames = (rate / SR * 1_024.0) as usize + 256;
         for loop_frames in [32, 128] {
             for reverse in [false, true] {
                 let mut unrolled = source.clone();
                 if reverse {
                     unrolled.reverse();
                 }
-                let repeated = unrolled[512 - loop_frames..].repeat(160);
+                let repeated =
+                    unrolled[512 - loop_frames..].repeat(read_frames.div_ceil(loop_frames));
                 unrolled.extend(repeated);
                 if reverse {
                     unrolled.reverse();
@@ -186,6 +219,38 @@ fn fir_loop_matches_unrolled_audio_in_both_directions() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn extreme_step_trimmed_loops_are_block_independent() {
+    // Key 84 at 198 kHz advances 16.5 frames, stepping through fractional phases.
+    let source = buf(198_000.0, noise(512));
+    let note = [on(0, 84, 1.0)];
+    for reverse in [0.0, 1.0] {
+        let play = |block| {
+            let mut s = sampler(SR, Arc::clone(&source));
+            s.set_param(p("start"), 0.125);
+            s.set_param(p("end"), 0.875);
+            s.set_param(p("loop"), 1.0);
+            s.set_param(p("loop_start"), 0.75);
+            s.set_param(p("reverse"), reverse);
+            let mut l = vec![0.0; 1024];
+            let mut r = vec![0.0; 1024];
+            for (i, (l, r)) in l.chunks_mut(block).zip(r.chunks_mut(block)).enumerate() {
+                let events = if i == 0 { &note[..] } else { &[] };
+                assert_no_alloc(|| s.process(l, r, None, events));
+            }
+            (l, r)
+        };
+        let reference = play(1);
+        assert!(peak(&reference.0[512..]) > 0.01);
+        for block in [37, 64, 128, 512] {
+            assert!(
+                same_bits(&play(block), &reference),
+                "reverse {reverse}, block {block}"
+            );
         }
     }
 }
