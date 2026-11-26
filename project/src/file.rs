@@ -17,10 +17,13 @@ use crate::reading::NoteDrops;
 use crate::{outline, reading};
 use grooviq_engine::InstrumentKind;
 use serde::Serialize;
+use serde::de::value::{MapAccessDeserializer, StrDeserializer};
+use serde::de::{Deserialize, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zip::result::ZipError;
@@ -760,9 +763,15 @@ fn load_inner(
     }
     let version = checked_version(outline.version)?;
     let (project, drops, mixer) = reading::with_context_mixer(version, outline.channels, || {
-        serde_json::from_reader::<_, reading::Named<Project>>(project_json(&mut zip, limits.json)?)
-            .map(|named| named.0)
-            .map_err(does_not_fit)
+        let json = project_json(&mut zip, limits.json)?;
+        let result = if version < 4 {
+            let mut de = serde_json::Deserializer::from_reader(json);
+            de.deserialize_map(LegacyProjectFields)
+                .and_then(|project| de.end().map(|()| project))
+        } else {
+            serde_json::from_reader::<_, reading::Named<Project>>(json).map(|named| named.0)
+        };
+        result.map_err(does_not_fit)
     });
     let mut project = project?;
     if version >= 4 && !mixer {
@@ -881,6 +890,88 @@ fn load_inner(
         samples,
         warnings,
     })
+}
+
+struct LegacyProjectFields;
+
+impl<'de> Visitor<'de> for LegacyProjectFields {
+    type Value = Project;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(reading::NAMED)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, inner: A) -> Result<Project, A::Error> {
+        Project::deserialize(MapAccessDeserializer::new(SkipRepeatedMixer {
+            inner,
+            seen_mixer: false,
+        }))
+    }
+}
+
+/// The existing legacy field reader discards the first mixer value. Discard later values
+/// here so the derived project reader keeps its normal duplicate checks for every other key.
+struct SkipRepeatedMixer<A> {
+    inner: A,
+    seen_mixer: bool,
+}
+
+impl<'de, A: MapAccess<'de>> MapAccess<'de> for SkipRepeatedMixer<A> {
+    type Error = A::Error;
+
+    fn next_key_seed<S: DeserializeSeed<'de>>(
+        &mut self,
+        mut seed: S,
+    ) -> Result<Option<S::Value>, A::Error> {
+        while let Some(key) = self.inner.next_key_seed(ProjectField {
+            seed,
+            seen_mixer: &mut self.seen_mixer,
+        })? {
+            match key {
+                ControlFlow::Break(value) => return Ok(Some(value)),
+                ControlFlow::Continue(reuse_seed) => {
+                    self.inner.next_value::<IgnoredAny>()?;
+                    seed = reuse_seed;
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn next_value_seed<S: DeserializeSeed<'de>>(&mut self, seed: S) -> Result<S::Value, A::Error> {
+        self.inner.next_value_seed(seed)
+    }
+}
+
+struct ProjectField<'a, S> {
+    seed: S,
+    seen_mixer: &'a mut bool,
+}
+
+impl<'de, S: DeserializeSeed<'de>> DeserializeSeed<'de> for ProjectField<'_, S> {
+    type Value = ControlFlow<S::Value, S>;
+
+    fn deserialize<D: Deserializer<'de>>(self, de: D) -> Result<Self::Value, D::Error> {
+        de.deserialize_identifier(self)
+    }
+}
+
+impl<'de, S: DeserializeSeed<'de>> Visitor<'de> for ProjectField<'_, S> {
+    type Value = ControlFlow<S::Value, S>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a project field name")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, key: &str) -> Result<Self::Value, E> {
+        if key == "mixer" && std::mem::replace(self.seen_mixer, true) {
+            Ok(ControlFlow::Continue(self.seed))
+        } else {
+            self.seed
+                .deserialize(StrDeserializer::new(key))
+                .map(ControlFlow::Break)
+        }
+    }
 }
 
 /// `project.json` from the zip, streamed and buffered, never more than `limit` bytes.
@@ -1140,6 +1231,70 @@ mod tests {
     thread_local! {
         /// Syncs [`sync_file`] made on this thread.
         pub(super) static SYNCED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn load_mixer_fixture(version: u32, extra: &str) -> Result<Loaded, LoadError> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixer.grooviq");
+        let json = format!(
+            r#"{{"format":"grooviq-project","version":{version},"name":"Beat","bpm":120,
+            "patterns":[{{"id":0,"name":"Beat","steps":16,"notes":[]}}],
+            "currentPattern":0,"nextId":1{extra}}}"#
+        );
+        write_zip(&mut File::create(&path).unwrap(), json.as_bytes(), &[]).unwrap();
+        load(&path)
+    }
+
+    #[test]
+    fn file_mixer_keys_ignore_repeated_legacy_values() {
+        for version in 1..4 {
+            let loaded = load_mixer_fixture(
+                version,
+                r#", "mixer":"obsolete", "m\u0069xer":{"mode":"routed"}, "mixer":[1,2]"#,
+            )
+            .unwrap();
+            assert_eq!(
+                loaded.project,
+                load_mixer_fixture(version, "").unwrap().project
+            );
+            assert_eq!(loaded.project.mixer.mode, crate::mixer::Mode::LegacyDirect);
+            assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        }
+    }
+
+    #[test]
+    fn file_mixer_keys_refuse_v4_duplicates() {
+        let identity = r#"{"mode":"legacyDirect","tracks":[{"id":0,"name":"Master"}],"nextTrackId":1,"nextInsertId":1,"nextSendId":1}"#;
+        let error = load_mixer_fixture(4, &format!(r#", "mixer":{identity}, "mixer":{identity}"#))
+            .unwrap_err();
+        assert!(
+            matches!(error, LoadError::Corrupt(ref why) if why.contains("duplicate field `mixer`")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn file_mixer_keys_keep_other_known_legacy_keys_strict() {
+        for version in 1..4 {
+            let error =
+                load_mixer_fixture(version, r#", "mixer":null, "mixer":{}, "name":"Other""#)
+                    .unwrap_err();
+            assert!(
+                matches!(error, LoadError::Corrupt(ref why) if why.contains("duplicate field `name`")),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_mixer_keys_refuse_future_header_before_typed_fields() {
+        assert!(matches!(
+            load_mixer_fixture(5, r#", "mixer":false, "mixer":{}, "channels":[[]]"#),
+            Err(LoadError::NewerVersion {
+                found: 5,
+                supported: 4
+            })
+        ));
     }
 
     #[cfg(unix)]
