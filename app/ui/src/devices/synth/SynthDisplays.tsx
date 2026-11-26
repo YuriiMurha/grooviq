@@ -2,6 +2,7 @@ import { useRef, useState, type PointerEvent } from "react";
 import { drawnScale, useBoxSize, useVerticalDrag, type ParamControl } from "../controls/gesture";
 import type { GestureGroup } from "../paramGestures";
 import { quantize, type ParamRange } from "../controls/paramDrag";
+import { zeroDbLabel } from "./filterLabels";
 import { filterDb, lfoWave, randomSteps } from "./waveShapes";
 
 const path = (pts: [number, number][]) => pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`).join("");
@@ -127,15 +128,15 @@ export function FilterDisplay({ type, cutoff, res, drive, envAmount, group }: Fi
               </text>
             );
           })}
-          <text className="dw-axis end" x={w - 4} y={y0 - 3}>
-            0 dB
-          </text>
           <path className="dw-fill" d={`${path(curve)}L${w} ${h}L0 ${h}Z`} />
           <path className="dw-line" d={path(curve)} />
           {sweep !== null && (
             <path className="dw-sweep" d={`M${nx} ${ya}L${sweep - dir * 3} ${ya}M${sweep - dir * 6} ${ya - 3.5}L${sweep} ${ya}L${sweep - dir * 6} ${ya + 3.5}`} />
           )}
           <circle className="dw-node" cx={nx} cy={ny} r={5} />
+          <text className="dw-axis" {...zeroDbLabel(w, h, nx, y0)}>
+            0 dB
+          </text>
         </svg>
       )}
     </div>
