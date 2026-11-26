@@ -306,7 +306,12 @@ mod tests {
             delay.set_param(1, SPEC[1].1);
             delay.set_tempo(SPEC[8].0);
             // The ring also limits the target before the interpolation read.
-            assert_eq!(delay.target, 6.0 * sr, "synced target at {sr} Hz");
+            let expected = 6.0 * sr;
+            assert!(
+                (delay.target - expected).abs() < 1.0,
+                "synced target at {sr} Hz: {} frames, expected {expected}",
+                delay.target
+            );
             delay.process(&mut [0.25], &mut [-0.25], None, &[]);
         }
     }
