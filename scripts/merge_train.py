@@ -11,12 +11,15 @@ import re
 import subprocess
 import sys
 import time
+from urllib.parse import urlencode
 from uuid import uuid4
 
 REPO = "YuriiMurha/grooviq"
 LABEL = "merge-train"
 AUTO_MERGE = "BYPASS risk: GitHub auto-merge is enabled"
 ACTIONS_APP = 15368
+ACTIONS_RUN_URL = f"https://github.com/{REPO}/actions/runs/"
+ACTIONS_JOB_LINK = re.compile(rf"{re.escape(ACTIONS_RUN_URL)}([1-9][0-9]*)(?:/job/([1-9][0-9]*))?")
 REQUIRED = ("rust (macos-latest)", "rust (windows-latest)", "ui")
 SELECTOR = "changes"
 PENDING = {None, "queued", "in_progress", "pending", "requested", "waiting"}
@@ -25,13 +28,18 @@ SHA = re.compile(r"[a-f0-9]{40}")
 ENTRY = re.compile(r"([1-9][0-9]*)=([a-f0-9]{40})")
 MEMBER = re.compile(r"Train-(PR|Suspect): ([1-9][0-9]*) ([a-f0-9]{40})")
 MAIN_REF = "refs/heads/main"
-BATCH_REF = "refs/heads/merge-train/batch"
+BATCH_BRANCH = "merge-train/batch"
+BATCH_REF = f"refs/heads/{BATCH_BRANCH}"
 AGENT_LABEL = "io.github.yuriimurha.grooviq.merge-train"
 ATTENDED_TRAIN = ("Run make merge-train-agent-disable, then make merge-train ORDER=… with approved heads, "
                   "then make merge-train-order ORDER=… with the heads still approved, "
                   "make merge-train-agent-enable, and make merge-train-agent-resume.")
 FAILED_TRAIN_GUIDANCE = (ATTENDED_TRAIN + " To drop suspects from the order, use make merge-train-order, "
                          "then make merge-train-agent-resume.")
+E2E_READ_ERRORS = (OSError, subprocess.SubprocessError, ValueError)
+E2E_HOLD_GUIDANCE = ("Review the archived evidence. Repair and requalify the affected heads, "
+                     "or record a scoped infrastructure false alarm. "
+                     f"Then use the attended hold workflow. {ATTENDED_TRAIN}")
 
 
 class TickDeadline(RuntimeError):
@@ -354,6 +362,17 @@ def merge_batch(repo, git, active, batch, order, mismatch_file, *, agent_deadlin
             raise RuntimeError(f"Held #{number} before merge: {reason}.")
     git.verify_chain(active, batch)
     print(f"Tested batch {active}")
+    if agent_deadline is not None:
+        check_deadline(agent_deadline, "checking aggregate e2e")
+        # This is a snapshot. Failures published after the lookup can escape detection.
+        try:
+            failed_run = repo.failed_e2e_run(active)
+        except E2E_READ_ERRORS:
+            print(f"Could not read advisory aggregate e2e evidence for batch {active}.", file=sys.stderr)
+            failed_run = None
+        if failed_run:
+            raise RuntimeError(f"Held batch {active}: aggregate e2e reported failure at {failed_run}\n"
+                               f"{E2E_HOLD_GUIDANCE}")
     merged = []
     expected_main = batch.base
     try:
@@ -501,25 +520,81 @@ class GitHub:
         if len(contexts) != len(REQUIRED) or set(contexts) != {(name, ACTIONS_APP) for name in REQUIRED}:
             raise RuntimeError("Main's required-check policy must match the three GitHub Actions checks.")
 
-    def checks(self, sha):
+    def check_runs(self, sha):
         pages = self.api(f"commits/{sha}/check-runs?filter=latest&per_page=100", paginate=True)
-        checks = {}
         for page in pages:
-            for check in page["check_runs"]:
-                name = check["name"]
-                if ((name in REQUIRED or name == SELECTOR) and check["head_sha"] == sha
-                        and (check.get("app") or {}).get("id") == ACTIONS_APP):
-                    if name in checks:
-                        if name != SELECTOR:
-                            raise RuntimeError(f"Ambiguous required check {name} on {sha}.")
-                        checks[name] = None, ""
-                        continue
-                    state = check["conclusion"] if check["status"] == "completed" else check["status"]
-                    if state is None and name != SELECTOR:
-                        raise RuntimeError(f"Missing conclusion for completed check {name} on {sha}.")
-                    url = check.get("details_url") or check.get("html_url") or ""
-                    checks[name] = state, url.split("/job/", 1)[0]
+            yield from page["check_runs"]
+
+    def checks(self, sha):
+        checks = {}
+        for check in self.check_runs(sha):
+            name = check["name"]
+            if ((name in REQUIRED or name == SELECTOR) and check["head_sha"] == sha
+                    and (check.get("app") or {}).get("id") == ACTIONS_APP):
+                if name in checks:
+                    if name != SELECTOR:
+                        raise RuntimeError(f"Ambiguous required check {name} on {sha}.")
+                    checks[name] = None, ""
+                    continue
+                state = check["conclusion"] if check["status"] == "completed" else check["status"]
+                if state is None and name != SELECTOR:
+                    raise RuntimeError(f"Missing conclusion for completed check {name} on {sha}.")
+                url = check.get("details_url") or check.get("html_url") or ""
+                checks[name] = state, url.split("/job/", 1)[0]
         return checks
+
+    def failed_e2e_run(self, sha):
+        candidates = set()
+        for check in self.check_runs(sha):
+            if (check.get("name") != "e2e" or check.get("head_sha") != sha
+                    or (check.get("app") or {}).get("id") != ACTIONS_APP
+                    or check.get("status") != "completed" or check.get("conclusion") != "failure"):
+                continue
+            link = ACTIONS_JOB_LINK.fullmatch(check.get("details_url") or "")
+            if link and (link[2] is None or int(link[2]) == check.get("id")):
+                candidates.add((int(link[1]), (check.get("check_suite") or {}).get("id"), check.get("id")))
+        if not candidates:
+            return None
+
+        def read_confirmation(path, run_ids):
+            try:
+                return self.api(path)
+            except E2E_READ_ERRORS as error:
+                # Keep the observed failure in the stop record. Raw transport errors
+                # would send the agent through its transient-network retry path.
+                links = ", ".join(f"{ACTIONS_RUN_URL}{run_id}" for run_id in sorted(run_ids))
+                raise RuntimeError(
+                    f"Held batch {sha}: aggregate e2e reported failure at {links}; "
+                    f"current-attempt verification unavailable.\n{E2E_HOLD_GUIDANCE}"
+                ) from error
+
+        # The Checks API can expose history for the same SHA. Confirm the suite and latest job
+        # against the batch push's CI workflow. An ambiguous push or job is insufficient evidence.
+        query = urlencode({"branch": BATCH_BRANCH, "event": "push", "head_sha": sha, "per_page": 1})
+        runs = read_confirmation(f"actions/workflows/ci.yml/runs?{query}",
+                                 {run_id for run_id, _, _ in candidates})
+        if runs["total_count"] != 1 or len(runs["workflow_runs"]) != 1:
+            return None
+        run = runs["workflow_runs"][0]
+        if (run.get("head_sha") != sha or run.get("head_branch") != BATCH_BRANCH
+                or run.get("event") != "push" or run.get("path") != ".github/workflows/ci.yml"):
+            return None
+        run_id, suite_id, attempt = run["id"], run["check_suite_id"], run["run_attempt"]
+        if not any(candidate[:2] == (run_id, suite_id) for candidate in candidates):
+            return None
+
+        jobs = read_confirmation(f"actions/runs/{run_id}/jobs?filter=latest&per_page=100", (run_id,))
+        if jobs["total_count"] != len(jobs["jobs"]):
+            return None
+        aggregate = [job for job in jobs["jobs"] if job.get("name") == "e2e"]
+        if len(aggregate) != 1:
+            return None
+        job = aggregate[0]
+        if ((run_id, suite_id, job.get("id")) in candidates and job.get("head_sha") == sha
+                and job.get("run_id") == run_id and job.get("run_attempt") == attempt
+                and job.get("status") == "completed" and job.get("conclusion") == "failure"):
+            return f"{ACTIONS_RUN_URL}{run_id}"
+        return None
 
     def reject(self, number, sha, reason):
         if self.hold_rejections:
