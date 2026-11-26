@@ -61,7 +61,7 @@ def locked(path):
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise LockBusy(path) from error
-        yield
+        yield handle
 
 
 def place(stage, app, previous, verify):
@@ -297,7 +297,8 @@ class Refresh:
             start = time.monotonic()
             with safe_path(self.ops / 'refresh-build.log').open('w') as log:
                 bundle = self.build(revision, log)
-            self.run(['codesign', '--force', '--sign', '-', '--timestamp=none', str(bundle)])
+            # Tauri ad-hoc signs the bundle with the hardened runtime (tauri.conf.json), as in
+            # release. Re-signing here would drop the runtime, so verify Tauri's signature as is.
             self.verify(bundle)
             expected = manifest(bundle)
             stage = self.app.parent / ('.Grooviq-quality-stage-' + uuid.uuid4().hex + '.app')

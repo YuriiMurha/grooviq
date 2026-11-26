@@ -74,6 +74,7 @@ function rig() {
     return { status: "applied", generation: 2, revision: 10, request: null, createdIds: [20], changed: true, reload: false, message: null, warnings: [] };
   };
   let audioImport: PlaylistAdapter["importAudio"] = async () => { throw new Error("Unexpected import"); };
+  let cancelAudio: PlaylistAdapter["cancelAudio"] = async () => { throw new Error("Unexpected cancel"); };
   let read = async (): Promise<ArrangementPage> => { effects.push("read-arrangement"); return snapshot; };
   let sources = async () => ({ generation: snapshot.generation, arrangementRevision: snapshot.revision,
     patterns: [{ id: 7, name: "Clip source", revision: 1, steps: 16 }, { id: 8, name: "Other pattern", revision: 1, steps: 4 }] });
@@ -92,7 +93,8 @@ function rig() {
     seek: (stamp, tick) => seekNative(stamp, tick),
     readPage: () => read(), edit: (_stamp, ops) => invoke(ops),
     selectPattern: (base, pattern) => select(base, pattern),
-    importAudio: (stamp, input) => audioImport(stamp, input), relinkAudio: async () => { throw new Error("Unexpected relink"); },
+    importAudio: (stamp, input, ticket) => audioImport(stamp, input, ticket), relinkAudio: async () => { throw new Error("Unexpected relink"); },
+    cancelAudio: (ticket: number) => cancelAudio(ticket),
     readProject: async () => { effects.push("read-project"); return project(); },
     publishProject: (_view, at) => { if (!current || at.generation !== 2) return false; effects.push("publish-project"); return true; },
     changed: state => { effects.push("publish-controller"); views.push(state); },
@@ -101,6 +103,7 @@ function rig() {
   const controller = new PlaylistController(adapter);
   cleanups.push(registerSettlement(() => queue.flush()), registerSettlement(controller.settle));
   return { controller, effects, views, audioImport: (fn: typeof audioImport) => { audioImport = fn; }, readQueue: (fn: typeof readQueue) => { readQueue = fn; }, seekNative: (fn: typeof seekNative) => { seekNative = fn; }, current: (v: boolean) => { current = v; }, blocked: (v: boolean) => { blocked = v; },
+    cancelAudio: (fn: typeof cancelAudio) => { cancelAudio = fn; },
     seekBlocked: (v: boolean) => { seekBlocked = v; },
     invoke: (fn: typeof invoke) => { invoke = fn; }, read: (fn: typeof read) => { read = fn; },
     sources: (fn: typeof sources) => { sources = fn; }, replaceSnapshot: (v: ArrangementPage) => { snapshot = v; },
@@ -393,6 +396,197 @@ describe("playlist audio admission and publication", () => {
   const input = { track: 11, startTick: 960, name: "Break", path: "/qa/Break.wav" };
   const applied: ArrangementReply = { status: "applied", generation: 2, revision: 10,
     request: 1, createdIds: [20, 21], changed: true, reload: false, message: null, warnings: [] };
+  const cancelled: ArrangementReply = { ...applied, status: "refused", revision: 9, changed: false,
+    createdIds: [], message: "Media preparation failed: Cancelled", reload: true };
+
+  it.each([true, false])("keeps the import pending until its own reply when ticket cancellation returns %s", async accepted => {
+    const r = rig();
+    const decode = deferred<ArrangementReply>();
+    const invoked = deferred<number>();
+    const calls: number[] = [];
+    await r.controller.reload();
+    const before = r.controller.state.snapshot!;
+    r.audioImport((_stamp, _input, ticket) => { invoked.resolve(ticket); return decode.promise; });
+    r.cancelAudio(async ticket => { calls.push(ticket); return accepted; });
+    const result = r.controller.importAudio(before, input);
+    const ticket = await invoked.promise;
+    expect(Number.isSafeInteger(ticket) && ticket > 0).toBe(true);
+    await r.controller.cancelMedia();
+    expect(calls).toEqual([ticket]);
+    expect(r.controller.state).toMatchObject({ snapshot: before, media: "import", cancelRequested: true });
+    expect(r.controller.unsettled()).toBe(true);
+    decode.resolve(cancelled);
+    expect(await result).toEqual({ status: "cancelled", reply: cancelled });
+    expect(r.controller.state).toMatchObject({ snapshot: before, media: null, cancelRequested: false,
+      cancelledMedia: "import", message: null, requiresRefresh: false });
+    expect(r.effects).not.toContain("publish-project");
+    expect(await r.controller.settleMedia()).toBe(true);
+  });
+
+  it("keeps refresh guidance when a cancelled reply reports a newer revision", async () => {
+    const r = rig();
+    const decode = deferred<ArrangementReply>();
+    const invoked = deferred<void>();
+    await r.controller.reload();
+    const snapshot = r.controller.state.snapshot!;
+    r.audioImport(() => { invoked.resolve(); return decode.promise; });
+    r.cancelAudio(async () => true);
+    const result = r.controller.importAudio(snapshot, input);
+    await invoked.promise;
+    await r.controller.cancelMedia();
+    const reply = { ...cancelled, revision: snapshot.revision + 1 };
+    decode.resolve(reply);
+    expect(await result).toEqual({ status: "cancelled", reply });
+    expect(r.controller.state).toMatchObject({ snapshot, cancelledMedia: "import", requiresRefresh: true,
+      message: expect.stringMatching(/refresh the playlist/i) });
+    expect(await r.controller.settleMedia()).toBe(false);
+  });
+
+  it.each([
+    { cancelRequested: false, message: "Older or cancelled media request" },
+    { cancelRequested: true, message: "Decode failed" },
+  ])("shows a refusal with reason '$message' when user cancel is $cancelRequested", async ({ cancelRequested, message }) => {
+    const r = rig();
+    const decode = deferred<ArrangementReply>();
+    const invoked = deferred<void>();
+    await r.controller.reload();
+    r.audioImport(() => { invoked.resolve(); return decode.promise; });
+    r.cancelAudio(async () => true);
+    const result = r.controller.importAudio(r.controller.state.snapshot!, input);
+    await invoked.promise;
+    if (cancelRequested) await r.controller.cancelMedia();
+    const reply = { ...cancelled, message };
+    decode.resolve(reply);
+    expect(await result).toEqual({ status: "refused", reply });
+    expect(r.controller.state).toMatchObject({ cancelledMedia: null, message, requiresRefresh: false });
+  });
+
+  it("allows retrying cancellation after the live cancel command rejects", async () => {
+    const r = rig();
+    const decode = deferred<ArrangementReply>();
+    const invoked = deferred<number>();
+    const attempts: number[] = [];
+    await r.controller.reload();
+    r.audioImport((_stamp, _input, ticket) => { invoked.resolve(ticket); return decode.promise; });
+    r.cancelAudio(async ticket => {
+      attempts.push(ticket);
+      if (attempts.length === 1) throw new Error("Lost connection");
+      return true;
+    });
+    const result = r.controller.importAudio(r.controller.state.snapshot!, input);
+    const ticket = await invoked.promise;
+    await r.controller.cancelMedia();
+    expect(r.controller.state).toMatchObject({ media: "import", cancelRequested: false });
+    await r.controller.cancelMedia();
+    expect(attempts).toEqual([ticket, ticket]);
+    decode.resolve(cancelled);
+    expect(await result).toEqual({ status: "cancelled", reply: cancelled });
+  });
+
+  it.each(["unsettled", "stale"] as const)("reports cancellation when the pre-send check would be %s", async status => {
+    const r = rig();
+    const settlement = deferred<boolean>();
+    const settling = deferred<void>();
+    let imports = 0;
+    await r.controller.reload();
+    const snapshot = r.controller.state.snapshot!;
+    cleanups.push(registerSettlement(() => { settling.resolve(); return settlement.promise; }));
+    r.audioImport(async () => { imports++; return applied; });
+    r.cancelAudio(async () => false);
+    const result = r.controller.importAudio(snapshot, input);
+    await settling.promise;
+    await r.controller.cancelMedia();
+    if (status === "stale") {
+      r.replaceSnapshot({ ...page(), revision: snapshot.revision + 1 });
+      await r.controller.reload();
+    }
+    settlement.resolve(status === "stale");
+    expect(await result).toEqual({ status: "cancelled" });
+    expect(imports).toBe(0);
+    expect(r.controller.state).toMatchObject({ media: null, cancelledMedia: "import", message: null });
+  });
+
+  it("keeps a native-published edit when cancellation loses the race", async () => {
+    const r = rig();
+    const decode = deferred<ArrangementReply>();
+    const invoked = deferred<number>();
+    const calls: number[] = [];
+    await r.controller.reload();
+    r.audioImport((_stamp, _input, ticket) => { invoked.resolve(ticket); return decode.promise; });
+    r.cancelAudio(async ticket => { calls.push(ticket); return false; });
+    const result = r.controller.importAudio(r.controller.state.snapshot!, input);
+    const ticket = await invoked.promise;
+    r.replaceSnapshot({ ...page(), revision: 10 });
+    await r.controller.cancelMedia();
+    decode.resolve(applied);
+    expect(await result).toEqual({ status: "applied", reply: applied });
+    const after = r.controller.state;
+    await r.controller.cancelMedia();
+    expect(calls).toEqual([ticket]);
+    expect(r.controller.state).toBe(after);
+    expect(after).toMatchObject({ snapshot: { revision: 10 }, media: null, cancelledMedia: null, message: null });
+    expect(r.effects.filter(effect => effect === "publish-project")).toHaveLength(1);
+  });
+
+  it("sends one cancel for two requests, even before the import command starts", async () => {
+    const r = rig();
+    const decode = deferred<ArrangementReply>();
+    const invoked = deferred<number>();
+    const ack = deferred<boolean>();
+    const commands: [string, number][] = [];
+    await r.controller.reload();
+    r.audioImport((_stamp, _input, ticket) => { commands.push(["import", ticket]); invoked.resolve(ticket); return decode.promise; });
+    r.cancelAudio(ticket => { commands.push(["cancel", ticket]); return ack.promise; });
+    const result = r.controller.importAudio(r.controller.state.snapshot!, input);
+    const first = r.controller.cancelMedia();
+    const second = r.controller.cancelMedia();
+    const ticket = await invoked.promise;
+    expect(commands).toEqual([["cancel", ticket], ["import", ticket]]);
+    ack.resolve(false);
+    await Promise.all([first, second]);
+    await r.controller.cancelMedia();
+    expect(commands).toEqual([["cancel", ticket], ["import", ticket]]);
+    decode.resolve({ ...cancelled, message: "Media ticket cancelled" });
+    expect((await result).status).toBe("cancelled");
+  });
+
+  it("ignores a retired import and a late cancel rejection while the next project is importing", async () => {
+    const r = rig();
+    const oldReply = deferred<ArrangementReply>();
+    const oldInvoked = deferred<void>();
+    const oldCancel = deferred<boolean>();
+    const nextReply = deferred<ArrangementReply>();
+    const nextCancel = deferred<boolean>();
+    const cancelCalls: number[] = [];
+    await r.controller.reload();
+    r.audioImport(() => { oldInvoked.resolve(); return oldReply.promise; });
+    r.cancelAudio(ticket => { cancelCalls.push(ticket); return oldCancel.promise; });
+    const old = r.controller.importAudio(r.controller.state.snapshot!, input);
+    await oldInvoked.promise;
+    const cancellingOld = r.controller.cancelMedia();
+    r.current(false);
+    r.controller.retire();
+    r.controller.replaceMedia();
+    expect(await r.controller.settleMedia()).toBe(true);
+    r.current(true);
+    await r.controller.reload();
+    r.audioImport(() => nextReply.promise);
+    r.cancelAudio(ticket => { cancelCalls.push(ticket); return nextCancel.promise; });
+    const next = r.controller.importAudio(r.controller.state.snapshot!, input);
+    const cancellingNext = r.controller.cancelMedia();
+    const state = r.controller.state;
+    oldReply.resolve(cancelled);
+    oldCancel.reject(new Error("Lost connection"));
+    expect(await old).toEqual({ status: "stale" });
+    await cancellingOld;
+    expect(r.controller.state).toBe(state);
+    expect(cancelCalls).toHaveLength(2);
+    expect(cancelCalls[0]).not.toBe(cancelCalls[1]);
+    nextCancel.resolve(true);
+    nextReply.resolve(cancelled);
+    await cancellingNext;
+    expect((await next).status).toBe("cancelled");
+  });
 
   it("admits only one decode, keeps Save waiting and publishes the accepted project", async () => {
     const r = rig();

@@ -4,7 +4,7 @@
 // `invoke` would call it.
 import type { Page } from "@playwright/test";
 import { expect, generatedWav, project, test, type Mock } from "./fixture";
-import type { ArrangementPage, ArrangementReply } from "../src/api/arrangement";
+import type { ArrangementOperation, ArrangementPage, ArrangementReply, AudioContent } from "../src/api/arrangement";
 import { decodeWaveform } from "../src/api/waveform";
 import type { MockNote } from "./mockTauri";
 import type { ProjectView } from "../src/api/project";
@@ -320,6 +320,20 @@ test.describe("arrangement media contract", () => {
   const importArgs = (state: ArrangementPage, audioPath = path) => ({
     ...stamp(state), startTick: 240, track: 1, name: clipName, path: audioPath, ticket: 12,
   });
+  const edit = (page: Page, state: ArrangementPage, ...ops: ArrangementOperation[]) =>
+    call<ArrangementReply>(page, "arrangement_edit", { ...stamp(state), editsJson: JSON.stringify(ops) });
+  const importClip = async (page: Page, mock: Mock, frames = 8) => {
+    await mock.registerAudio(path, generatedWav({ samples: Array<number>(frames).fill(0) }));
+    expect(await call<ArrangementReply>(page, "audio_import", importArgs(await view(page))))
+      .toMatchObject({ status: "applied", createdIds: [2, 3] });
+    return view(page);
+  };
+  const relinkClip = async (page: Page, mock: Mock, state: ArrangementPage) => {
+    await mock.registerAudio(replacementPath, generatedWav({ rate: 48000, samples: [0, 0, 0] }));
+    expect(await call(page, "audio_relink", { ...stamp(state), asset: 2, path: replacementPath, ticket: 27 }))
+      .toMatchObject({ status: "applied" });
+    return view(page);
+  };
   test.use({ seed: { project: initial }, deviceScaleFactor: 2 });
 
   test("native file drops broadcast platform-specific enter, over and drop coordinates", async ({ app, mock, browserName }) => {
@@ -554,6 +568,92 @@ test.describe("arrangement media contract", () => {
     const waveform = decodeWaveform(Uint8Array.from(bytes).buffer);
     expect(waveform).toMatchObject({ generation: 2n, request: 41n, asset: 2, frames: 8, rate: 32000 });
     expect(Array.from(waveform.peaks)).toEqual([-1, 32767 / 32768, -1, 32767 / 32768]);
+  });
+
+  test("audio batch moves, copies, resizes, renames and mutes; history and reopen keep the batch", async ({ app, mock }) => {
+    const imported = await importClip(app, mock);
+    // arrangement_edit.rs:309–331,456–471,533–548 and session.rs:998–1039.
+    const content: AudioContent = { type: "audio", asset: 2, sourceStart: 1, sourceEnd: 7,
+      gain: 2, reverse: true, fadeIn: 4, fadeOut: 5 };
+    expect(await edit(app, imported,
+      { kind: "createTrack", name: "Edits", color: 1 },
+      { kind: "move", clip: 3, track: 4, startTick: 480 },
+      { kind: "copy", clip: 3, track: 1, startTick: 960 },
+      // The candidate is validated after all operations, and native decodes gain as f32.
+      { kind: "resize", clip: 5, startTick: 961, content: { ...content, sourceEnd: 9 } },
+      { kind: "resize", clip: 5, startTick: 961, content: { ...content, gain: 2 + 1e-8 } },
+      { kind: "setClip", clip: 5, name: "Edited", muted: true },
+    )).toMatchObject({ status: "applied", revision: imported.revision + 1, createdIds: [4, 5] });
+    const edited = await view(app);
+    expect(edited.audioAssets).toEqual(imported.audioAssets);
+    expect(edited.clips).toEqual([
+      { ...imported.clips[0], track: 4, startTick: 480 },
+      { id: 5, track: 1, name: "Edited", startTick: 961, muted: true, content },
+    ]);
+    expect(await call(app, "arrangement_history", { ...stamp(edited), undo: true }))
+      .toMatchObject({ status: "applied", effect: { kind: "arrangement" } });
+    const undone = await view(app);
+    expect(undone).toEqual({ ...imported, revision: edited.revision + 1 });
+    expect(await call(app, "arrangement_history", { ...stamp(undone), undo: false }))
+      .toMatchObject({ status: "applied", effect: { kind: "arrangement" } });
+    expect(await view(app)).toEqual({ ...edited, revision: undone.revision + 1 });
+    expect(await edit(app, await view(app), { kind: "deleteClip", clip: 3 })).toMatchObject({ status: "applied" });
+    const saved = await view(app);
+    expect(saved.clips).toEqual([edited.clips[1]]);
+    expect(saved.audioAssets).toEqual(imported.audioAssets);
+    await call(app, "project_save_as", { path: savePath });
+    await call(app, "project_new");
+    await mock.eval(`(m) => m.files.delete(${JSON.stringify(path)})`);
+    await call(app, "project_open", { path: savePath });
+    expect(await view(app)).toEqual({ ...saved, generation: 2, revision: 0, audioAssets: [
+      { ...saved.audioAssets[0], sample: { path: "generated.wav", file: "samples/1-generated.wav" } },
+    ] });
+  });
+
+  test("audio resize validates frame geometry and the tick duration at project tempo", async ({ app, mock }) => {
+    const relinked = await relinkClip(app, mock, await importClip(app, mock, 100));
+    // arrangement.rs:424–476,544–549. At 120 BPM, 60 frames at 32 kHz occupy four ticks.
+    const startTick = 38_399_996;
+    const content: AudioContent = { type: "audio", asset: 2, sourceStart: 40, sourceEnd: 100,
+      gain: 0, reverse: false, fadeIn: 60, fadeOut: 60 };
+    expect(await edit(app, relinked, { kind: "resize", clip: 3, startTick, content }))
+      .toMatchObject({ status: "applied" });
+    const resized = await view(app);
+    expect(resized.clips).toEqual([{ ...relinked.clips[0], startTick, content }]);
+    const invalidBounds = `Clip 3 (${clipName}): invalid track/source reference, bounds or automation value.`;
+    expect(await edit(app, resized, { kind: "resize", clip: 3, startTick: startTick + 1, content }))
+      .toMatchObject({ ...stamp(resized), status: "refused", message: invalidBounds });
+    for (const change of [
+      { sourceEnd: 101 }, { sourceStart: 100, fadeIn: 0, fadeOut: 0 },
+      { fadeIn: 61 }, { fadeOut: 61 }, { gain: 2.1 }, { gain: -0.1 },
+      { sourceStart: 0 }, // 100 frames occupy six ticks and cross the song boundary.
+    ]) {
+      expect(await edit(app, resized, { kind: "resize", clip: 3, startTick, content: { ...content, ...change } }))
+        .toMatchObject({ ...stamp(resized), status: "refused", message: invalidBounds });
+    }
+    expect(await view(app)).toEqual(resized);
+  });
+
+  test("audio slice uses an explicit frame partition and keeps only outer fades", async ({ app, mock }) => {
+    const relinked = await relinkClip(app, mock, await importClip(app, mock, 100));
+    // arrangement_edit.rs:338–343,410–454. At 120 BPM and the saved 32 kHz, 44 frames round up to three ticks.
+    const content: AudioContent = { type: "audio", asset: 2, sourceStart: 7, sourceEnd: 100,
+      gain: 0.75, reverse: false, fadeIn: 50, fadeOut: 70 };
+    expect(await edit(app, relinked, { kind: "resize", clip: 3, startTick: 240, content }))
+      .toMatchObject({ status: "applied" });
+    const resized = await view(app);
+    const slice = (tick: number, audioFirstFrames: number | null) =>
+      edit(app, resized, { kind: "slice", clip: 3, tick, audioFirstFrames });
+    expect(await slice(240, 44)).toMatchObject({ status: "refused", message: "Slice must be inside clip" });
+    expect(await slice(243, null)).toMatchObject({ status: "refused", message: "Audio slice requires explicit source-frame count" });
+    expect(await slice(246, 93)).toMatchObject({ status: "refused", message: "Audio cut must partition source frames" });
+    expect(await slice(243, 60)).toMatchObject({ status: "refused", message: expect.stringContaining("Audio cut tick must equal start") });
+    expect(await view(app)).toEqual(resized);
+    expect(await slice(243, 44)).toMatchObject({ status: "applied", createdIds: [4] });
+    const [left, right] = (await view(app)).clips;
+    expect(left).toEqual({ ...resized.clips[0], content: { ...content, sourceEnd: 51, fadeIn: 44, fadeOut: 0 } });
+    expect(right).toEqual({ ...resized.clips[0], id: 4, startTick: 243,
+      content: { ...content, sourceStart: 51, fadeIn: 0, fadeOut: 49 } });
   });
 
   test("a replacement cancels a request whose worker has not returned", async ({ app, mock }) => {
