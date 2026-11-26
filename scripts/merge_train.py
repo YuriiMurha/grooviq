@@ -27,6 +27,9 @@ MEMBER = re.compile(r"Train-(PR|Suspect): ([1-9][0-9]*) ([a-f0-9]{40})")
 MAIN_REF = "refs/heads/main"
 BATCH_REF = "refs/heads/merge-train/batch"
 AGENT_LABEL = "io.github.yuriimurha.grooviq.merge-train"
+ATTENDED_TRAIN = ("Run make merge-train-agent-disable, then make merge-train ORDER=… with approved heads, "
+                  "then make merge-train-agent-enable to restore unattended ticks.")
+FAILED_TRAIN_GUIDANCE = ATTENDED_TRAIN + " To drop suspects from the order, use make merge-train-order."
 
 
 class TickDeadline(RuntimeError):
@@ -431,7 +434,8 @@ def tick(repo, git, order, limit=4, *, mismatch_file=None, ack_mismatch=None, ag
             failures, cancelled, pending = check_status(repo, active, scope="batch")
             if failures:
                 if agent_deadline is not None:
-                    raise RuntimeError(f"Held batch {active}: failed required checks ({failures}).")
+                    raise RuntimeError(f"Held batch {active}: failed required checks ({failures}). "
+                                       f"{FAILED_TRAIN_GUIDANCE}")
                 main_hold = main_check_hold(repo, base)
                 if main_hold:
                     print(f"Waiting on batch {active}: {main_hold}.")
@@ -517,7 +521,8 @@ class GitHub:
 
     def reject(self, number, sha, reason):
         if self.hold_rejections:
-            raise RuntimeError(f"Held #{number}: {reason}.")
+            raise RuntimeError(f"Held #{number}: {reason}. {FAILED_TRAIN_GUIDANCE}")
+
         def still_current():
             pr = self.pull(number)
             return pr["state"] == "open" and pr["head"]["sha"] == sha and labelled(pr)
@@ -671,7 +676,8 @@ def main():
                 disabled = home / "Library/Application Support/Grooviq Ops/merge-train/disabled"
                 if plist.is_file() and not disabled.exists():
                     raise RuntimeError("The merge-train agent owns the approved order. "
-                                       "Use make merge-train-order and make merge-train-agent-tick.")
+                                       "Use make merge-train-order and make merge-train-agent-tick. "
+                                       f"For an attended run: {ATTENDED_TRAIN}")
             git = Git(hooks=not unattended, agent_deadline=args.agent_deadline)
             tick(GitHub(hold_rejections=unattended), git, order, args.batch,
                  mismatch_file=Path(common_dir) / "merge-train-mismatch",

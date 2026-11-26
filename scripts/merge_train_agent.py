@@ -55,7 +55,7 @@ STOP_INSTRUCTIONS = "\n".join((
     "launchctl disable gui/$(id -u)/" + LABEL,
     "launchctl bootout gui/$(id -u)/" + LABEL,
 ))
-WRITE_OUTPUT = re.compile(r"^(?:Merged|Pushed|Removed|Stopped at)\b")
+WRITE_OUTPUT = re.compile(r"^(?:Merged|Pushed|Removed|Stopped at|Squash attempt)\b")
 WRITE_ERROR = re.compile(
     r"\b(?:Git push|GitHub (?:POST|PUT|PATCH|DELETE)|Stopped at|Merged so far)\b", re.IGNORECASE
 )
@@ -78,12 +78,15 @@ CI_RUN_COMMAND = ("gh", "run", "list", "--repo", REPO, "--branch", BATCH_BRANCH,
 NETWORK_FAILURE = re.compile(
     r"\bHTTP(?:/\d+(?:\.\d+)?)?\s+5\d\d\b|"
     r"failed to connect|error connecting|connection (?:error|refused|reset|timed out|closed|aborted)|"
-    r"could not resolve host|network is unreachable|no such host|i/o timeout|TLS handshake timeout",
+    r"could not resolve host|network is unreachable|no such host|i/o timeout|TLS handshake timeout|"
+    r"returned error: 5\d\d\b|operation timed out|ssl_error_syscall|ssl_connect|not closed cleanly|"
+    r"early eof|unexpected disconnect|no route to host|host is down",
     re.IGNORECASE,
 )
 
 AUTH_FAILURE = re.compile(
-    r"permission denied|authentication failed|could not read username|terminal prompts disabled",
+    r"permission denied|authentication failed|could not read username|terminal prompts disabled|"
+    r"(?:returned error:\s*|\bHTTP(?:/\d+(?:\.\d+)?)?\s+)(?:401|403)\b",
     re.IGNORECASE,
 )
 SOURCE_CHANGED = "merge-train scripts changed on main since enable; re-run make merge-train-agent-enable"
@@ -200,16 +203,11 @@ class Agent:
         executable = Path(sys.executable)
         self.python = str(executable if any(executable.is_relative_to(root) for root in HOMEBREW_OPT)
                           else executable.resolve())
-        self.env = dict(os.environ, DEVELOPER_DIR="/Library/Developer/CommandLineTools",
+        self.env = {name: value for name, value in os.environ.items()
+                    if name in ("TMPDIR", "LANG", "USER") or name.startswith("GH_")}
+        self.env.update(HOME=str(self.home), DEVELOPER_DIR="/Library/Developer/CommandLineTools",
                         PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                         GIT_TERMINAL_PROMPT="0")
-        # The working directory and its Git linkage select the repo for every child.
-        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-                     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                     "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "GIT_CONFIG"):
-            self.env.pop(name, None)
-        self.env = {name: value for name, value in self.env.items()
-                    if not name.startswith(("PYTHON", "GIT_CONFIG_"))}
 
     def git_allowed(self, args):
         # Validate caller arguments before adding trusted global Git options.
@@ -234,8 +232,8 @@ class Agent:
     def git(self, *args):
         if not self.git_allowed(args):
             raise RuntimeError("Git command is not allowed in the merge-train agent.")
-        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(self.repo), *args],
-                              env=self.env, check=True, capture_output=True, timeout=90).stdout
+        command = ["git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-C", str(self.repo)]
+        return subprocess.run([*command, *args], env=self.env, check=True, capture_output=True, timeout=90).stdout
 
     def refresh_main(self):
         fetch = self.git("remote", "get-url", "origin").decode().strip()
@@ -269,7 +267,14 @@ class Agent:
         interrupted = False
         added = False
         try:
-            script.write_bytes(self.git("show", f"{revision}:scripts/merge_train.py"))
+            source = f"{revision}:scripts/merge_train.py"
+            blob = self.git("rev-parse", source).decode().strip()
+            raw = self.git("show", source)
+            # Git hashes a blob's type and byte count along with its contents.
+            digest = hashlib.sha1(f"blob {len(raw)}\0".encode("ascii") + raw).hexdigest()
+            if digest != blob:
+                raise RuntimeError("Train script bytes do not match the verified blob.")
+            script.write_bytes(raw)
             self.git(*ADD_WORKTREE, str(worktree), revision)
             added = True
             yield worktree, script
@@ -307,7 +312,9 @@ class Agent:
         stdout, stderr = read_tick_output(root)
         if timed_out:
             raise subprocess.TimeoutExpired(args, TICK_TIMEOUT + TICK_GRACE, output=stdout, stderr=stderr)
-        result = 124 if time.monotonic() >= deadline else process.returncode
+        result = process.returncode
+        if result >= 0 and time.monotonic() >= deadline:
+            result = 124
         return subprocess.CompletedProcess(args, result, stdout, stderr)
 
     def set_order(self, raw):
@@ -446,7 +453,7 @@ class Agent:
         if row["landed_tree"] and row["tested_tree"]:
             row["match"] = row["landed_tree"] == row["tested_tree"]
             output = record["stdout"] + record["stderr"]
-            partial = record.get("timed_out") or any(
+            partial = record.get("timed_out") or record["exit_code"] < 0 or any(
                 "Stopped at #" in line or line.startswith(("Recovered landed prefix", "Unconfirmed squash"))
                 for line in output
             )
@@ -480,7 +487,11 @@ class Agent:
                     bounded["reason"] = [line[:384] for line in record["reason"][:20]]
                 if "agent_error" in record:
                     bounded["agent_error"] = record["agent_error"][:1024]
-                line = json.dumps(dict(bounded, output_truncated=True)) + "\n"
+                bounded["output_truncated"] = True
+                line = json.dumps(bounded) + "\n"
+                while len(line.encode("utf-8")) > TICK_LINE_BYTES and bounded.get("reason"):
+                    bounded["reason"].pop()
+                    line = json.dumps(bounded) + "\n"
             lines.append(line)
             atomic_text(path, "".join(lines))
         finally:
@@ -581,8 +592,8 @@ class Agent:
         except FetchFailed as error:
             cause = error.__cause__
             detail = os.fsdecode(getattr(cause, "stderr", "") or str(error))
-            network = (not AUTH_FAILURE.search(detail)
-                       and (isinstance(cause, subprocess.TimeoutExpired) or bool(NETWORK_FAILURE.search(detail))))
+            # This fetch has made no train writes. Bound retries for unknown transport errors too.
+            network = not AUTH_FAILURE.search(detail)
             status = self.record_result(record, "pre-train fetch", 1, "", detail, network=network)
             return {"status": status, "exit_code": 1, "log": str(self.log)}
         try:
@@ -599,16 +610,12 @@ class Agent:
             if os.path.lexists(self.kill_switch):
                 record.update(status=STOP_SKIP, exit_code=0)
                 return {"status": STOP_SKIP, "exit_code": 0}
-            hard_timeout = False
             try:
                 # Keep the scheduler lock held until an orphaned train exits.
                 result = self.run_tick(worktree, script, entries, batch, lock_fd=lock_fd)
             except subprocess.TimeoutExpired as error:
-                hard_timeout = True
                 result = subprocess.CompletedProcess(error.cmd, 124, error.stdout, error.stderr)
-            stdout, stderr = result.stdout or "", result.stderr or ""
-            if hard_timeout:
-                stdout, stderr = self.reconcile_landing(stdout, stderr)
+            stdout, stderr = self.reconcile_landing(result.stdout or "", result.stderr or "")
             if show_output:
                 print(stdout, end="", flush=True)
                 print(stderr, end="", file=sys.stderr, flush=True)

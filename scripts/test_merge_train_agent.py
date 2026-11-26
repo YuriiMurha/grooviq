@@ -315,6 +315,18 @@ class AgentTests(unittest.TestCase):
                 if index:
                     self.assertTrue(row["agent_error"].startswith("failure "))
 
+    def test_journal_trims_astral_reasons_to_encoded_budget(self):
+        self.agent.set_order(ORDER)
+        lines = [f"failure {i} " + "😀" * 1000 for i in range(20)]
+        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, "", "\n".join(lines))
+        self.assertEqual(self.agent.tick()["status"], "stopped")
+        raw = self.agent.ticks.read_bytes()
+        self.assertLessEqual(len(raw), agent_module.TICK_LINE_BYTES)
+        row = json.loads(raw)
+        self.assertTrue(row["output_truncated"])
+        self.assertTrue(row["reason"][0].startswith("failure 0 "))
+        self.assertGreater(len(row["reason"]), 1)
+
     def test_repeated_stop_skips_preserve_last_latch_at_rotation(self):
         self.agent.set_order(ORDER)
         self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, "", "failure")
@@ -433,6 +445,18 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(records[-1]["reason"][0].startswith("Three consecutive ticks"))
         self.assertIn("connection timed out", records[-1]["reason"])
         self.assertEqual(self.agent.tick()["status"], "latched")
+
+    def test_train_recognizes_git_transport_errors_before_any_write(self):
+        self.agent.set_order(ORDER)
+        for message in (
+            "The requested URL returned error: 503", "Operation timed out",
+            "OpenSSL SSL_connect: SSL_ERROR_SYSCALL", "TLS connection was not closed cleanly",
+            "early EOF", "unexpected disconnect", "No route to host", "Host is down",
+        ):
+            with self.subTest(message=message):
+                self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, "", message)
+                self.assertEqual(self.agent.tick()["status"], "retry: network")
+                self.agent.ticks.unlink()
 
     def test_network_failure_after_write_latches_immediately(self):
         self.agent.set_order(ORDER)
@@ -683,6 +707,62 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(row["status"], "partial")
         self.assertTrue(json.loads(self.agent.ticks.read_text())["timed_out"])
 
+    def test_pending_recovery_confirms_dangling_attempt(self):
+        self.scratch.mkdir(parents=True)
+        self.agent.latch({}, "", ["tick in progress"], pending=True, scratch=self.scratch.name)
+        (self.scratch / "stdout").write_text(f"Tested batch {TESTED}\nSquash attempt #12 {HEAD} after {NEXT}\n")
+        self.agent.commit_tree = Mock(return_value=TREE)
+        self.agent.ci_run_id = Mock(return_value=123)
+        self.agent.commit_object = Mock(return_value=NEXT)
+        pull = {"merged": True, "merge_commit_sha": LANDED, "head": {"sha": HEAD}, "base": {"ref": "main"}}
+        with patch.object(agent_module.subprocess, "run", return_value=Mock(stdout=json.dumps(pull))):
+            self.assertEqual(self.agent.tick()["status"], "latched")
+        self.agent.commit_object.assert_called_once_with(LANDED, "^")
+        self.assertEqual(json.loads(self.agent.landings.read_text())["landed_prefix"], [[12, LANDED]])
+
+    def test_reconcile_landing_refuses_unexpected_parent(self):
+        stdout = f"Tested batch {TESTED}\nSquash attempt #12 {HEAD} after {NEXT}\n"
+        pull = {"merged": True, "merge_commit_sha": LANDED, "head": {"sha": HEAD}, "base": {"ref": "main"}}
+        self.agent.commit_object = Mock(return_value=HEAD)
+        with patch.object(agent_module.subprocess, "run", return_value=Mock(stdout=json.dumps(pull))):
+            actual, stderr = self.agent.reconcile_landing(stdout, "")
+        self.assertEqual(actual, stdout)
+        self.assertIn("Unconfirmed squash of #12", stderr)
+
+    def test_non_timeout_child_stop_reconciles_dangling_attempt(self):
+        self.agent.set_order(ORDER)
+        stdout = f"Tested batch {TESTED}\nSquash attempt #12 {HEAD} after {NEXT}\n"
+        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, stdout, "connection reset")
+        self.agent.commit_tree = Mock(return_value=TREE)
+        self.agent.ci_run_id = Mock(return_value=123)
+        self.agent.commit_object = Mock(return_value=NEXT)
+        pull = {"merged": True, "merge_commit_sha": LANDED, "head": {"sha": HEAD}, "base": {"ref": "main"}}
+        with patch.object(agent_module.subprocess, "run", return_value=Mock(stdout=json.dumps(pull))):
+            self.assertEqual(self.agent.tick()["status"], "stopped")
+        self.assertTrue(self.agent.landings.is_file(), "reconciliation did not record the landing")
+        self.assertEqual(json.loads(self.agent.landings.read_text())["landed_prefix"], [[12, LANDED]])
+
+    def test_unconfirmed_squash_attempt_never_retries_a_network_error(self):
+        self.agent.set_order(ORDER)
+        stdout = f"Tested batch {TESTED}\nSquash attempt #12 {HEAD} after {NEXT}\n"
+        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, stdout, "connection reset")
+        unavailable = subprocess.CalledProcessError(1, "gh", stderr="HTTP 503")
+        with patch.object(agent_module.subprocess, "run", side_effect=unavailable):
+            self.assertEqual(self.agent.tick()["status"], "stopped")
+        row = json.loads(self.agent.ticks.read_text())
+        self.assertTrue(any("Unconfirmed squash of #12" in line for line in row["reason"]))
+        self.assertFalse(self.agent.landings.exists())
+
+    def test_signal_marks_confirmed_prefix_partial_even_with_matching_trees(self):
+        self.agent.set_order(ORDER)
+        self.agent.run_tick.return_value = subprocess.CompletedProcess(
+            [], -signal.SIGTERM, f"Tested batch {TESTED}\nMerged #12 at {LANDED}\n",
+        )
+        self.agent.commit_tree = Mock(return_value=TREE)
+        self.agent.ci_run_id = Mock(return_value=123)
+        self.assertEqual(self.agent.tick()["status"], "stopped")
+        self.assertEqual(json.loads(self.agent.landings.read_text())["status"], "partial")
+
     def test_cooperative_timeout_records_confirmed_prefix(self):
         self.agent.set_order(ORDER)
         self.agent.run_tick.return_value = subprocess.CompletedProcess(
@@ -694,6 +774,27 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.agent.tick()["status"], "stopped")
         self.assertTrue(json.loads(self.agent.ticks.read_text())["timed_out"])
         self.assertEqual(json.loads(self.agent.landings.read_text())["status"], "partial")
+
+    def test_git_guards_complete_commands_and_argument_slots(self):
+        fetch = ("fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head")
+        main_fetch = (*fetch, "origin", "+refs/heads/main:refs/remotes/origin/main")
+        common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
+        worktree_list = ("worktree", "list", "--porcelain", "-z")
+        add = ("worktree", "add", "--detach", "--no-checkout", "--quiet")
+        with patch.object(agent_module.subprocess, "run") as runner:
+            for args in (
+                ("-c", "core.sshCommand=x", *main_fetch),
+                ("-C", "/tmp", *common_dir),
+                ("--config-env=core.fsmonitor=X", *worktree_list),
+                ("push", "remote", "get-url", "origin"),
+                (*fetch, "--refmap=", "origin", "--upload-pack=x"),
+                (*fetch, "--refmap=", "origin", "+refs/heads/x:refs/heads/main"),
+                (*add, "/tmp/tick-x/checkout", HEAD),
+                ("show", f"{HEAD}:scripts/other.py"),
+            ):
+                with self.subTest(args=args), self.assertRaisesRegex(RuntimeError, "not allowed"):
+                    self.agent.git(*args)
+            runner.assert_not_called()
 
     def test_git_allow_list_rejects_github_writes_before_subprocess(self):
         with patch.object(agent_module.subprocess, "run") as runner:
@@ -920,6 +1021,43 @@ print(json.dumps({'marker': MARKER, 'argv': sys.argv[1:], 'cwd': os.getcwd(),
         self.assertIn("dirty lane", (lane / "scripts/merge_train.py").read_text())
         self.assertEqual(self.git(self.repo, "worktree", "list", "--porcelain"), before_worktrees)
 
+    def test_checkout_ignores_git_replacement_and_checks_exact_script_bytes(self):
+        reviewed = "print('verified train')\n"
+        revision = self.publish({**self.reviewed_sources(), "merge_train.py": reviewed})
+        self.pin_fixture(revision)
+        self.agent.set_order(ORDER)
+        blob = self.git(self.repo, "rev-parse", f"{revision}:scripts/merge_train.py")
+        self.script.write_text("raise SystemExit('replacement must not run')\n")
+        replacement = self.git(self.repo, "hash-object", "-w", self.script)
+        self.git(self.repo, "replace", blob, replacement)
+        self.assertIn("replacement must not run", self.git(self.repo, "show", f"{revision}:scripts/merge_train.py"))
+        self.assertEqual(self.agent.tick()["status"], "completed")
+        self.assertIn("verified train", self.agent.log.read_text())
+        git = self.agent.git
+
+        def corrupted_read(*args):
+            if args == ("show", f"{revision}:scripts/merge_train.py"):
+                return b"print('corrupted bytes')"
+            return git(*args)
+
+        with patch.object(self.agent, "git", side_effect=corrupted_read):
+            self.assertEqual(self.agent.tick()["status"], "error")
+        self.assertIn("verified blob", self.agent.log.read_text())
+        self.assertNotIn("corrupted bytes", self.agent.log.read_text())
+
+    def test_child_environment_admits_only_the_documented_keys(self):
+        inherited = {"HOME": "/wrong", "TMPDIR": str(self.root), "LANG": "en_US.UTF-8",
+                     "USER": "fixture", "GH_TOKEN": "test-only", "DYLD_INSERT_LIBRARIES": "blocked",
+                     "GIT_ASKPASS": "blocked", "BASH_ENV": "blocked", "PYTHONPATH": "blocked",
+                     "UNRELATED_SECRET": "blocked"}
+        with patch.dict(os.environ, inherited, clear=True):
+            agent = agent_module.Agent(self.repo, home=self.home, launchctl=self.launchctl)
+        self.assertEqual(agent.env, {
+            "HOME": str(self.home), "TMPDIR": str(self.root), "LANG": "en_US.UTF-8", "USER": "fixture",
+            "GH_TOKEN": "test-only", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools",
+            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "GIT_TERMINAL_PROMPT": "0",
+        })
+
     def test_tick_prunes_leftover_worktrees_and_dirs(self):
         revision = self.publish({**self.reviewed_sources(), "merge_train.py": "print('fixture')\n"})
         self.pin_fixture(revision)
@@ -1075,9 +1213,11 @@ Agent({str(self.repo)!r}, home={str(self.home)!r}, origins=({str(self.origin)!r}
         self.publish({"merge_train.py": "print('must never run')\n"})
         self.agent.set_order(ORDER)
         git = self.agent.git
+        errors = iter((b"The requested URL returned error: 503",
+                       b"Could not resolve host: fixture", b"unexpected pre-train fetch failure"))
         def failing_fetch(*args):
             if args[0] == "fetch":
-                raise subprocess.CalledProcessError(1, args, stderr=b"Could not resolve host: fixture")
+                raise subprocess.CalledProcessError(1, args, stderr=next(errors))
             return git(*args)
 
         with patch.object(self.agent, "git", side_effect=failing_fetch):
@@ -1094,7 +1234,8 @@ Agent({str(self.repo)!r}, home={str(self.home)!r}, origins=({str(self.origin)!r}
         for message in ("Permission denied (publickey)", "Authentication failed",
                         "could not read Username: terminal prompts disabled",
                         "Permission denied writing a local ref",
-                        "Permission denied (publickey) after connection reset"):
+                        "Permission denied (publickey) after connection reset",
+                        "The requested URL returned error: 401", "The requested URL returned error: 403"):
             def failing_fetch(*args):
                 if args[0] == "fetch":
                     raise subprocess.CalledProcessError(1, args, stderr=message.encode())

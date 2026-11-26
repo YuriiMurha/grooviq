@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -416,7 +417,9 @@ class MergeTrainTests(unittest.TestCase):
                 self.repo.states[ACTIVE] = {
                     **GREEN, "ui": ("failure", ""), REQUIRED[0]: ("in_progress", ""),
                 }
-                with self.assertRaisesRegex(RuntimeError, "failed required checks.*ui"):
+                with self.assertRaisesRegex(
+                    RuntimeError, "failed required checks.*ui.*make merge-train ORDER=.*make merge-train-order",
+                ):
                     self.run_tick(agent_deadline=float("inf"))
                 self.assertFalse(self.git.writes)
                 self.assertFalse(self.repo.rejected)
@@ -489,6 +492,25 @@ class MergeTrainTests(unittest.TestCase):
             self.run_tick()
         self.assertEqual(self.repo.merged, [(20, sha(20))])
         self.assertFalse(self.git.writes)
+
+    def test_train_announces_parseable_squash_attempt_before_merge(self):
+        from merge_train_agent import SQUASH_ATTEMPT
+
+        self.git.batch([10, 20])
+        merge = self.repo.merge
+        before_merges = []
+
+        def inspect_attempt(number, head):
+            before_merges.append(self.output.getvalue().splitlines()[-1])
+            return merge(number, head)
+
+        self.repo.merge = inspect_attempt
+        self.run_tick((10, 20), agent_deadline=time.monotonic() + 60)
+        self.assertEqual(self.repo.merged, [(10, sha(10)), (20, sha(20))])
+        attempts = [SQUASH_ATTEMPT.fullmatch(line) for line in before_merges]
+        self.assertTrue(all(attempts), before_merges)
+        self.assertEqual([attempt.groups() for attempt in attempts],
+                         [("10", sha(10), BASE), ("20", sha(20), sha(310))])
 
     def test_agent_deadline_stops_between_squashes_after_reporting_the_prefix(self):
         self.git.batch([10, 20])
@@ -900,10 +922,69 @@ class CliTests(unittest.TestCase):
                   redirect_stderr(io.StringIO()) as stderr):
                 self.assertEqual(train.main(), 1)
                 self.assertIn("make merge-train-order", stderr.getvalue())
+                self.assertIn("make merge-train-agent-disable", stderr.getvalue())
+                self.assertIn("make merge-train ORDER=", stderr.getvalue())
+                self.assertIn("make merge-train-agent-enable", stderr.getvalue())
                 tick.assert_not_called()
                 disabled.touch()
                 self.assertEqual(train.main(), 0)
                 tick.assert_called_once()
+
+    def test_unattended_cli_holds_failed_pr_and_disables_all_git_hooks(self):
+        with TemporaryDirectory() as tmp:
+            fixture = Repo()
+            pr = fixture.prs[10]
+            git_calls, api_calls = [], []
+
+            def git(argv, **kwargs):
+                git_calls.append(argv)
+                if "--git-common-dir" in argv:
+                    stdout = tmp
+                elif "ls-remote" in argv:
+                    stdout = f"{BASE} {train.MAIN_REF}\n"
+                elif "fetch" in argv:
+                    stdout = ""
+                else:
+                    raise AssertionError(argv)
+                return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+            def api(_self, path, *, method="GET", **kwargs):
+                api_calls.append(method)
+                if method != "GET":
+                    return None
+                if path == "branches/main/protection/required_status_checks":
+                    return {"strict": False, "checks": [
+                        {"context": name, "app_id": ACTIONS_APP} for name in REQUIRED
+                    ]}
+                if path.startswith("issues?"):
+                    return [[{"number": 10, "pull_request": {}}]]
+                if path == "pulls/10":
+                    return pr if "DELETE" not in api_calls else {**pr, "labels": []}
+                if path.startswith("commits/"):
+                    head = path.split("/")[1]
+                    return [{"check_runs": [
+                        {"name": name, "head_sha": head, "app": {"id": ACTIONS_APP},
+                         "status": "completed", "conclusion": "failure"
+                         if name == "ui" and head == sha(10) else "success"}
+                        for name in REQUIRED
+                    ]}]
+                raise AssertionError(path)
+
+            argv = ["merge_train.py", "--order", f"10={sha(10)}",
+                    "--agent-deadline", str(time.monotonic() + 60)]
+            with (patch.object(sys, "argv", argv), patch.object(train.subprocess, "run", side_effect=git),
+                  patch.object(train.GitHub, "api", api),
+                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as stderr):
+                code = train.main()
+            self.assertIn("Held #10", stderr.getvalue())
+            self.assertIn("make merge-train ORDER=", stderr.getvalue())
+            self.assertIn("make merge-train-order", stderr.getvalue())
+            self.assertEqual(code, 1)
+            self.assertTrue(api_calls)
+            self.assertEqual(set(api_calls), {"GET"})
+            self.assertGreaterEqual(len(git_calls), 3)
+            for argv in git_calls:
+                self.assertEqual(argv[:3], ["git", "-c", "core.hooksPath=/dev/null"])
 
     def test_busy_flock_returns_tempfail_before_creating_clients(self):
         with TemporaryDirectory() as tmp:
