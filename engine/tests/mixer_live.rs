@@ -240,7 +240,11 @@ fn comp_params(threshold: f32) -> Vec<f32> {
     p
 }
 
+// Different from the synced delays' 140 BPM default so their output proves host tempo arrived.
+const INSERT_SCENE_BPM: f32 = 97.0;
+
 fn render_insert_scene(mix: MixSetup, inputs: Vec<[Vec<f32>; 2]>, frames: usize) -> Vec<f32> {
+    assert_eq!(frames % N, 0);
     let mut assets = Vec::new();
     let mut clips = Vec::new();
     let mut routes = Vec::new();
@@ -272,6 +276,7 @@ fn render_insert_scene(mix: MixSetup, inputs: Vec<[Vec<f32>; 2]>, frames: usize)
     let (mut c, mut p) = engine_with(
         config,
         EngineState {
+            bpm: INSERT_SCENE_BPM,
             playback_mode: PlaybackMode::Song,
             song: SongData {
                 audio: audio.with_tracks(&routes).unwrap(),
@@ -289,7 +294,6 @@ fn render_insert_scene(mix: MixSetup, inputs: Vec<[Vec<f32>; 2]>, frames: usize)
     for block in out.as_chunks_mut::<{ N * 2 }>().0 {
         p.process(block, 2);
     }
-    assert_eq!(frames % N, 0);
     let health = c.check_health();
     assert!(health.is_empty(), "{health:?}");
     out
@@ -327,9 +331,10 @@ fn render_direct_insert(
     [mut l, mut r]: [Vec<f32>; 2],
     key: Option<(&[f32], &[f32])>,
 ) -> Vec<f32> {
+    assert_eq!(l.len(), r.len());
+    assert_eq!(l.len() % N, 0);
     let mut device = grooviq_dsp::create_insert(kind, SR, seed, params).unwrap();
-    // The engine state uses the default 140 BPM, including for tempo-synced effects.
-    device.set_tempo(EngineState::default().bpm);
+    device.set_tempo(INSERT_SCENE_BPM);
     for (block, (l, r)) in l
         .as_chunks_mut::<N>()
         .0
@@ -432,9 +437,10 @@ fn every_builtin_insert_matches_its_direct_impulse_on_the_live_path() {
     let seed = 0x0000_abcd_1234_5678;
     for kind in grooviq_dsp::EFFECTS {
         let mut params = defaults(kind);
-        // Engage the otherwise transparent controls and expose the seeded crusher.
+        // Engage transparent controls and expose seed-dependent processing.
         let overrides: &[(usize, f32)] = match kind {
             "bitcrusher" => &[(0, 4.0), (1, 12.0), (2, 0.5), (3, 0.4), (4, 1.0)],
+            "character_delay" => &[(9, 2.0)], // Analogue mode uses seeded noise.
             "comp" => &[(0, -24.0), (2, 0.05)],
             "drum_shaper" => &[(4, 0.5)],
             "eq" => &[(0, 1.0), (3, 6.0)],
@@ -1670,8 +1676,8 @@ fn a_plainly_added_routed_channel_gets_its_fade_route_and_must_be_routed() {
     assert!(c.state().channels.is_empty());
 }
 
-#[cfg(feature = "test-hooks")]
 #[test]
+#[cfg(feature = "test-hooks")]
 fn retiring_an_older_graph_keeps_fades_of_the_newer_one() {
     let (mut c, mut p) = engine_with(
         EngineConfig { sample_rate: SR },
