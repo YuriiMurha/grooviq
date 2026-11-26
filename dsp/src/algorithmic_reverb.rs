@@ -80,7 +80,8 @@ fn tiny(x: f32) -> f32 {
 fn read(d: &DelayLine, n: f32) -> f32 {
     let i = n as usize;
     let t = n - i as f32;
-    d.read_int(i) * (1.0 - t) + d.read_int(i + 1) * t
+    let [newer, older] = d.read_pair(i);
+    newer * (1.0 - t) + older * t
 }
 struct Network {
     lines: [DelayLine; 4],
