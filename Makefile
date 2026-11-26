@@ -142,6 +142,10 @@ bench: ## Render speed, block times and determinism of the reference scenes, the
 	$(CARGO) bench -p grooviq-golden --bench render
 	$(CARGO) bench -p grooviq-dsp --bench kernels
 
+.PHONY: bench-song
+bench-song: ## Five warmed production exports of the M3 golden song (run on a quiet host)
+	$(CARGO) bench -p grooviq-golden --bench song_export
+
 bench-roll-operations: ## The six piano-roll timing budgets, without work counters (run on a quiet host)
 	@set --; \
 	if [ -n "$$ROLL_TIMING_REPORT" ]; then \
