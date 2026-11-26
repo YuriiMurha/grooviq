@@ -140,7 +140,7 @@ const browserPlatform = (browserName: string): NonNullable<MockSeed["platform"]>
   browserName === "chromium" ? "windows" : "macos";
 
 /** The page with the mock shell loaded and every console error and page error collected. */
-export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; app: Page; mock: Mock; mockPage: Page }>({
+export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; startupPage: Page; app: Page; mock: Mock; mockPage: Page }>({
   seed: [{}, { option: true }],
   // Direct IPC checks can use the same seed without mounting the UI.
   mockPage: async ({ page, seed, browserName }, use) => {
@@ -149,7 +149,8 @@ export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; app: Page
   },
   // Retain WebGL frames (see webglProbe.ts). Off only where the shipping buffer lifetime is the subject.
   keepFrames: [true, { option: true }],
-  app: async ({ page, seed, keepFrames, browserName }, use) => {
+  // Startup tests control navigation so they can observe the shell before the rack mounts.
+  startupPage: async ({ page, seed, keepFrames, browserName }, use) => {
     const consoleErrors: string[] = [];
     page.on("console", (m) => {
       // Headless Chromium's own GPU notes ("GPU stall due to ReadPixels" while it composites):
@@ -160,11 +161,14 @@ export const test = base.extend<{ seed: MockSeed; keepFrames: boolean; app: Page
     page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
     if (keepFrames) await page.addInitScript(keepWebglFrames);
     await page.addInitScript(installMockTauri, { ...DEVICE_SEED, platform: browserPlatform(browserName), ...seed });
-    await page.goto("/");
-    await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
-    await workspaceReady(page);
     await use(page);
     expect(consoleErrors, "console errors and warnings").toEqual([]);
+  },
+  app: async ({ startupPage }, use) => {
+    await startupPage.goto("/");
+    await expect(startupPage.getByRole("button", { name: "Stop" })).toBeVisible();
+    await workspaceReady(startupPage);
+    await use(startupPage);
   },
   mock: async ({ app }, use) => {
     const evalIn = <T>(fn: string) => app.evaluate(`(${fn})(window.__grooviqMock)`) as Promise<T>;

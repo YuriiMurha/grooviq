@@ -281,6 +281,12 @@ input[type="checkbox"] {
   overflow: hidden;
 }
 
+.stage-loading {
+  margin: auto;
+  color: var(--text);
+  font-size: 14px;
+}
+
 .workspace {
   flex: 1;
   min-height: 0;
