@@ -8,7 +8,8 @@ const THEME_SYNTAX = new RegExp([
 ].join("|"), "gis");
 const THEME_VALUE_TOKEN = new RegExp([
   CSS_STRING.source,
-  /\bvar\(\s*(--[\w-]+)\s*\)/.source,
+  // Identifier characters, hash and at-keyword prefixes cannot precede a standalone var().
+  /(?<![\w#@\u0080-\uFFFF-])var\(\s*(--[\w-]+)\s*\)/.source,
 ].join("|"), "gs");
 
 /** Read a theme file's single flat rule before the CSS build rewrites values. */
