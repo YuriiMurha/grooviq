@@ -66,8 +66,14 @@ export class AudioEditGesture {
     const frames = sourceFrameDelta(deltaTicks, sourceRate, bpm);
     const deltaFrames = edge === "start" ? Math.max(-this.maxExtension, frames) : Math.min(this.maxExtension, frames);
     const trimmed = trimAudio(content, edge, deltaFrames, sourceFrames);
-    const lengthTicks = this.duration(trimmed.sourceEnd - trimmed.sourceStart);
-    const startTick = edge === "start" ? this.originalEnd - lengthTicks : clip.startTick;
+    const trimmedFrames = trimmed.sourceEnd - trimmed.sourceStart;
+    const lengthTicks = this.duration(trimmedFrames);
+    let startTick = clip.startTick;
+    if (edge === "start") {
+      // A rounded duration can shift the end by a tick. Keep the snapped start if it fits.
+      const clamped = this.originalFrames - trimmedFrames !== frames;
+      startTick = clamped ? this.originalEnd - lengthTicks : Math.min(clip.startTick + deltaTicks, MAX_SONG_TICKS - lengthTicks);
+    }
     this.value = { ...clip, startTick, lengthTicks };
     if (trimmed.sourceStart !== content.sourceStart || trimmed.sourceEnd !== content.sourceEnd) {
       this.operation = { kind: "resize", clip: clip.id, startTick, content: trimmed };
