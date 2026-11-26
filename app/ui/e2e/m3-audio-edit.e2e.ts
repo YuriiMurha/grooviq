@@ -79,10 +79,12 @@ async function setup(app: Page, mock: Mock) {
   };
   const undo = async (before: ArrangementPage) => {
     const { generation, revision } = await arrangement(app);
-    const history = await mock.calls("arrangement_history");
+    // The mock stamps each call with its time; compare only the command and its arguments.
+    const historyCalls = async () => (await mock.calls("arrangement_history")).map(({ cmd, args }) => ({ cmd, args }));
+    const history = await historyCalls();
     await app.keyboard.press("ControlOrMeta+z");
     await expect.poll(async () => (await arrangement(app)).clips).toEqual(before.clips);
-    await expect.poll(() => mock.calls("arrangement_history")).toEqual([
+    await expect.poll(historyCalls).toEqual([
       ...history, { cmd: "arrangement_history", args: { generation, revision, undo: true } },
     ]);
     await expect(canvas).toHaveAttribute("aria-disabled", "false");
