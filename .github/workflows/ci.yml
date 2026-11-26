@@ -59,8 +59,8 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     env: &rust_env
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: 'true'
     steps: &rust_steps
       - uses: actions/checkout@v5
       # rust-cache keys on Cargo.toml dependency sections only, so a [profile] change would reuse
@@ -69,6 +69,11 @@ jobs:
         shell: bash
         run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
       - run: rustup toolchain install
+      - name: Install sccache
+        id: sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.19.0
       # The Actions cache is over its 10 GB limit, and PR copies evict main's caches.
       - uses: Swatinem/rust-cache@v2
         with:
@@ -111,6 +116,9 @@ jobs:
 
       - name: Optimized 8-second export budget
         run: node scripts/export-budget.mjs
+      - name: Report sccache stats
+        if: always() && steps.sccache.outcome == 'success'
+        run: sccache --show-stats
 
   rust-windows:
     name: rust (windows-latest)
