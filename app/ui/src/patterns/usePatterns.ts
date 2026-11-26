@@ -118,8 +118,6 @@ export function usePatterns({ view, publishPatterns, enqueue, run }: SessionAdap
           if (!currentMode() || canonical.generation !== generation) throw new Error("The project changed during the mode change.");
           const fresh = await projectView();
           if (!currentMode() || fresh.generation !== generation) throw new Error("The project changed during the mode change.");
-          // Project view observers must be able to refresh after the mode change is published.
-          finish();
           setMode(canonical.playMode);
           return fresh;
         });
