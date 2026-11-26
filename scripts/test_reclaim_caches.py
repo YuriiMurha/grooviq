@@ -621,6 +621,64 @@ class ReclaimTests(unittest.TestCase):
         self.assertIn(f"Skipped {stash}: contains node_modules", output)
         self.assertTrue((stash / "node_modules").is_dir())
 
+    def test_ignored_non_pid_directory_is_not_a_recovery_candidate(self):
+        target = self.worktree("candidate")
+        notes = target.with_name(".target-reclaim-notes")
+        target.rename(notes)
+        todo = notes / "todo.txt"
+        todo.write_text("keep my notes")
+        # Older checkouts can still have the broad ignore rule.
+        with (self.main / ".git" / "info" / "exclude").open("a") as exclusions:
+            exclusions.write("\n/.target-reclaim-*\n")
+        self.assertEqual(self.git(notes.parent, "status", "--porcelain"), "")
+        self.reclaim()
+        self.assertTrue(todo.is_file())
+        self.assertEqual(todo.read_text(), "keep my notes")
+
+    def test_untracked_non_pid_directory_keeps_detached_cache(self):
+        target = self.worktree("candidate")
+        notes = target.with_name(".target-reclaim-42-notes")
+        notes.mkdir()
+        (notes / "todo.txt").touch()
+        output = self.reclaim()
+        self.assertIn(f"Skipped {target}: dirty detached worktree", output)
+        self.assertTrue(target.is_dir())
+
+    def test_recovery_stash_on_remote_branch_is_kept(self):
+        target = self.worktree("candidate", detached=False)
+        self.merge_branch(target)
+        self.git(target.parent, "push", "origin", "candidate")
+        stash = target.with_name(".target-reclaim-42")
+        target.rename(stash)
+        output = self.reclaim()
+        self.assertIn(f"Skipped {stash}: remote branch still exists", output)
+        self.assertTrue((stash / "artifact").is_file())
+
+    def test_recovery_stash_busy_on_second_snapshot_is_kept(self):
+        target = self.worktree("candidate")
+        stash = target.with_name(".target-reclaim-42")
+        target.rename(stash)
+        snapshots = 0
+
+        def runner(args, **kwargs):
+            nonlocal snapshots
+            if args[0] == "lsof":
+                snapshots += 1
+                if snapshots == 2:
+                    return self.lsof_record(args, "5", stash / "artifact")
+            return self.run_command(args, **kwargs)
+
+        output = self.reclaim(runner=runner)
+        self.assertIn(f"Skipped {stash}: open handle", output)
+        self.assertTrue((stash / "artifact").is_file())
+
+    def test_untracked_file_keeps_detached_cache(self):
+        target = self.worktree("candidate")
+        (target.parent / "draft.txt").touch()
+        output = self.reclaim()
+        self.assertIn(f"Skipped {target}: dirty detached worktree", output)
+        self.assertTrue((target / "artifact").is_file())
+
     @unittest.skipUnless(sys.platform == "darwin", "requires macOS F_GETPATH")
     def test_wrong_case_registered_worktree_keeps_cache(self):
         target = self.worktree("MixedCase")

@@ -1,5 +1,6 @@
 /target
-/.target-reclaim-*
+/.target-reclaim-[0-9]*/
+!/.target-reclaim-*[!0-9]*/
 node_modules/
 dist/
 .DS_Store

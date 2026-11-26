@@ -23,6 +23,7 @@ if sys.platform == "darwin":
 GIB = 1024**3
 RELEASE_CACHE = Path("~/Library/Caches/Grooviq/quality-release").expanduser()
 RECLAIM_PREFIX = ".target-reclaim-"
+RECLAIM_NAME = re.compile(r"\.target-reclaim-\d+", re.ASCII)
 PROBE_TIMEOUT = 10
 LSOF_TIMEOUT = 30
 
@@ -109,7 +110,10 @@ def worktree_skip_reason(run, worktree):
         )
         # Older checkouts may not yet ignore abandoned reclamation directories.
         if any(
-            entry and not entry.startswith(f"?? {RECLAIM_PREFIX}")
+            entry and not (
+                entry.startswith("?? ") and entry.endswith("/")
+                and RECLAIM_NAME.fullmatch(entry[3:-1])
+            )
             for entry in changes.split("\0")
         ):
             return "dirty detached worktree"
@@ -262,7 +266,7 @@ def protected_reason(target, main_path, release_cache, worktrees):
     if any(target == path or target in path.parents for path in worktrees):
         return "contains a registered worktree"
     if any(
-        path.parent in worktrees and (path.name == "target" or path.name.startswith(RECLAIM_PREFIX))
+        path.parent in worktrees and (path.name == "target" or RECLAIM_NAME.fullmatch(path.name))
         for path in (target.parent, *target.parent.parents)
     ):
         return "inside a registered worktree's target"
@@ -336,7 +340,10 @@ def reclaim_caches(
             return size, None
 
         for worktree in worktrees:
-            targets = sorted(worktree.path.glob(f"{RECLAIM_PREFIX}*"))
+            targets = sorted(
+                path for path in worktree.path.glob(f"{RECLAIM_PREFIX}*")
+                if RECLAIM_NAME.fullmatch(path.name)
+            )
             targets.append(worktree.path / "target")
             for target in targets:
                 try:
