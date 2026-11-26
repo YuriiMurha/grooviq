@@ -587,9 +587,21 @@ pub fn apply(p: &mut Project, ops: Vec<ArrangementEdit>) -> Result<Vec<u32>, Str
                         "Clip {c}: point is outside the automation source range"
                     ));
                 }
-                if points.as_slice() == &**source {
+                if points.windows(2).any(|pair| pair[0].tick >= pair[1].tick) {
+                    return Err(format!(
+                        "Clip {c}: automation ticks must be strictly increasing"
+                    ));
+                }
+                let first = source.partition_point(|point| point.tick < start);
+                let last = first + source[first..].partition_point(|point| point.tick < end);
+                if points.as_slice() == &source[first..last] {
                     continue;
                 }
+                // A slice or trim can leave points outside this clip's visible window.
+                let mut merged = Vec::with_capacity(source.len() - (last - first) + points.len());
+                merged.extend_from_slice(&source[..first]);
+                merged.extend(points);
+                merged.extend_from_slice(&source[last..]);
                 // Copy and Slice share this allocation. Replace it everywhere on the candidate
                 // so history retains the old curve and independently created curves stay separate.
                 let source = source.clone();
@@ -598,10 +610,10 @@ pub fn apply(p: &mut Project, ops: Vec<ArrangementEdit>) -> Result<Vec<u32>, Str
                     .unwrap_or_else(|| source.clone());
                 // An edit followed by its inverse leaves no point delta. Keep the original
                 // allocation so a Copy in the same batch still links after undo/redo.
-                let replacement = if points.as_slice() == &*origin {
+                let replacement = if merged.as_slice() == &*origin {
                     origin
                 } else {
-                    let replacement = CurvePoints::from(points);
+                    let replacement = CurvePoints::from(merged);
                     curve_origins.insert(replacement.allocation().0, origin);
                     replacement
                 };
@@ -620,18 +632,54 @@ pub fn apply(p: &mut Project, ops: Vec<ArrangementEdit>) -> Result<Vec<u32>, Str
             } => {
                 let i = clip(p, c)?;
                 let ClipContent::Automation {
+                    target: current_target,
+                    points: source,
+                    ..
+                } = &p.arrangement.clips[i].content
+                else {
+                    return Err(format!("Clip {c} is not an automation clip"));
+                };
+                if target != *current_target {
+                    for sibling in &p.arrangement.clips {
+                        if sibling.id != c
+                            && let ClipContent::Automation {
+                                target: sibling_target,
+                                points,
+                                ..
+                            } = &sibling.content
+                            && *sibling_target != target
+                            && points.shares_allocation(source)
+                        {
+                            return Err(format!(
+                                "Clip {c} shares its automation source with clip {} ({}) on a different target; make it unique first.",
+                                sibling.id, sibling.name
+                            ));
+                        }
+                    }
+                }
+                if priority > p.next_id {
+                    return Err(format!(
+                        "Clip {c}: automation priority {priority} exceeds the next available id {}",
+                        p.next_id
+                    ));
+                }
+                // Priorities occupy the same id space as entities and must survive Open verbatim.
+                let priority = if priority == p.next_id {
+                    id(p, &mut issued)?
+                } else {
+                    issued.insert(priority);
+                    priority
+                };
+                let ClipContent::Automation {
                     target: clip_target,
                     priority: clip_priority,
                     ..
                 } = &mut p.arrangement.clips[i].content
                 else {
-                    return Err(format!("Clip {c} is not an automation clip"));
+                    unreachable!();
                 };
                 *clip_target = target;
                 *clip_priority = priority;
-                // Priorities occupy the same id space as entities and must survive Open verbatim.
-                issued.insert(priority);
-                p.next_id = p.next_id.max(priority.saturating_add(1));
             }
             ArrangementEdit::DeleteClip { clip: c } => {
                 let i = clip(p, c)?;
