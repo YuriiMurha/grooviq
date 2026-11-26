@@ -13,7 +13,7 @@
   --select: #63a7ff;
   --ok: #6fd087;
   --mute: #d98b80;
-  --solo: var(--ink-2);
+  --solo: #c6aee4; /* violet Solo lamp, distinct from amber warning */
   --warn: #ebc16b;
   --error: #fa8d87;
   /* The lab's 24% washes (coral resolves to #4e3d42) are too dim for slide fills. */

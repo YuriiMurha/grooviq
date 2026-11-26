@@ -135,10 +135,14 @@
   font-size: 11px;
 }
 
-.mx-tool:hover:not(:disabled, [aria-disabled="true"]),
+.mx-tool:hover:not(:disabled, [aria-disabled="true"], :where([aria-pressed]:not(.solo))),
 .mx-icon-btn:hover:not(:disabled),
 .mx select:hover:not(:disabled) {
   border-color: var(--muted);
+}
+
+.mx-tool[aria-pressed="false"]:hover:not(.solo, :disabled, [aria-disabled="true"]) {
+  border-color: color-mix(in srgb, var(--muted) 45%, var(--raised));
 }
 
 .mx-tool[aria-pressed="true"] {

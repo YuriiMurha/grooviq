@@ -48,10 +48,11 @@ for (const { id } of themes) {
 
     const values = await app.locator("html").evaluate((root) => {
       const style = getComputedStyle(root);
-      return Object.fromEntries(["--solo", "--mute", "--ok"].map((name) => [name, style.getPropertyValue(name)]));
+      return Object.fromEntries(["--solo", "--mute", "--ok", "--warn"].map((name) => [name, style.getPropertyValue(name)]));
     });
     const bytes = (name: string) => themeRgb(values, name).map((channel) => 255 * channel);
-    for (const other of ["--mute", "--ok"]) {
+    const otherRoles = id === "slate-system" ? ["--mute", "--ok", "--warn"] : ["--mute", "--ok"];
+    for (const other of otherRoles) {
       expect(colourDistance(bytes("--solo"), bytes(other)), `--solo versus ${other}`).toBeGreaterThanOrEqual(48);
     }
     const soloColor = `rgb(${bytes("--solo").map(Math.round).join(", ")})`;
@@ -78,6 +79,14 @@ for (const { id } of themes) {
       return fill;
     }, soloColor);
     await expect(mixerSolo).toHaveCSS("background-color", tintedFill);
+
+    const mixerMute = app.getByRole("button", { name: "Mute Kick", exact: true });
+    const muteColor = `rgb(${bytes("--mute").map(Math.round).join(", ")})`;
+    await mixerMute.hover();
+    await expect(mixerMute).not.toHaveCSS("border-top-color", muteColor);
+    await mixerMute.click();
+    await expect(mixerMute).toHaveAttribute("aria-pressed", "true");
+    await expect(mixerMute).toHaveCSS("border-top-color", muteColor);
   });
 
   for (const renderer of ["webgl2", "canvas2d"] as const) {
@@ -146,6 +155,7 @@ for (const { id } of themes) {
       for (const surface of ["--well", "--line-soft"]) {
         expect(contrastRatio(rgb("--error"), rgb(surface)), `meter clip indicator over ${surface}`).toBeGreaterThanOrEqual(3);
       }
+      expect(colourDistance(bytes("--mute"), bytes("--ok")), "mute versus on").toBeGreaterThanOrEqual(48);
       for (const status of ["--ok", "--error", "--select"]) {
         expect(colourDistance(bytes("--warn"), bytes(status)), `--warn versus ${status}`).toBeGreaterThanOrEqual(48);
       }
