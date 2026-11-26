@@ -126,7 +126,7 @@ jobs:
           mount_dir=$(mktemp -d)
           trap 'rmdir "$mount_dir"' EXIT
           hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$mount_dir" "${dmgs[0]}"
-          trap 'hdiutil detach "$mount_dir"; if [[ -d "$mount_dir" ]]; then rmdir "$mount_dir"; fi' EXIT
+          trap 'hdiutil detach "$mount_dir" || hdiutil detach -force "$mount_dir"; if [[ -d "$mount_dir" ]]; then rmdir "$mount_dir"; fi' EXIT
           codesign -dv "$mount_dir/Grooviq.app"
           codesign --verify --deep --strict --verbose=2 "$mount_dir/Grooviq.app"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
