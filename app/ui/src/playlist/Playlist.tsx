@@ -4,6 +4,7 @@ import { errorText } from "../api/project";
 import { dropNotice, missingAudioAssets } from "./audio/media";
 import { createWaveformLoader, packWaveforms, visibleWaveforms } from "./audio/waveforms";
 import { AudioEditGesture, type AudioEditInput } from "./audio/editGesture";
+import { AudioClipInspector } from "./audio/AudioClipInspector";
 import { useAudioDrop } from "./audio/useAudioDrop";
 import { arrangementWaveform, type LoopRegion, type ArrangementStamp } from "../api/arrangement";
 import type { PatternsView } from "../api/patterns";
@@ -84,8 +85,9 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
   const selectedClip = selected === null ? null : clipSummaries.get(selected);
   const selectedPattern = selectedClip?.content.type === "pattern" ? selectedClip : null;
   const missingAssets = useMemo(() => missingAudioAssets(snapshot?.warnings ?? []), [snapshot]);
-  const selectedAsset = selectedClip?.content;
-  const missingAsset = selectedAsset?.type === "audio" && missingAssets.has(selectedAsset.asset) ? selectedAsset.asset : null;
+  const selectedAudio = selectedClip?.content.type === "audio" ? { ...selectedClip, content: selectedClip.content } : null;
+  const selectedAsset = selectedAudio ? audioAssets.get(selectedAudio.content.asset) : null;
+  const missingAsset = selectedAsset && missingAssets.has(selectedAsset.id) ? selectedAsset.id : null;
   const selectedIndex = useMemo(() => selected === null ? -1 : clips.findIndex(clip => clip.id === selected), [clips, selected]);
   const cancel = useCallback(() => {
     if (dropPreview.current) { dropPreview.current = null; draw.current(); }
@@ -590,6 +592,9 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
       {missingAsset !== null && <button type="button" disabled={busy} onClick={() => { void relink(); }}>Relink missing audio</button>}
       <button type="button" aria-label={`Delete selected ${clipLabel}`} disabled={busy || !actionClips.length} onClick={() => { void selectedAction("delete"); }}>Delete</button>
     </div>
+    {snapshot && selectedAudio && selectedAsset && <AudioClipInspector key={`${snapshot.generation}:${selectedAudio.id}`}
+      clip={selectedAudio} asset={selectedAsset} stamp={snapshot} disabled={busy} bpm={bpm} beats={beats} unit={unit}
+      onEdit={(stamp, operation) => { cancel(); void commit(stamp, [operation], false); }} />}
     {message && <p role="alert" className="playlist-error">{message}</p>}
     {missingAsset !== null ? <p className="playlist-readonly">The audio file for this clip is missing.</p> : selectedClip?.content.type === "automation" && <p className="playlist-readonly">This clip is visible here; its editing controls are not available yet.</p>}
     {!state.busy && state.media === null && snapshot?.total === 0 && <p className="playlist-empty">Draw a pattern or drop an audio file onto a track.</p>}
