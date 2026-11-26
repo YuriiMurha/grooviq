@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MixerGestures, moveTarget, navTarget, renderIndices, revealScroll, visibleWindow, type ParamCommand, type ParamTarget } from "./mixerModel";
+import { availableSends, MixerGestures, unsupportedReason, moveTarget, navTarget, placeholderValue, renderIndices, revealScroll, visibleWindow, type ParamCommand, type ParamTarget } from "./mixerModel";
 
 const level = (nodeId: string): ParamTarget => ({ kind: "level", nodeId });
 const send = (nodeId: string, sendId: string): ParamTarget => ({ kind: "send", nodeId, sendId });
@@ -355,4 +355,27 @@ describe("MixerGestures", () => {
     expect(h.sent.at(-1)).toEqual({ target: level("b"), value: -1, phase: "commit" });
   });
 
+});
+
+describe("strip controls", () => {
+  it("preserves supplied order, removing only already-used send destinations", () => {
+    const offered = [{ id: "room", name: "Room" }, { id: "project:echo", name: "Echo" }, { id: "bus", name: "Bus" }];
+    const sends = [{ id: "opaque", destinationId: "project:echo", pre: false, amount: 0 }];
+    expect(availableSends(offered, sends)).toEqual([offered[0], offered[2]]);
+  });
+
+  it("reserves a placeholder even if the host uses empty or whitespace ids", () => {
+    const choices = [{ id: "", name: "Empty" }, { id: " ", name: "Space" }];
+    expect(choices.some((choice) => choice.id === placeholderValue(choices))).toBe(false);
+  });
+
+  it("looks up the unsupported reason for each command that controls those features", () => {
+    const reasons = { mute: "Mute", solo: "Solo", bypass: "Bypass", detector: "Detector" };
+    expect(unsupportedReason(reasons, "mute")).toBe("Mute");
+    expect(unsupportedReason(reasons, "solo")).toBe("Solo");
+    expect(unsupportedReason(reasons, "setInsertActive")).toBe("Bypass");
+    expect(unsupportedReason(reasons, "setDetector")).toBe("Detector");
+    expect(unsupportedReason(reasons, "setOutput")).toBeUndefined();
+    expect(unsupportedReason(undefined, "setDetector")).toBeUndefined();
+  });
 });

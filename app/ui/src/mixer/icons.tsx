@@ -1,6 +1,7 @@
 // Small authored glyphs for the mixer's buttons, drawn in the device windows' stroke style.
 
 const PATHS = {
+  route: "M4 13V5H12M9 2L12 5L9 8M4 10H8",
   arrow: "M2 8H13M9 4L13 8L9 12",
   up: "M8 13V3M4 7L8 3L12 7",
   down: "M8 3V13M4 9L8 13L12 9",

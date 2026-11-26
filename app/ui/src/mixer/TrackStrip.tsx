@@ -1,9 +1,13 @@
-import { memo, useCallback, useMemo, type CSSProperties, type KeyboardEvent } from "react";
+import { useCallback, useMemo, type CSSProperties, type KeyboardEvent } from "react";
 import { Knob } from "../devices/controls/Knob";
 import type { ParamControl } from "../devices/controls/gesture";
 import { Fader } from "./Fader";
 import { Icon } from "./icons";
-import { formatDb, formatPan, LEVEL, PAN, type MixerCommand, type MixerGestures, type MixerTrack, type ParamTarget } from "./mixerModel";
+import { Options, OutputChoice } from "./OutputChoice";
+import {
+  availableSends, formatDb, formatPan, formatPercent, LEVEL, PAN, placeholderValue, SEND, unsupportedReason,
+  type MixerCommand, type MixerGestures, type MixerProps, type MixerSend, type MixerTrack, type ParamTarget,
+} from "./mixerModel";
 
 /** What every strip shares; one stable object for the mixer's lifetime. */
 export interface StripActions {
@@ -19,9 +23,10 @@ export interface StripActions {
 interface StripProps {
   track: MixerTrack;
   actions: StripActions;
-  master?: boolean;
-  /** The output's name or the master's device label. */
-  outputLabel: string;
+  nodes: ReadonlyMap<string, MixerTrack>;
+  unsupported: MixerProps["unsupported"];
+  masterOutput?: string;
+  index?: number;
   level: number;
   pan: number;
   selected: boolean;
@@ -35,15 +40,19 @@ function control(gestures: MixerGestures, target: ParamTarget): ParamControl {
   return { begin: () => gestures.begin(target), set: (v) => gestures.set(target, v) };
 }
 
-/** One vertical channel strip. Values come from the host (or a gesture in flight); every change
- * goes out as a command on the strip's id. */
-export const TrackStrip = memo(function TrackStrip({ track, actions, master, outputLabel, level, pan, selected, tabStop, left }: StripProps) {
+const TICKS = [0, -15, -30, -45, -60];
+
+/** One vertical channel strip. Values come from the host (or a gesture in flight). */
+export function TrackStrip({ track, actions, nodes, unsupported, masterOutput, index, level, pan, selected, tabStop, left }: StripProps) {
   const { id, name, pending } = track;
+  const master = masterOutput !== undefined;
   const levelControl = useMemo(() => control(actions.gestures, { kind: "level", nodeId: id }), [actions, id]);
   const panControl = useMemo(() => control(actions.gestures, { kind: "pan", nodeId: id }), [actions, id]);
   const meterRef = useCallback((el: HTMLElement | null) => actions.meter(id, el), [actions, id]);
-  const shownInserts = track.inserts.slice(0, 2);
-  const more = track.inserts.length - shownInserts.length;
+  const muteReason = unsupportedReason(unsupported, "mute");
+  const soloReason = unsupportedReason(unsupported, "solo");
+  const destinations = availableSends(track.sendDestinations, track.sends);
+  const addPlaceholder = placeholderValue(destinations);
 
   const onNameKey = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (actions.navigate(id, e.key)) e.preventDefault();
@@ -58,89 +67,115 @@ export const TrackStrip = memo(function TrackStrip({ track, actions, master, out
       data-node={id}
       onFocus={() => actions.focused(id)}
     >
-      <span className="mx-ink" aria-hidden="true" />
       <button
         type="button"
         className="mx-pick"
         aria-pressed={selected}
         aria-label={name}
+        aria-disabled={pending || undefined}
         tabIndex={tabStop ? 0 : -1}
         title={name}
-        data-hint="Selects this track for its inserts and sends. Left and Right move between tracks."
         onClick={() => actions.command({ type: "select", nodeId: id })}
         onKeyDown={onNameKey}
       >
-        <span className="mx-kind">{track.kind}</span>
+        <span className="mx-kind" title={track.kind}>
+          <span className="mx-index">{master ? "LR" : String(index).padStart(2, "0")}</span>
+          {track.kind === "Instrument" ? "Inst." : track.kind}
+        </span>
         <strong className="mx-name">{name}</strong>
       </button>
-      <ul className="mx-slots" aria-label={`${name} inserts`}>
-        {shownInserts.map((s) => (
-          <li key={s.id} className={s.active ? undefined : "bypassed"} title={s.name}>
-            {s.name}
-          </li>
-        ))}
-        {more > 0 && <li className="mx-more">+{more} more</li>}
-        {track.inserts.length === 0 && <li className="mx-none">No inserts</li>}
-      </ul>
       <div className="mx-tools">
-        <button
-          type="button"
-          className="mx-tool"
-          aria-pressed={track.mute}
-          aria-label={`Mute ${name}`}
-          disabled={pending}
-          onClick={() => actions.command({ type: "mute", nodeId: id, on: !track.mute })}
-        >
+        <button type="button" className="mx-tool" aria-pressed={track.mute} aria-label={`Mute ${name}`}
+          title={muteReason ?? `Mute ${name}`} aria-description={muteReason} disabled={pending || muteReason !== undefined}
+          onClick={() => actions.command({ type: "mute", nodeId: id, on: !track.mute })}>
           M
         </button>
-        <button
-          type="button"
-          className="mx-tool solo"
-          aria-pressed={track.solo}
-          aria-label={`Solo ${name}`}
-          disabled={pending}
-          onClick={() => actions.command({ type: "solo", nodeId: id, on: !track.solo })}
-        >
+        <button type="button" className="mx-tool solo" aria-pressed={track.solo} aria-label={`Solo ${name}`}
+          title={soloReason ?? `Solo ${name}`} aria-description={soloReason} disabled={pending || soloReason !== undefined}
+          onClick={() => actions.command({ type: "solo", nodeId: id, on: !track.solo })}>
           S
-        </button>
-        <button
-          type="button"
-          className={`mx-tool clip${track.clipped ? " on" : ""}`}
-          aria-label={track.clipped ? `Clear ${name} clip` : `${name} has not clipped`}
-          disabled={pending || !track.clipped}
-          onClick={() => actions.command({ type: "clearClip", nodeId: id })}
-        >
-          Clip
         </button>
       </div>
       <div className="mx-bank">
         <Fader control={levelControl} param={LEVEL} value={level} name={`${name} level`} format={formatDb} disabled={pending} />
+        <div className="mx-scale" aria-hidden="true">
+          {TICKS.map((tick) => <span key={tick} style={{ bottom: `${((tick - LEVEL.min) / (LEVEL.max - LEVEL.min)) * 100}%` }}>{tick}</span>)}
+        </div>
         <div className="mx-meter" ref={meterRef} role="img" aria-label={`${name} meter`}>
           <span className="mx-meter-bar" />
           <span className="mx-meter-bar" />
         </div>
-      </div>
-      <output className="mx-db" aria-hidden="true">
-        {formatDb(level)}
-      </output>
-      <div className="mx-pan" aria-disabled={pending || undefined}>
-        <Knob
-          control={panControl}
-          id={`pan-${id}`}
-          param={PAN}
-          value={pan}
-          label="Pan"
-          name={`${name} pan`}
-          format={formatPan}
-          does="Places the track between left and right."
-          row
-          size={26}
+        <button
+          type="button"
+          className={`mx-clip${track.clipped ? " on" : ""}`}
+          aria-label={track.clipped ? `Clear ${name} clip` : `${name} has not clipped`}
+          title={track.clipped ? `Clear ${name} clip` : undefined}
+          disabled={pending || !track.clipped}
+          onClick={() => actions.command({ type: "clearClip", nodeId: id })}
         />
       </div>
-      <p className="mx-out" title={outputLabel}>
-        {!master && <Icon name="arrow" />}
-        <span>{outputLabel}</span>
-      </p>
+      <output className="mx-db" aria-hidden="true">{formatDb(level)}</output>
+      <div className="mx-pan" style={{ "--pan": (pan + 1) / 2 } as CSSProperties} inert={pending || undefined}>
+        <Knob control={panControl} id={`pan-${id}`} param={PAN} value={pan} label="Pan" name={`${name} pan`}
+          format={formatPan} does="Places the track between left and right." variant="field" row />
+      </div>
+      <div className="mx-out">
+        {master ? <><Icon name="arrow" /><span title={masterOutput}>{masterOutput}</span></> : <OutputChoice track={track} nodes={nodes} command={actions.command} compact />}
+      </div>
+      {!master && (
+        <section className="mx-sends" aria-label={`${name} sends`}>
+          <h3>Sends</h3>
+          <div className="mx-send-list">
+            {track.sends.map((send) => (
+              <SendRow key={send.id} nodeId={id} send={send}
+                name={track.sendDestinations.find((d) => d.id === send.destinationId)?.name ?? nodes.get(send.destinationId)?.name ?? "Unavailable destination"}
+                pending={pending} actions={actions} />
+            ))}
+            {track.sends.length === 0 && <p className="mx-mini">No sends</p>}
+          </div>
+          <select
+            className="mx-add-send"
+            aria-label={`Add send from ${name}`}
+            title={destinations.length ? "Add send" : "No destinations available"}
+            value={addPlaceholder}
+            disabled={pending || destinations.length === 0}
+            onChange={(e) => {
+              const destination = destinations.find((option) => option.id === e.currentTarget.value);
+              if (destination) actions.command({ type: "addSend", nodeId: id, destinationId: destination.id, pre: false, amount: 0 });
+            }}
+          >
+            <option value={addPlaceholder} disabled>Add send</option>
+            <Options options={destinations} />
+          </select>
+        </section>
+      )}
     </section>
   );
-});
+}
+
+function SendRow({ nodeId, send, name, pending, actions }: { nodeId: string; send: MixerSend; name: string; pending?: boolean; actions: StripActions }) {
+  const { id: sendId } = send;
+  const { gestures, command } = actions;
+  const ctl = useMemo(() => control(gestures, { kind: "send", nodeId, sendId }), [gestures, nodeId, sendId]);
+  const amount = gestures.shown({ kind: "send", nodeId, sendId }) ?? send.amount;
+  return (
+    <div className="mx-send" role="group" aria-label={`Send to ${name}`}>
+      <div inert={pending || undefined}>
+        <Knob control={ctl} id={sendId} param={SEND} value={amount} label="" name={`Send to ${name} amount`}
+          format={formatPercent} does="Sets the level of this send." size={29} />
+      </div>
+      <strong title={name}>{name}</strong>
+      <div className="mx-send-tools">
+        <button type="button" className="mx-tool" aria-label={`Pre-fader send to ${name}`}
+          aria-pressed={send.pre} title={send.pre ? "Switch to post-fader" : "Switch to pre-fader"} disabled={pending}
+          onClick={() => command({ type: "setSendPre", nodeId, sendId, pre: !send.pre })}>
+          {send.pre ? "Pre" : "Post"}
+        </button>
+        <button type="button" className="mx-icon-btn" aria-label={`Remove send to ${name}`} title="Remove send" disabled={pending}
+          onClick={() => command({ type: "removeSend", nodeId, sendId })}>
+          <Icon name="remove" />
+        </button>
+      </div>
+    </div>
+  );
+}

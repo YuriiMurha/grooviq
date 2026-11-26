@@ -48,7 +48,7 @@ async function center(el: Locator) {
 
 test("selection, strip keyboard navigation, and sliders that keep their keys", async ({ fixture }) => {
   const page = await fixture();
-  await expect(inspector(page).getByRole("heading", { name: "Drum bus" })).toBeVisible();
+  await expect(inspector(page).getByRole("heading", { name: "Snare" })).toBeVisible();
 
   const kick = strip(page, "Kick").getByRole("button", { name: "Kick", exact: true });
   await kick.click();
@@ -68,7 +68,7 @@ test("selection, strip keyboard navigation, and sliders that keep their keys", a
   await fader.focus();
   await page.keyboard.press("ArrowUp");
   await expect(fader).toBeFocused();
-  await expect(fader).not.toHaveAttribute("aria-valuenow", "-7");
+  await expect(fader).not.toHaveAttribute("aria-valuenow", "-8");
   await page.keyboard.press("Home");
   await expect(fader).toHaveAttribute("aria-valuetext", "−∞ dB");
   await page.keyboard.press("End");
@@ -135,15 +135,15 @@ test("fader and pan drags preview live and commit once, Shift drags finely", asy
 
 test("mute, solo and clip reset address their own strip", async ({ fixture }) => {
   const page = await fixture();
-  await page.getByRole("button", { name: "Mute Hats" }).click();
-  await expect(page.getByRole("button", { name: "Mute Hats" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Mute Kit bus" }).click();
+  await expect(page.getByRole("button", { name: "Mute Kit bus" })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Solo Keys" }).click();
   await expect(page.getByRole("button", { name: "Solo Keys" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("button", { name: "Kick has not clipped" })).toBeDisabled();
   await page.getByRole("button", { name: "Clear Snare clip" }).click();
   await expect(page.getByRole("button", { name: "Snare has not clipped" })).toBeDisabled();
   expect(await log(page)).toEqual([
-    { type: "mute", nodeId: "n-hats", on: true },
+    { type: "mute", nodeId: "n-drums", on: true },
     { type: "solo", nodeId: "n-keys", on: true },
     { type: "clearClip", nodeId: "n-snare" },
   ]);
@@ -156,7 +156,6 @@ test("inserts: add, bypass, open, reorder and remove by slot id", async ({ fixtu
   await insp.getByLabel("Insert chain").selectOption({ label: "Saturation" });
   const chain = insp.getByRole("listitem");
   await expect(chain).toHaveText([/Fattener/, /Compressor/, /Saturation/]);
-  await expect(strip(page, "Bass").getByText("+1 more")).toBeVisible();
 
   const sat = insp.getByRole("listitem", { name: "Saturation" });
   await sat.getByRole("switch", { name: "On" }).click();
@@ -187,42 +186,118 @@ test("inserts: add, bypass, open, reorder and remove by slot id", async ({ fixtu
   expect(new Set(cmds.map(nodeOf))).toEqual(new Set(["n-bass"]));
 });
 
-test("sends: explicit pre/post, new sends post and off, amount by send id", async ({ fixture }) => {
+test("visible sends use host options and send their own pre/post, amount and remove commands", async ({ fixture }) => {
   const page = await fixture();
-  await strip(page, "Kick").getByRole("button", { name: "Kick", exact: true }).click();
-  const air = inspector(page).getByRole("group", { name: "Send to Air return" });
-  await expect(air.getByRole("radio", { name: "Post" })).toHaveAttribute("aria-checked", "true");
-  await air.getByRole("radio", { name: "Pre" }).click();
-  await expect(air.getByRole("radio", { name: "Pre" })).toHaveAttribute("aria-checked", "true");
+  const snare = strip(page, "Snare");
+  const room = snare.getByRole("group", { name: "Send to Room" });
+  const tap = room.getByRole("button", { name: "Pre-fader send to Room" });
+  await expect(tap).toHaveAttribute("aria-pressed", "false");
+  await tap.click();
+  await expect(tap).toHaveAttribute("aria-pressed", "true");
 
-  await inspector(page).getByLabel("Add a send").selectOption({ label: "Echo return" });
-  const echo = inspector(page).getByRole("group", { name: "Send to Echo return" });
-  await expect(echo.getByRole("radio", { name: "Post" })).toHaveAttribute("aria-checked", "true");
-  const amount = echo.getByRole("slider", { name: "Send to Echo return amount" });
+  const add = snare.getByRole("combobox", { name: "Add send from Snare" });
+  await expect(add.getByRole("option", { name: "Room", exact: true })).toHaveCount(0);
+  await expect(add.getByRole("option", { name: "Echo", exact: true })).toHaveCount(1);
+  await add.selectOption({ label: "Echo" });
+  const echo = snare.getByRole("group", { name: "Send to Echo" });
+  await expect(echo.getByRole("button", { name: "Pre-fader send to Echo" })).toHaveAttribute("aria-pressed", "false");
+  const amount = echo.getByRole("slider", { name: "Send to Echo amount" });
   await expect(amount).toHaveAttribute("aria-valuetext", "0%");
-  await amount.focus();
-  await page.keyboard.press("PageUp");
+  await amount.press("PageUp");
   await expect(amount).toHaveAttribute("aria-valuetext", "10%");
-  await expect(inspector(page).getByLabel("Add a send")).toBeDisabled();
-  await echo.getByRole("button", { name: "Remove send to Echo return" }).click();
+  await expect(add).toBeDisabled();
+  await echo.getByRole("button", { name: "Remove send to Echo" }).press("Enter");
   await expect(echo).toHaveCount(0);
+  await room.getByRole("button", { name: "Remove send to Room" }).click();
+  await expect(room).toHaveCount(0);
 
-  const cmds = commits(await log(page)).filter((c) => c.type !== "select");
-  const echoSend = (cmds.find((c) => c.type === "param") as Extract<MixerCommand, { type: "param" }>).target;
+  const cmds = await log(page);
+  const echoAmount = cmds.find((c) => c.type === "param");
+  expect(echoAmount?.target).toEqual({ kind: "send", nodeId: "n-snare", sendId: expect.any(String) });
   expect(cmds).toEqual([
-    { type: "setSendPre", nodeId: "n-kick", sendId: expect.any(String), pre: true },
-    { type: "addSend", nodeId: "n-kick", destinationId: "n-echo", pre: false, amount: 0 },
-    { type: "param", target: echoSend, value: expect.closeTo(0.1, 5), phase: "commit" },
-    { type: "removeSend", nodeId: "n-kick", sendId: echoSend.kind === "send" ? echoSend.sendId : "" },
+    { type: "setSendPre", nodeId: "n-snare", sendId: expect.any(String), pre: true },
+    { type: "addSend", nodeId: "n-snare", destinationId: "n-echo", pre: false, amount: 0 },
+    { type: "param", target: echoAmount?.target, value: expect.closeTo(0.1, 5), phase: "commit" },
+    { type: "removeSend", nodeId: "n-snare", sendId: echoAmount?.target.kind === "send" ? echoAmount.target.sendId : "" },
+    { type: "removeSend", nodeId: "n-snare", sendId: expect.any(String) },
   ]);
 });
 
-test("the master: pinned, output disabled, no sends", async ({ fixture }) => {
+test("the strip output picker changes the single main output and the rack reflects it", async ({ fixture }) => {
   const page = await fixture();
+  const snare = strip(page, "Snare");
+  const output = snare.getByRole("combobox", { name: "Main output for Snare" });
+  await expect(output).toHaveValue("n-drums");
+  await output.selectOption({ label: "Master" });
+  await expect(inspector(page).getByLabel("Main output")).toHaveValue("n-master");
+  expect(await log(page)).toEqual([{ type: "setOutput", nodeId: "n-snare", outputId: "n-master" }]);
+});
+
+test("unsupported controls explain why and emit no command", async ({ fixture }) => {
+  const page = await fixture("?unsupported=1");
+  const snare = strip(page, "Snare");
+  const controls = [
+    [snare.getByRole("button", { name: "Mute Snare" }), /Mute.*unavailable/],
+    [snare.getByRole("button", { name: "Solo Snare" }), /Solo.*unavailable/],
+    [inspector(page).getByRole("switch", { name: "On" }).first(), /Bypass.*unavailable/],
+    [inspector(page).getByRole("combobox", { name: "Sidechain input" }), /Detector.*unavailable/],
+  ] as const;
+  for (const [control] of controls) {
+    await control.evaluate((el) => {
+      (el as HTMLButtonElement).click();
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+  expect(await log(page)).toEqual([]);
+  for (const [control, reason] of controls) {
+    await expect(control).toBeDisabled();
+    await expect(control).toHaveAccessibleDescription(reason);
+  }
+});
+
+for (const finish of ["release", "Escape", "blur"] as const) {
+  test(`send drag streams live values and handles ${finish} without a late commit`, async ({ fixture }) => {
+    const page = await fixture();
+    const amount = strip(page, "Snare").getByRole("slider", { name: "Send to Room amount" });
+    const at = await center(amount);
+    await page.mouse.move(at.x, at.y);
+    await page.mouse.down();
+    await page.mouse.move(at.x, at.y - 22, { steps: 3 });
+    const live = (await log(page)).filter((command) => command.type === "param" && command.phase === "live");
+    expect(live.length).toBeGreaterThan(0);
+    await expect(amount).not.toHaveAttribute("aria-valuetext", "16%");
+    if (finish === "Escape") await page.keyboard.press("Escape");
+    if (finish === "blur") await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await page.mouse.up();
+    expect(commits(await log(page))).toEqual([{
+      type: "param",
+      phase: finish === "release" ? "commit" : "cancel",
+      target: { kind: "send", nodeId: "n-snare", sendId: expect.any(String) },
+      value: finish === "release" ? expect.any(Number) : 0.16,
+    }]);
+    if (finish !== "release") await expect(amount).toHaveAttribute("aria-valuetext", "16%");
+  });
+}
+
+test("meters change through MeterSource without rendering the mixer on each frame", async ({ fixture }) => {
+  const page = await fixture("?measure=1");
+  const stats = () => page.evaluate(() => window.mixerFixture.stats());
+  const meter = strip(page, "Snare").getByRole("img", { name: "Snare meter" });
+  await expect.poll(async () => (await stats()).meterReads).toBeGreaterThan(20);
+  const before = await stats();
+  const bars = await meter.locator("span").evaluateAll((els) => els.map((el) => (el as HTMLElement).style.transform));
+  await expect.poll(async () => (await stats()).meterReads).toBeGreaterThan(before.meterReads + 50);
+  await expect.poll(() => meter.locator("span").evaluateAll((els) => els.map((el) => (el as HTMLElement).style.transform))).not.toEqual(bars);
+  expect((await stats()).mixerRenders).toBe(before.mixerRenders);
+  await strip(page, "Kick").getByRole("button", { name: "Kick", exact: true }).click();
+  await expect.poll(async () => (await stats()).mixerRenders).toBeGreaterThan(before.mixerRenders);
+});
+
+test("the master: pinned, output disabled, no sends", async ({ fixture }) => {
+  const page = await fixture("?tracks=35");
   await page.getByRole("region", { name: "Master" }).getByRole("button", { name: "Master", exact: true }).click();
   await expect(inspector(page).getByLabel("Main output")).toBeDisabled();
-  await expect(inspector(page).getByText("The master has no sends.")).toBeVisible();
-  await expect(inspector(page).getByLabel("Add a send")).toHaveCount(0);
+  await expect(strip(page, "Master").getByRole("combobox")).toHaveCount(0);
   // Scrolling the tracks never moves the master.
   const before = await page.getByRole("region", { name: "Master" }).boundingBox();
   await page.getByRole("group", { name: /Mixer tracks/ }).evaluate((el) => (el.scrollLeft = el.scrollWidth));
@@ -233,18 +308,18 @@ test("a refused change keeps the supplied state, shows the host's error and send
   const page = await fixture();
   await strip(page, "Keys").getByRole("button", { name: "Keys", exact: true }).click();
   const output = inspector(page).getByLabel("Main output");
-  await expect(output).toHaveValue("n-master");
+  await expect(output).toHaveValue("n-music");
   await page.evaluate(() => window.mixerFixture.refuseNext("That route would feed back into Keys."));
   await clearLog(page);
-  await output.selectOption({ label: "Drum bus" });
+  await output.selectOption({ label: "Kit bus" });
   await expect(inspector(page).getByRole("status")).toHaveText("That route would feed back into Keys.");
-  await expect(output).toHaveValue("n-master");
+  await expect(output).toHaveValue("n-music");
 
   const fader = page.getByRole("slider", { name: "Keys level" });
   await page.evaluate(() => window.mixerFixture.refuseNext("The engine is busy."));
   await fader.focus();
   await page.keyboard.press("End");
-  await expect(fader).toHaveAttribute("aria-valuenow", "-8");
+  await expect(fader).toHaveAttribute("aria-valuenow", "-9");
   await expect(inspector(page).getByRole("status")).toHaveText("The engine is busy.");
   await page.waitForTimeout(400);
   expect(await log(page)).toEqual([
@@ -258,6 +333,8 @@ test("a pending track shows the supplied state and takes no input", async ({ fix
   await page.evaluate(() => window.mixerFixture.setPending("n-kick", true));
   await expect(strip(page, "Kick")).toHaveAttribute("aria-busy", "true");
   await expect(page.getByRole("button", { name: "Mute Kick" })).toBeDisabled();
+  await expect(strip(page, "Kick").getByRole("combobox", { name: "Main output for Kick" })).toBeDisabled();
+  await expect(strip(page, "Kick").getByRole("combobox", { name: "Add send from Kick" })).toBeDisabled();
   const fader = page.getByRole("slider", { name: "Kick level" });
   await fader.focus();
   await page.keyboard.press("End");
@@ -299,32 +376,31 @@ test("a strip or send removed or replaced mid-gesture: nothing reaches it or its
   cmds = await log(page);
   expect(cmds.some((c) => nodeOf(c) === "n-snare-2")).toBe(false);
   expect(cmds.filter((c) => c.type === "param" && c.phase !== "live")).toEqual([]);
-  await expect(page.getByRole("slider", { name: "Snare level" })).toHaveAttribute("aria-valuenow", "-7");
+  await expect(page.getByRole("slider", { name: "Snare level" })).toHaveAttribute("aria-valuenow", "-8");
 
   // A send removed during an amount drag, its strip still there.
-  await strip(page, "Keys").getByRole("button", { name: "Keys", exact: true }).click();
   await clearLog(page);
-  const amount = inspector(page).getByRole("slider", { name: "Send to Echo return amount" });
+  const amount = strip(page, "Vocal take").getByRole("slider", { name: "Send to Echo amount" });
   at = await center(amount);
   await page.mouse.move(at.x, at.y);
   await page.mouse.down();
   await page.mouse.move(at.x, at.y - 20, { steps: 3 });
   const live = (await log(page)).find((c) => c.type === "param") as Extract<MixerCommand, { type: "param" }>;
   expect(live.target.kind).toBe("send");
-  await page.evaluate((id) => window.mixerFixture.removeSend("n-keys", id), live.target.kind === "send" ? live.target.sendId : "");
+  await page.evaluate((id) => window.mixerFixture.removeSend("n-vocal", id), live.target.kind === "send" ? live.target.sendId : "");
   await page.mouse.move(at.x, at.y - 40, { steps: 3 });
   await page.mouse.up();
   cmds = await log(page);
   expect(cmds.filter((c) => c.type === "param" && c.phase !== "live")).toEqual([]);
-  await expect(inspector(page).getByText("No sends.")).toBeVisible();
+  await expect(strip(page, "Vocal take").getByRole("group", { name: "Send to Echo" })).toHaveCount(0);
 });
 
 test("a removed selection shows its own state, and a renamed strip keeps its id", async ({ fixture }) => {
   const page = await fixture();
-  await strip(page, "Hats").getByRole("button", { name: "Hats", exact: true }).click();
-  await page.evaluate(() => window.mixerFixture.rename("n-hats", "Open hats"));
-  await expect(inspector(page).getByRole("heading", { name: "Open hats" })).toBeVisible();
-  await page.evaluate(() => window.mixerFixture.remove("n-hats"));
+  await strip(page, "Kit bus").getByRole("button", { name: "Kit bus", exact: true }).click();
+  await page.evaluate(() => window.mixerFixture.rename("n-drums", "Percussion bus"));
+  await expect(inspector(page).getByRole("heading", { name: "Percussion bus" })).toBeVisible();
+  await page.evaluate(() => window.mixerFixture.remove("n-drums"));
   await expect(inspector(page)).toContainText("The selected track is no longer in the mixer.");
 });
 
@@ -428,11 +504,14 @@ for (const cause of ["Escape", "blur"] as const) {
     const pan = page.getByRole("slider", { name: "Kick pan" });
     const point = await center(pan);
     await page.mouse.move(point.x, point.y);
+    const now = new Date();
+    await page.clock.install({ time: now });
+    await page.clock.pauseAt(new Date(now.getTime() + 10_000));
     await page.mouse.wheel(0, -80);
     await expect.poll(async () => (await log(page)).filter(c => c.type === "param" && c.phase === "live").length).toBeGreaterThan(0);
     await cancel();
-    // Past the shared 300 ms wheel-settlement timer: it must not resurrect a cancelled gesture.
-    await page.waitForTimeout(400);
+    // Advance past the wheel timer after cancelling, independently of browser scheduling.
+    await page.clock.runFor(400);
     params = (await log(page)).filter((c): c is Extract<MixerCommand, { type: "param" }> => c.type === "param");
     expect(params.filter(c => c.phase === "cancel")).toEqual([{ type: "param", target: { kind: "pan", nodeId: "n-kick" }, value: 0, phase: "cancel" }]);
     expect(params.filter(c => c.phase === "commit")).toEqual([]);
@@ -457,7 +536,7 @@ for (const width of [1000, 728, 390]) {
     expect(master.x + master.width).toBeLessThanOrEqual(width);
     const console = (await page.locator(".mx-console").boundingBox())!;
     const insp = (await inspector(page).boundingBox())!;
-    if (width <= 960) expect(insp.y).toBeGreaterThanOrEqual(console.y + console.height - 1);
+    if (width <= 850) expect(insp.y).toBeGreaterThanOrEqual(console.y + console.height - 1);
     else expect(insp.x).toBeGreaterThanOrEqual(console.x + console.width - 1);
     // Every insert row fits the inspector.
     for (const box of await inspector(page).getByRole("listitem").evaluateAll((els) => els.map((e) => e.getBoundingClientRect().right))) {
