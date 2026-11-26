@@ -448,6 +448,22 @@ impl State {
         self.monitor.set_guard(shared.guard.load(Ordering::Acquire));
         let devices = self.backend.outputs();
         let mut events = self.monitor.tick(&devices);
+        // A refused move can leave the monitor targeting a different device than the open stream.
+        if let Some(open) = &self.open {
+            events.retain_mut(|event| {
+                let (OutputEvent::Opened(to) | OutputEvent::Switched { to, .. }) = event else {
+                    return true;
+                };
+                if to.id == open.info.id {
+                    return false;
+                }
+                *event = OutputEvent::Switched {
+                    from: open.info.clone(),
+                    to: to.clone(),
+                };
+                true
+            });
+        }
         let target = self.monitor.current().cloned();
         let target_id = target.as_ref().map(|t| t.id.clone());
         if target_id != self.target {
@@ -985,8 +1001,8 @@ mod tests {
 
     #[test]
     fn mixer_memory_refusal_keeps_the_previous_output_until_retry() {
-        struct TwoRates(Vec<OutputInfo>);
-        impl OutputBackend for TwoRates {
+        struct FakeOutputs(Vec<OutputInfo>);
+        impl OutputBackend for FakeOutputs {
             fn outputs(&self) -> Vec<OutputInfo> {
                 self.0.clone()
             }
@@ -1002,10 +1018,11 @@ mod tests {
             id: id.into(),
             name: id.into(),
             kind: super::super::OutputKind::Headphones,
-            is_default: sample_rate == 48_000,
+            is_default: id == "old",
             sample_rate,
         };
         let (old, new) = (device("old", 48_000), device("new", 96_000));
+        let alternate = device("alternate", 48_000);
         let (mut c, p) = crate::engine_with(
             EngineConfig {
                 sample_rate: 48_000.0,
@@ -1020,7 +1037,11 @@ mod tests {
         let controller = Arc::new(Mutex::new(c));
         let shared = Shared {
             state: Mutex::new(State {
-                backend: Box::new(TwoRates(vec![old.clone(), new.clone()])),
+                backend: Box::new(FakeOutputs(vec![
+                    old.clone(),
+                    new.clone(),
+                    alternate.clone(),
+                ])),
                 controller: Arc::clone(&controller),
                 monitor: OutputMonitor::new(OutputChoice::SystemDefault, true),
                 processor: Some(p),
@@ -1051,12 +1072,37 @@ mod tests {
         shared.slot.process(&mut [0.0; BLOCK * 2], 2);
         assert!(lock(&controller).live().frames > before);
         assert!(state.look(&shared).is_empty() && state.open.is_some());
+
+        *lock(&shared.requested) = Some(OutputChoice::Device(old.id.clone()));
+        let events = state.look(&shared);
+        assert!(
+            events.is_empty(),
+            "reselecting the restored output emitted {events:?}"
+        );
+        assert_eq!(lock(&shared.seen).current.as_ref(), Some(&old));
+
+        *lock(&shared.requested) = Some(OutputChoice::Device(new.id.clone()));
+        assert!(
+            matches!(&state.look(&shared)[..], [OutputEvent::OpenFailed { output, .. }] if output == &new)
+        );
+        *lock(&shared.requested) = Some(OutputChoice::Device(alternate.id.clone()));
+        assert_eq!(
+            state.look(&shared),
+            [OutputEvent::Switched {
+                from: old,
+                to: alternate.clone()
+            }]
+        );
+        *lock(&shared.requested) = Some(OutputChoice::Device(new.id.clone()));
+        assert!(
+            matches!(&state.look(&shared)[..], [OutputEvent::OpenFailed { output, .. }] if output == &new)
+        );
         lock(&controller).set_mixer_memory_limit(crate::mixer::Budget::default().memory_bytes);
         state.retry.not_before = None;
         assert_eq!(
             state.look(&shared),
             [OutputEvent::Switched {
-                from: old,
+                from: alternate,
                 to: new.clone()
             }]
         );
