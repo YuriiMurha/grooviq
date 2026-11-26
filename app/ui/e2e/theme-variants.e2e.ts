@@ -152,10 +152,7 @@ for (const { id } of themes) {
       const sectionInks = ["--dev-osc1", "--dev-osc2", "--dev-filter", "--dev-amp", "--dev-lfo", "--dev-mix", "--dev-voice"];
       const cardColor = rgb("--dev-card");
       for (const [index, ink] of sectionInks.entries()) {
-        // Slate System's existing cobalt Voice caption falls below 4.5:1. See #792.
-        if (id !== "slate-system" || ink !== "--dev-voice") {
-          expect(contrastRatio(rgb(ink), cardColor), `${ink} caption over --dev-card`).toBeGreaterThanOrEqual(4.5);
-        }
+        expect(contrastRatio(rgb(ink), cardColor), `${ink} caption over --dev-card`).toBeGreaterThanOrEqual(4.5);
         for (const other of sectionInks.slice(index + 1)) {
           const distance = colourDistance(bytes(ink), bytes(other));
           const deltaE = oklabDeltaE(rgb(ink), rgb(other));
