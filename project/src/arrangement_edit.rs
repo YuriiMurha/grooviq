@@ -63,6 +63,15 @@ pub enum ArrangementEdit {
         name: String,
         muted: bool,
     },
+    SetAutomationPoints {
+        clip: u32,
+        points: Vec<AutomationPoint>,
+    },
+    SetAutomationClip {
+        clip: u32,
+        target: AutomationTarget,
+        priority: u32,
+    },
     DeleteClip {
         clip: u32,
     },
@@ -98,6 +107,9 @@ struct EditFields {
     tick: Option<u64>,
     audio_first_frames: Option<u64>,
     asset: Option<u32>,
+    points: Option<crate::arrangement::Points>,
+    target: Option<AutomationTarget>,
+    priority: Option<u32>,
     #[serde(default, deserialize_with = "read_region")]
     region: Option<Option<LoopRegion>>,
 }
@@ -164,6 +176,15 @@ impl<'de> Deserialize<'de> for ArrangementEdit {
                 clip: need(f.clip, "clip")?,
                 name: need(f.name, "name")?,
                 muted: need(f.muted, "muted")?,
+            },
+            "setAutomationPoints" => Self::SetAutomationPoints {
+                clip: need(f.clip, "clip")?,
+                points: need(f.points, "points")?.0,
+            },
+            "setAutomationClip" => Self::SetAutomationClip {
+                clip: need(f.clip, "clip")?,
+                target: need(f.target, "target")?,
+                priority: need(f.priority, "priority")?,
             },
             "deleteClip" => Self::DeleteClip {
                 clip: need(f.clip, "clip")?,
@@ -233,6 +254,7 @@ pub fn apply(p: &mut Project, ops: Vec<ArrangementEdit>) -> Result<Vec<u32>, Str
         .collect();
     let mut ids = Vec::new();
     let mut tracks_by_operation = std::collections::HashMap::new();
+    let mut curve_origins = std::collections::HashMap::<usize, CurvePoints>::new();
     for (operation, op) in ops.into_iter().enumerate() {
         match op {
             ArrangementEdit::CreateTrack { name, color } => {
@@ -541,6 +563,75 @@ pub fn apply(p: &mut Project, ops: Vec<ArrangementEdit>) -> Result<Vec<u32>, Str
                 let i = clip(p, c)?;
                 p.arrangement.clips[i].name = name;
                 p.arrangement.clips[i].muted = muted;
+            }
+            ArrangementEdit::SetAutomationPoints { clip: c, points } => {
+                let i = clip(p, c)?;
+                let ClipContent::Automation {
+                    offset_tick,
+                    length_ticks,
+                    points: source,
+                    ..
+                } = &p.arrangement.clips[i].content
+                else {
+                    return Err(format!("Clip {c} is not an automation clip"));
+                };
+                let start = u64::from(*offset_tick);
+                let end = start
+                    .checked_add(*length_ticks)
+                    .ok_or("Automation source range overflow")?;
+                if points
+                    .iter()
+                    .any(|point| !(start..end).contains(&point.tick))
+                {
+                    return Err(format!(
+                        "Clip {c}: point is outside the automation source range"
+                    ));
+                }
+                if points.as_slice() == &**source {
+                    continue;
+                }
+                // Copy and Slice share this allocation. Replace it everywhere on the candidate
+                // so history retains the old curve and independently created curves stay separate.
+                let source = source.clone();
+                let origin = curve_origins
+                    .remove(&source.allocation().0)
+                    .unwrap_or_else(|| source.clone());
+                // An edit followed by its inverse leaves no point delta. Keep the original
+                // allocation so a Copy in the same batch still links after undo/redo.
+                let replacement = if points.as_slice() == &*origin {
+                    origin
+                } else {
+                    let replacement = CurvePoints::from(points);
+                    curve_origins.insert(replacement.allocation().0, origin);
+                    replacement
+                };
+                for sibling in &mut p.arrangement.clips {
+                    if let ClipContent::Automation { points, .. } = &mut sibling.content
+                        && points.shares_allocation(&source)
+                    {
+                        *points = replacement.clone();
+                    }
+                }
+            }
+            ArrangementEdit::SetAutomationClip {
+                clip: c,
+                target,
+                priority,
+            } => {
+                let i = clip(p, c)?;
+                let ClipContent::Automation {
+                    target: clip_target,
+                    priority: clip_priority,
+                    ..
+                } = &mut p.arrangement.clips[i].content
+                else {
+                    return Err(format!("Clip {c} is not an automation clip"));
+                };
+                *clip_target = target;
+                *clip_priority = priority;
+                // Priorities occupy the same id space as entities and must survive Open verbatim.
+                issued.insert(priority);
+                p.next_id = p.next_id.max(priority.saturating_add(1));
             }
             ArrangementEdit::DeleteClip { clip: c } => {
                 let i = clip(p, c)?;
