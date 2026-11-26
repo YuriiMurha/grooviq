@@ -1059,6 +1059,66 @@
         "changed": false,
         "createdIds": [],
         "generation": 0,
+        "message": "Unknown track 98",
+        "reload": true,
+        "request": null,
+        "revision": 9,
+        "status": "refused",
+        "warnings": [
+          "Audio asset 2: decoded geometry differs from saved provenance; trim duration is preserved and unavailable decoded frames are silent."
+        ]
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 0,
+        "message": "Unknown track 98",
+        "reload": true,
+        "request": null,
+        "revision": 9,
+        "status": "refused",
+        "warnings": [
+          "Audio asset 2: decoded geometry differs from saved provenance; trim duration is preserved and unavailable decoded frames are silent."
+        ]
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 0,
+        "message": "Unknown clip 99",
+        "reload": true,
+        "request": null,
+        "revision": 9,
+        "status": "refused",
+        "warnings": [
+          "Audio asset 2: decoded geometry differs from saved provenance; trim duration is preserved and unavailable decoded frames are silent."
+        ]
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 0,
+        "message": "Unknown track 98",
+        "reload": true,
+        "request": null,
+        "revision": 9,
+        "status": "refused",
+        "warnings": [
+          "Audio asset 2: decoded geometry differs from saved provenance; trim duration is preserved and unavailable decoded frames are silent."
+        ]
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 0,
         "message": "Clip 6 (  Take 01 / edit  ): invalid track/source reference, bounds or automation value.",
         "reload": true,
         "request": null,
@@ -1763,6 +1823,124 @@
         "pendingRequests": [],
         "playMode": "pattern",
         "revision": 15,
+        "songError": null,
+        "total": 3,
+        "tracks": [
+          {
+            "color": 0,
+            "id": 1,
+            "mute": false,
+            "name": "Audio"
+          },
+          {
+            "color": 1,
+            "id": 4,
+            "mute": false,
+            "name": "Patterns"
+          }
+        ],
+        "warnings": [
+          "Audio asset 2: decoded geometry differs from saved provenance; trim duration is preserved and unavailable decoded frames are silent."
+        ]
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [
+          9
+        ],
+        "generation": 0,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 16,
+        "status": "applied",
+        "warnings": [
+          "Audio asset 2: decoded geometry differs from saved provenance; trim duration is preserved and unavailable decoded frames are silent."
+        ]
+      }
+    },
+    {
+      "ok": {
+        "effect": {
+          "kind": "arrangement"
+        },
+        "generation": 0,
+        "revision": 17,
+        "status": "applied"
+      }
+    },
+    {
+      "ok": {
+        "audioAssets": [
+          {
+            "id": 2,
+            "originalKey": null,
+            "originalTempo": null,
+            "sample": {
+              "file": null,
+              "path": "relinked.wav"
+            },
+            "sourceFrames": 8,
+            "sourceRate": 32000
+          }
+        ],
+        "clips": [
+          {
+            "content": {
+              "asset": 2,
+              "fadeIn": 2,
+              "fadeOut": 0,
+              "gain": 2.0,
+              "reverse": true,
+              "sourceEnd": 7,
+              "sourceStart": 5,
+              "type": "audio"
+            },
+            "id": 3,
+            "muted": true,
+            "name": "Reverse take",
+            "startTick": 480,
+            "track": 4
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 0,
+              "pattern": 0,
+              "type": "pattern"
+            },
+            "id": 5,
+            "muted": false,
+            "name": "Pattern clip",
+            "startTick": 0,
+            "track": 4
+          },
+          {
+            "content": {
+              "asset": 2,
+              "fadeIn": 0,
+              "fadeOut": 4,
+              "gain": 2.0,
+              "reverse": true,
+              "sourceEnd": 5,
+              "sourceStart": 1,
+              "type": "audio"
+            },
+            "id": 7,
+            "muted": true,
+            "name": "Reverse take",
+            "startTick": 481,
+            "track": 4
+          }
+        ],
+        "generation": 0,
+        "loopRegion": null,
+        "offset": 0,
+        "pendingRequests": [],
+        "playMode": "pattern",
+        "revision": 17,
         "songError": null,
         "total": 3,
         "tracks": [
@@ -3143,6 +3321,38 @@
     },
     {
       "args": {
+        "editsJson": "[{\"kind\":\"move\",\"clip\":99,\"track\":98,\"startTick\":0}]",
+        "generation": 0,
+        "revision": 9
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"kind\":\"copy\",\"clip\":99,\"track\":98,\"startTick\":0}]",
+        "generation": 0,
+        "revision": 9
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"kind\":\"copy\",\"clip\":99,\"track\":4,\"startTick\":0}]",
+        "generation": 0,
+        "revision": 9
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"kind\":\"move\",\"clip\":5,\"track\":98,\"startTick\":0}]",
+        "generation": 0,
+        "revision": 9
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
         "editsJson": "[{\"kind\":\"copy\",\"clip\":3,\"track\":4,\"startTick\":38400000}]",
         "generation": 0,
         "revision": 9
@@ -3284,6 +3494,29 @@
       "args": {
         "generation": 0,
         "revision": 14,
+        "undo": true
+      },
+      "command": "arrangement_history"
+    },
+    {
+      "args": {
+        "limit": 32,
+        "offset": 0
+      },
+      "command": "arrangement_view"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"kind\":\"copy\",\"clip\":5,\"track\":4,\"startTick\":960},{\"kind\":\"deleteClip\",\"clip\":9}]",
+        "generation": 0,
+        "revision": 15
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "generation": 0,
+        "revision": 16,
         "undo": true
       },
       "command": "arrangement_history"

@@ -118,6 +118,26 @@ fn steps() -> Vec<Value> {
         edit(
             0,
             9,
+            r#"[{"kind":"move","clip":99,"track":98,"startTick":0}]"#,
+        ),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"copy","clip":99,"track":98,"startTick":0}]"#,
+        ),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"copy","clip":99,"track":4,"startTick":0}]"#,
+        ),
+        edit(
+            0,
+            9,
+            r#"[{"kind":"move","clip":5,"track":98,"startTick":0}]"#,
+        ),
+        edit(
+            0,
+            9,
             r#"[{"kind":"copy","clip":3,"track":4,"startTick":38400000}]"#,
         ),
         edit(
@@ -183,6 +203,13 @@ fn steps() -> Vec<Value> {
             r#"[{"kind":"copy","clip":3,"track":1,"startTick":720},{"kind":"deleteClip","clip":8}]"#,
         ),
         history(0, 14, true),
+        view(),
+        edit(
+            0,
+            15,
+            r#"[{"kind":"copy","clip":5,"track":4,"startTick":960},{"kind":"deleteClip","clip":9}]"#,
+        ),
+        history(0, 16, true),
         view(),
         step("project_save_as", json!({"path": "/qa/media.grooviq"})),
         step("project_new", json!({})),

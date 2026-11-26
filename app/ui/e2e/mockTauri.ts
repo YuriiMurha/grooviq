@@ -1519,7 +1519,6 @@ export function installMockTauri(seed: MockSeed): void {
       const addedPatterns = new Map<number, PatternEntry>();
       const sourcePattern = (id: number) => addedPatterns.get(id) ?? patternBank.get(id);
       let next = candidate.nextId; const issued = new Set([...candidate.channels.map(c => c.id), ...patternBank.keys(), ...arrangement.tracks.map(t => t.id), ...arrangement.clips.map(c => c.id), ...arrangement.audioAssets.map(a => a.id)]);
-      let allocatedAudioClip = false;
       const ids: number[] = [], tracksByOperation = new Map<number, number>();
       const allocate = () => { while (next < 0xffffffff && issued.has(next)) next++; if (next >= 0xffffffff) throw "Project ids exhausted"; const id = next++; issued.add(id); return id; };
       const maxSongTicks = 38_400_000;
@@ -1542,15 +1541,15 @@ export function installMockTauri(seed: MockSeed): void {
       };
       const audioAssets = new Map(arrangement.audioAssets.map(asset => [asset.id, asset]));
       const bpm = Math.fround(candidate.bpm);
-      const track = (value: unknown, audio = false) => {
+      const track = (value: unknown) => {
         const id = int(value, 0xffffffff);
-        if (!arrangement.tracks.some(t => t.id === id)) throw audio ? `Unknown track ${id}` : "Unknown track";
+        if (!arrangement.tracks.some(t => t.id === id)) throw `Unknown track ${id}`;
         return id;
       };
       const clip = (value: unknown) => {
         const id = int(value, 0xffffffff);
         const result = arrangement.clips.find(c => c.id === id);
-        if (!result) throw "Unknown clip";
+        if (!result) throw `Unknown clip ${id}`;
         if (result.content.type !== "pattern" && result.content.type !== "audio") throw "Automation clips are outside the finite fixture";
         return result;
       };
@@ -1572,13 +1571,12 @@ export function installMockTauri(seed: MockSeed): void {
           if (typeof op.muted !== "boolean") throw "Invalid muted flag";
           const id = allocate(); arrangement.clips.push({ id, track: target, name: name(op.name), startTick: int(op.startTick), muted: op.muted, content: patternContent(op.content) }); ids.push(id);
         } else if (op.kind === "move" || op.kind === "copy") {
+          const destination = track(op.track);
           const source = clip(op.clip);
-          const audio = source.content.type === "audio";
-          const destination = track(op.track, audio), start = audio ? safeUint(op.startTick) : int(op.startTick);
+          const start = source.content.type === "audio" ? safeUint(op.startTick) : int(op.startTick);
           if (op.kind === "copy") {
             const copy = { ...clone(source), id: allocate(), track: destination, startTick: start };
             arrangement.clips.push(copy); ids.push(copy.id);
-            allocatedAudioClip ||= audio;
           }
           else { source.track = destination; source.startTick = start; }
         } else if (op.kind === "slice") {
@@ -1606,7 +1604,6 @@ export function installMockTauri(seed: MockSeed): void {
             }
             // Chronological fades stay at the outside, even when the source plays backwards.
             left.fadeIn = Math.min(left.fadeIn, count); left.fadeOut = 0;
-            allocatedAudioClip = true;
           } else {
             if (op.audioFirstFrames != null || cut <= 0 || cut >= left.lengthTicks) throw "Invalid musical slice";
             const period = sourcePattern(left.pattern)!.pattern.steps * STEP_TICKS;
@@ -1662,9 +1659,8 @@ export function installMockTauri(seed: MockSeed): void {
           }
         }
       }
-      // Session compares the whole Project, so issuing an audio clip ID still changes it
-      // when a later operation in the batch removes the new fragment or copy.
-      if (!allocatedAudioClip && !addedPatterns.size && JSON.stringify(before) === JSON.stringify(arrangement)) return arrangementReply(null, false, []);
+      // Session treats consumed IDs as a change, even if the batch leaves the arrangement identical.
+      if (next === candidate.nextId && JSON.stringify(before) === JSON.stringify(arrangement)) return arrangementReply(null, false, []);
       candidate.nextId = next;
       workspaceAdmit(candidate, true, [...allPatterns(), ...Array.from(addedPatterns.values(), entry => entry.pattern)]);
       clearWorkspaceRedo();
