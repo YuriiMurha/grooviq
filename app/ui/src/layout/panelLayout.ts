@@ -2,7 +2,6 @@ import { SPLIT_MAX, SPLIT_MIN } from "./panels";
 
 export const NOTE_MIN = 112;
 const RACK_MIN = 80;
-const CSS_UNITS = 64;
 
 export type PanelChrome = Readonly<{ rackHeader: number; firstRackRow: number; rackPadding: number;
   rollHeader: number; tools: number; velocity: number; splitter: number }>;
@@ -15,18 +14,13 @@ function nonnegative(value: number) {
   if (!Number.isFinite(value) || value < 0) throw new RangeError("Panel geometry must be finite and nonnegative");
   return value;
 }
-function cssPixels(value: number, round: (value: number) => number) {
-  const result = round(value * CSS_UNITS) / CSS_UNITS;
-  return nonnegative(result);
-}
-
 /** Share conservative minima with single-pane contained scrolling. Measurements stay data. */
 export function panelMinimums(chrome: PanelChrome): Readonly<{ rack: number; roll: number; splitter: number }> {
   for (const value of Object.values(chrome)) nonnegative(value);
   return {
-    rack: cssPixels(Math.max(RACK_MIN, chrome.rackHeader + chrome.firstRackRow + chrome.rackPadding), Math.ceil),
-    roll: cssPixels(chrome.rollHeader + chrome.tools + chrome.velocity + NOTE_MIN, Math.ceil),
-    splitter: cssPixels(chrome.splitter, Math.ceil),
+    rack: Math.ceil(nonnegative(Math.max(RACK_MIN, chrome.rackHeader + chrome.firstRackRow + chrome.rackPadding))),
+    roll: Math.ceil(nonnegative(chrome.rollHeader + chrome.tools + chrome.velocity + NOTE_MIN)),
+    splitter: Math.ceil(chrome.splitter),
   };
 }
 
@@ -35,17 +29,18 @@ export function fitPanelLayout({ viewportHeight, requestedRatio, chrome }: Panel
   nonnegative(viewportHeight);
   if (!Number.isFinite(requestedRatio)) throw new RangeError("The requested split must be finite");
   const minimum = panelMinimums(chrome);
-  const contentHeight = cssPixels(Math.max(viewportHeight,
+  // Whole-pixel allocations keep WebKit's overflow clipping from trimming the final lane.
+  const contentHeight = Math.ceil(Math.max(viewportHeight,
     minimum.rack + minimum.splitter + minimum.roll,
-    (minimum.roll + minimum.splitter) / (1 - SPLIT_MIN), minimum.rack / SPLIT_MAX), Math.ceil);
-  // Round required chrome up and the available interval inward. Preferred shares may
-  // round to the nearest layout unit inside that interval; none can spend note room.
-  const lowerHeight = cssPixels(Math.max(minimum.rack, contentHeight * SPLIT_MIN), Math.ceil);
-  const upperHeight = cssPixels(Math.min(contentHeight * SPLIT_MAX,
-    contentHeight - minimum.splitter - minimum.roll), Math.floor);
+    (minimum.roll + minimum.splitter) / (1 - SPLIT_MIN), minimum.rack / SPLIT_MAX));
+  if (!Number.isSafeInteger(contentHeight)) throw new RangeError("Panel content height must be a safe integer");
+  // Round the available interval inward to preserve both the chrome and the split bounds.
+  const lowerHeight = Math.ceil(Math.max(minimum.rack, contentHeight * SPLIT_MIN));
+  const upperHeight = Math.floor(Math.min(contentHeight * SPLIT_MAX,
+    contentHeight - minimum.splitter - minimum.roll));
   if (lowerHeight > upperHeight) throw new RangeError("No finite panel allocation interval");
   const preferredHeight = contentHeight * clamp(requestedRatio, SPLIT_MIN, SPLIT_MAX);
-  const rackHeight = clamp(cssPixels(preferredHeight, Math.round), lowerHeight, upperHeight);
+  const rackHeight = clamp(Math.round(preferredHeight), lowerHeight, upperHeight);
   return { contentHeight, rackHeight, rollHeight: contentHeight - minimum.splitter - rackHeight,
     lowerRatio: lowerHeight / contentHeight, upperRatio: upperHeight / contentHeight,
     effectiveRatio: rackHeight / contentHeight };

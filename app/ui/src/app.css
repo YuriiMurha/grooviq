@@ -407,10 +407,7 @@ input[type="checkbox"] {
 }
 
 .roll-snap .list-picker {
-  /* Match the native select height that kept the compact velocity gutter visible in WebKit. */
-  min-height: 36px;
   gap: 4px;
-  padding-inline: 6px;
   background: var(--raised);
   font-weight: 700;
 }

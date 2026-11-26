@@ -197,7 +197,9 @@ export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError,
     const height = rackPane.current?.getBoundingClientRect().height;
     if (!current || height === undefined) return;
     const currentLayout = fitPanelLayout({ viewportHeight: current.height, requestedRatio: panels.split, chrome: current.chrome });
-    const split = acceptedSplit(currentLayout, height / currentLayout.contentHeight + dir * SPLIT_KEY_STEP);
+    // Start at the fitted bound when compacted, and keep keyboard steps free of pixel rounding.
+    const start = acceptedSplit(currentLayout, panels.split);
+    const split = acceptedSplit(currentLayout, start + dir * SPLIT_KEY_STEP);
     const target = fitPanelLayout({ viewportHeight: current.height, requestedRatio: split, chrome: current.chrome });
     if (target.rackHeight !== height) setPanels((p) => ({ ...p, split }));
   };
