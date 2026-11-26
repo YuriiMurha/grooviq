@@ -38,9 +38,6 @@ unsafe impl Jobs for Fixture {
 
 #[test]
 fn callback_and_worker_pool_are_realtime_on_first_use_fault_and_recovery() {
-    #[cfg(feature = "profiling")]
-    let _client = tracy_client::Client::start();
-
     let config = PoolConfig {
         workers: 1,
         test_normal_priority: true,

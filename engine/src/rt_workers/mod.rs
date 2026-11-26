@@ -203,6 +203,12 @@ impl<J: Jobs + 'static> WorkerPool<J> {
                 "invalid worker pool configuration",
             ));
         }
+        // Profiling builds can construct the pool before the processor enables its own
+        // timeline. Initialize the process-wide client before the workers open their zones.
+        #[cfg(feature = "profiling")]
+        if config.workers != 0 {
+            let _ = tracy_client::Client::start();
+        }
         let shared = Arc::new(Shared {
             active: AtomicPtr::new(ptr::null_mut()),
             callback: AtomicPtr::new(ptr::null_mut()),
