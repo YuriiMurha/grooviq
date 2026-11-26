@@ -87,9 +87,11 @@ jobs:
         with:
           tool: cargo-nextest@0.9.151
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Default-feature test build check
+      # App and project dev-dependencies enable grooviq-engine/test-hooks in --workspace builds.
+      # Add a separate -p check for any crate that gains a test-only feature.
+      - name: Default-feature engine test build check
         if: runner.os == 'macOS'
-        run: cargo check --workspace --tests --locked
+        run: cargo check -p grooviq-engine --tests --locked
       - name: Default-feature no_alloc run
         if: runner.os == 'macOS'
         id: default_no_alloc
