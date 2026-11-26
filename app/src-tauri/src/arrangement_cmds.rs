@@ -5,7 +5,6 @@ use crate::{
     lock,
 };
 use grooviq_project::{
-    ClipContent,
     arrangement_edit::{self, ArrangementAck},
     session::MediaTarget,
 };
@@ -45,25 +44,7 @@ pub fn arrangement_curve(
     revision: u64,
     clip: u32,
 ) -> Result<serde_json::Value, String> {
-    let s = lock(&audio.session);
-    let v = s.arrangement_view();
-    if (generation, revision) != (v.generation, v.revision) {
-        return Err("Stale curve request; reload".into());
-    }
-    let c = s
-        .project()
-        .arrangement
-        .clips
-        .iter()
-        .find(|c| c.id == clip)
-        .ok_or("Unknown clip")?;
-    if let ClipContent::Automation { points, .. } = &c.content {
-        Ok(
-            serde_json::json!({"generation":generation,"revision":revision,"clip":clip,"points":points}),
-        )
-    } else {
-        Err("Not an automation clip".into())
-    }
+    arrangement_core::arrangement_curve(&audio.session, generation, revision, clip)
 }
 #[tauri::command]
 #[expect(
