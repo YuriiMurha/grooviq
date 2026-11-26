@@ -18,7 +18,7 @@
   --ok: #82d8d5;            /* Riso Mint: power, meters */
   --mute: var(--muted);
   --solo: var(--ink-3);
-  --warn: var(--ink-3);     /* warning notices and unsaved changes */
+  --warn: #ff8430;          /* warning notices and unsaved changes */
   --error: #f0504a;         /* error notices and meter clipping */
   --ink-1: #ff48b0; --ink-1b: #2f7bd8;   /* Fluorescent Pink / Blue */
   --ink-2: #62a8e5; --ink-2b: #e2459f;   /* Cornflower / Pink */

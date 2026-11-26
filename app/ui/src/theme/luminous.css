@@ -12,6 +12,7 @@
   --accent: #f6f3ec;
   --select: #008cff; /* cool blue, distinct from the aqua and periwinkle inks */
   --ok: #5fe3b8;
+  --warn: var(--ink-3b);
   --error: #ff787f;
   --ink-1: #ff8b78; --ink-1b: #f0476d;
   --ink-2: #93a7ff; --ink-2b: #6a5cf5;
