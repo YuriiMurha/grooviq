@@ -943,18 +943,6 @@ fn coefs(p: &[f32; PARAMS], sr: f32) -> Coefs {
     }
 }
 
-// Keep both divisions out of the usual path, far from the sample edge.
-#[cold]
-#[inline(never)]
-fn declick_edge(amp: f32, to_edge: f64, step: f64, fade_out: f64) -> f32 {
-    let frames_left = to_edge / step;
-    if frames_left < fade_out {
-        amp * (frames_left / fade_out).max(0.0) as f32
-    } else {
-        amp
-    }
-}
-
 /// Cubic Hermite read of one channel at `pos`, sample index `k` read from `index(k)` (frames
 /// outside the sample read as zero). At an integer position it returns that sample itself.
 #[inline]
@@ -1028,29 +1016,35 @@ impl Device for Sampler {
 impl Sampler {
     // Tests use eager filter coefficient updates as an oracle.
     fn render<const EAGER: bool>(&mut self, l: &mut [f32], r: &mut [f32], events: &[NoteEvent]) {
-        let span = if self.sample.is_some() {
+        let mut span = if self.sample.is_some() {
             self.voices.span()
         } else {
             VOICES
         };
-        // No events can add tails, and an equal finite gain always takes the snap branch.
-        if !EAGER
-            && events.is_empty()
-            && span == VOICES
-            && self.out.map(f32::to_bits) == self.c.out.map(f32::to_bits)
-        {
-            self.render_block::<EAGER, true, false>(l, r, events, span);
-        } else {
-            self.render_block::<EAGER, false, false>(l, r, events, span);
+        if !EAGER && events.is_empty() && span == VOICES && self.sample.is_some() {
+            let notes = &self.voices.v[..VOICES];
+            span = notes
+                .iter()
+                .rposition(|v| v.stage != Stage::Off)
+                .map_or(0, |last| last + 1);
+            // The full note loop pays off from three sounding slots. Sparse blocks keep
+            // the early Off check and can skip the unused suffix until the next event.
+            if span >= 3
+                && self.out.map(f32::to_bits) == self.c.out.map(f32::to_bits)
+                && notes[..span]
+                    .iter()
+                    .filter(|v| v.stage != Stage::Off)
+                    .nth(2)
+                    .is_some()
+            {
+                self.render_block::<EAGER, true>(l, r, events, span);
+                return;
+            }
         }
+        self.render_block::<EAGER, false>(l, r, events, span);
     }
 
-    #[cfg(test)]
-    fn render_reference(&mut self, l: &mut [f32], r: &mut [f32], events: &[NoteEvent]) {
-        self.render_block::<false, false, true>(l, r, events, self.voices.span());
-    }
-
-    fn render_block<const EAGER: bool, const NOTES_ONLY: bool, const REFERENCE: bool>(
+    fn render_block<const EAGER: bool, const NOTES_ONLY: bool>(
         &mut self,
         l: &mut [f32],
         r: &mut [f32],
@@ -1215,16 +1209,9 @@ impl Sampler {
                         } else {
                             v.pos - v.start
                         };
-                        let step = v.step.abs();
-                        if REFERENCE {
-                            let frames_left = to_edge / step;
-                            if frames_left < *fade_out {
-                                amp *= (frames_left / *fade_out).max(0.0) as f32;
-                            }
-                        } else if to_edge <= step * *fade_out {
-                            // A distance strictly above the rounded product is above the exact
-                            // product too. At equality, keep the original rounded divisions.
-                            amp = declick_edge(amp, to_edge, step, *fade_out);
+                        let frames_left = to_edge / v.step.abs();
+                        if frames_left < *fade_out {
+                            amp *= (frames_left / *fade_out).max(0.0) as f32;
                         }
                     }
                 }
@@ -1283,5 +1270,7 @@ impl Sampler {
     }
 }
 
+#[cfg(test)]
+mod reference;
 #[cfg(test)]
 mod tests;

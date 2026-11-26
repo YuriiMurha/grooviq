@@ -31,7 +31,8 @@ impl RenderPair {
     }
 
     fn exact_block(&mut self, frames: usize, events: &[NoteEvent], context: &str) -> bool {
-        let audible = self.compare_block(frames, events, context, Sampler::render_reference);
+        let audible =
+            self.compare_block(frames, events, context, Sampler::render_reference::<false>);
         let actual = &self.actual.voices;
         let expected = &self.eager.voices;
         assert_eq!(actual.counter, expected.counter, "{context}");
@@ -145,6 +146,7 @@ fn render_matches_main_through_fade_pool_overload() {
     assert_eq!(pair.actual.active_voices(), SLOTS);
     assert_ne!(pair.actual.voices.v[VOICES].id, oldest_tail);
     assert_eq!(pair.actual.voices.v[VOICES].id, 65);
+    assert!(pair.exact_block(17, &[], "full note and fade pools without events"));
     pair.actual.choke();
     pair.eager.choke();
     assert!(pair.exact_block(63, &[], "choked voices with no events"));
@@ -210,6 +212,36 @@ fn render_matches_main_through_both_sample_edges_and_smoothed_pan() {
         }
         assert_eq!(pair.actual.active_voices(), 0);
     }
+}
+
+#[test]
+fn render_matches_main_for_one_ulp_pan_change_with_three_voices() {
+    let mut pair = RenderPair::new(4096);
+    let chord = [note(59, 0.7), note(61, 0.8), note(64, 0.9)];
+    assert!(pair.exact_block(17, &chord, "start three notes"));
+    assert!(pair.exact_block(64, &[], "settled output"));
+    pair.set(&[(PAN, 1e-7)]);
+    assert_eq!(pair.actual.active_voices(), 3);
+    let distance_in_bits = pair.actual.out[0]
+        .to_bits()
+        .abs_diff(pair.actual.c.out[0].to_bits());
+    assert_eq!(distance_in_bits, 1);
+    assert!(pair.exact_block(1, &[], "snap a one-ulp output change"));
+    assert!(pair.exact_block(63, &[], "settled at the new gain"));
+    pair.set(&[(FILTER_TYPE, 1.0)]);
+    assert!(pair.exact_block(17, &[], "enable filter between control ticks"));
+}
+
+#[test]
+fn render_matches_main_with_a_hole_before_the_last_note() {
+    let mut pair = RenderPair::new(4096);
+    pair.set(&[(END, 0.01)]);
+    pair.exact_block(17, &[note(60, 0.7)], "short note in slot zero");
+    pair.set(&[(END, 1.0)]);
+    pair.exact_block(64, &[note(62, 0.8)], "long note in slot one");
+    assert_eq!(pair.actual.voices.v[0].stage, Stage::Off);
+    assert_eq!(pair.actual.active_voices(), 1);
+    assert!(pair.exact_block(63, &[], "sparse render with slot zero off"));
 }
 
 fn note(key: u8, velocity: f32) -> NoteEvent {

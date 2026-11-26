@@ -97,6 +97,8 @@ mod counts {
 
     // 100 blocks of 64 frames. (Plain comments: the macro rejects doc attributes.)
     #[library_benchmark]
+    #[bench::voices_0(sampler(0))]
+    #[bench::voices_2(sampler(2))]
     #[bench::voices_16(sampler(16))]
     #[bench::filter_static_16(scenario(0.0, false))]
     #[bench::filter_envelope_16(scenario(0.7, false))]
