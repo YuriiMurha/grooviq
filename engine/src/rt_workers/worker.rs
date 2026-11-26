@@ -164,14 +164,15 @@ fn work<J: Jobs>(shared: &Shared<J>, index: usize, config: PoolConfig) {
     let worker = &shared.workers[index];
     let mut hot = 0;
     let mut acknowledged = 0;
-    let mut poll = || worker.poll(index + 1);
-    while !shared.stop.load(Ordering::Acquire) {
+    let mut poll = || {
         let published = shared.published.load(Ordering::Acquire);
         if published != acknowledged {
             worker.acknowledged.store(published, Ordering::Release);
             acknowledged = published;
         }
-
+        worker.poll(index + 1)
+    };
+    while !shared.stop.load(Ordering::Acquire) {
         #[cfg(any(test, feature = "test-hooks"))]
         let worked = match config.test_worker_context {
             Some(guard) => guard(&mut poll),
