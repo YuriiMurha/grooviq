@@ -161,6 +161,9 @@ if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs"
 if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
     "scripts/qa-driver.py", "scripts/test_qa_driver.py"].includes(path)))
   step("private QA command tests", "make", ["test-qa-driver"]);
+if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
+    "scripts/reclaim_caches.py", "scripts/test_reclaim_caches.py"].includes(path)))
+  step("cache reclaim safety tests", "make", ["test-reclaim-caches"]);
 const uiDir = join(root, "app", "ui");
 const needsUi = ui || workspace || rustCrates.has("grooviq-app");
 
