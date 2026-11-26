@@ -423,6 +423,7 @@ class MergeTrainTests(unittest.TestCase):
         self.git.batch([20, 10], [30, 40, 50])
         output = self.run_tick()
         self.assertEqual(self.repo.merged, [(20, sha(20)), (10, sha(10))])
+        self.assertIn(f"Tested batch {ACTIVE}", output.splitlines())
         self.assertIn(f"Merged #20 at {sha(320)}", output)
         self.assertIn(f"Merged #10 at {sha(310)}", output)
         self.written([30, 40], [50], expected=ACTIVE, base=sha(310))
@@ -696,6 +697,7 @@ class MergeTrainTests(unittest.TestCase):
         self.git.history[BASE, ACTIVE] = [sha(490), ACTIVE]
         self.git.trees[sha(490)] = self.git.landed_tree
         output = self.run_tick((10, 20, 30))
+        self.assertIn(f"Tested batch {ACTIVE}", output.splitlines())
         self.assertIn(f"Merged #10 at {landed}", output)
         self.assertIn("prefix", output)
         self.assertNotIn("BYPASS", output)

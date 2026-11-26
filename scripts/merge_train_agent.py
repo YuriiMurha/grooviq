@@ -110,6 +110,16 @@ def read_text(path):
         return None
 
 
+def read_tick_output(root):
+    def read(name):
+        try:
+            return safe_path(root / name).read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return ""
+
+    return read("stdout"), read("stderr")
+
+
 class Agent:
     def __init__(self, repo, home=None, *, launchctl=subprocess.run, origins=ORIGINS):
         self.repo = safe_path(repo)
@@ -176,35 +186,49 @@ class Agent:
     @contextmanager
     def checkout(self, revision):
         # The tick's flock and mismatch file live in the shared Git directory.
-        with tempfile.TemporaryDirectory(prefix="tick-", dir=self.state) as scratch:
-            root = Path(scratch)
-            script = root / "merge_train.py"
+        root = Path(tempfile.mkdtemp(prefix="tick-", dir=self.state))
+        script, worktree = root / "merge_train.py", root / "checkout"
+        interrupted = False
+        added = False
+        try:
             script.write_bytes(self.git("show", f"{revision}:scripts/merge_train.py"))
-            worktree = root / "checkout"
             self.git("-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", "--no-checkout", "--quiet",
                      str(worktree), revision)
-            try:
-                yield worktree, script
-            finally:
-                # An empty index from --no-checkout looks dirty to Git.
-                self.git("worktree", "remove", "--force", str(worktree))
+            added = True
+            yield worktree, script
+        except KeyboardInterrupt:
+            # A foreground interrupt can leave the train running with our inherited lock.
+            interrupted = True
+            raise
+        finally:
+            if not interrupted:
+                if added:
+                    # An empty index from --no-checkout looks dirty to Git.
+                    self.git("worktree", "remove", "--force", str(worktree))
+                shutil.rmtree(root)
 
     def run_tick(self, worktree, script, entries, batch, *, lock_fd=None):
         args = [self.python, "-I", "-u", "-S", "-B", str(script), "--order", *entries, "--batch", str(batch)]
-        with subprocess.Popen(args, cwd=worktree, env=self.env, stdin=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
-                              pass_fds=() if lock_fd is None else (lock_fd,),
-                              encoding="utf-8", errors="replace") as process:
-            try:
-                stdout, stderr = process.communicate(timeout=TICK_TIMEOUT)
-            except subprocess.TimeoutExpired:
+        root = script.parent
+        timed_out = False
+        # The train can keep writing even if the supervisor exits between squashes.
+        with (root / "stdout").open("xb") as stdout_file, (root / "stderr").open("xb") as stderr_file:
+            with subprocess.Popen(args, cwd=worktree, env=self.env, stdin=subprocess.DEVNULL,
+                                  stdout=stdout_file, stderr=stderr_file, start_new_session=True,
+                                  pass_fds=() if lock_fd is None else (lock_fd,)) as process:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                stdout, stderr = process.communicate()
-                raise subprocess.TimeoutExpired(args, TICK_TIMEOUT, output=stdout, stderr=stderr) from None
-            return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+                    process.wait(timeout=TICK_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
+        stdout, stderr = read_tick_output(root)
+        if timed_out:
+            raise subprocess.TimeoutExpired(args, TICK_TIMEOUT, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
     def set_order(self, raw):
         entries, batch = parse_order(raw)
@@ -353,9 +377,12 @@ class Agent:
                 return 1 if previous["status"] == "stopped" else previous["network_streak"] + 1
         return 1
 
-    def latch(self, record, output, reason, *, pending=False):
-        atomic_json(safe_path(self.stopped), {"recorded_utc": stamp(), "output": output,
-                    "order_sha256": record.get("order_sha256"), "reason": reason, "pending": pending})
+    def latch(self, record, output, reason, *, pending=False, scratch=None):
+        stop = {"recorded_utc": stamp(), "output": output,
+                "order_sha256": record.get("order_sha256"), "reason": reason, "pending": pending}
+        if scratch is not None:
+            stop["scratch"] = scratch
+        atomic_json(safe_path(self.stopped), stop)
 
     def ledger(self):
         rows = []
@@ -409,9 +436,14 @@ class Agent:
         if stop is not None:
             saved = json.loads(stop)
             if saved.get("pending"):
-                self.latch(saved, saved["output"], ["previous tick did not finish"])
+                stdout, stderr = "", ""
+                scratch = saved.get("scratch")
+                if scratch and scratch.startswith("tick-") and Path(scratch).name == scratch:
+                    stdout, stderr = read_tick_output(self.state / scratch)
+                reason = ["previous tick did not finish"]
+                self.latch(saved, saved["output"] + stdout + stderr, reason)
                 record.update(recorded_utc=stamp(), exit_code=1, status="stopped", network_streak=0,
-                              reason=["previous tick did not finish"])
+                              reason=reason, stdout=stdout.splitlines(), stderr=stderr.splitlines())
             self.prune_checkouts()
             return {"status": "latched"}
         self.prune_checkouts()
@@ -434,7 +466,7 @@ class Agent:
             if os.path.lexists(self.kill_switch):
                 record.update(status="skipped: STOP file", exit_code=0)
                 return {"status": "skipped: STOP file", "exit_code": 0}
-            self.latch(record, "", ["tick in progress"], pending=True)
+            self.latch(record, "", ["tick in progress"], pending=True, scratch=script.parent.name)
             if os.path.lexists(self.kill_switch):
                 record.update(status="skipped: STOP file", exit_code=0)
                 return {"status": "skipped: STOP file", "exit_code": 0}

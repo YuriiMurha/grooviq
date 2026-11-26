@@ -10,8 +10,11 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
+
+import merge_train
 
 try:
     import merge_train_agent as agent_module
@@ -43,7 +46,8 @@ class AgentTests(unittest.TestCase):
         self.agent.refresh_main = Mock(return_value=HEAD)
         self.agent.remote_tips = Mock(return_value={"main": HEAD, "batch": None})
         self.agent.run_tick = Mock(return_value=subprocess.CompletedProcess([], 0, "waiting\n"))
-        self.agent.checkout = Mock(return_value=nullcontext((self.root / "checkout", self.root / "train.py")))
+        self.scratch = self.agent.state / "tick-fixture"
+        self.agent.checkout = Mock(return_value=nullcontext((self.scratch / "checkout", self.scratch / "train.py")))
 
     def test_order_preserves_priority_comments_and_blank_lines(self):
         raw = f" # priority\n\n34={'b' * 40} # reviewed\n {ORDER}"
@@ -173,7 +177,8 @@ class AgentTests(unittest.TestCase):
         self.agent.commit_tree = Mock(side_effect=lambda sha: TREE if sha == TESTED else landed_tree)
         self.agent.ci_run_id = Mock(return_value=run_id)
         self.agent.run_tick.return_value = subprocess.CompletedProcess(
-            [], 1, f"Tested batch {TESTED}\nMerged #12 at {LANDED}\nHeld #13: checks pending\nMerged #14 at {LANDED}\n"
+            [], 1, f"Tested batch {NEXT}\nMerged #12 at {HEAD}\nHeld #13: checks pending\n"
+                   f"Tested batch {TESTED}\nMerged #14 at {LANDED}\n"
         )
 
     def test_ledger_uses_reported_landing_even_if_main_moved_again(self):
@@ -217,15 +222,41 @@ class AgentTests(unittest.TestCase):
             f"{LANDED} | {NEXT} | {TREE} | no | partial |"
         ])
 
+    def test_both_landings_are_appended_to_the_ledger(self):
+        self.landed_tick()
+        self.agent.remote_tips.side_effect = None
+        self.agent.run_tick.side_effect = [
+            subprocess.CompletedProcess([], 0, f"Tested batch {TESTED}\nMerged #12 at {LANDED}\n"),
+            subprocess.CompletedProcess([], 0, f"Tested batch {NEXT}\nMerged #14 at {TREE}\n"),
+        ]
+        with patch.object(agent_module, "TICK_HISTORY", 1):
+            for _ in range(2):
+                self.assertEqual(self.agent.tick()["status"], "completed")
+        rows = [json.loads(line) for line in self.agent.landings.read_text().splitlines()]
+        self.assertEqual([(row["tested_batch"], row["landed_tip"]) for row in rows],
+                         [(TESTED, LANDED), (NEXT, TREE)])
+
+    def test_matching_trees_without_a_ci_run_are_partial(self):
+        self.landed_tick()
+        self.agent.ci_run_id.side_effect = RuntimeError("run lookup failed")
+        self.agent.tick()
+        row = json.loads(self.agent.landings.read_text())
+        self.assertTrue(row["match"])
+        self.assertEqual(row["status"], "partial")
+
     def test_tick_record_has_a_byte_cap_and_keeps_valid_json(self):
         self.agent.set_order(ORDER)
-        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 0, "é😀" * 100_000)
-        self.agent.tick()
+        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, "é😀" * 100_000, "HTTP 502")
+        self.assertEqual(self.agent.tick()["status"], "retry: network")
         raw = self.agent.ticks.read_bytes()
         self.assertLessEqual(len(raw), 65_536)
         record = json.loads(raw)
-        self.assertEqual(record["exit_code"], 0)
+        self.assertEqual(record["exit_code"], 1)
+        self.assertEqual(record["network_streak"], 1)
         self.assertTrue(record["output_truncated"])
+        self.assertEqual(self.agent.tick()["status"], "retry: network")
+        latest = json.loads(self.agent.ticks.read_text().splitlines()[-1])
+        self.assertEqual(latest["network_streak"], 2)
 
     def test_tick_log_rotates_and_keeps_latest_records(self):
         self.agent.set_order(ORDER)
@@ -348,6 +379,62 @@ class AgentTests(unittest.TestCase):
                 self.assertEqual(json.loads(self.agent.ticks.read_text().splitlines()[-1])["network_streak"], 0)
                 self.agent.resume()
 
+    def test_real_train_write_markers_block_retry_on_502(self):
+        self.agent.set_order(ORDER)
+        for name in ("gh", "git"):
+            fake = self.root / name
+            fake.write_text("#!/bin/sh\necho 'HTTP 502' >&2\nexit 1\n")
+            fake.chmod(0o755)
+        operations = {
+            method: lambda method=method: merge_train.GitHub().api("fixture", method=method)
+            for method in ("POST", "PUT", "DELETE")
+        }
+        operations["git push"] = lambda: merge_train.Git(self.root).publish(TESTED, "")
+        for name, write in operations.items():
+            with self.subTest(operation=name):
+                with patch.dict(os.environ, PATH=str(self.root)), redirect_stderr(io.StringIO()) as output:
+                    with self.assertRaises(subprocess.CalledProcessError) as failure:
+                        write()
+                self.assertEqual(merge_train.error_detail(failure.exception), "HTTP 502")
+                stderr = f"{output.getvalue()}Merge train stopped: {merge_train.error_detail(failure.exception)}"
+                self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, "", stderr)
+                self.assertEqual(self.agent.tick()["status"], "stopped")
+                self.assertTrue(self.agent.stopped.exists())
+                self.agent.resume()
+
+    def test_timeout_and_signal_with_network_text_latch_without_retry(self):
+        self.agent.set_order(ORDER)
+        for code in (124, -9):
+            with self.subTest(code=code):
+                self.agent.run_tick.return_value = subprocess.CompletedProcess([], code, "", "HTTP 502")
+                self.assertEqual(self.agent.tick()["status"], "stopped")
+                self.assertEqual(json.loads(self.agent.ticks.read_text().splitlines()[-1])["network_streak"], 0)
+                self.agent.resume()
+
+    def test_network_streak_restarts_at_one_after_resume(self):
+        self.agent.set_order(ORDER)
+        self.agent.run_tick.return_value = subprocess.CompletedProcess([], 1, "", "HTTP 502")
+        for expected in ("retry: network", "retry: network", "stopped"):
+            self.assertEqual(self.agent.tick()["status"], expected)
+        self.agent.resume()
+        self.assertEqual(self.agent.tick()["status"], "retry: network")
+        self.assertEqual(json.loads(self.agent.ticks.read_text().splitlines()[-1])["network_streak"], 1)
+
+    def test_stop_created_by_pending_write_prevents_spawn_and_clears_pending(self):
+        self.agent.set_order(ORDER)
+        latch = self.agent.latch
+
+        def write_pending(*args, **kwargs):
+            latch(*args, **kwargs)
+            if kwargs.get("pending"):
+                self.agent.kill_switch.parent.mkdir()
+                self.agent.kill_switch.touch()
+
+        with patch.object(self.agent, "latch", side_effect=write_pending):
+            self.assertEqual(self.agent.tick()["status"], "skipped: STOP file")
+        self.agent.run_tick.assert_not_called()
+        self.assertFalse(self.agent.stopped.exists())
+
     def test_failed_pending_write_never_starts_train(self):
         self.agent.set_order(ORDER)
         with patch.object(agent_module, "atomic_json", side_effect=OSError("disk full")):
@@ -445,13 +532,23 @@ class AgentTests(unittest.TestCase):
     def test_timed_out_train_is_killed_as_a_group_and_latched(self):
         self.agent.set_order(ORDER)
         self.agent.run_tick = agent_module.Agent.run_tick.__get__(self.agent)
+        self.scratch.mkdir()
         process = Mock(pid=321, returncode=-signal.SIGKILL)
-        process.communicate.side_effect = [subprocess.TimeoutExpired("fixture", 600), ("partial", "last error")]
-        with patch.object(agent_module.subprocess, "Popen") as popen, \
+        process.wait.side_effect = [subprocess.TimeoutExpired("fixture", 600), -signal.SIGKILL]
+
+        def spawn(*args, stdout, stderr, **kwargs):
+            stdout.write(b"partial")
+            stderr.write(b"last error")
+            return popen_context
+
+        popen_context = Mock()
+        popen_context.__enter__ = Mock(return_value=process)
+        popen_context.__exit__ = Mock(return_value=False)
+        with patch.object(agent_module.subprocess, "Popen", side_effect=spawn) as popen, \
                 patch.object(agent_module.os, "killpg") as kill:
-            popen.return_value.__enter__.return_value = process
             self.assertEqual(self.agent.tick()["status"], "stopped")
-        self.assertEqual(process.communicate.call_args_list[0].kwargs, {"timeout": 600})
+        self.assertEqual(process.wait.call_args_list[0].kwargs, {"timeout": 600})
+        self.assertEqual(process.wait.call_count, 2)
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         self.assertEqual(len(popen.call_args.kwargs["pass_fds"]), 1)
         kill.assert_called_once_with(321, signal.SIGKILL)
@@ -615,6 +712,74 @@ print(json.dumps({'marker': MARKER, 'argv': sys.argv[1:], 'cwd': os.getcwd(),
         self.assertEqual(outcome["status"], "completed", outcome)
         self.assertEqual(list(self.agent.state.glob("tick-*")), [])
         self.assertEqual(self.git(self.repo, "worktree", "list", "--porcelain"), before_worktrees)
+
+    def check_orphan_finishes(self, interrupt):
+        self.publish({"merge_train.py": """from pathlib import Path
+import sys
+import time
+
+root = Path(__file__).parent
+print("merged-1")
+(root / "merged-1").touch()
+deadline = time.monotonic() + 10
+while not (root / "continue").exists():
+    if time.monotonic() >= deadline:
+        sys.exit("fixture did not receive permission to continue")
+    time.sleep(0.01)
+print("merged-2")
+print("finished", file=sys.stderr)
+(root / "finished").touch()
+"""})
+        self.agent.set_order(ORDER)
+        before = self.git(self.repo, "worktree", "list", "--porcelain")
+        supervisor_source = f"""import sys
+sys.path.insert(0, {str(CHECKOUT)!r})
+from merge_train_agent import Agent
+Agent({str(self.repo)!r}, home={str(self.home)!r}, origins=({str(self.origin)!r},)).tick()
+"""
+
+        def wait_for(predicate):
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline:
+                if result := predicate():
+                    return result
+                time.sleep(0.01)
+            self.fail("Timed out waiting for fixture")
+
+        with subprocess.Popen([sys.executable, "-B", "-c", supervisor_source],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as supervisor:
+            try:
+                merged_one = wait_for(lambda: next(self.agent.state.glob("tick-*/merged-1"), None))
+                scratch = merged_one.parent
+                supervisor.send_signal(interrupt)
+                self.assertNotEqual(supervisor.wait(timeout=4), 0)
+                self.assertEqual(self.agent.tick()["status"], "busy")
+                self.assertTrue((scratch / "checkout" / ".git").is_file())
+                (scratch / "continue").touch()
+                wait_for(lambda: (scratch / "finished").exists())
+
+                def next_tick():
+                    result = self.agent.tick()
+                    return result if result["status"] != "busy" else None
+
+                self.assertEqual(wait_for(next_tick)["status"], "latched")
+                stopped = json.loads(self.agent.stopped.read_text())
+                self.assertEqual(stopped["reason"], ["previous tick did not finish"])
+                self.assertFalse(stopped["pending"])
+                self.assertEqual(stopped["output"].splitlines(), ["merged-1", "merged-2", "finished"])
+                self.assertFalse(scratch.exists())
+                self.assertEqual(self.git(self.repo, "worktree", "list", "--porcelain"), before)
+            finally:
+                if supervisor.poll() is None:
+                    supervisor.kill()
+                for scratch in self.agent.state.glob("tick-*"):
+                    (scratch / "continue").touch()
+
+    def test_orphan_train_finishes_and_reattaches_output_after_sigterm(self):
+        self.check_orphan_finishes(signal.SIGTERM)
+
+    def test_orphan_train_finishes_and_reattaches_output_after_sigint(self):
+        self.check_orphan_finishes(signal.SIGINT)
 
     def test_plist_registers_a_pinned_merged_runner_with_bounded_logging(self):
         names = ("merge_train_agent.py", "refresh_install.py")
