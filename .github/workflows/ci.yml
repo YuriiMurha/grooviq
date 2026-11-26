@@ -58,6 +58,9 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
     runs-on: macos-latest
     timeout-minutes: 30
+    env: &rust_env
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps: &rust_steps
       - uses: actions/checkout@v5
       # rust-cache keys on Cargo.toml dependency sections only, so a [profile] change would reuse
@@ -124,6 +127,7 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 30
+    env: *rust_env
     steps: *rust_steps
 
   # The DSP crate is meant to also run in a browser; this keeps it compiling for the web.

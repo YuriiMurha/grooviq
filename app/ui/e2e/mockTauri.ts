@@ -4,6 +4,8 @@
 // project_cmds.rs, project/src/session.rs). Playwright serialises the function, so it must not
 // reference anything outside its own body.
 
+import type deviceParams from "../../../tests/fixtures/device-params.json";
+import type { CommandMap, DeferredCommands, Edit, OpenReport, ProjectView, TrimView } from "../src/api/generated/contract";
 import type { ArrangementPage, ArrangementReply, AudioContent, PatternContent } from "../src/api/arrangement";
 
 /** A file in the mock's file system. */
@@ -112,9 +114,9 @@ export interface MockSeed {
   /** Pause after the first progress event until releaseExport is called. */
   holdExport?: boolean;
   /** The sampler's parameters (tests/fixtures/device-params.json); the fixture fills it in. */
-  samplerParams?: { id: string; min: number; max: number; default: number }[];
+  samplerParams?: typeof deviceParams.sampler;
   /** The synth's parameters (the same fixture). */
-  synthParams?: { id: string; min: number; max: number; default: number }[];
+  synthParams?: typeof deviceParams.synth;
   /** The MIDI keyboards plugged in at start, and the ones the person switched off (settings.json). */
   midi?: { inputs: string[]; disabled?: string[] };
   /** Every synth preset's 40 values in SPEC order (tests/fixtures/synth-presets.json). */
@@ -400,7 +402,7 @@ export function installMockTauri(seed: MockSeed): void {
     const f = files.get(path);
     return f?.kind === "sample" ? (f.seconds ?? 1) : 1;
   };
-  const view = () => {
+  const view = (): ProjectView => {
     const p = s.project;
     const steps = p.pattern.steps;
     const cells: Record<string, (number | null)[]> = {};
@@ -771,7 +773,6 @@ export function installMockTauri(seed: MockSeed): void {
     if (!spec) throw `The ${synth ? "synth" : "sampler"} has no setting called "${String(param)}".`;
     return { spec, value: clamp(finite(value, `${synth ? "synth" : "sampler"} value`), spec[1], spec[2]) };
   };
-  type Edit = Record<string, unknown> & { kind: string };
   // #181 sampler-only capability bookkeeping; no legacy note/history semantics here.
   let trimEpoch = 0n;
   const trimIdentities = new Map<number, { sample: bigint; edit: bigint }>();
@@ -786,7 +787,7 @@ export function installMockTauri(seed: MockSeed): void {
     trimUndo = trimUndo.filter((entry) => entry.channel !== channel);
     trimRedo = trimRedo.filter((entry) => entry.channel !== channel);
   };
-  const trimView = (channel: number) => {
+  const trimView = (channel: number): TrimView => {
     const c = s.project.channels[channelIndex(channel)];
     if (c.kind === "synth") throw "Not a sampler channel";
     if (!trimInstances.has(c)) trimInstances.set(c,++trimEpoch);
@@ -898,7 +899,7 @@ export function installMockTauri(seed: MockSeed): void {
         return true;
       }
       case "setProjectKey": {
-        const k = e.key as { root: number; scale: string } | null;
+        const k = e.key;
         if (k !== null && (!(k.root >= 0 && k.root <= 11) || !SCALES.includes(k.scale))) {
           throw `${String(k.scale)} on ${String(k.root)} is not a key Grooviq knows.`;
         }
@@ -931,7 +932,7 @@ export function installMockTauri(seed: MockSeed): void {
         return editPattern((pat) => {
           const before = pat.notes.length;
           pat.notes = pat.notes.filter((n) => !(n.channel === e.channel && n.tick === tick));
-          if (pat.notes.length === before) pat.notes.push(noteBase(pat, e.channel as number, tick, DEFAULT_VELOCITY));
+          if (pat.notes.length === before) pat.notes.push(noteBase(pat, e.channel, tick, DEFAULT_VELOCITY));
         });
       }
       case "setStepVelocity": {
@@ -945,7 +946,7 @@ export function installMockTauri(seed: MockSeed): void {
               found = true;
             }
           }
-          if (!found) pat.notes.push(noteBase(pat, e.channel as number, tick, velocity));
+          if (!found) pat.notes.push(noteBase(pat, e.channel, tick, velocity));
         });
       }
       case "clearStep": {
@@ -988,8 +989,10 @@ export function installMockTauri(seed: MockSeed): void {
         p.timeSignature = { beats, unit };
         return true;
       }
-      default:
-        throw `unknown edit ${e.kind}`;
+      default: {
+        const unhandled: never = e;
+        throw new Error(`Unhandled edit: ${JSON.stringify(unhandled)}`);
+      }
     }
   };
 
@@ -1048,7 +1051,7 @@ export function installMockTauri(seed: MockSeed): void {
     markClean();
     return view();
   };
-  const openProject = (p: Project, path: string | null, unsaved: boolean) => {
+  const openProject = (p: Project, path: string | null, unsaved: boolean): OpenReport => {
     stopTransport();
     // Like Controller::load_state, replacing the graph cuts live notes without sending offs.
     s.live.clear();
@@ -1876,7 +1879,14 @@ export function installMockTauri(seed: MockSeed): void {
   };
   const nativeArrangementOnly = () => { throw "Arrangement/media commands are not simulated by this browser fixture; use native offline acceptance."; };
   const nativeMixerOnly = () => { throw "Mixer commands require a generated mixer fixture or native offline acceptance."; };
-  const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
+  type RawArgs = Record<string, unknown>;
+  type RawHandler = (args: RawArgs) => unknown;
+  type MockCommands = {
+    [K in keyof CommandMap]: (args: CommandMap[K]["args"]) =>
+      CommandMap[K]["reply"] | Promise<CommandMap[K]["reply"]>;
+  } & Record<keyof DeferredCommands | `plugin:${string}`, RawHandler>;
+
+  const commands = {
     arrangement_view: workspaceView,
     arrangement_edit: editArrangement,
     arrangement_history: stepProjectHistory,
@@ -1923,14 +1933,14 @@ export function installMockTauri(seed: MockSeed): void {
     project_edit: (a) => {
       // session.rs `apply_in`: an edit made for a replaced project changes nothing.
       if (a.generation !== s.generation) return view();
-      const kind = (a.edit as Edit).kind;
+      const kind = a.edit.kind;
       if (["toggleStep", "setStepVelocity", "clearStep", "setPatternLength", "setSwing"].includes(kind)) checkStamp(a.stamp);
-      if (applyEdit(a.edit as Edit)) changed();
+      if (applyEdit(a.edit)) changed();
       return view();
     },
     channel_add: (a) => {
       // session.rs `add_channel_in`: checked after the file is read, at the change.
-      const path = String(a.path);
+      const { path } = a;
       readSample(path);
       sameProject(a.generation);
       const p = s.project;
@@ -1956,7 +1966,7 @@ export function installMockTauri(seed: MockSeed): void {
       return view();
     },
     channel_set_sample: (a) => {
-      const path = String(a.path);
+      const { path } = a;
       readSample(path);
       sameProject(a.generation);
       const c = s.project.channels[channelIndex(a.channel)];
@@ -1975,7 +1985,7 @@ export function installMockTauri(seed: MockSeed): void {
     notes_redo: (a) => { checkStamp(a.stamp); return stepHistory(false); },
     channel_add_synth: (a) => {
       sameProject(a.generation);
-      const preset = String(a.preset);
+      const { preset } = a;
       if (!PRESETS.includes(preset)) throw `There is no synth preset called "${preset}".`;
       const p = s.project;
       if (p.channels.length >= MAX_CHANNELS) {
@@ -2020,7 +2030,7 @@ export function installMockTauri(seed: MockSeed): void {
       synthObservation.push(synthMotion?.ampStage ?? (sounding ? 3 : 0), synthMotion?.filterStage ?? (sounding ? 3 : 0), synthMotion?.lfoPhase ?? (t % 1));
       return synthObservation;
     },
-    sampler_trim_view: (a) => trimView(Number(a.channel)),
+    sampler_trim_view: (a) => trimView(a.channel),
     sampler_trim_reset: (a) => trimMutation(Number(a.channel),String(a.stamp)),
     sampler_trim_undo: (a) => trimMutation(Number(a.channel),String(a.stamp),String(a.token)),
     channel_param_live: (a) => {
@@ -2107,13 +2117,13 @@ export function installMockTauri(seed: MockSeed): void {
     },
     project_new: () => openProject(emptyProject(), null, false).view,
     project_open: (a) => {
-      const f = files.get(String(a.path));
+      const f = files.get(a.path);
       if (!f) throw "No such file or directory (os error 2)";
       if (f.kind !== "project") throw "This is not a Grooviq project file.";
-      return openProject(f.project, String(a.path), false);
+      return openProject(f.project, a.path, false);
     },
     project_save: () => saveTo(null),
-    project_save_as: (a) => saveTo(String(a.path)),
+    project_save_as: (a) => saveTo(a.path),
     project_export: async (a) => {
       const o = a.options as { sampleRate: number; format: string; loops: number };
       if (!(o.sampleRate >= 8000 && o.sampleRate <= 384000)) {
@@ -2199,7 +2209,7 @@ export function installMockTauri(seed: MockSeed): void {
       return null;
     },
     "plugin:window|set_title": () => null,
-  };
+  } satisfies MockCommands;
 
   /** session.rs `checked_key`. */
   const checkedKey = (key: unknown) => {
@@ -2335,18 +2345,24 @@ export function installMockTauri(seed: MockSeed): void {
 
   // Argument types as serde reads them from the payload (the command signatures, `Edit`,
   // `ExportRequest`): a wrong type is refused before the command runs, as in the shell.
-  type Check = (v: unknown) => string | null;
+  type RawCheck = (v: unknown) => string | null;
+  // Migrated fields require a declared validator type, and it must match exactly.
+  type Check<T> = RawCheck & { readonly checkedType: (value: T) => T };
+  // The marker is type-only. Require the validator's type at its declaration.
+  const validator = <T>(check: RawCheck): Check<NoInfer<T>> => check as Check<T>;
+  type Checks<T> = { [K in keyof T]-?: Check<T[K]> };
+  type Checked<C> = C extends Check<infer T> ? T : never;
   const isInt = (v: unknown, max: number) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= max;
-  const u8: Check = (v) => (isInt(v, 255) ? null : `invalid value: ${JSON.stringify(v)}, expected u8`);
-  const u32: Check = (v) => (isInt(v, 0xffffffff) ? null : `invalid value: ${JSON.stringify(v)}, expected u32`);
-  const wireU64: Check = (v) => isInt(v, 2 ** 64) && Number(v) < 2 ** 64 ? null : "expected u64";
+  const u8 = validator<number>((v) => (isInt(v, 255) ? null : `invalid value: ${JSON.stringify(v)}, expected u8`));
+  const u32 = validator<number>((v) => (isInt(v, 0xffffffff) ? null : `invalid value: ${JSON.stringify(v)}, expected u32`));
+  const wireU64 = validator<number>((v) => isInt(v, 2 ** 64) && Number(v) < 2 ** 64 ? null : "expected u64");
   // A u64 as JavaScript numbers carry it exactly (the presses the shell hands out stay far below).
-  const u64: Check = (v) => (isInt(v, Number.MAX_SAFE_INTEGER) ? null : `invalid value: ${JSON.stringify(v)}, expected u64`);
+  const u64 = validator<number>((v) => (isInt(v, Number.MAX_SAFE_INTEGER) ? null : `invalid value: ${JSON.stringify(v)}, expected u64`));
   // JSON has no NaN or infinity: they arrive as null.
-  const f32: Check = (v) => (typeof v === "number" && Number.isFinite(v) ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected f32`);
-  const bool: Check = (v) => (typeof v === "boolean" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a boolean`);
-  const str: Check = (v) => (typeof v === "string" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a string`);
-  const fields = (spec: Record<string, Check>): Check => (v) => {
+  const f32 = validator<number>((v) => (typeof v === "number" && Number.isFinite(v) ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected f32`));
+  const bool = validator<boolean>((v) => (typeof v === "boolean" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a boolean`));
+  const str = validator<string>((v) => (typeof v === "string" ? null : `invalid type: ${JSON.stringify(v ?? null)}, expected a string`));
+  const checkFields = (spec: Record<string, RawCheck>, v: unknown): string | null => {
     if (typeof v !== "object" || v === null) return "expected a map";
     for (const [key, check] of Object.entries(spec)) {
       const why = check((v as Record<string, unknown>)[key]);
@@ -2354,36 +2370,37 @@ export function installMockTauri(seed: MockSeed): void {
     }
     return null;
   };
-  const EDITS: Record<string, Check> = {
-    removeChannel: fields({ channel: u32 }),
-    setChannelMix: fields({ channel: u32, volume: f32, pan: f32, mute: bool, solo: bool }),
-    setSamplerParam: fields({ channel: u32, param: str, value: f32 }),
-    toggleStep: fields({ channel: u32, step: u32 }),
-    setStepVelocity: fields({ channel: u32, step: u32, velocity: f32 }),
-    clearStep: fields({ channel: u32, step: u32 }),
-    setPatternLength: fields({ steps: u32 }),
-    setSwing: fields({ swing: f32 }),
-    setTempo: fields({ bpm: f32 }),
-    setTimeSignature: fields({ beats: u8, unit: u8 }),
-    setInstrumentParam: fields({ channel: u32, param: str, value: f32 }),
-    loadSynthPreset: fields({ channel: u32, preset: str }),
-    setChoke: fields({ channel: u32, group: u8 }),
-    setProjectKey: (v) => {
-      const key = (v as { key?: unknown } | null)?.key;
-      return key === null ? null : fields({ root: u8, scale: str })(key);
-    },
-  };
-  const optional = (check: Check): Check => (v) => (v === null || v === undefined ? null : check(v));
-  const list = (check: Check): Check => (v) => {
+  const fields = <S extends Record<string, RawCheck>>(spec: S) =>
+    validator<{ [K in keyof S]: Checked<S[K]> }>((v) => checkFields(spec, v));
+  const nullable = <T>(check: Check<T>) => validator<T | null>((v) => v === null ? null : check(v));
+  const EDITS = {
+    removeChannel: { channel: u32 },
+    setChannelMix: { channel: u32, volume: f32, pan: f32, mute: bool, solo: bool },
+    setSamplerParam: { channel: u32, param: str, value: f32 },
+    toggleStep: { channel: u32, step: u32 },
+    setStepVelocity: { channel: u32, step: u32, velocity: f32 },
+    clearStep: { channel: u32, step: u32 },
+    setPatternLength: { steps: u32 },
+    setSwing: { swing: f32 },
+    setTempo: { bpm: f32 },
+    setTimeSignature: { beats: u8, unit: u8 },
+    setInstrumentParam: { channel: u32, param: str, value: f32 },
+    loadSynthPreset: { channel: u32, preset: str },
+    setChoke: { channel: u32, group: u8 },
+    setProjectKey: { key: nullable(fields({ root: u8, scale: str })) },
+  } satisfies { [K in Edit["kind"]]: Checks<Omit<Extract<Edit, { kind: K }>, "kind">> };
+  const optional = <T>(check: Check<T>) =>
+    validator<T | null | undefined>((v) => v === null || v === undefined ? null : check(v));
+  const list = <T>(check: Check<T>) => validator<T[]>((v) => {
     if (!Array.isArray(v)) return `invalid type: ${JSON.stringify(v ?? null)}, expected a sequence`;
     for (const item of v) {
       const why = check(item);
       if (why) return why;
     }
     return null;
-  };
+  });
   const newNote = fields({ channel: u32, tick: u32, length: u32, key: u8, velocity: f32, slide: bool });
-  const notesEditArg: Check = fields({
+  const notesEditArg = fields({
     generation: u64,
     patternId: u32,
     baseRevision: u32,
@@ -2391,17 +2408,21 @@ export function installMockTauri(seed: MockSeed): void {
     update: list(fields({ id: u32, channel: u32, tick: u32, length: u32, key: u8, velocity: f32, slide: bool })),
     delete: list(u32),
   });
-  const edit: Check = (v) => {
+  const edit = validator<Edit>((v) => {
     const kind = (v as { kind?: unknown } | null)?.kind;
-    const check = typeof kind === "string" ? EDITS[kind] : undefined;
-    return check ? check(v) : `unknown variant ${JSON.stringify(kind ?? null)}`;
-  };
-  const exportOptions: Check = (v) =>
+    const check = typeof kind === "string" && Object.hasOwn(EDITS, kind) ? EDITS[kind as Edit["kind"]] : undefined;
+    return check ? checkFields(check, v) : `unknown variant ${JSON.stringify(kind ?? null)}`;
+  });
+  const exportOptions = validator<unknown>((v) =>
     fields({ sampleRate: u32, loops: u32 })(v) ??
     (["pcm24", "float32"].includes((v as { format?: unknown }).format as string)
       ? null
-      : `format: unknown variant ${JSON.stringify((v as { format?: unknown }).format ?? null)}, expected \`pcm24\` or \`float32\``);
-  const ARGS: Record<string, Record<string, Check>> = {
+      : `format: unknown variant ${JSON.stringify((v as { format?: unknown }).format ?? null)}, expected \`pcm24\` or \`float32\``));
+  type ArgChecks = {
+    [K in keyof CommandMap as CommandMap[K]["args"] extends undefined ? never : K]:
+      Checks<CommandMap[K]["args"]>;
+  } & Partial<Record<keyof DeferredCommands, Record<string, RawCheck>>>;
+  const ARGS = {
     arrangement_view: { offset: u64, limit: u64 },
     arrangement_mode: { generation: u64, revision: u64, mode: (value) => value === "pattern" || value === "song" ? null : "expected pattern or song" },
     arrangement_history: { generation: u64, revision: u64, undo: bool },
@@ -2441,7 +2462,8 @@ export function installMockTauri(seed: MockSeed): void {
     project_open: { path: str },
     project_save_as: { path: str },
     project_export: { path: str, options: exportOptions },
-  };
+  } satisfies ArgChecks;
+  const ARGUMENT_CHECKS: Partial<Record<string, Record<string, RawCheck>>> = ARGS;
 
   /** Commands the test holds back (`holdCommand`), each until `releaseCommand`. */
   const holds = new Map<string, { promise: Promise<void>; release: () => void }>();
@@ -2466,12 +2488,13 @@ export function installMockTauri(seed: MockSeed): void {
         state: patternsView(), settlement: { recordingDisarmed: false, waiting: false } });
       throw refused;
     }
-    const handler = commands[cmd];
-    if (!handler) throw `The mock engine has no command ${cmd}`;
-    for (const [name, check] of Object.entries(ARGS[cmd] ?? {})) {
+    if (!Object.hasOwn(commands, cmd)) throw `The mock engine has no command ${cmd}`;
+    for (const [name, check] of Object.entries(ARGUMENT_CHECKS[cmd] ?? {})) {
       const why = check((args ?? {})[name]);
       if (why) throw `invalid args \`${name}\` for command \`${cmd}\`: ${why}`;
     }
+    // Raw Playwright calls reach the typed handlers only after their argument checks run.
+    const handler = commands[cmd as keyof typeof commands] as RawHandler;
     const result = await handler(args ?? {});
     const admitted = result instanceof ArrayBuffer ? result.slice(0) : clone(result);
     if (replyHoldCommands.has(cmd)) {

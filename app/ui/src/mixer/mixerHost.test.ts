@@ -16,6 +16,7 @@ const project = (generation = 1): ProjectView => ({
   generation, name: "Test", path: null, dirty: false, bpm: 120, timeSignature: { beats: 4, unit: 4 },
   channels: [], pattern: { id: 1, name: "Pattern 1", steps: 16, swing: 0, cells: {} }, autosavedAt: null, key: null,
   notesRevision: 1, recording: false, canUndo: false, canRedo: false,
+  projectCanUndo: false, projectCanRedo: false, patternRevision: 0,
 });
 
 function mixer(revision = 1, generation = 1, slots = [1, 2]): MixerSnapshot {

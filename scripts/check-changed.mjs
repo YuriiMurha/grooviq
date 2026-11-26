@@ -88,6 +88,11 @@ const CI = [".github/workflows/"];
 // Read by people, never by a build, test or check.
 const INERT = [/\.md$/, /^LICENSE$/, /^docs\//, /^\.github\/(ISSUE_TEMPLATE\/|pull_request_template\.md$)/, /^\.(gitignore|gitattributes|editorconfig)$/];
 const TOOLING = [/^Makefile$/, /^scripts\//, /^\.githooks\//];
+const IPC_UI = ["app/ui/src/api/ipc.ts", "app/ui/src/api/project.ts", "app/ui/src/api/samplerTrim.ts",
+  "app/ui/e2e/mockTauri.ts", "app/ui/e2e/fixture.ts"];
+const ipcUi = (path) => under(path, "app/ui/src/api/generated") || IPC_UI.includes(path);
+const ipcContract = changed.some((path) => ipcUi(path) || under(path, "app/src-tauri/src") ||
+  ["project/src/session.rs", "project/src/model.rs", "project/src/session/sampler_trim.rs"].includes(path));
 
 let workspace = false;
 const rustCrates = new Set();
@@ -97,6 +102,12 @@ const reasons = [];
 const inert = [];
 
 for (const path of changed) {
+  if (ipcUi(path)) {
+    rustCrates.add("grooviq-app");
+    ui = true;
+    reasons.push(`${path}: IPC contract and UI`);
+    continue;
+  }
   if (path === "scripts/semantic-replay.mjs") {
     for (const name of withDependents("grooviq-project")) rustCrates.add(name);
     ui = true;
@@ -189,9 +200,9 @@ if (ui || workspace || changed.some((path) => path.startsWith("scripts/e2e-diagn
   step("e2e diagnostic safety tests", "node", ["--test", "scripts/e2e-diagnostics.test.mjs"]);
 if (ui || workspace || changed.some((path) => path.startsWith("scripts/rerun-no-runner") || path === "Makefile"))
   step("runner acquisition retry tests", "node", ["--test", "scripts/rerun-no-runner.test.cjs"]);
+if (ui) step("ui lint", "npm", ["run", "lint"], uiDir);
+if (ui || ipcContract) step("ui typecheck", "npm", ["run", "typecheck"], uiDir);
 if (ui) {
-  step("ui lint", "npm", ["run", "lint"], uiDir);
-  step("ui typecheck", "npm", ["run", "typecheck"], uiDir);
   step("ui tests", "npm", ["test", "--", "--run"], uiDir);
   step("semantic replay browser", "npx", ["playwright", "install", "chromium"], uiDir);
   step("semantic replay", "npm", ["run", "e2e", "--", "--config", "playwright.replay.config.ts", "--project", "chromium"], uiDir);

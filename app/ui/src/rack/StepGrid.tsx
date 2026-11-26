@@ -143,7 +143,7 @@ export function StepGrid({
 
   const rows = channels.length;
   const steps = pattern.steps;
-  const cells = channels.map((c) => pattern.cells[String(c.id)] ?? []);
+  const cells = channels.map((c) => pattern.cells[c.id] ?? []);
   const focusCell = nextFocus(focus, "", rows, steps);
   const size = gridSize({ rows, steps, cell: CELL, gap: GAP, dpr: 1 });
   const cssWidth = size.width + 2 * EDGE;
@@ -183,7 +183,7 @@ export function StepGrid({
     }
     const sceneLayout = { rows: channels.length, steps: pattern.steps, cell: CELL, gap: GAP, dpr: scale };
     scene.current = {
-      cells: channels.map((c) => pattern.cells[String(c.id)] ?? []),
+      cells: channels.map((c) => pattern.cells[c.id] ?? []),
       roll: channels.map((c, i) => (c.roll ? rollInstances(sceneLayout, i, notes, c.id, c.color, focusRow === i) : null)),
       inks: channels.map((c) => c.color),
       layout: sceneLayout,

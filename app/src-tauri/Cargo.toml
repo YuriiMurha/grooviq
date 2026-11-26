@@ -8,6 +8,7 @@ repository.workspace = true
 description = "The Grooviq desktop app: the Tauri shell around the engine"
 
 [features]
+ipc-contract = ["dep:heck", "dep:syn", "dep:tempfile", "dep:ts-rs", "grooviq-project/ipc-contract"]
 profiling = ["grooviq-engine/profiling"]
 qa-driver = []
 
@@ -19,15 +20,20 @@ name = "grooviq"
 path = "src/main.rs"
 
 [build-dependencies]
+syn = { version = "2", features = ["full", "visit"], optional = true }
 tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
 grooviq-dsp = { path = "../../dsp" }
 grooviq-engine = { path = "../../engine" }
 grooviq-project = { path = "../../project" }
+heck = { version = "0.5", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+syn = { version = "2", features = ["full", "visit"], optional = true }
 tauri = { version = "2.12", features = [] }
+tempfile = { version = "3", optional = true }
+ts-rs = { version = "=12.0.1", optional = true }
 # Open and save dialogs for projects, samples and exports (MIT OR Apache-2.0).
 tauri-plugin-dialog = "2"
 # MIDI keyboards: lists and opens the system's MIDI inputs (MIT).
@@ -46,3 +52,9 @@ grooviq-engine = { path = "../../engine", features = ["test-hooks"] }
 
 [[test]]
 name = "panic_hook"
+
+[[example]]
+name = "ipc-contract"
+path = "examples/ipc_contract.rs"
+required-features = ["ipc-contract"]
+test = false

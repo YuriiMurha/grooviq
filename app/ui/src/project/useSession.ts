@@ -33,7 +33,7 @@ export function useSession(onError: (message: string) => void) {
     const prev = latest.current;
     // A late reply about a project that was replaced since: the open one is drawn, not it.
     if (prev.view && (view.generation < prev.view.generation ||
-      (view.generation === prev.view.generation && (view.patternRevision ?? 0) < (prev.view.patternRevision ?? 0)))) return;
+      (view.generation === prev.view.generation && view.patternRevision < prev.view.patternRevision))) return;
     const becameClean =
       !view.dirty && (prev.view === null || prev.view.dirty || prev.view.path !== view.path);
     latest.current = { view, cleanSince: becameClean ? Date.now() : prev.cleanSince };
@@ -124,7 +124,7 @@ export function useSession(onError: (message: string) => void) {
       projectGeneration() !== at.replacements || next.generation !== at.generation ||
       next.view.generation !== at.generation || next.view.pattern.id !== next.selected ||
       !next.patterns.some((pattern) => pattern.id === next.selected)) return false;
-    if (shown && (shown.generation !== at.generation || (shown.patternRevision ?? 0) > next.revision ||
+    if (shown && (shown.generation !== at.generation || shown.patternRevision > next.revision ||
       (shown.pattern.id === next.selected && shown.notesRevision > next.view.notesRevision))) return false;
     adopt(next.view);
     return true;
