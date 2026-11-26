@@ -44,6 +44,9 @@ const integer = (value: number) => Number.isSafeInteger(value) && value >= 0;
 export function validateStamp(stamp: ArrangementStamp): void {
   if (!integer(stamp.generation) || !integer(stamp.revision)) throw new Error("Invalid arrangement stamp");
 }
+export function validateAudioTicket(ticket: number): void {
+  if (!integer(ticket) || ticket === 0) throw new Error("Invalid media ticket");
+}
 export function encodeArrangementBatch(operations: readonly ArrangementOperation[]): string {
   if (operations.length > 100_000) throw new Error("Arrangement operation limit exceeded");
   const encoded = JSON.stringify(operations);
@@ -63,14 +66,22 @@ export function arrangementHistory(stamp: ArrangementStamp, undo: boolean) {
 export function arrangementCurve(stamp: ArrangementStamp, clip: number) {
   validateStamp(stamp); return invoke<ArrangementStamp & { clip: number; points: readonly CurvePoint[] }>("arrangement_curve", { ...stamp, clip });
 }
-export function audioImport(stamp: ArrangementStamp, input: { track: number; startTick: number; name: string; path: string }) {
-  validateStamp(stamp); return invoke<ArrangementReply>("audio_import", { ...stamp, ...input });
+export function audioImport(stamp: ArrangementStamp, input: { track: number; startTick: number; name: string; path: string; ticket: number }) {
+  validateStamp(stamp);
+  validateAudioTicket(input.ticket);
+  return invoke<ArrangementReply>("audio_import", { ...stamp, ...input });
 }
-export function audioRelink(stamp: ArrangementStamp, asset: number, path: string) {
-  validateStamp(stamp); return invoke<ArrangementReply>("audio_relink", { ...stamp, asset, path });
+export function audioRelink(stamp: ArrangementStamp, asset: number, path: string, ticket: number) {
+  validateStamp(stamp);
+  validateAudioTicket(ticket);
+  return invoke<ArrangementReply>("audio_relink", { ...stamp, asset, path, ticket });
 }
 /** Pending server request identities are available in arrangementView while preparation awaits. */
 export const audioCancel = (request: number) => invoke<boolean>("audio_cancel", { request });
+export function audioCancelTicket(ticket: number) {
+  validateAudioTicket(ticket);
+  return invoke<boolean>("audio_cancel_ticket", { ticket });
+}
 export async function arrangementWaveform(input: { generation: number; asset: number; request: number; start: number; end: number; bins: number }) {
   const packet = await invoke<ArrayBuffer>("arrangement_waveform", input);
   const decoded = decodeWaveform(packet);

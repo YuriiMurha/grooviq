@@ -1,0 +1,60 @@
+/* Slate System: the theme-scope slate ramp and cobalt signal, with style-lab materials. */
+:root[data-theme="slate-system"] {
+  --bg: #21282f;
+  --panel: #293038;
+  --raised: #323a43;
+  --line: #444d57;
+  --line-soft: #303740;
+  --text: #f0f3f6;
+  --muted: #c3cad2;
+  --faint: #a7b1bc;
+  --accent: #396bc4;
+  --on-accent: #ffffff;
+  --select: #63a7ff;
+  --ok: #6fd087;
+  --mute: #d98b80;
+  --warn: #ebc16b;
+  --error: #fa8d87;
+  /* The lab's 24% washes (coral resolves to #4e3d42) are too dim for slide fills. */
+  --ink-1: #dd807e; --ink-1b: #c764aa;
+  --ink-2: #e5c878; --ink-2b: #c47d2c;
+  --ink-3: #93c794; --ink-3b: #3b9c87;
+  --ink-4: #e49b68; --ink-4b: #b47daf;
+  --ink-5: #c6aee4; --ink-5b: #d889a4;
+  --ink-6: #d28bb3; --ink-6b: #b366dc;
+  --font: "Manrope Variable", system-ui, sans-serif;
+  --radius-s: 4px;
+  --radius-m: 6px;
+  --radius-l: 10px;
+
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --paper: #f0f3f6;
+  --well: #171c23; /* the inset slate shade composited over the canvas */
+  --rec: #e36b65;
+  --hair: rgba(48, 55, 64, 0.64);
+  --step-a: #323a43;
+  --step-b: #2e363e;
+  --step-lit: #3b444e;
+  --grid-playhead: var(--select);
+  --knob-track: #444d57;
+  --reg-x: 0px;
+  --reg-y: 0px;
+
+  --roll-row: #293038;
+  --roll-row-black: #21282f;
+  --roll-dim: rgba(8, 11, 16, 0.4);
+  --roll-line: #303740;
+  --roll-beat: #444d57;
+  --roll-bar: #5a6470;
+  --roll-box: rgba(57, 107, 196, 0.24);
+  --roll-playhead: var(--select);
+  --roll-key-white: #c3cad2; /* muted steel keeps the shared dark octave labels readable */
+  --roll-key-black: #21282f;
+
+  --dev-card: #293038;
+  --dev-shadow: 0 28px 70px -24px rgba(8, 11, 16, 0.85), 0 0 0 1px var(--line);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --z-overlay: 20;
+  --z-device: 5;
+  --toolbar-h: 56px;
+}

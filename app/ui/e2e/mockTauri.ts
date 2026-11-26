@@ -95,6 +95,8 @@ interface Growth {
 type LengthEntry = { owner: number | null; growth: Growth } | { set: number };
 
 export interface MockSeed {
+  /** Native platform whose file-drop coordinates the fixture emits. */
+  platform?: "macos" | "windows" | "linux";
   audioLog?: { id: number; atMs: number; level: "info" | "warn" | "error"; message: string }[];
   holdAudioLog?: boolean;
   holdProjectView?: boolean;
@@ -1758,6 +1760,7 @@ export function installMockTauri(seed: MockSeed): void {
     audio_import: (a) => prepareAudio(a, { kind: "import", track: Number(a.track), startTick: Number(a.startTick), name: String(a.name) }),
     audio_relink: (a) => prepareAudio(a, { kind: "relink", asset: Number(a.asset) }),
     audio_cancel: nativeArrangementOnly,
+    audio_cancel_ticket: nativeArrangementOnly,
     arrangement_waveform: arrangementWaveform,
     arrangement_mode: workspaceMode,
     arrangement_loop: nativeArrangementOnly,
@@ -2415,8 +2418,10 @@ export function installMockTauri(seed: MockSeed): void {
     releaseWaveform: (request: number) => releaseMedia(waveformHolds, request),
     /** Files dragged from the OS at CSS client coordinates. */
     drag: (paths: string[], drop: boolean, client = { x: 400, y: 300 }) => {
-      // Model Tauri’s documented physical-pixel position. macOS may deliver points (#636).
-      const position = { x: client.x * window.devicePixelRatio, y: client.y * window.devicePixelRatio };
+      // Wry 0.57.2 drag_drop.rs: WKWebView 74–124 and WebKitGTK 71–115 send logical units;
+      // WebView2 225–309 sends physical pixels. Tauri wraps them unscaled. Retina hand-check: #636.
+      const scale = seed.platform === "windows" ? window.devicePixelRatio : 1;
+      const position = { x: client.x * scale, y: client.y * scale };
       emit("tauri://drag-enter", { paths, position });
       emit("tauri://drag-over", { position });
       if (drop) emit("tauri://drag-drop", { paths, position });

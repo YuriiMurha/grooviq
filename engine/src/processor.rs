@@ -11,6 +11,8 @@ use crate::command::{Command, Msg, Trash};
 use crate::graph::Graph;
 use crate::live::LiveShared;
 use crate::metronome::Metronome;
+#[cfg(feature = "profiling")]
+use crate::profiling::Profile;
 use crate::record::{RecordEvent, Recorder};
 use crate::transport::TransportClock;
 use crate::{BLOCK, QUEUE_CAPACITY};
@@ -19,6 +21,8 @@ use rtrb::{Consumer, Producer, PushError};
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+#[cfg(feature = "profiling")]
+use std::time::Instant;
 
 thread_local! {
     /// On while this thread is inside [`AudioProcessor::process`]. Const-initialised and
@@ -105,6 +109,8 @@ pub struct AudioProcessor {
     meter: [f32; 2],
     meter_release: f32,
     completed_recovery_stop: Option<u32>,
+    #[cfg(feature = "profiling")]
+    pub(crate) profile: Option<Profile>,
 }
 
 impl AudioProcessor {
@@ -143,7 +149,31 @@ impl AudioProcessor {
             meter: [0.0; 2],
             meter_release: meter_release(sample_rate),
             completed_recovery_stop: None,
+            #[cfg(feature = "profiling")]
+            profile: None,
         }
+    }
+
+    /// Starts a local Tracy client and attaches a reporter before this processor enters a stream.
+    #[cfg(feature = "profiling")]
+    pub fn enable_profiling(&mut self) -> std::io::Result<()> {
+        if self.profile.is_none() {
+            self.profile = Some(Profile::start(tracy_client::Client::start())?);
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "profiling", feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn with_stalled_profiling_for_test(
+        &mut self,
+        capacity: usize,
+        run: impl FnOnce(&mut Self),
+    ) {
+        let (profile, _drain) = Profile::channel(capacity);
+        let previous = self.profile.replace(profile);
+        run(self);
+        self.profile = previous;
     }
 
     /// Fills `out`, interleaved with `channels` channels, of any length. Channels 0 and 1 get
@@ -151,8 +181,18 @@ impl AudioProcessor {
     /// partial frame get silence. Real-time safe.
     pub fn process(&mut self, out: &mut [f32], channels: usize) {
         let _rendering = Rendering::start();
+        #[cfg(feature = "profiling")]
+        if let Some(profile) = &mut self.profile {
+            let frames = out.len().checked_div(channels).unwrap_or(0);
+            let blocks = frames.saturating_sub(BLOCK - self.served).div_ceil(BLOCK);
+            profile.begin_callback(blocks);
+        }
         if channels == 0 {
             out.fill(0.0);
+            #[cfg(feature = "profiling")]
+            if let Some(profile) = &mut self.profile {
+                profile.end_callback();
+            }
             return;
         }
         let mut frames = out.chunks_exact_mut(channels);
@@ -173,6 +213,10 @@ impl AudioProcessor {
             }
         }
         frames.into_remainder().fill(0.0);
+        #[cfg(feature = "profiling")]
+        if let Some(profile) = &mut self.profile {
+            profile.end_callback();
+        }
     }
 
     /// Restarts with `graph`, built for `sample_rate` in a new generation. Only
@@ -221,6 +265,12 @@ impl AudioProcessor {
     }
 
     fn render_block(&mut self) {
+        #[cfg(feature = "profiling")]
+        let profile_start = self
+            .profile
+            .as_ref()
+            .filter(|profile| profile.recording())
+            .map(|_| Instant::now());
         let start = self.clock;
         let end = start + BLOCK as u64;
         self.retry_trash();
@@ -332,6 +382,10 @@ impl AudioProcessor {
             self.transport.playing(),
             self.graph.position(self.transport.position_ticks(start)),
         );
+        #[cfg(feature = "profiling")]
+        if let (Some(profile), Some(start)) = (&mut self.profile, profile_start) {
+            profile.block(start, self.transport.sample_rate());
+        }
     }
 
     /// Applies, in queue order, the commands due before `end` (the block covers `start..end`).

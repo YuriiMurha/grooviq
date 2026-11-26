@@ -127,10 +127,9 @@ for (const cancellation of ["Escape", "capture"] as const) test(`held group canc
   expect((await state(app)).clips).toEqual(before.clips);
   expect(await mock.calls("arrangement_edit")).toHaveLength(calls.length);
 });
-test("modifier toggles and sub-threshold clicks do not edit; group destructive controls stay single-only", async ({ app, mock }) => {
+test("modifier toggles and sub-threshold clicks do not edit; Make unique stays single-only", async ({ app, mock }) => {
   const { box, playlist } = await setup(app), calls = await mock.calls("arrangement_edit");
   await expect(playlist.getByRole("button", { name: "Make selected clip unique" })).toBeDisabled();
-  await expect(playlist.getByRole("button", { name: "Delete selected clip" })).toBeDisabled();
   for (const modifier of ["Shift", "ControlOrMeta"]) {
     await app.keyboard.down(modifier); await app.mouse.click(box.x + 140, box.y + 40); await app.keyboard.up(modifier);
     await expect(playlist.getByText(modifier === "Shift" ? "1 selected" : "2 selected", { exact: true })).toBeVisible();

@@ -1,5 +1,5 @@
 # Repeatable commands. `make help` lists them. macOS or Linux shell.
-.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan bench bench-roll-operations bench-instructions profile build-app install-app qa-ui qa-app
+.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan bench bench-roll-operations bench-instructions profile profile-tracy build-app install-app qa-ui qa-app
 
 # rustup installs cargo into ~/.cargo/bin, which is often not on PATH.
 export PATH := $(HOME)/.cargo/bin:$(PATH)
@@ -26,6 +26,16 @@ test-merge-train: ## Test ordered protected merges without calling GitHub
 .PHONY: test-pre-commit
 test-pre-commit: ## Exercise staged conflict checks in disposable Git repositories
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_pre_commit.py -v
+
+.PHONY: reclaim-caches disk-check test-reclaim-caches
+reclaim-caches: ## Preview idle worktree target cleanup (RECLAIM_APPLY=1 deletes, RECENT_MINUTES=45)
+	@python3 -B scripts/reclaim_caches.py reclaim-caches $(if $(filter command line,$(origin RECLAIM_APPLY)),--apply="$$RECLAIM_APPLY") --recent-minutes="$${RECENT_MINUTES:-45}"
+
+disk-check: ## Require free space on the repo volume (MIN_GIB=20)
+	@python3 -B scripts/reclaim_caches.py disk-check --min-gib="$${MIN_GIB:-20}"
+
+test-reclaim-caches: ## Exercise cache reclamation in temporary repositories
+	python3 -B -m unittest discover -s scripts -p test_reclaim_caches.py -v
 
 ui-install: ## Install the UI's locked dependencies (npm ci)
 	npm --prefix $(UI) ci --no-audit --no-fund
@@ -113,6 +123,9 @@ profile: ## Profile the render benchmark with samply (cargo install --locked sam
 	@mkdir -p target
 	CARGO_PROFILE_BENCH_DEBUG=line-tables-only $(CARGO) bench -p grooviq-golden --bench render --no-run > target/render-build.log 2>&1 || { cat target/render-build.log; exit 1; }
 	$(SAMPLY) -o target/render-profile.json.gz -- "$$(sed -n 's/^ *Executable .*(\(.*\))$$/\1/p' target/render-build.log)" $(ARGS)
+
+profile-tracy: ui-install ## Build an optimised profiling bundle in target/profiling
+	CARGO_TARGET_DIR="$(CURDIR)/target/profiling" npm --prefix $(UI) run tauri build -- --bundles app --features profiling
 
 build-app: ui-install ## Build the release Grooviq.app (no .dmg) into target/release/bundle/macos
 	npm --prefix $(UI) run tauri build -- --bundles app

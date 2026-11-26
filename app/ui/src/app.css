@@ -101,18 +101,18 @@ input {
 }
 
 .chip.warn {
-  border-color: var(--ink-3);
-  box-shadow: inset 0 0 0 1px var(--ink-3);
+  border-color: var(--warn);
+  box-shadow: inset 0 0 0 1px var(--warn);
 }
 
 .chip.warn .chip-name {
-  color: var(--ink-3);
+  color: var(--warn);
 }
 
 .tone[aria-pressed="true"] {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--well);
+  color: var(--on-accent);
   font-weight: 700;
 }
 
@@ -146,7 +146,7 @@ input {
 }
 
 .meter-bar.clip {
-  background: var(--ink-3b);
+  background: var(--error);
 }
 
 /* ---------------- popover ---------------- */
@@ -197,7 +197,7 @@ input {
 }
 
 .device.warn .device-name {
-  color: var(--ink-3);
+  color: var(--warn);
 }
 
 .device-note {
@@ -250,11 +250,11 @@ input[type="checkbox"] {
 }
 
 .log-warn span {
-  color: var(--ink-3);
+  color: var(--warn);
 }
 
 .log-error span {
-  color: var(--ink-3b);
+  color: var(--error);
 }
 
 .log-empty {
@@ -741,7 +741,7 @@ input[type="checkbox"] {
 }
 
 .channel-missing {
-  color: var(--ink-3b);
+  color: var(--error);
   font-size: 11px;
   font-weight: 700;
 }
@@ -896,7 +896,7 @@ input[type="checkbox"] {
 }
 
 .toast.warn {
-  border-left-color: var(--ink-3);
+  border-left-color: var(--warn);
 }
 
 .toast span {
@@ -959,7 +959,7 @@ input[type="checkbox"] {
 }
 
 .save-state.dirty {
-  color: var(--ink-3);
+  color: var(--warn);
 }
 
 .menu {
@@ -1036,7 +1036,7 @@ input[type="checkbox"] {
 .transport-btn.play {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--well);
+  color: var(--on-accent);
   box-shadow: var(--reg-x) var(--reg-y) 0 var(--ink-1b);
 }
 
@@ -1207,7 +1207,7 @@ input[type="checkbox"] {
 }
 
 .modal-message.warn {
-  color: var(--ink-3);
+  color: var(--warn);
 }
 
 .modal-actions {
@@ -1232,7 +1232,7 @@ input[type="checkbox"] {
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--well);
+  color: var(--on-accent);
   font-weight: 700;
 }
 
@@ -1342,5 +1342,5 @@ label.field {
   }
 }
 
-.roll-key.in-scale { box-shadow: inset 3px 0 var(--accent), inset 0 0 0 100px color-mix(in srgb, var(--accent) 12%, transparent); }
-.roll-key.root { box-shadow: inset 6px 0 var(--accent); }
+.roll-key.in-scale { box-shadow: inset 3px 0 var(--roll-key-scale), inset 0 0 0 100px color-mix(in srgb, var(--roll-key-scale) 12%, transparent); }
+.roll-key.root { box-shadow: inset 6px 0 var(--roll-key-scale); }

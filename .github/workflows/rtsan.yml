@@ -8,7 +8,7 @@ name: rtsan
 
 on:
   push:
-    branches: [main]
+    branches: [main, merge-train/batch]
   pull_request:
 
 permissions:
@@ -35,6 +35,8 @@ jobs:
       run: ${{ steps.select.outputs.result }}
     steps:
       - uses: actions/checkout@v5
+      - run: rustup toolchain install
+        timeout-minutes: 3
       - run: make optional-rust-policy-test
       - uses: actions/github-script@v8
         id: select
@@ -42,7 +44,10 @@ jobs:
           script: |
             const { shouldRun } = require('./scripts/optional-rust-checks.cjs');
             return await shouldRun({
+              workflow: 'rtsan',
               eventName: context.eventName,
+              ref: context.ref,
+              after: context.payload.after,
               pullRequest: context.payload.pull_request,
               repo: context.repo,
               rest: github.rest,

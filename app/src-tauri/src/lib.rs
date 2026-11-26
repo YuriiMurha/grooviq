@@ -140,6 +140,17 @@ fn start_audio(app: &AppHandle) -> Audio {
     let (controller, processor) = engine(EngineConfig {
         sample_rate: START_RATE,
     });
+    #[cfg(feature = "profiling")]
+    let processor = {
+        let mut processor = processor;
+        if let Err(err) = processor.enable_profiling() {
+            lock(&log).push(
+                Level::Error,
+                format!("Tracy profiling could not start: {err}"),
+            );
+        }
+        processor
+    };
     let live = controller.live_shared();
     let controller = Arc::new(Mutex::new(controller));
     let session = Arc::new(Mutex::new(Session::new(Arc::clone(&controller))));
@@ -485,6 +496,7 @@ pub fn run() {
             arrangement_cmds::audio_import,
             arrangement_cmds::audio_relink,
             arrangement_cmds::audio_cancel,
+            arrangement_cmds::audio_cancel_ticket,
             arrangement_cmds::arrangement_waveform,
             arrangement_cmds::arrangement_mode,
             arrangement_cmds::arrangement_loop,
