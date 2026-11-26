@@ -3,30 +3,95 @@ on:
   workflow_dispatch:
     inputs:
       candidate:
-        description: 'Exact 40-character candidate commit SHA (20 full suites; substantial cost)'
+        description: 'Exact 40-character candidate commit SHA'
         required: true
         type: string
+      runner:
+        description: 'GitHub-hosted Linux runner'
+        type: choice
+        options:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+        default: ubuntu-latest
+      project:
+        description: 'Playwright browser project'
+        type: choice
+        options:
+          - both
+          - webkit
+          - chromium
+        default: both
+      repeats:
+        description: 'Number of suites to run (20 full suites have substantial cost)'
+        type: number
+        default: 20
+      specs:
+        description: 'Optional comma- or newline-separated spec paths under app/ui/e2e'
+        type: string
+      grep:
+        description: 'Optional Playwright --grep regular expression'
+        type: string
+      repeat_each:
+        description: 'Executions of each selected case per suite'
+        type: number
+        default: 1
 permissions:
   contents: read
 jobs:
   stability:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner == 'ubuntu-24.04-arm' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     # Twenty complete two-worker suites can exceed three hours. Leave time for evidence upload.
     timeout-minutes: 360
     steps:
-      - name: Require immutable candidate
+      - name: Validate target and name evidence
+        id: evidence
         env:
           CANDIDATE: ${{ inputs.candidate }}
-        run: '[[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]'
+          RUNNER_LABEL: ${{ inputs.runner }}
+          PROJECT: ${{ inputs.project }}
+          SPECS: ${{ inputs.specs }}
+          GREP: ${{ inputs.grep }}
+        shell: bash
+        run: |
+          [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RUNNER_LABEL" == ubuntu-latest || "$RUNNER_LABEL" == ubuntu-24.04-arm ]]
+          [[ "$PROJECT" == both || "$PROJECT" == webkit || "$PROJECT" == chromium ]]
+          filter=all
+          if [[ -n "$SPECS$GREP" ]]; then
+            slug=$(printf '%s %s' "$SPECS" "$GREP" | LC_ALL=C tr -cs 'a-zA-Z0-9._-' '-' | cut -c1-48)
+            digest=$(printf '%s\0%s' "$SPECS" "$GREP" | sha256sum | cut -c1-12)
+            filter="focused-${slug:-filter}-$digest"
+          fi
+          printf 'name=stability-%s-%s-%s-%s-%s\n' "$RUNNER_LABEL" "$PROJECT" "$filter" "$CANDIDATE" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: harness
+          persist-credentials: false
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.candidate }}
-      - run: make qa-stability
+          path: candidate
+          persist-credentials: false
+      - name: Run stability proof
+        working-directory: candidate
         timeout-minutes: 340
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+          STABILITY_RUNNER: ${{ inputs.runner }}
+          STABILITY_PROJECT: ${{ inputs.project }}
+          STABILITY_REPEATS: ${{ inputs.repeats }}
+          STABILITY_SPECS: ${{ inputs.specs }}
+          STABILITY_GREP: ${{ inputs.grep }}
+          STABILITY_REPEAT_EACH: ${{ inputs.repeat_each }}
+        shell: bash
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$CANDIDATE" ]]
+          sh ../harness/scripts/stability/container.sh proof hosted
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.evidence.outcome == 'success'
         with:
-          name: stability-${{ inputs.candidate }}
-          path: docs/evidence/stability/
+          name: ${{ steps.evidence.outputs.name }}
+          path: candidate/docs/evidence/stability/${{ inputs.candidate }}-proof/
           retention-days: 7
           if-no-files-found: error
