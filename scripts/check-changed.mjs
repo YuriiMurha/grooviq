@@ -155,6 +155,12 @@ if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs"
 if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
     "scripts/merge_train.py", "scripts/test_merge_train.py"].includes(path)))
   step("merge train safety tests", "make", ["test-merge-train"]);
+if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
+    ".githooks/pre-commit", "scripts/test_pre_commit.py"].includes(path)))
+  step("staged conflict safety tests", "make", ["test-pre-commit"]);
+if (workspace || changed.some((path) => ["Makefile", "scripts/check-changed.mjs",
+    "scripts/qa-driver.py", "scripts/test_qa_driver.py"].includes(path)))
+  step("private QA command tests", "make", ["test-qa-driver"]);
 const uiDir = join(root, "app", "ui");
 const needsUi = ui || workspace || rustCrates.has("grooviq-app");
 

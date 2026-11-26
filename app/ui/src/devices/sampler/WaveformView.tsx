@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { subscribeThemeChange } from "../../theme/changes";
 import { drawnScale, useBoxSize, useLatest } from "../controls/gesture";
 import { useDeviceScale } from "../deviceScale";
 import type { Gesture } from "../paramGestures";
@@ -58,7 +59,7 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
   const lo = Math.min(region.start, region.end);
   const hi = Math.max(region.start, region.end);
   const loopAt = markerPosition("loop_start", region);
-  useEffect(() => {
+  const draw = useCallback(() => {
     const c = canvas.current;
     const el = host.current;
     if (!c || !el || w <= 0 || h <= 0) return;
@@ -124,6 +125,10 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
     for (let y = 0; y < H; y += 2 * dash) g.fillRect(Math.round(loopAt * W - line / 2), y, line, dash);
     g.globalAlpha = 1;
   }, [peaks, w, h, scale, lo, hi, loopAt, loop, region.start, region.end, region.reverse]);
+  useEffect(() => {
+    draw();
+    return subscribeThemeChange(draw);
+  }, [draw]);
 
   const local = (e: PointerEvent<HTMLElement>) => {
     const r = host.current!.getBoundingClientRect();
@@ -185,6 +190,15 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
     if (next !== value) set(id, next);
   };
 
+  // Match the CSS grip clamp so the hit areas split even when two lines meet at an edge.
+  const edgeGripWidth = 18;
+  const gripLeft = (position: number, offset: number) => Math.max(0, Math.min(position * w - offset, w - edgeGripWidth));
+  const startGrip = gripLeft(region.start, 4);
+  const endGrip = gripLeft(region.end, 14);
+  const stacked = w > 0 && Math.abs(startGrip - endGrip) <= edgeGripWidth;
+  const startInset = (1 - region.start) * w < 14;
+  const lowerGrip = startInset ? "start" : "end";
+
   const handle = (id: Marker) => {
     const m = markers[id];
     const value = regionValue(region, id);
@@ -192,11 +206,15 @@ export function WaveformView({ name, peaks, region, loop, markers, begin, set, c
     const range = markerRange(id, region);
     const [min, max] = range ?? [value, value];
     const off = id === "loop_start" && !loop;
+    const position = markerPosition(id, region);
+    const sharesBand = stacked && id !== "loop_start";
+    const turnsInward = id === "start" ? startInset : id === "end" && position * w < 14;
+    const inset = sharesBand ? id === lowerGrip : turnsInward;
     return (
       <div
         key={id}
-        className={`wmark ${id === "loop_start" ? "loop" : "edge"}${off ? " off" : ""}${dragging === id ? " dragging" : ""}`}
-        style={{ "--x": `${(markerPosition(id, region) * 100).toFixed(4)}%` } as CSSProperties}
+        className={`wmark ${id === "loop_start" ? "loop" : "edge"}${sharesBand ? " stacked" : ""}${inset ? " inset" : ""}${off ? " off" : ""}${dragging === id ? " dragging" : ""}`}
+        style={{ "--x": `${(position * 100).toFixed(4)}%` } as CSSProperties}
         role="slider"
         tabIndex={0}
         aria-label={`${name} ${m.name.toLowerCase()}`}

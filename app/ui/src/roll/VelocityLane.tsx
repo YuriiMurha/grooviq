@@ -4,7 +4,8 @@ import type { PatternStamp } from "../api/patterns";
 import { useEffect, useRef, type PointerEvent, type RefObject } from "react";
 import type { CommitQueue } from "./commitQueue";
 import { FALLBACK } from "../rack/palette";
-import { readRollPalette } from "./glRoll";
+import { subscribeThemeChange } from "../theme/changes";
+import { readRollPalette, type RollPalette } from "./glRoll";
 import type { NoteStore } from "./noteStore";
 import { laneEdit, laneSet, velocityAt } from "./velocity";
 import type { RollView } from "./view";
@@ -36,6 +37,7 @@ export function VelocityLane({ store, queue, channel, view, ink }: Props) {
    * project's, and is dropped if another replaced it). */
   const drag = useRef<{ values: Map<number, number>; rev: number; origin: PatternStamp } | null>(null);
   const redraw = useRef(true);
+  const palette = useRef<RollPalette | null>(null);
   useEffect(() => registerGestureCancellation(() => { drag.current = null; redraw.current = true; }), []);
   useEffect(() => {
     live.current = { channel, ink };
@@ -48,7 +50,12 @@ export function VelocityLane({ store, queue, channel, view, ink }: Props) {
     if (!el || !box) return;
     const ctx = el.getContext("2d", { alpha: false });
     if (!ctx) return;
-    const palette = readRollPalette(document.documentElement);
+    const refreshPalette = () => {
+      palette.current = readRollPalette(document.documentElement);
+      redraw.current = true;
+    };
+    refreshPalette();
+    const unsubscribeTheme = subscribeThemeChange(refreshPalette);
     const css = (c: number[]) => `rgb(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ${Math.round(c[2] * 255)})`;
     let width = 0;
     const ro = new ResizeObserver(() => {
@@ -63,6 +70,8 @@ export function VelocityLane({ store, queue, channel, view, ink }: Props) {
       const v = view.current;
       const rev = drag.current?.rev ?? -1;
       if (!redraw.current && seen.version === store.version && seen.scroll === v.scrollTick && seen.px === v.tickPx && seen.rev === rev) return;
+      const colours = palette.current;
+      if (!colours) return;
       seen = { version: store.version, scroll: v.scrollTick, px: v.tickPx, rev };
       redraw.current = false;
       const dpr = window.devicePixelRatio || 1;
@@ -73,7 +82,7 @@ export function VelocityLane({ store, queue, channel, view, ink }: Props) {
         el.height = h;
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = css(palette.outside);
+      ctx.fillStyle = css(colours.outside);
       ctx.fillRect(0, 0, width, LANE_HEIGHT);
       // Guides at full, half and silent.
       ctx.fillStyle = css([0.2, 0.22, 0.34]);
@@ -81,7 +90,7 @@ export function VelocityLane({ store, queue, channel, view, ink }: Props) {
       const { channel: ch, ink: own } = live.current;
       if (ch === null) return;
       const preview = drag.current?.values;
-      const colour = palette.inks[own] ?? FALLBACK;
+      const colour = colours.inks[own] ?? FALLBACK;
       const lastTick = v.scrollTick + width / v.tickPx;
       for (let i = 0; i < store.count; i++) {
         if (store.channels[i] !== ch) continue;
@@ -89,12 +98,13 @@ export function VelocityLane({ store, queue, channel, view, ink }: Props) {
         if (tick > lastTick || tick + BAR_PX / v.tickPx < v.scrollTick) continue;
         const velocity = preview?.get(store.ids[i]) ?? store.velocities[i];
         const top = (1 - Math.min(1, Math.max(0, velocity))) * LANE_HEIGHT;
-        ctx.fillStyle = css(store.selected[i] ? palette.select : colour);
+        ctx.fillStyle = css(store.selected[i] ? colours.select : colour);
         ctx.fillRect((tick - v.scrollTick) * v.tickPx, top, BAR_PX, LANE_HEIGHT - top);
       }
     };
     raf = requestAnimationFrame(frame);
     return () => {
+      unsubscribeTheme();
       cancelAnimationFrame(raf);
       ro.disconnect();
     };

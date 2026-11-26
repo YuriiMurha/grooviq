@@ -33,7 +33,7 @@ ui-install: ## Install the UI's locked dependencies (npm ci)
 fmt: ## Format all Rust code
 	$(CARGO) fmt --all
 
-check: test-instruction-profiles test-merge-train ci-paths-test e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
+check: test-instruction-profiles test-merge-train test-pre-commit test-qa-driver ci-paths-test e2e-browser-results-test e2e-diagnostics-test rerun-no-runner-test ui-install test-refresh-app ## Everything CI runs: fmt, clippy, workspace tests, UI lint/typecheck/tests/build
 	npm --prefix $(UI) run lint
 	npm --prefix $(UI) run typecheck
 	npm --prefix $(UI) test -- --run
@@ -61,14 +61,14 @@ check-changed: ## Only the checks the changes against origin/main need (ARGS=--p
 	node scripts/check-changed.mjs $(ARGS)
 
 .PHONY: replay replay-update
-replay: ui-install ## Compare the real offline Session and both browser mocks against the shared command transcript
+replay: ## Compare the real offline Session and MIDI hub against both browser mocks
+replay-update: ## Regenerate the real Session and MIDI transcripts intentionally, then verify both browser mocks
+replay replay-update: ui-install
+	npm --prefix $(UI) run build
+	$(if $(filter replay-update,$@),GROOVIQ_UPDATE_REPLAY=1 node scripts/semantic-replay.mjs)
 	node scripts/semantic-replay.mjs
 	npm --prefix $(UI) exec -- playwright install chromium webkit
 	npm --prefix $(UI) run e2e -- --config playwright.replay.config.ts
-
-replay-update: ## Regenerate the real-Session transcript intentionally, then verify both browser mocks
-	GROOVIQ_UPDATE_REPLAY=1 node scripts/semantic-replay.mjs
-	$(MAKE) replay
 
 qa-ui: ui-install ## Playwright on the web build with the mock engine (WebKit and Chromium); shots in app/ui/e2e-results
 	cd $(UI) && npx playwright install chromium webkit && npm run e2e
