@@ -94,6 +94,11 @@ for (const { id } of themes) {
         }
       }
       expect(contrastRatio(rgb("--on-accent"), rgb("--accent")), "accent foreground").toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(rgb("--on-play"), rgb("--play")), "Play foreground").toBeGreaterThanOrEqual(4.5);
+      expect(colourDistance(bytes("--play"), bytes("--rec")), "Play versus Record").toBeGreaterThanOrEqual(48);
+      const play = app.getByRole("button", { name: "Play", exact: true });
+      const [playFill] = await pixelsAt(app, play, [{ x: 8, y: 18 }]);
+      expect(colourDistance(playFill, bytes("--play")), "Play button fill").toBeLessThan(8);
       for (const text of ["--text", "--muted", "--faint", "--error", "--warn"]) {
         for (const surface of ["--bg", "--panel", "--raised"]) {
           // Riso retains its existing Bright Red at 4.40:1 on raised controls. See #634.
@@ -171,7 +176,7 @@ for (const { id } of themes) {
       await app.keyboard.press("ArrowDown");
       await app.keyboard.press("ArrowDown");
       await expect.poll(() => ringDistance("--grid-focus"), { message: "focused Kick step" }).toBeLessThan(8);
-      await app.getByRole("button", { name: "Play" }).click();
+      await play.click();
       await expect.poll(() => mock.eval<boolean>("(m) => m.state.transport.playing")).toBe(true);
       await mock.eval("(m) => m.hold(10)");
       await expect.poll(() => ringDistance("--grid-playhead"), { message: "playhead on the lit Kick step" }).toBeLessThan(8);

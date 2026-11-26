@@ -8,7 +8,10 @@
   --text: #ebe7db;
   --muted: #b0bab3;
   --faint: #909d93;
-  --accent: var(--ok); /* the green running lamp also lights the Play cap */
+  --accent: var(--text); /* ivory primary action */
+  --on-accent: var(--well);
+  --play: var(--ok); /* green running lamp */
+  --on-play: var(--well);
   --select: #fffb73; /* the yellow lamp edge separates selection from mustard ink */
   --ok: #43d17a;
   --mute: var(--text);
