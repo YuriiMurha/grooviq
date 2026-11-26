@@ -22,6 +22,7 @@ type Renderer = "webgl2" | "canvas2d";
 type RenderProbe = Window & { themeTestRenderers?: WeakMap<HTMLCanvasElement, Renderer> };
 
 const quietNoteStrength = 0.45;
+const noteStrengths = Array.from({ length: 551 }, (_, index) => quietNoteStrength + index / 1000);
 
 function nearestVelocityShadeDistance(primary: number[], slide: number[]) {
   // Both renderers scale the primary RGB from 45% to 100%. Project onto that segment.
@@ -123,8 +124,17 @@ for (const { id } of themes) {
         }
       }
       for (const state of ["--select", "--grid-focus", "--roll-select"]) {
+        const outline = rgb(state);
         for (const ink of inks) {
-          expect(oklabDeltaE(rgb(state), rgb(ink)), `${state} versus ${ink} in OKLab`).toBeGreaterThanOrEqual(0.10);
+          const fill = rgb(ink);
+          if (ink.endsWith("b")) {
+            expect(oklabDeltaE(outline, fill), `${state} versus ${ink} in OKLab`).toBeGreaterThanOrEqual(0.10);
+          } else {
+            const [r, g, b] = fill;
+            const nearest = Math.min(...noteStrengths.map((strength) =>
+              oklabDeltaE(outline, [r * strength, g * strength, b * strength])));
+            expect(nearest, `${state} versus ${ink} velocity shades in OKLab`).toBeGreaterThanOrEqual(0.10);
+          }
         }
       }
       for (const state of ["--grid-playhead", "--roll-playhead"]) {
