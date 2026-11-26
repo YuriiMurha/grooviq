@@ -14,6 +14,9 @@
 //! The global Upward and Downward amounts scale the curve for all bands; each band's own
 //! upward/downward amount (parameters 11..=16) scales it again for that band.
 //!
+//! [`effective_splits`] applies the crossover constraints. Scalar meters 6 and 7 report the
+//! active low/mid and mid/high crossover frequencies in Hz, including control-rate smoothing.
+//!
 //! Parameter ids for hosts and UIs are in [`PARAM_IDS`], factory settings in [`PRESETS`] and
 //! [`preset`].
 
@@ -126,6 +129,21 @@ pub fn preset(name: &str) -> Option<Vec<(u32, f32)>> {
     Some(v.iter().enumerate().map(|(i, &x)| (i as u32, x)).collect())
 }
 
+/// Constrains the low/mid and mid/high splits in Hz at the device sample rate.
+/// Caps both inputs at 45% of the rate before enforcing the 1.5× spacing above the capped low.
+/// Pass the smoothed frequencies to reproduce the active coefficients, or the requested
+/// frequencies to estimate where they will settle. An estimate expects values within `SPEC` and
+/// the device's clamped rate. Once settled, a running device's meters 6/7 can differ from it by a
+/// relative error of about 1e-6 (the device's f32 log2/exp2 round trip: a few millihertz near
+/// 12 kHz), and by much more while a split glides. Compare with a relative tolerance, or read the
+/// meters.
+pub fn effective_splits(low_hz: f64, high_hz: f64, sample_rate: f64) -> (f64, f64) {
+    let limit = 0.45 * sample_rate;
+    let low = low_hz.min(limit);
+    let high = high_hz.min(limit).max(low * 1.5);
+    (low, high)
+}
+
 const CTRL: u32 = 16;
 const DOWN_T: [f32; 3] = [-33.8, -30.2, -35.5];
 const UP_T: [f32; 3] = [-40.8, -41.8, -40.8];
@@ -194,6 +212,7 @@ pub struct Ott {
     fresh: bool,
     gain_meter: [f32; 3],
     level_meter: [f32; 3],
+    crossover_meter: [f32; 2],
 }
 
 impl Ott {
@@ -226,6 +245,7 @@ impl Ott {
             fresh: true,
             gain_meter: [0.0; 3],
             level_meter: [-120.0; 3],
+            crossover_meter: [0.0; 2],
         };
         for b in 0..3 {
             o.bands[b].ms_coef = 1.0 - libm::expf(-1.0 / (RMS_MS[b] * 0.001 * sr));
@@ -247,15 +267,17 @@ impl Ott {
     fn update_xover(&mut self) {
         let sr = self.sr as f64;
         let q = std::f64::consts::FRAC_1_SQRT_2;
-        let lo = (libm::exp2f(self.x_lo.next()) as f64).min(0.45 * sr);
-        let hi = (libm::exp2f(self.x_hi.next()) as f64)
-            .min(0.45 * sr)
-            .max(lo * 1.5);
+        let (lo, hi) = effective_splits(
+            libm::exp2f(self.x_lo.next()) as f64,
+            libm::exp2f(self.x_hi.next()) as f64,
+            sr,
+        );
         self.c_lp1 = Coefs::lowpass(lo, q, sr);
         self.c_hp1 = Coefs::highpass(lo, q, sr);
         self.c_lp2 = Coefs::lowpass(hi, q, sr);
         self.c_hp2 = Coefs::highpass(hi, q, sr);
         self.c_ap2 = Coefs::allpass(hi, q, sr);
+        self.crossover_meter = [lo as f32, hi as f32];
     }
 
     fn update_amounts(&mut self) {
@@ -400,10 +422,13 @@ impl Device for Ott {
         self.fresh = true;
     }
 
+    /// 0–2: band levels in dB. 3–5: band gain changes in dB.
+    /// 6–7: active low/mid and mid/high crossover frequencies in Hz.
     fn meter(&self, index: u32) -> f32 {
         match index {
             0..=2 => self.level_meter[index as usize],
             3..=5 => self.gain_meter[(index - 3) as usize],
+            6..=7 => self.crossover_meter[(index - 6) as usize],
             _ => 0.0,
         }
     }

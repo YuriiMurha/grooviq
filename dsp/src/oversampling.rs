@@ -1,4 +1,12 @@
 //! Private Drive/Saturation FIR machinery. Arithmetic retained for legacy parity.
+
+/// Count an up/down FIR pair in each stereo channel. `k` is a fixed stage size.
+pub(crate) fn add_stereo_stage_payload(k: usize, payload: &mut crate::insert_memory::Payload) {
+    payload.array::<f32>(2 * k, 4); // Coefficients for Up and Down.
+    payload.array::<f32>(4 * k, 4); // Doubled Up and even Down histories.
+    payload.array::<f32>(2 * (k + 1), 2); // Doubled odd Down history.
+    payload.array::<f64>(4 * k - 1, 4); // Temporary halfband tables.
+}
 fn bessel_i0(x: f64) -> f64 {
     let mut sum = 1.0;
     let mut term = 1.0;

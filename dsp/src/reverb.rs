@@ -24,6 +24,18 @@ pub const SPEC: [(f32, f32, f32); 8] = [
     (0.0, 1.0, 0.25),          // 7 mix
 ];
 
+/// Stable parameter ids in `SPEC` order.
+pub const PARAM_IDS: [&str; 8] = [
+    "size",
+    "decay",
+    "pre_delay",
+    "damping",
+    "width",
+    "low_cut",
+    "high_cut",
+    "mix",
+];
+
 const LINES: usize = 8;
 const CTRL: u32 = 16;
 /// FDN line lengths relative to the mean (spread ~0.7..1.3, mutually incommensurate).
@@ -75,30 +87,60 @@ fn mean_len_ms(size: f32) -> f32 {
     20.0 + 110.0 * size
 }
 
+fn ms_frames(sr: f32, ms: f32) -> f32 {
+    ms * 0.001 * sr
+}
+
+fn diffusers(sr: f32) -> ([[usize; LINES]; 4], [[f32; LINES]; 4]) {
+    let mut rng = Rng(0x5EED_1234);
+    let mut diff_d = [[1usize; LINES]; 4];
+    let mut diff_flip = [[1.0f32; LINES]; 4];
+    for s in 0..4 {
+        for i in 0..LINES {
+            let lo = DIFF_MS[s] * i as f32 / LINES as f32;
+            let hi = DIFF_MS[s] * (i + 1) as f32 / LINES as f32;
+            diff_d[s][i] = (ms_frames(sr, lo + (hi - lo) * rng.unit()).round() as usize).max(1);
+            diff_flip[s][i] = if rng.next_u32() & 1 == 0 { 1.0 } else { -1.0 };
+        }
+    }
+    (diff_d, diff_flip)
+}
+
+fn max_line_delay(sr: f32) -> usize {
+    ms_frames(
+        sr,
+        mean_len_ms(1.0) * RATIOS[LINES - 1] + MOD_DEPTH_MS * 2.0,
+    ) as usize
+        + 8
+}
+
+fn pre_delay(sr: f32) -> usize {
+    ms_frames(sr, 260.0) as usize
+}
+
+pub(crate) fn memory_payload(sr: f32) -> crate::insert_memory::Payload {
+    let mut payload = crate::insert_memory::Payload::boxed::<Reverb>();
+    payload.delay_lines(pre_delay(sr), 2);
+    payload.array::<DelayLine>(DIFF_MS.len() * LINES, 1);
+    let (diff_d, _) = diffusers(sr);
+    for delay in diff_d.into_iter().flatten() {
+        payload.delay_lines(delay + 1, 1);
+    }
+    payload.array::<DelayLine>(LINES, 1);
+    payload.delay_lines(max_line_delay(sr), LINES);
+    payload
+}
+
 impl Reverb {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.clamp(8000.0, 384_000.0);
-        let ms = |m: f32| m * 0.001 * sr;
-        let mut rng = Rng(0x5EED_1234);
-        let mut diff_d = [[1usize; LINES]; 4];
-        let mut diff_flip = [[1.0f32; LINES]; 4];
-        for s in 0..4 {
-            for i in 0..LINES {
-                let lo = DIFF_MS[s] * i as f32 / LINES as f32;
-                let hi = DIFF_MS[s] * (i + 1) as f32 / LINES as f32;
-                diff_d[s][i] = (ms(lo + (hi - lo) * rng.unit()).round() as usize).max(1);
-                diff_flip[s][i] = if rng.next_u32() & 1 == 0 { 1.0 } else { -1.0 };
-            }
-        }
-        let max_line = ms(mean_len_ms(1.0) * RATIOS[LINES - 1] + MOD_DEPTH_MS * 2.0) as usize + 8;
+        let (diff_d, diff_flip) = diffusers(sr);
+        let max_line = max_line_delay(sr);
         let sm = |v: f32, t: f32| Smooth::new(v, t, sr);
         let ctrl_rate = sr / CTRL as f32;
         let mut r = Self {
             sr,
-            pre: [
-                DelayLine::new(ms(260.0) as usize),
-                DelayLine::new(ms(260.0) as usize),
-            ],
+            pre: [DelayLine::new(pre_delay(sr)), DelayLine::new(pre_delay(sr))],
             pre_d: sm(0.0, 60.0),
             diff: (0..4 * LINES)
                 .map(|k| DelayLine::new(diff_d[k / LINES][k % LINES] + 1))
@@ -112,7 +154,7 @@ impl Reverb {
             damp_s: [0.0; LINES],
             mod_ph: core::array::from_fn(|i| i as f64 / LINES as f64),
             mod_inc: core::array::from_fn(|i| MOD_RATES[i] / sr as f64),
-            mod_depth: ms(MOD_DEPTH_MS),
+            mod_depth: ms_frames(sr, MOD_DEPTH_MS),
             size: 0.5,
             decay: 2.2,
             damping: 0.5,

@@ -1887,3 +1887,207 @@ fn legacy_block_is_pinned_across_metadata_only_rename() {
     rig.hub.set_enabled("Keys", true);
     assert!(rig.ports.is_open("Keys"));
 }
+
+mod semantic_replay {
+    use super::{Fake, MidiHub};
+    use grooviq_app::midi::ControllerSink;
+    use grooviq_engine::{ChannelId, Command, EngineConfig, NoteId, RecordEvent, engine};
+    use grooviq_project::{
+        Loaded, SampleFiles,
+        session::{DecodedSamples, Edit, Session},
+    };
+    use serde::Deserialize;
+    use serde_json::{Value, json};
+    use std::{
+        collections::BTreeMap,
+        path::Path,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU32, Ordering},
+        },
+        time::Instant,
+    };
+
+    #[derive(Deserialize)]
+    #[serde(tag = "op", rename_all = "camelCase")]
+    enum Step {
+        Plug { port: String },
+        Unplug { port: String },
+        Enable { port: String, enabled: bool },
+        Message { port: String, bytes: [u8; 3] },
+        Select { channel: u32 },
+        Stall { stalled: bool },
+        Retry,
+        Remove { channel: u32 },
+        Add,
+        Open,
+        New,
+    }
+
+    #[test]
+    fn hub_matches_shared_midi_replay() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/midi-replay.json");
+        let mut transcript: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let (controller, mut processor) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        let controller = Arc::new(Mutex::new(controller));
+        let mut session = Session::new(Arc::clone(&controller));
+        let now = Instant::now();
+        for _ in 0..2 {
+            session.add_synth_channel("Init", now).unwrap();
+        }
+        let replacement = session.project().clone();
+        let arm = || {
+            let mut controller = controller.lock().unwrap();
+            controller.send(Command::SetRecording { on: true }).unwrap();
+            controller.send(Command::Play).unwrap();
+        };
+        arm();
+        let mut render = || processor.process(&mut [0.0; 512], 2);
+        render();
+
+        let ports = Fake::default();
+        let sink = Arc::new(ControllerSink::new(Arc::clone(&controller)));
+        let selected = Arc::new(AtomicU32::new(grooviq_app::midi::NO_CHANNEL));
+        let mut hub = MidiHub::new(
+            Box::new(ports.clone()),
+            sink.clone(),
+            selected.clone(),
+            vec![],
+        );
+        let mut stalled = false;
+        let mut next_press = 1;
+        let mut active = BTreeMap::<NoteId, (u32, ChannelId, u8, u64)>::new();
+        let mut expected = Vec::new();
+
+        for input in transcript["steps"].as_array().unwrap() {
+            if stalled {
+                // Refill before each action. Rendering below observes what landed and drains the
+                // queue without invoking the hub's retry, so reads don't advance the MIDI script.
+                let mut controller = controller.lock().unwrap();
+                while controller.send(Command::SetTempo { bpm: 120.0 }).is_ok() {}
+            }
+            match serde_json::from_value::<Step>(input.clone()).unwrap() {
+                Step::Plug { port } => {
+                    ports.plug(&port);
+                    hub.poll();
+                }
+                Step::Unplug { port } => {
+                    ports.unplug(&port);
+                    hub.poll();
+                }
+                Step::Enable { port, enabled } => {
+                    hub.set_enabled(&port, enabled);
+                }
+                Step::Message { port, bytes } => {
+                    ports.send(&port, &bytes);
+                }
+                Step::Select { channel } => {
+                    selected.store(channel, Ordering::Release);
+                    hub.release_stale();
+                }
+                Step::Stall { stalled: value } => stalled = value,
+                Step::Retry => hub.retry_owed(),
+                Step::Remove { channel } => {
+                    session.apply(Edit::RemoveChannel { channel }, now).unwrap();
+                }
+                Step::Add => {
+                    session.add_synth_channel("Init", now).unwrap();
+                }
+                Step::Open => {
+                    session
+                        .open(
+                            Path::new("replacement.grooviq"),
+                            Loaded {
+                                project: replacement.clone(),
+                                samples: SampleFiles::new(),
+                                warnings: vec![],
+                            },
+                            DecodedSamples::default(),
+                        )
+                        .unwrap();
+                    arm();
+                }
+                Step::New => {
+                    session.new_project().unwrap();
+                    arm();
+                }
+            }
+
+            render();
+            let mut controller = controller.lock().unwrap();
+            let mut events = Vec::new();
+            controller.take_recorded(&mut events);
+            // Graph removal cuts the notes directly; there is no MIDI off command for them.
+            active.retain(|_, (_, channel, _, instance)| {
+                controller.channel_instance(*channel) == Some(*instance)
+            });
+            let mut delivered = Vec::new();
+            for event in events {
+                if let RecordEvent::Note {
+                    id,
+                    channel,
+                    key,
+                    on,
+                    ..
+                } = event
+                {
+                    let press = if on {
+                        let press = next_press;
+                        next_press += 1;
+                        let instance = controller.channel_instance(channel).unwrap();
+                        assert!(active.insert(id, (press, channel, key, instance)).is_none());
+                        press
+                    } else {
+                        let Some((press, owner, note, _)) = active.remove(&id) else {
+                            panic!("release without a current press at {input}: {event:?}");
+                        };
+                        assert_eq!((channel, key), (owner, note));
+                        press
+                    };
+                    delivered.push((press, channel.0, key, on));
+                }
+            }
+            // Key release order across different ports is immaterial; each press ID is observable.
+            delivered.sort_unstable();
+            let presses: Vec<_> = active
+                .values()
+                .map(|&(press, channel, key, _)| (press, channel.0, key))
+                .collect();
+            expected.push(json!({ "presses": presses, "delivered": delivered, "owed": sink.owed(), "inputs": hub.inputs() }));
+        }
+
+        let expected = json!(expected);
+        if std::env::var("GROOVIQ_UPDATE_REPLAY").as_deref() == Ok("1") {
+            transcript["expected"] = expected;
+            // One line per transition keeps changes reviewable.
+            let lines = |key: &str| {
+                transcript[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| format!("    {row}"))
+                    .collect::<Vec<_>>()
+                    .join(",\n")
+            };
+            std::fs::write(
+                path,
+                format!(
+                    "{{\n  \"steps\": [\n{}\n  ],\n  \"expected\": [\n{}\n  ]\n}}\n",
+                    lines("steps"),
+                    lines("expected")
+                ),
+            )
+            .unwrap();
+        } else {
+            let snapshots = transcript["expected"].as_array().unwrap();
+            let actual = expected.as_array().unwrap();
+            assert_eq!(snapshots.len(), actual.len());
+            for (index, (saved, fresh)) in snapshots.iter().zip(actual).enumerate() {
+                assert_eq!(saved, fresh, "step {index}: {}", transcript["steps"][index]);
+            }
+        }
+    }
+}

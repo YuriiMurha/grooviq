@@ -8,6 +8,7 @@ repository.workspace = true
 description = "The Grooviq desktop app: the Tauri shell around the engine"
 
 [features]
+profiling = ["grooviq-engine/profiling"]
 qa-driver = []
 
 [lib]
@@ -31,9 +32,10 @@ tauri-plugin-dialog = "2"
 # MIDI keyboards: lists and opens the system's MIDI inputs (MIT).
 midir = "0.11"
 
-# WebKit's 60 fps cap (src/display.rs): the Objective-C runtime bindings Tauri itself uses (MIT).
+# Native window and application APIs use the same Objective-C bindings as Tauri (MIT).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder"] }
 libc = "0.2"
 
 [dev-dependencies]

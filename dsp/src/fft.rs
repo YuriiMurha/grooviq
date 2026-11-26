@@ -11,6 +11,11 @@ pub struct Fft {
 }
 
 impl Fft {
+    pub(crate) fn add_payload(n: usize, payload: &mut crate::insert_memory::Payload) {
+        payload.array::<f64>(n / 2, 2); // Cosine and sine tables.
+        payload.array::<u32>(n, 1); // Bit reversal.
+    }
+
     /// `n` must be a power of two.
     pub fn new(n: usize) -> Self {
         assert!(n.is_power_of_two() && n >= 2);
