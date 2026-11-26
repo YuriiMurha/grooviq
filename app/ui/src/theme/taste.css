@@ -31,9 +31,9 @@
   --well: #070c12;
   --rec: #f45553;
   --hair: rgba(150, 185, 225, 0.075);
-  --step-a: #0f161d;
-  --step-b: #070c12;
-  --step-lit: #1d2730; /* raised display glass above the velocity fill */
+  --step-a: #28323d;
+  --step-b: #202a34;
+  --step-lit: #313d49; /* raised display glass above the velocity fill */
   --knob-track: #2a3139;
   --reg-x: 0px;
   --reg-y: 0px;
