@@ -45,6 +45,15 @@ describe("list picker", () => {
     }
   });
 
+  test("hover highlights an enabled option without committing and ignores disabled or missing options", () => {
+    const open = step(null, { type: "open" }).state;
+    const hovered = step(open, { type: "hover", id: "reverb" });
+    expect(hovered).toEqual({ state: { highlight: { id: "reverb", index: 3 } }, commit: null });
+    expect(step(hovered.state, { type: "hover", id: "cue" })).toEqual(hovered);
+    expect(step(hovered.state, { type: "hover", id: "missing" })).toEqual(hovered);
+    expect(step(hovered.state, { type: "choose" }).commit).toBe("reverb");
+  });
+
   test("confirmation emits a new enabled value once and closes", () => {
     const open = step(null, { type: "open" }).state;
     const choice = step(open, { type: "choose" });

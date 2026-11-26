@@ -33,7 +33,7 @@ export const references: readonly Reference[] = [
   { id: "transport.tempo", family: "transport.tempo", title: "Tempo entry", source: "src/transport/BpmField.tsx",
     role: "textbox", name: "BPM", behavior: "Real tempo entry with a local accepted-value and commit-count witness; no engine/project writes." },
   { id: "layout.list-picker", family: "layout.list-picker", title: "List picker", source: "src/layout/ListPicker.tsx",
-    role: "button", name: "Gallery route", behavior: "Arrows move the highlight; Enter, Space or click confirms a choice." },
+    role: "button", name: "Gallery route", exact: false, behavior: "Arrows move the highlight; Enter, Space or click confirms a choice." },
   { id: "output.status", family: "output.status", title: "Output status", source: "src/output/OutputChip.tsx",
     role: "button", name: "No output", behavior: "Real output chip with generated device props. Opener callbacks are recorded; no output/MIDI dialog or hardware is mounted." },
 ];
@@ -43,7 +43,7 @@ export const stateContract = {
   "keyboard-focus": "Real sequential Tab focus, including :focus-visible.",
   hover: "Real pointer over the existing control; hover paint is component-specific.",
   compact: "The same semantic states at 900×560; no replacement control markup.",
-  disabled: "List picker options can be disabled. App busy/admission flows have separate coverage.",
+  disabled: "Only families that list `disabled` in their states accept it (the list picker's options); for the others it is not applicable. App busy and admission flows have separate coverage.",
   error: "Not applicable: these leaf APIs do not own error presentation. App repair/refusal surfaces have separate coverage.",
 } as const;
 

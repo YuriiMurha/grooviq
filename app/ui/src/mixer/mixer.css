@@ -372,10 +372,18 @@
 .mx .mx-route-choice {
   width: 100%;
   min-height: 18px;
-  justify-content: center;
-  gap: 4px;
-  padding: 0 2px;
+  padding: 0;
+  border: 0;
   background: transparent;
+  text-align: center;
+}
+
+.mx-route-choice .list-picker-value {
+  width: 100%;
+}
+
+.mx-route-choice .list-picker-chevron {
+  display: none;
 }
 
 .mx .mx-add-send {

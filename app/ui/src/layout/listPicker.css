@@ -81,7 +81,6 @@
   font-weight: 700;
 }
 
-.list-picker-option:not([aria-disabled="true"]):hover,
 .list-picker-option[data-active] {
   background: var(--raised);
 }

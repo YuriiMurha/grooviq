@@ -42,7 +42,7 @@ export const catalog = [
       error: "Invalid text is discarded without an error surface; do not invent aria-invalid styling.",
     }, specimenIds: ["transport.tempo"], referenceScope: "isolated-local-state" },
   { id: "layout.list-picker", title: "List picker", sources: ["src/layout/ListPicker.tsx"],
-    semantics: "Listbox focus stays on the list; navigation highlights a choice until it is confirmed.",
+    semantics: "Listbox focus stays on the list and navigation highlights a choice until it is confirmed. The mixer Playwright spec exercises the open, selected and disabled option states in this specimen. Gallery captures cover the closed trigger.",
     states: ["normal", "keyboard-focus", "hover", "compact", "open", "selected", "disabled"],
     notApplicable: { error: leafExclusions.error },
     specimenIds: ["layout.list-picker"], referenceScope: "isolated-local-state" },

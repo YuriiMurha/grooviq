@@ -275,6 +275,7 @@ test("ListPicker arrows send zero commands, then Enter or click commits exactly 
   const page = await fixture();
   const trigger = strip(page, "Snare").getByRole("button", { name: "Main output for Snare" });
   const list = page.getByRole("listbox", { name: "Main output for Snare" });
+  await expect(trigger).toHaveAccessibleName(/Main output for Snare.*Kit bus/);
   await trigger.press("ArrowDown");
   await expectHighlight(list, "Kit bus");
   for (const [key, name] of [["ArrowDown", "Music bus"], ["ArrowUp", "Kit bus"], ["End", "Master"]]) {
@@ -286,11 +287,41 @@ test("ListPicker arrows send zero commands, then Enter or click commits exactly 
   await expect(list).toBeHidden();
   const routed = { type: "setOutput", nodeId: "n-snare", outputId: "n-master" };
   expect(await log(page)).toEqual([routed]);
+  await expect(trigger).toHaveAccessibleName(/Main output for Snare.*Master/);
 
   await choose(page, trigger, "Master");
   expect(await log(page)).toEqual([routed]);
   await choose(page, trigger, "Music bus");
   expect(await log(page)).toEqual([routed, { ...routed, outputId: "n-music" }]);
+});
+
+test("ListPicker pointer highlight becomes the Enter choice without a command on hover", async ({ fixture }) => {
+  const page = await fixture();
+  const trigger = strip(page, "Snare").getByRole("button", { name: "Main output for Snare" });
+  await trigger.press("Enter");
+  const list = page.getByRole("listbox", { name: "Main output for Snare" });
+  await page.keyboard.press("ArrowDown");
+  await expectHighlight(list, "Music bus");
+
+  await list.getByRole("option", { name: "Master" }).hover();
+  await expectHighlight(list, "Master");
+  expect(await log(page)).toEqual([]);
+  await page.keyboard.press("Enter");
+  await expect(list).toBeHidden();
+  expect(await log(page)).toEqual([{ type: "setOutput", nodeId: "n-snare", outputId: "n-master" }]);
+});
+
+test("ListPicker strip output displays the full Music bus name", async ({ fixture }) => {
+  const page = await fixture();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => document.fonts.ready);
+  const trigger = strip(page, "Snare").getByRole("button", { name: "Main output for Snare" });
+  await choose(page, trigger, "Music bus");
+  const value = trigger.getByText("Music bus", { exact: true });
+  await expect(value).toBeVisible();
+  await expect(trigger).toHaveAttribute("title", "Music bus");
+  const dimensions = await value.evaluate((element) => ({ scrollWidth: element.scrollWidth, clientWidth: element.clientWidth }));
+  expect(dimensions.scrollWidth, "Music bus must fit on the strip").toBeLessThanOrEqual(dimensions.clientWidth);
 });
 
 test("ListPicker Escape, Tab, focus leaving and outside click discard the highlight", async ({ fixture }) => {
@@ -354,6 +385,9 @@ test("ListPicker closes when the host disables it and opens fresh when enabled",
   await page.evaluate(() => window.mixerFixture.setPending("n-snare", true));
   await expect(list).toBeHidden();
   await expect(trigger).toBeDisabled();
+  await expect(trigger).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(list).toBeHidden();
   await page.evaluate(() => window.mixerFixture.setPending("n-snare", false));
   await expect(trigger).toBeEnabled();
   await expect(trigger).toHaveAttribute("aria-expanded", "false");
@@ -367,6 +401,7 @@ test("ListPicker uses listbox focus and skips disabled options in the provider-f
   await page.goto("/gallery/index.html");
   const trigger = page.getByRole("button", { name: "Gallery route" });
   const count = page.getByLabel("Gallery route commits");
+  await expect(trigger).toHaveAccessibleName(/Gallery route.*Main/);
   await expect(trigger).toHaveAttribute("aria-haspopup", "listbox");
   await expect(trigger).toHaveAttribute("aria-expanded", "false");
   await trigger.press("Space");
@@ -383,7 +418,7 @@ test("ListPicker uses listbox focus and skips disabled options in the provider-f
   await expect(count).toHaveText("0");
   await page.keyboard.press("Space");
   await expect(count).toHaveText("1");
-  await expect(trigger).toHaveText("Headphones");
+  await expect(trigger).toHaveAccessibleName(/Gallery route.*Headphones/);
   await expect(trigger).toBeFocused();
   await expect(list).toBeHidden();
 });

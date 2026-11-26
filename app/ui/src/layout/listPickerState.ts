@@ -13,6 +13,7 @@ export type ListPickerAction =
   | { type: "move"; direction: 1 | -1 }
   | { type: "edge"; fromEnd: boolean }
   | { type: "search"; key: string }
+  | { type: "hover"; id: string }
   | { type: "choose"; id?: string }
   | { type: "dismiss" }
   | { type: "blur" }
@@ -52,6 +53,10 @@ export function stepListPicker(
       const key = action.key.toLocaleLowerCase();
       const matches = ({ index }: Highlight) => options[index].name.trimStart().toLocaleLowerCase().startsWith(key);
       return highlight(enabled.slice(start).find(matches) ?? enabled.slice(0, start).find(matches) ?? enabled[current]);
+    }
+    case "hover": {
+      const target = enabled.find(({ id }) => id === action.id);
+      return target ? highlight(target) : stay;
     }
     case "choose": {
       const target = action.id === undefined ? enabled[current] : enabled.find(({ id }) => id === action.id);

@@ -45,7 +45,7 @@ export function ListPicker({ label, options, value, placeholder, onCommit, disab
   const description = disabled ? reason : undefined;
 
   if (state) {
-    const reconciled = disabled ? null : stepListPicker(state, { type: "options" }, options, value).state;
+    const reconciled = stepListPicker(state, { type: "options" }, options, value).state;
     if (reconciled !== state) setState(reconciled);
   }
 
@@ -78,7 +78,16 @@ export function ListPicker({ label, options, value, placeholder, onCommit, disab
   }, [align, disabled, open, options]);
 
   useLayoutEffect(() => {
-    if (open && !disabled) popup.current?.focus({ preventScroll: true });
+    const list = popup.current;
+    if (!open || !list) return;
+    if (disabled) {
+      // Return focus before hiding the focused listbox.
+      if (document.activeElement === list) trigger.current?.focus({ preventScroll: true });
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Close only after transferring DOM focus.
+      setState(null);
+    } else {
+      list.focus({ preventScroll: true });
+    }
   }, [disabled, open]);
 
   useLayoutEffect(() => {
@@ -117,13 +126,13 @@ export function ListPicker({ label, options, value, placeholder, onCommit, disab
         ref={trigger}
         type="button"
         className={className ? `list-picker ${className}` : "list-picker"}
-        aria-label={label}
+        aria-label={`${label}: ${displayedName}`}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={listId}
         aria-disabled={disabled || undefined}
         aria-describedby={description ? reasonId : undefined}
-        title={description}
+        title={disabled ? description : displayedName}
         onPointerDown={(event) => {
           if (open && event.button === 0) event.preventDefault();
         }}
@@ -170,6 +179,11 @@ export function ListPicker({ label, options, value, placeholder, onCommit, disab
               aria-selected={option.id === value}
               aria-disabled={option.disabled || undefined}
               data-active={index === activeIndex || undefined}
+              onPointerMove={(event) => {
+                if (event.pointerType !== "touch" && !option.disabled && index !== activeIndex) {
+                  act({ type: "hover", id: option.id });
+                }
+              }}
               onMouseDown={(event) => {
                 // The listbox keeps focus through the pointer's click.
                 if (event.button === 0) event.preventDefault();
