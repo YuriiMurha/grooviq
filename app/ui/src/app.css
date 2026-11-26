@@ -1347,6 +1347,15 @@ label.field {
     gap: 8px;
   }
 
+  /* Leave room for the project and its save state even with a long output name. */
+  .toolbar-audio .chip-name {
+    max-width: 110px;
+  }
+
+  .toolbar-audio .meter {
+    width: 56px;
+  }
+
   .tone {
     padding: 0 8px;
   }

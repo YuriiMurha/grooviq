@@ -39,6 +39,87 @@ async function contained(child: Locator, parent: Locator) {
   expect(c.y + c.height).toBeLessThanOrEqual(p.y + p.height);
 }
 
+test.describe("compact project identity", () => {
+  const longName = "East Warehouse Live Sessions — Percussion and Synth Instrumentals";
+  const longPath = `/qa/projects/${longName}.grooviq`;
+  const kick = project(["Kick"], { 1: [0, 8] });
+  test.use({
+    viewport: { width: 900, height: 560 },
+    seed: {
+      project: kick,
+      files: { ...soundsFor(["Kick"]), [longPath]: { kind: "project", project: kick } },
+    },
+  });
+
+  test("toolbar keeps project identity, save state and controls readable", async ({ app, mock }) => {
+    const toolbar = app.locator(".toolbar");
+    const projectColumn = toolbar.locator(".toolbar-project");
+    const shortName = toolbar.getByRole("button", { name: "QA beat", exact: true });
+    const mute = app.getByRole("region", { name: "Channel rack" }).getByRole("button", { name: "Mute Kick" });
+    const controls = [
+      ...["Play", "Stop", "Record", "Metronome", "Typing keyboard", /Silent \(QA mode\)/, "Test tone"]
+        .map((name) => toolbar.getByRole("button", { name })),
+      ...["Playback", "Beats per bar", "Beat note value"]
+        .map((name) => toolbar.getByRole("combobox", { name })),
+      toolbar.getByRole("textbox", { name: "BPM" }),
+      toolbar.getByRole("timer", { name: "Position" }),
+      toolbar.getByRole("img", { name: "Master level meter" }),
+    ];
+
+    async function fits(label: Locator) {
+      await expect(label).toBeVisible();
+      await contained(label, projectColumn);
+      const { scrollWidth, clientWidth, fontSize } = await label.evaluate((el) => ({
+        scrollWidth: el.scrollWidth,
+        clientWidth: el.clientWidth,
+        fontSize: parseFloat(getComputedStyle(el).fontSize),
+      }));
+      expect(scrollWidth, `full text of "${await label.innerText()}"`).toBeLessThanOrEqual(clientWidth);
+      expect(fontSize).toBeGreaterThanOrEqual(11);
+    }
+
+    async function controlsFit() {
+      for (const control of controls) {
+        await expect(control).toBeVisible();
+        await expect(control).toBeInViewport({ ratio: 1 });
+        await contained(control, toolbar);
+      }
+    }
+
+    await app.evaluate(() => document.fonts.ready.then(() => true));
+    for (const [width, height] of [[900, 560], [1280, 800], [1440, 900], [1920, 1080]]) {
+      await app.setViewportSize({ width, height });
+      await test.step(`${width}×${height} toolbar fits`, async () => {
+        await fits(shortName.getByText("QA beat", { exact: true }));
+        await fits(projectColumn.getByText("Not saved yet", { exact: true }));
+        await controlsFit();
+      });
+    }
+
+    await app.setViewportSize({ width: 900, height: 560 });
+    await mute.click();
+    await fits(projectColumn.getByText("Unsaved changes", { exact: true }));
+
+    await mock.eval(`(m) => m.queueDialog(${JSON.stringify(longPath)})`);
+    await shortName.click();
+    await app.getByRole("menuitem", { name: "Open…" }).click();
+    await app.getByRole("button", { name: "Don't save" }).click();
+
+    const longProject = toolbar.getByRole("button", { name: longName, exact: true });
+    await expect(longProject).toBeVisible();
+    await expect(longProject).toHaveAttribute("title", longName);
+    const longLabel = longProject.getByText(longName, { exact: true });
+    expect(await longLabel.evaluate((el) => (
+      el.scrollWidth > el.clientWidth && getComputedStyle(el).textOverflow === "ellipsis"
+    ))).toBe(true);
+    await contained(longProject, toolbar);
+    await fits(projectColumn.getByText(/^Saved /));
+    await mute.click();
+    await fits(projectColumn.getByText("Unsaved changes", { exact: true }));
+    await controlsFit();
+  });
+});
+
 async function geometry(page: Page) {
   const headers = page.locator(".rack-head");
   await expect(headers).toHaveCount(2);
