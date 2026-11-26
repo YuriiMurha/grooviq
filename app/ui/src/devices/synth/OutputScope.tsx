@@ -1,65 +1,62 @@
 import { useEffect, useRef } from "react";
-import { decodeSynthMeter, readSynthMeter, type SynthMeter } from "../../api/synthMeter";
+import { decodeSynthMeter, readSynthMeter } from "../../api/synthMeter";
 import { isProjectReplacing, onProjectReplacing } from "../../project/replacement";
+import { subscribeThemeChange } from "../../theme/changes";
 
 import { envelopeMeter, lfoMeter } from "./meterGeometry";
+import { SILENT_SCOPE_DISPLAY, scopeDisplayChanged, scopeSample, scopeStatus } from "./scopeWake";
 import "./meterMotion.css";
 
-const SILENT_SCOPE = Array<number>(256).fill(0);
-const SILENT_LEVELS = Array<number>(6).fill(0);
+const POLL_MS = 33;
+const STALE_MS = 250;
+// The IPC gate is shared by the editors, so keep the polling cadence across selection changes.
+let lastMeterRead = -Infinity;
 
-/** One outstanding read, no accumulating queue, no synthesized display motion. */
+function setMeterAttribute(element: SVGElement, name: string, value: string) {
+  if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+}
+
+function setMeterVisibility(element: SVGElement, visible: boolean) {
+  const visibility = visible ? "visible" : "hidden";
+  if (element.style.visibility !== visibility) element.style.visibility = visibility;
+}
+
+/** One outstanding read, with display work queued only on invalidation. */
 export function OutputScope({ channel, active, generation }: { channel: number; active: boolean; generation: number }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const status = useRef<HTMLSpanElement>(null);
   useEffect(() => {
+    const scopeCanvas = canvas.current;
+    if (!scopeCanvas) return;
+    const ctx = scopeCanvas.getContext("2d");
+    const dialog = scopeCanvas.closest('[role="dialog"]');
+    let strokeColour = getComputedStyle(scopeCanvas).color;
     let disposed = false;
-    let frame = 0;
-    let lastRead = -Infinity;
-    let lastReply = -Infinity;
+    let frame: number | undefined;
+    let pollTimer: number | undefined;
+    let expiry: number | undefined;
+    let epoch = 0;
     let instance: number | null = null;
     let lastClock = -1;
-    let scope = SILENT_SCOPE;
-    let levels = SILENT_LEVELS;
-    let motion: SynthMeter["motion"] = null;
-    const clear = () => { scope = SILENT_SCOPE; levels = SILENT_LEVELS; motion = null; };
-    const unsubscribe = onProjectReplacing(clear);
-    const draw = (now: number) => {
-      const visible = active && !document.hidden && !isProjectReplacing();
-      if (!visible || now - lastReply > 250) clear();
-      if (visible && generation !== undefined && now - lastRead >= 33) {
-        const request = readSynthMeter(channel, generation, instance);
-        if (request) {
-          lastRead = now;
-          void request.then((raw) => {
-            if (disposed || isProjectReplacing()) return;
-            const meter = decodeSynthMeter(raw, instance);
-            if (!meter) { clear(); return; }
-            if (meter.frames === lastClock) return;
-            lastClock = meter.frames;
-            instance = meter.instance;
-            scope = meter.scope;
-            levels = meter.levels;
-            motion = meter.motion;
-            lastReply = performance.now();
-          }, clear);
-        }
-      }
-      const c = canvas.current;
-      const ctx = c?.getContext("2d");
-      if (c && ctx) {
-        ctx.clearRect(0, 0, c.width, c.height);
-        ctx.strokeStyle = getComputedStyle(c).color;
+    let display = SILENT_SCOPE_DISPLAY;
+
+    const draw = () => {
+      frame = undefined;
+      const { scope, levels, motion } = display;
+      const { width, height } = scopeCanvas;
+      if (ctx) {
+        ctx.clearRect(0, 0, width, height);
+        ctx.strokeStyle = strokeColour;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        scope.forEach((v, i) => {
-          const x = i * c.width / 255;
-          const y = c.height / 2 - Math.max(-1, Math.min(1, v)) * (c.height / 2 - 5);
-          if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+        scope.forEach((sample, index) => {
+          const x = index * width / 255;
+          const y = height / 2 - scopeSample(sample) * (height / 2 - 5);
+          if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
         });
         ctx.stroke();
       }
-      canvas.current?.closest('[role="dialog"]')?.querySelectorAll<SVGEllipseElement>("[data-synth-meter]").forEach((dot) => {
+      dialog?.querySelectorAll<SVGEllipseElement>("[data-synth-meter]").forEach((dot) => {
         const kind = dot.dataset.synthMeter;
         const box = {
           left: Number(dot.dataset.meterLeft), right: Number(dot.dataset.meterRight),
@@ -72,24 +69,113 @@ export function OutputScope({ channel, active, generation }: { channel: number; 
             ...box, attack: Number(dot.dataset.meterAttack), decay: Number(dot.dataset.meterDecay), sustain: Number(dot.dataset.meterSustain),
           }, live);
         if (point) {
-          dot.setAttribute("cx", String(point.x));
-          dot.setAttribute("cy", String(point.y));
+          setMeterAttribute(dot, "cx", String(point.x));
+          setMeterAttribute(dot, "cy", String(point.y));
         }
-        dot.style.visibility = point ? "visible" : "hidden";
+        setMeterVisibility(dot, point !== null);
         const highlight = dot.parentElement?.querySelector<SVGRectElement>(`[data-synth-stage="${kind}"]`);
         if (highlight) {
-          highlight.style.visibility = point ? "visible" : "hidden";
+          setMeterVisibility(highlight, point !== null);
           if (point && "left" in point && "width" in point) {
-            highlight.setAttribute("x", String(point.left));
-            highlight.setAttribute("width", String(point.width));
+            setMeterAttribute(highlight, "x", String(point.left));
+            setMeterAttribute(highlight, "width", String(point.width));
           }
         }
       });
-      if (status.current) status.current.textContent = `${Math.round(levels[2])} ${levels[2] === 1 ? "voice" : "voices"} · Peak ${Math.max(levels[0], levels[1]).toFixed(2)}`;
-      if (active) frame = requestAnimationFrame(draw);
+      const text = scopeStatus(levels);
+      if (status.current && status.current.textContent !== text) status.current.textContent = text;
     };
-    draw(performance.now());
-    return () => { disposed = true; cancelAnimationFrame(frame); unsubscribe(); };
+
+    const wake = () => {
+      if (frame === undefined) frame = requestAnimationFrame(draw);
+    };
+    const updateDisplay = (next: typeof display) => {
+      if (!scopeDisplayChanged(display, next)) return;
+      display = scopeDisplayChanged(SILENT_SCOPE_DISPLAY, next) ? next : SILENT_SCOPE_DISPLAY;
+      wake();
+    };
+    const cancelExpiry = () => {
+      window.clearTimeout(expiry);
+      expiry = undefined;
+    };
+    const clear = () => {
+      cancelExpiry();
+      updateDisplay(SILENT_SCOPE_DISPLAY);
+    };
+
+    const canPoll = () => !disposed && active && !document.hidden;
+    const untilNextRead = () => lastMeterRead + POLL_MS - performance.now();
+    const queuePoll = (delay = untilNextRead()) => {
+      if (canPoll() && pollTimer === undefined) {
+        pollTimer = window.setTimeout(poll, Math.max(0, Math.ceil(delay)));
+      }
+    };
+    function poll() {
+      pollTimer = undefined;
+      if (!canPoll()) return;
+      const remaining = untilNextRead();
+      if (remaining > 0) { queuePoll(remaining); return; }
+      if (isProjectReplacing()) { clear(); queuePoll(POLL_MS); return; }
+      const request = readSynthMeter(channel, generation, instance);
+      if (!request) { queuePoll(POLL_MS); return; }
+      lastMeterRead = performance.now();
+      const requestEpoch = epoch;
+      const acceptsReply = () => canPoll() && epoch === requestEpoch && !isProjectReplacing();
+      void request.then((raw) => {
+        if (!acceptsReply()) return;
+        const meter = decodeSynthMeter(raw, instance);
+        if (!meter) { clear(); return; }
+        // Replies may repeat a frozen capture. Only a new capture extends its lifetime.
+        if (meter.frames === lastClock) return;
+        lastClock = meter.frames;
+        instance = meter.instance;
+        updateDisplay(meter);
+        cancelExpiry();
+        if (display !== SILENT_SCOPE_DISPLAY) expiry = window.setTimeout(clear, STALE_MS);
+      }, () => {
+        if (acceptsReply()) clear();
+      }).finally(() => queuePoll());
+    }
+
+    const reset = () => {
+      // A reply already in flight can settle after the scope becomes visible or usable again.
+      epoch++;
+      clear();
+      wake();
+    };
+    const onVisibility = () => {
+      window.clearTimeout(pollTimer);
+      pollTimer = undefined;
+      reset();
+      queuePoll();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    const unsubscribeReplacement = onProjectReplacing(reset);
+    const unsubscribeTheme = subscribeThemeChange(() => {
+      strokeColour = getComputedStyle(scopeCanvas).color;
+      wake();
+    });
+    const geometry = new MutationObserver(wake);
+    geometry.observe(scopeCanvas, { attributeFilter: ["width", "height"] });
+    if (dialog) geometry.observe(dialog, {
+      subtree: true,
+      attributeFilter: [
+        "data-meter-left", "data-meter-right", "data-meter-top", "data-meter-bottom",
+        "data-meter-attack", "data-meter-decay", "data-meter-sustain", "data-meter-amount",
+      ],
+    });
+    wake();
+    queuePoll();
+    return () => {
+      disposed = true;
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      window.clearTimeout(pollTimer);
+      cancelExpiry();
+      document.removeEventListener("visibilitychange", onVisibility);
+      unsubscribeReplacement();
+      unsubscribeTheme();
+      geometry.disconnect();
+    };
   }, [channel, active, generation]);
   return <section className="dwell synth-output" aria-label="Live synth output"><div className="dcard-head"><b className="dcard-title">Output</b><span ref={status} className="synth-output-status" /></div><canvas ref={canvas} width={660} height={48} style={{ width: "100%", height: 48, color: "var(--kc, var(--accent))" }} aria-label="Synth output waveform" /></section>;
 }
