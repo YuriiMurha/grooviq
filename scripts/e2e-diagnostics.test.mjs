@@ -105,12 +105,38 @@ test('write failure stays incomplete and preserves failed suite status', async t
   assert.ok(!records().some(x => x.kind === 'framework-end'));
   assert.equal(r.activeTimer, false);
 });
-test('unref timer cannot keep an otherwise idle child alive', async t => {
+// A hang backstop only: the property is checked without a clock below.
+test('unref timer cannot keep an otherwise idle child alive', { timeout: 120_000 }, async t => {
   const { root } = fixture(t);
-  const child = spawn(process.execPath, ['--input-type=module', '-e', `import R from ${JSON.stringify(source)}; const r=new R({directory:${JSON.stringify(join(root, 'idle'))}}); r.onBegin({}, {allTests:()=>[]});`], { stdio: 'ignore' });
-  const timeout = setTimeout(() => child.kill('SIGKILL'), 3000);
-  try { const [code, signal] = await once(child, 'exit'); assert.equal(code, 0); assert.equal(signal, null); }
-  finally { clearTimeout(timeout); }
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import R from ${JSON.stringify(source)};
+    const r = new R({ directory: ${JSON.stringify(join(root, 'idle'))} });
+    r.onBegin({}, { allTests: () => [] });
+    process.send({ activeTimer: r.activeTimer, resources: process.getActiveResourcesInfo() });
+    process.disconnect();
+  `], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  // A timed-out test must not leave the child running, or the runner never exits.
+  t.signal.addEventListener('abort', () => child.kill('SIGKILL'), { once: true });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+  const closed = once(child, 'close');
+  let timeout;
+  try {
+    const ready = await Promise.race([
+      once(child, 'message').then(([message]) => message),
+      closed.then(() => undefined),
+    ]);
+    assert.ok(ready, `child closed before reporting resources: ${stderr}`);
+    assert.equal(ready.activeTimer, true, `reporter did not start sampling: ${stderr}`);
+    assert.ok(!ready.resources.includes('Timeout'), `resources keeping the child alive: ${ready.resources.join(', ')}`);
+    timeout = setTimeout(() => child.kill('SIGKILL'), 30_000);
+    const [code, signal] = await closed;
+    assert.equal(signal, null, stderr);
+    assert.equal(code, 0, stderr);
+  } finally {
+    clearTimeout(timeout);
+    if (child.kill('SIGKILL')) await closed;
+  }
 });
 test('final sync and close faults cannot certify diagnostic success', async t => {
   for (const method of ['fsyncSync', 'closeSync']) {
