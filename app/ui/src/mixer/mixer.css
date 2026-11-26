@@ -568,7 +568,7 @@
 .mx-notice {
   min-height: 18px;
   margin: 12px 0 0;
-  color: var(--ink-3b);
+  color: var(--error);
   font-size: 12px;
   font-weight: 600;
 }
