@@ -76,6 +76,32 @@ pub fn arrangement_view(
         serde_json::json!({"generation":stamp.generation,"revision":stamp.revision,"offset":offset,"total":p.arrangement.clips.len(),"clips":clips,"tracks":p.arrangement.tracks,"audioAssets":p.arrangement.audio_assets,"loopRegion":p.arrangement.loop_region,"playMode":p.play_mode,"songError":s.song_error(),"pendingRequests":s.pending_media_requests(),"warnings":s.media_warnings()}),
     )
 }
+pub fn arrangement_curve(
+    session: &Mutex<Session>,
+    generation: u64,
+    revision: u64,
+    clip: u32,
+) -> Result<serde_json::Value, String> {
+    let s = lock(session);
+    let stamp = s.arrangement_view();
+    if (generation, revision) != (stamp.generation, stamp.revision) {
+        return Err("Stale curve request; reload".into());
+    }
+    let c = s
+        .project()
+        .arrangement
+        .clips
+        .iter()
+        .find(|c| c.id == clip)
+        .ok_or("Unknown clip")?;
+    if let ClipContent::Automation { points, .. } = &c.content {
+        Ok(
+            serde_json::json!({"generation":generation,"revision":revision,"clip":clip,"points":points}),
+        )
+    } else {
+        Err("Not an automation clip".into())
+    }
+}
 pub fn arrangement_edit(
     session: &Mutex<Session>,
     generation: u64,

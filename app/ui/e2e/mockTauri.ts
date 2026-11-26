@@ -4,7 +4,14 @@
 // project_cmds.rs, project/src/session.rs). Playwright serialises the function, so it must not
 // reference anything outside its own body.
 
-import type { ArrangementPage, ArrangementReply, AudioContent, PatternContent } from "../src/api/arrangement";
+import type { ArrangementPage, ArrangementReply, AudioContent, AutomationContent, CurvePoint, PatternContent } from "../src/api/arrangement";
+
+// The native operation decoder accepts arbitrary instrument names before validating the candidate.
+type MockAutomationTarget =
+  | { type: "channelVolume" | "channelPan"; channel: number }
+  | { type: "instrumentParam"; channel: number; instrument: string; param: string };
+type MockAutomationContent = Omit<AutomationContent, "target"> & { target: MockAutomationTarget };
+type MockClipContent = PatternContent | AudioContent | MockAutomationContent;
 
 /** A file in the mock's file system. */
 export type MockFile =
@@ -27,7 +34,7 @@ export interface MockProject {
   playMode?: "pattern" | "song";
   arrangement?: { tracks: { id: number; name: string; color: number; mute: boolean }[];
     clips: { id: number; track: number; name: string; startTick: number; muted: boolean;
-      content: PatternContent | AudioContent }[];
+      content: MockClipContent }[];
     audioAssets: ArrangementPage["audioAssets"][number][]; loopRegion: { startTick: number; endTick: number; enabled: boolean } | null };
   /** Embedded fixture WAV bytes keyed by asset ID, independent of the original paths. */
   arrangementMedia?: Record<number, number[]>;
@@ -193,6 +200,11 @@ export function installMockTauri(seed: MockSeed): void {
       slide: n.slide ?? false,
     }));
     p.pattern.nextNoteId = Math.max(p.pattern.nextNoteId ?? 1, next);
+    for (const { content } of p.arrangement?.clips ?? []) {
+      if (content.type === "automation") {
+        content.points = content.points.map(point => ({ ...point, value: Math.fround(point.value) }));
+      }
+    }
     return p;
   };
   const emptyProject = (): Project => ({
@@ -286,6 +298,11 @@ export function installMockTauri(seed: MockSeed): void {
   let trimUndo: TrimChange[] = [];
   let trimRedo: TrimChange[] = [];
   type Arrangement = NonNullable<Project["arrangement"]>;
+  const arrangementIds = (arrangement: Arrangement | undefined) => arrangement ? [
+    ...arrangement.tracks.map(track => track.id),
+    ...arrangement.audioAssets.map(asset => asset.id),
+    ...arrangement.clips.flatMap(clip => clip.content.type === "automation" ? [clip.id, clip.content.priority] : [clip.id]),
+  ] : [];
   type AddedPattern = { initial: Project["pattern"]; dormant?: PatternEntry };
   type AudioSource = { bytes: number[]; data: DataView; rate: number; frames: number; channels: number; fromWorker: boolean };
   type ClipChange = { order: number; before: Arrangement; after: Arrangement; addedPatterns: AddedPattern[];
@@ -1337,8 +1354,9 @@ export function installMockTauri(seed: MockSeed): void {
     }
     const candidate = new Map([...patternBank].map(([id, entry]) => [id, { pattern: clone(entry.pattern), revision: entry.revision, history: entry.history }]));
     let nextId = s.project.nextId;
+    const reservedArrangementIds = new Set(arrangementIds(s.project.arrangement));
     const allocate = () => {
-      while (nextId < 0xffffffff && (candidate.has(nextId) || s.project.channels.some((c) => c.id === nextId) || s.project.patternClips?.some((c) => c.id === nextId) || s.project.arrangement?.tracks.some(t => t.id === nextId) || s.project.arrangement?.clips.some(c => c.id === nextId) || s.project.arrangement?.audioAssets.some(a => a.id === nextId))) nextId++;
+      while (nextId < 0xffffffff && (candidate.has(nextId) || s.project.channels.some((c) => c.id === nextId) || s.project.patternClips?.some((c) => c.id === nextId) || reservedArrangementIds.has(nextId))) nextId++;
       if (nextId >= 0xffffffff) return null;
       return nextId++;
     };
@@ -1379,7 +1397,8 @@ export function installMockTauri(seed: MockSeed): void {
 
   const nextChannelIdentity = () => {
     let id=s.project.nextId;
-    while (id < 0xffffffff && (s.project.channels.some((c) => c.id===id) || patternBank.has(id) || s.project.patternClips?.some((c) => c.id===id) || s.project.arrangement?.tracks.some(t => t.id===id) || s.project.arrangement?.clips.some(c => c.id===id) || s.project.arrangement?.audioAssets.some(a => a.id===id))) id++;
+    const reservedArrangementIds = new Set(arrangementIds(s.project.arrangement));
+    while (id < 0xffffffff && (s.project.channels.some((c) => c.id===id) || patternBank.has(id) || s.project.patternClips?.some((c) => c.id===id) || reservedArrangementIds.has(id))) id++;
     if (id>=0xffffffff) throw "Project ids are exhausted.";
     return id;
   };
@@ -1425,9 +1444,21 @@ export function installMockTauri(seed: MockSeed): void {
     if (s.project.patternClips?.length) requireEmptyArrangement();
     const arrangement = s.project.arrangement ?? emptyArrangement();
     const offset = Number(args.offset);
+    const clips = arrangement.clips.slice(offset, offset + limit).map(({ content, ...clip }) => {
+      if (content.type !== "automation") return { ...clip, content: clone(content) };
+      const { points, ...summary } = content;
+      return { ...clip, content: { ...clone(summary), pointCount: points.length } };
+    });
     return { generation: s.generation, revision: arrangementRevision, offset, total: arrangement.clips.length,
-      clips: clone(arrangement.clips.slice(offset, offset + limit)), tracks: clone(arrangement.tracks), audioAssets: clone(arrangement.audioAssets), loopRegion: arrangement.loopRegion, playMode: s.project.playMode ?? "pattern",
+      clips, tracks: clone(arrangement.tracks), audioAssets: clone(arrangement.audioAssets), loopRegion: arrangement.loopRegion, playMode: s.project.playMode ?? "pattern",
       songError: null, pendingRequests: Array.from(pendingMedia.values(), intent => intent.request), warnings: mediaWarnings() };
+  };
+  const arrangementCurve = ({ generation, revision, clip }: Record<string, unknown>) => {
+    if (generation !== s.generation || revision !== arrangementRevision) throw "Stale curve request; reload";
+    const source = s.project.arrangement?.clips.find(candidate => candidate.id === clip);
+    if (!source) throw "Unknown clip";
+    if (source.content.type !== "automation") throw "Not an automation clip";
+    return { generation, revision, clip, points: clone(source.content.points) };
   };
   const workspaceMode = (args: Record<string, unknown>) => {
     try {
@@ -1507,7 +1538,14 @@ export function installMockTauri(seed: MockSeed): void {
       return { status: "applied", generation: s.generation, revision: arrangementRevision, effect };
     } catch (error) { return { status: "refused", generation: s.generation, revision: arrangementRevision, message: String(error), reload: true }; }
   };
-  /** Finite pattern and audio clip counterpart to Session::edit_arrangement. */
+  const sameAutomationTarget = (left: MockAutomationTarget, right: MockAutomationTarget) =>
+    left.type === right.type && left.channel === right.channel &&
+    (left.type !== "instrumentParam" || (right.type === "instrumentParam" &&
+      left.instrument === right.instrument && left.param === right.param));
+  const sameCurve = (left: readonly CurvePoint[], right: readonly CurvePoint[]) =>
+    left.length === right.length && left.every((point, index) =>
+      point.tick === right[index].tick && point.value === right[index].value && point.mode === right[index].mode);
+  /** Finite clip-edit counterpart to Session::edit_arrangement. */
   const editArrangement = (args: Record<string, unknown>) => {
     try {
       workspaceStamp(args); saveActivePattern();
@@ -1519,7 +1557,8 @@ export function installMockTauri(seed: MockSeed): void {
       const candidate = clone(s.project); const arrangement = clone(before); candidate.arrangement = arrangement;
       const addedPatterns = new Map<number, PatternEntry>();
       const sourcePattern = (id: number) => addedPatterns.get(id) ?? patternBank.get(id);
-      let next = candidate.nextId; const issued = new Set([...candidate.channels.map(c => c.id), ...patternBank.keys(), ...arrangement.tracks.map(t => t.id), ...arrangement.clips.map(c => c.id), ...arrangement.audioAssets.map(a => a.id)]);
+      let next = candidate.nextId;
+      const issued = new Set([...candidate.channels.map(c => c.id), ...patternBank.keys(), ...arrangementIds(arrangement)]);
       const ids: number[] = [], tracksByOperation = new Map<number, number>();
       const allocate = () => { while (next < 0xffffffff && issued.has(next)) next++; if (next >= 0xffffffff) throw "Project ids exhausted"; const id = next++; issued.add(id); return id; };
       const maxSongTicks = 38_400_000;
@@ -1540,6 +1579,36 @@ export function installMockTauri(seed: MockSeed): void {
           sourceEnd: safeUint(fields.sourceEnd), gain: Math.fround(fields.gain), reverse: fields.reverse,
           fadeIn: safeUint(fields.fadeIn), fadeOut: safeUint(fields.fadeOut) };
       };
+      let requestedAutomationPoints = 0;
+      const automationContent = (value: unknown): MockAutomationContent => {
+        if (!value || typeof value !== "object" || !("type" in value) || value.type !== "automation") throw "Resize must preserve source, target and priority";
+        const fields = value as Record<string, unknown>;
+        const rawTarget = fields.target as Record<string, unknown> | undefined;
+        const channel = int(rawTarget?.channel, 0xffffffff);
+        let target: MockAutomationTarget;
+        if (rawTarget?.type === "channelVolume" || rawTarget?.type === "channelPan") {
+          target = { type: rawTarget.type, channel };
+        } else if (rawTarget?.type === "instrumentParam" &&
+          typeof rawTarget.instrument === "string" && typeof rawTarget.param === "string") {
+          target = { type: "instrumentParam", channel, instrument: rawTarget.instrument, param: rawTarget.param };
+        } else throw "Invalid automation target";
+        if (!Array.isArray(fields.points)) throw "Invalid automation points";
+        if (fields.points.length > 16_384) throw "arrangement list limit exceeded";
+        requestedAutomationPoints += fields.points.length;
+        if (requestedAutomationPoints > 1_000_000) throw "total automation point limit exceeded";
+        const points = fields.points.map((point: unknown): CurvePoint => {
+          if (!point || typeof point !== "object" || !("tick" in point) || !("value" in point) ||
+            typeof point.value !== "number" || !("mode" in point) || (point.mode !== "linear" && point.mode !== "hold")) {
+            throw "Invalid automation point";
+          }
+          return { tick: safeUint(point.tick), value: Math.fround(point.value), mode: point.mode };
+        });
+        return { type: "automation", target, priority: int(fields.priority, 0xffffffff),
+          offsetTick: int(fields.offsetTick, 0xffffffff), lengthTicks: safeUint(fields.lengthTicks), points };
+      };
+      const assignAutomationPriority = (content: MockClipContent) => {
+        if (content.type === "automation") content.priority = allocate();
+      };
       const audioAssets = new Map(arrangement.audioAssets.map(asset => [asset.id, asset]));
       const bpm = Math.fround(candidate.bpm);
       const track = (value: unknown) => {
@@ -1551,7 +1620,6 @@ export function installMockTauri(seed: MockSeed): void {
         const id = int(value, 0xffffffff);
         const result = arrangement.clips.find(c => c.id === id);
         if (!result) throw `Unknown clip ${id}`;
-        if (result.content.type !== "pattern" && result.content.type !== "audio") throw "Automation clips are outside the finite fixture";
         return result;
       };
       operations.forEach((op, index) => {
@@ -1570,19 +1638,25 @@ export function installMockTauri(seed: MockSeed): void {
           const target = op.kind === "createClip" ? track(op.track) : tracksByOperation.get(int(op.trackOperation, 100_000));
           if (target === undefined) throw "Track must refer to an earlier CreateTrack";
           if (typeof op.muted !== "boolean") throw "Invalid muted flag";
-          const id = allocate(); arrangement.clips.push({ id, track: target, name: name(op.name), startTick: int(op.startTick), muted: op.muted, content: patternContent(op.content) }); ids.push(id);
+          const content = (op.content as { type?: unknown } | null)?.type === "automation"
+            ? automationContent(op.content) : patternContent(op.content);
+          const id = allocate();
+          assignAutomationPriority(content);
+          const startTick = content.type === "automation" ? safeUint(op.startTick) : int(op.startTick);
+          arrangement.clips.push({ id, track: target, name: name(op.name), startTick, muted: op.muted, content }); ids.push(id);
         } else if (op.kind === "move" || op.kind === "copy") {
           const destination = track(op.track);
           const source = clip(op.clip);
-          const start = source.content.type === "audio" ? safeUint(op.startTick) : int(op.startTick);
+          const start = source.content.type === "pattern" ? int(op.startTick) : safeUint(op.startTick);
           if (op.kind === "copy") {
             const copy = { ...clone(source), id: allocate(), track: destination, startTick: start };
+            assignAutomationPriority(copy.content);
             arrangement.clips.push(copy); ids.push(copy.id);
           }
           else { source.track = destination; source.startTick = start; }
         } else if (op.kind === "slice") {
           const source = clip(op.clip), left = source.content;
-          const tick = left.type === "audio" ? safeUint(op.tick) : int(op.tick), cut = tick - source.startTick;
+          const tick = left.type === "pattern" ? int(op.tick) : safeUint(op.tick), cut = tick - source.startTick;
           let rightContent: typeof left;
           if (left.type === "audio") {
             if (cut <= 0) throw "Slice must be inside clip";
@@ -1605,6 +1679,13 @@ export function installMockTauri(seed: MockSeed): void {
             }
             // Chronological fades stay at the outside, even when the source plays backwards.
             left.fadeIn = Math.min(left.fadeIn, count); left.fadeOut = 0;
+          } else if (left.type === "automation") {
+            if (cut <= 0) throw "Slice must be inside clip";
+            if (op.audioFirstFrames != null || cut >= left.lengthTicks) throw "Invalid automation slice";
+            const offsetTick = left.offsetTick + cut;
+            if (offsetTick > 0xffffffff) throw "Source offset overflow";
+            rightContent = { ...left, offsetTick, lengthTicks: left.lengthTicks - cut };
+            left.lengthTicks = cut;
           } else {
             if (op.audioFirstFrames != null || cut <= 0 || cut >= left.lengthTicks) throw "Invalid musical slice";
             const period = sourcePattern(left.pattern)!.pattern.steps * STEP_TICKS;
@@ -1619,6 +1700,17 @@ export function installMockTauri(seed: MockSeed): void {
             const resized = audioContent(op.content);
             if (resized.asset !== source.content.asset) throw "Resize must preserve source, target and priority";
             source.content = { ...source.content, ...resized }; source.startTick = safeUint(op.startTick);
+          } else if (source.content.type === "automation") {
+            const original = source.content;
+            const resized = automationContent(op.content);
+            if (!sameAutomationTarget(original.target, resized.target) || original.priority !== resized.priority ||
+              !sameCurve(original.points, resized.points)) throw "Resize must preserve source, target and priority";
+            const startTick = safeUint(op.startTick);
+            if (resized.offsetTick !== original.offsetTick + (startTick - source.startTick)) {
+              throw "Resize must preserve automation source phase";
+            }
+            source.startTick = startTick;
+            source.content = { ...original, offsetTick: resized.offsetTick, lengthTicks: resized.lengthTicks };
           } else {
             const resized = patternContent(op.content);
             if (source.content.pattern !== resized.pattern) throw "Resize cannot retarget its source";
@@ -1646,7 +1738,22 @@ export function installMockTauri(seed: MockSeed): void {
         } else throw "This arrangement operation is outside the finite fixture";
       });
       if (arrangement.tracks.length > 256 || arrangement.clips.length > 100_000) throw "Arrangement bounds exceeded";
+      const layers = new Map<number, { target: MockAutomationTarget; start: number; end: number }[]>();
+      for (const { content, startTick } of arrangement.clips) {
+        if (content.type !== "automation") continue;
+        const fragments = layers.get(content.priority) ?? [];
+        fragments.push({ target: content.target, start: startTick, end: startTick + content.lengthTicks });
+        layers.set(content.priority, fragments);
+      }
+      for (const fragments of layers.values()) {
+        fragments.sort((left, right) => left.start - right.start || left.end - right.end);
+        if (fragments.some((item, index) => index > 0 &&
+          (!sameAutomationTarget(item.target, fragments[index - 1].target) || fragments[index - 1].end > item.start))) {
+          throw "Automation fragments sharing a priority must use one target and remain disjoint; copy to create a new layer.";
+        }
+      }
       // Like validate_arrangement, check final clip geometry after the whole batch.
+      let totalPoints = 0;
       for (const clip of arrangement.clips) {
         if (clip.content.type === "pattern") {
           if (clip.startTick + clip.content.lengthTicks > maxSongTicks) throw "Arrangement bounds exceeded";
@@ -1656,6 +1763,22 @@ export function installMockTauri(seed: MockSeed): void {
           const ticks = asset ? Math.ceil(frames / asset.sourceRate * bpm * 16) : 0;
           if (!asset || frames < 1 || sourceEnd > asset.sourceFrames || !(gain >= 0 && gain <= 2) ||
               fadeIn > frames || fadeOut > frames || clip.startTick >= maxSongTicks || clip.startTick + ticks > maxSongTicks) {
+            throw `Clip ${clip.id} (${clip.name}): invalid track/source reference, bounds or automation value.`;
+          }
+        } else {
+          const { target, offsetTick, lengthTicks, points } = clip.content;
+          const channel = candidate.channels.find(channel => channel.id === target.channel);
+          const spec = channel && target.type === "instrumentParam" && (channel.kind ?? "sampler") === target.instrument
+            ? (target.instrument === "sampler" ? PARAMS : SYNTH_PARAMS).find(([id]) => id === target.param)
+            : undefined;
+          const min = target.type === "channelPan" ? -1 : target.type === "channelVolume" ? 0 : spec?.[1];
+          const max = target.type === "channelPan" ? 1 : target.type === "channelVolume" ? 2 : spec?.[2];
+          totalPoints += points.length;
+          if (!channel || min === undefined || max === undefined || lengthTicks < 1 ||
+            offsetTick + lengthTicks > maxSongTicks || clip.startTick + lengthTicks > maxSongTicks ||
+            points.length > 16_384 || totalPoints > 1_000_000 || points.some((point, index) =>
+              point.tick > maxSongTicks || (index > 0 && points[index - 1].tick > point.tick) ||
+              !(point.value >= min && point.value <= max))) {
             throw `Clip ${clip.id} (${clip.name}): invalid track/source reference, bounds or automation value.`;
           }
         }
@@ -1770,8 +1893,7 @@ export function installMockTauri(seed: MockSeed): void {
       if (target.kind === "import") {
         const issued = new Set([
           ...candidate.channels.map(channel => channel.id), ...patternBank.keys(),
-          ...arrangement.tracks.map(track => track.id), ...arrangement.clips.map(clip => clip.id),
-          ...arrangement.audioAssets.map(entry => entry.id),
+          ...arrangementIds(arrangement),
         ]);
         const allocate = () => {
           while (candidate.nextId < 0xffffffff && issued.has(candidate.nextId)) candidate.nextId++;
@@ -1879,7 +2001,7 @@ export function installMockTauri(seed: MockSeed): void {
     arrangement_view: workspaceView,
     arrangement_edit: editArrangement,
     arrangement_history: stepProjectHistory,
-    arrangement_curve: nativeArrangementOnly,
+    arrangement_curve: arrangementCurve,
     audio_import: (a) => prepareAudio(a, { kind: "import", track: Number(a.track), startTick: Number(a.startTick), name: String(a.name) }),
     audio_relink: (a) => prepareAudio(a, { kind: "relink", asset: Number(a.asset) }),
     audio_cancel: (a) => cancelMediaRequest(Number(a.request)),
@@ -2401,6 +2523,7 @@ export function installMockTauri(seed: MockSeed): void {
     arrangement_mode: { generation: u64, revision: u64, mode: (value) => value === "pattern" || value === "song" ? null : "expected pattern or song" },
     arrangement_history: { generation: u64, revision: u64, undo: bool },
     arrangement_edit: { generation: u64, revision: u64, editsJson: str },
+    arrangement_curve: { generation: u64, revision: u64, clip: u32 },
     audio_import: { generation: u64, revision: u64, track: u32, startTick: u64, name: str, path: str, ticket: wireU64 },
     audio_relink: { generation: u64, revision: u64, asset: u32, path: str, ticket: wireU64 },
     audio_cancel: { request: wireU64 },
