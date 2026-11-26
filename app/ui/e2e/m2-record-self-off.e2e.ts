@@ -13,7 +13,7 @@ test("recording_stopping_itself_mid_draw_warns_releases_held_keys_and_commits_th
   const live = () => mock.eval<string[]>("(m) => m.live().sort()");
   await record.click();
   await expect(record).toHaveAttribute("aria-pressed", "true");
-  await app.getByRole("button", { name: "Play" }).click();
+  await app.getByRole("button", { name: "Play", exact: true }).click();
   // A typed key held while a note is drawn.
   await app.keyboard.down("z");
   await expect.poll(live).toContain("1:48");

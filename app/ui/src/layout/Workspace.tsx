@@ -156,7 +156,7 @@ export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError,
   const layout = measurement ? fitPanelLayout({ viewportHeight: measurement.height, requestedRatio: panels.split, chrome: measurement.chrome }) : null;
   const minimum = measurement ? panelMinimums(measurement.chrome) : null;
   const contentHeight = both ? layout?.contentHeight : measurement && minimum
-    ? Math.max(measurement.height, panels.roll ? minimum.roll : panels.rack ? minimum.rack : 0) : undefined;
+    ? Math.max(Math.floor(measurement.height), panels.roll ? minimum.roll : panels.rack ? minimum.rack : 0) : undefined;
   const onSplitDown = (e: PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     const current = readPanels(viewport.current, area.current);
@@ -197,7 +197,9 @@ export function Workspace({ latest, subscribePlaybackStart, sampleRate, onError,
     const height = rackPane.current?.getBoundingClientRect().height;
     if (!current || height === undefined) return;
     const currentLayout = fitPanelLayout({ viewportHeight: current.height, requestedRatio: panels.split, chrome: current.chrome });
-    const split = acceptedSplit(currentLayout, height / currentLayout.contentHeight + dir * SPLIT_KEY_STEP);
+    // Start at the fitted bound when compacted, and keep keyboard steps free of pixel rounding.
+    const start = acceptedSplit(currentLayout, panels.split);
+    const split = acceptedSplit(currentLayout, start + dir * SPLIT_KEY_STEP);
     const target = fitPanelLayout({ viewportHeight: current.height, requestedRatio: split, chrome: current.chrome });
     if (target.rackHeight !== height) setPanels((p) => ({ ...p, split }));
   };

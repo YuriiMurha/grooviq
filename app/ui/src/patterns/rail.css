@@ -3,10 +3,10 @@
 .pattern-rail { flex: 0 0 188px; min-width: 0; min-height: 0; overflow: auto; padding: 12px; background: var(--panel); border-right: 1px solid var(--line); color: var(--text); font: 12px var(--font); scrollbar-color: var(--line) var(--panel); }
 .pattern-rail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
 .pattern-rail-head h2 { margin: 0; font-size: 13px; }
-.pattern-rail button, .pattern-rail input, .pattern-mode-controls select { font: inherit; color: var(--text); background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 6px 8px; min-height: 30px; }
-.pattern-rail button:hover:not(:disabled), .pattern-mode-controls select:hover:not(:disabled) { background: var(--line-soft); }
+.pattern-rail button, .pattern-rail input { font: inherit; color: var(--text); background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 6px 8px; min-height: 30px; }
+.pattern-rail button:hover:not(:disabled) { background: var(--line-soft); }
 .pattern-rail button:active:not(:disabled) { background: var(--line); }
-.pattern-rail button:disabled, .pattern-rail input:disabled, .pattern-mode-controls select:disabled { color: var(--faint); cursor: default; }
+.pattern-rail button:disabled, .pattern-rail input:disabled { color: var(--faint); cursor: default; }
 .pattern-rail :focus-visible, .pattern-mode-controls :focus-visible { outline: 2px solid var(--select); outline-offset: 2px; }
 .pattern-rail ::selection { background: var(--select); color: var(--bg); }
 .pattern-rail input { width: 100%; box-sizing: border-box; caret-color: var(--accent); margin: 6px 0; }
@@ -18,10 +18,8 @@
 .pattern-rail p { color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
 .pattern-rail p[role="alert"] { color: var(--text); }
 .pattern-mode-controls { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11px; }
-.pattern-mode-controls label { position: relative; display: grid; gap: 2px; color: var(--muted); }
-.pattern-mode-controls label::after { content: ""; position: absolute; right: 8px; bottom: 13px; width: 4px; height: 4px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); pointer-events: none; }
-/* Keep the native select behavior; GTK's themed field can clip and recolor its label. */
-.pattern-mode-controls select { appearance: none; color-scheme: dark; padding-right: 22px; }
+.pattern-mode-field { display: grid; gap: 2px; color: var(--muted); }
+.pattern-mode-field .list-picker { min-width: 72px; min-height: 30px; gap: 4px; background: var(--raised); }
 .pattern-current { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pattern-playlist-shell { padding: 16px; border-bottom: 1px solid var(--line); color: var(--muted); background: var(--bg); }
 .pattern-playlist-shell h2 { color: var(--text); font-size: 14px; margin: 0 0 8px; }
@@ -31,8 +29,7 @@
   .toolbar:has(.pattern-mode-controls) .save-state { overflow: hidden; text-overflow: ellipsis; }
   .transport:has(.pattern-mode-controls) { gap: 4px; }
   .pattern-mode-controls { flex: 0 0 72px; flex-direction: column; align-items: stretch; gap: 0; width: 72px; }
-  .pattern-mode-controls label { gap: 0; }
-  .pattern-mode-controls label::after { bottom: 10px; }
-  .pattern-mode-controls select { width: 100%; min-width: 0; min-height: 24px; height: 24px; padding: 2px 20px 2px 4px; }
+  .pattern-mode-field { gap: 0; }
+  .pattern-mode-field .list-picker { min-height: 24px; padding-inline: 4px; }
   .pattern-mode-controls .pattern-current { max-width: 72px; line-height: 14px; }
 }

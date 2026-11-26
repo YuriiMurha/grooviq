@@ -457,7 +457,7 @@ test.describe("renderers", () => {
       } as typeof get;
     });
     await app.reload();
-    await expect(app.getByRole("button", { name: "Stop" })).toBeVisible();
+    await expect(app.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
     await openRoll(app);
     expect((await stats(app)).renderer).toBe("canvas2d");
     const [onNote, offNote] = await pixelsAt(app, canvas(app), [await local(app, 480, 60), await local(app, 480, 66)]);

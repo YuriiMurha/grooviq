@@ -97,7 +97,7 @@ test.describe("undo and redo", () => {
   test("a_recorded_take_undoes_in_one_step", async ({ app, mock }) => {
     // Two notes played on the typing keyboard in one take, each committed on its own.
     await app.getByRole("button", { name: "Record" }).click();
-    await app.getByRole("button", { name: "Play" }).click();
+    await app.getByRole("button", { name: "Play", exact: true }).click();
     for (const [key, at] of [["z", 0], ["x", 960]] as const) {
       await mock.eval(`(m) => m.hold(${at})`);
       await app.keyboard.down(key);
@@ -105,20 +105,20 @@ test.describe("undo and redo", () => {
       await app.keyboard.up(key);
     }
     await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 480, 48], [1, 960, 480, 50]]);
-    await app.getByRole("button", { name: "Stop" }).click();
+    await app.getByRole("button", { name: "Stop", exact: true }).click();
     await app.keyboard.press(UNDO);
     await expect.poll(() => sessionNotes(mock)).toEqual([]);
     await expect.poll(() => mock.view().then((v) => v.canUndo)).toBe(false);
     await app.keyboard.press(REDO);
     await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 480, 48], [1, 960, 480, 50]]);
     // A second take is a step of its own.
-    await app.getByRole("button", { name: "Play" }).click();
+    await app.getByRole("button", { name: "Play", exact: true }).click();
     await mock.eval("(m) => m.hold(1920)");
     await app.keyboard.down("c");
     await mock.eval("(m) => m.hold(2400)");
     await app.keyboard.up("c");
     await expect.poll(() => sessionNotes(mock).then((n) => n.length)).toBe(3);
-    await app.getByRole("button", { name: "Stop" }).click();
+    await app.getByRole("button", { name: "Stop", exact: true }).click();
     await app.keyboard.press(UNDO);
     await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 480, 48], [1, 960, 480, 50]]);
   });
@@ -127,12 +127,12 @@ test.describe("undo and redo", () => {
     await app.getByRole("button", { name: "Record" }).click();
     for (const [key, at] of [["z", 0], ["x", 960]] as const) {
       // Each take: Play, one note, Stop.
-      await app.getByRole("button", { name: "Play" }).click();
+      await app.getByRole("button", { name: "Play", exact: true }).click();
       await mock.eval(`(m) => m.hold(${at})`);
       await app.keyboard.down(key);
       await mock.eval(`(m) => m.hold(${at + 480})`);
       await app.keyboard.up(key);
-      await app.getByRole("button", { name: "Stop" }).click();
+      await app.getByRole("button", { name: "Stop", exact: true }).click();
     }
     await expect.poll(() => sessionNotes(mock)).toEqual([[1, 0, 480, 48], [1, 960, 480, 50]]);
     await app.keyboard.press(UNDO);

@@ -1,3 +1,4 @@
+import { choosePickerOption, pickerButton } from "./listPickerHelpers";
 import type { Locator, Page } from "@playwright/test";
 import { expect, project, soundsFor, test } from "./fixture";
 
@@ -7,10 +8,9 @@ test.use({
   reducedMotion: "reduce",
 });
 
-// Native select painting can ignore CSS background/color. Sample the rendered label area,
-// excluding its border and arrow, so a computed-style check cannot hide unreadable text.
-async function labelContrast(page: Page, select: Locator) {
-  const png = await select.screenshot({ animations: "disabled", scale: "css" });
+// Sample the rendered text area, excluding the border and chevron, to measure visible contrast.
+async function labelContrast(page: Page, trigger: Locator) {
+  const png = await trigger.screenshot({ animations: "disabled", scale: "css" });
   const measurement = await page.evaluate(async (data) => {
     const image = new Image();
     image.src = `data:image/png;base64,${data}`;
@@ -41,15 +41,15 @@ async function labelContrast(page: Page, select: Locator) {
 for (const viewport of [{ width: 900, height: 560 }, { width: 1280, height: 800 }]) {
   test(`Playback labels stay readable with light native controls at ${viewport.width}x${viewport.height}`, async ({ app, mock }, info) => {
     await app.setViewportSize(viewport);
-    const mode = app.getByRole("combobox", { name: "Playback mode" });
+    const mode = pickerButton(app, "Playback mode");
     await expect(mode).toBeEnabled();
-    for (const value of ["pattern", "song"] as const) {
-      await mode.selectOption(value);
-      await expect(mode).toHaveValue(value);
+    for (const [value, name] of [["pattern", "Pattern"], ["song", "Song"]] as const) {
+      await choosePickerOption(app, "Playback mode", name);
+      await expect(mode).toHaveAccessibleName(`Playback mode: ${name}`);
       await expect.poll(() => mock.eval<string>("(m) => m.workspaceSnapshot().playMode")).toBe(value);
       await mode.press("Tab");
       const rendered = await labelContrast(app, mode);
-      await info.attach(`${value}-native-label`, { body: rendered.png, contentType: "image/png" });
+      await info.attach(`${value}-picker-label`, { body: rendered.png, contentType: "image/png" });
       await info.attach(`${value}-rendered-contrast`, { body: JSON.stringify(rendered.measurement), contentType: "application/json" });
       await info.attach(`${value}-workspace`, { body: await app.screenshot({ animations: "disabled", scale: "css" }), contentType: "image/png" });
       expect(rendered.measurement.samples).toBeGreaterThan(0);
