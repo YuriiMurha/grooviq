@@ -1,8 +1,15 @@
-//! Warmed production exports of the reopened M3 golden project. Timings are advisory.
+//! Warmed production exports of the reopened M3 golden project.
+//! Set `GROOVIQ_SONG_EXPORT_BUDGET=1` to apply the advisory CI budget.
 
-use std::{process::Command, thread::available_parallelism, time::Instant};
+use std::{
+    ffi::OsStr,
+    process::{Command, ExitCode},
+    thread::available_parallelism,
+    time::{Duration, Instant},
+};
 
-use grooviq_golden::{perf::median, song};
+use grooviq_golden::perf::export_budget::{ExportBudget, FAIL_AT, WARN_AT, classify};
+use grooviq_golden::song;
 
 #[path = "support/song_workload.rs"]
 mod song_workload;
@@ -42,7 +49,7 @@ fn cpu_model() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-fn main() {
+fn main() -> ExitCode {
     let cores = available_parallelism().map_or_else(|_| "unknown".into(), |n| n.to_string());
     let seconds = song::FRAMES as f64 / f64::from(song::options().sample_rate);
     println!("### M3 production export (advisory)");
@@ -56,21 +63,42 @@ fn main() {
     let path = dir.path().join("garden.wav");
     assert_eq!(song::export(&session, &path).frames, song::FRAMES as u64);
 
-    let mut elapsed = [0.0; REPS];
+    let mut elapsed = [Duration::ZERO; REPS];
     for (i, time) in elapsed.iter_mut().enumerate() {
         let start = Instant::now();
         let report = song::export(&session, &path);
-        *time = start.elapsed().as_secs_f64();
+        *time = start.elapsed();
         assert_eq!(report.frames, song::FRAMES as u64);
+        let elapsed_seconds = time.as_secs_f64();
         println!(
-            "- Run {}: {:.3} s ({:.1}× real time)",
+            "- Run {}: {elapsed_seconds:.3} s ({:.1}× real time)",
             i + 1,
-            time,
-            seconds / *time
+            seconds / elapsed_seconds
         );
     }
-    elapsed.sort_by(f64::total_cmp);
-    let median = median(&elapsed);
+    elapsed.sort_unstable();
+    let median = elapsed[REPS / 2];
+    let median_seconds = median.as_secs_f64();
     println!();
-    println!("Median: {median:.3} s ({:.1}× real time)", seconds / median);
+    println!(
+        "Median: {median_seconds:.3} s ({:.1}× real time)",
+        seconds / median_seconds
+    );
+    if std::env::var_os("GROOVIQ_SONG_EXPORT_BUDGET").as_deref() == Some(OsStr::new("1")) {
+        let budget = classify(median);
+        if budget != ExportBudget::Pass {
+            println!(
+                "::warning::M3 export median {median_seconds:.6} s exceeded {} s",
+                WARN_AT.as_secs()
+            );
+        }
+        if budget == ExportBudget::Fail {
+            println!(
+                "::error::M3 export median {median_seconds:.6} s exceeded the {} s budget",
+                FAIL_AT.as_secs()
+            );
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
 }

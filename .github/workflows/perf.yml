@@ -1,9 +1,8 @@
 name: perf
 
-# Speed numbers for benchmark inputs. Render timing is informational; roll timing retries a
-# budget failure once. Instruction counts are exact: that job fails when a benchmark runs
-# more than 1 % more instructions than on the merge commit's first parent (the base branch
-# tip GitHub merged onto). None is a required check.
+# Render timing is informational. Roll timing retries a budget failure once. M3 export timing
+# checks a single batch. The instruction job fails when a count rises by more than 1 % from
+# the merge commit's first parent (the base tip GitHub merged onto). None is a required check.
 
 on:
   push:
@@ -182,8 +181,10 @@ jobs:
         with:
           key: song-export
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Measure warmed production exports (report only)
+      - name: Check the warmed production export budget
         shell: bash
+        env:
+          GROOVIQ_SONG_EXPORT_BUDGET: '1'
         run: make --silent bench-song | tee -a "$GITHUB_STEP_SUMMARY"
 
   # The same scene must render the same bits on every platform (the export rule).

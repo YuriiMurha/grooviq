@@ -149,7 +149,7 @@ fn main() -> ExitCode {
         append(&path, &markdown(&summaries, reps));
     }
     if let Ok(path) = std::env::var("GROOVIQ_PERF_JSON")
-        && let Err(e) = std::fs::write(&path, json(&summaries, frames, reps))
+        && let Err(e) = std::fs::write(&path, json(&summaries, reps))
     {
         eprintln!("error: cannot write {path}: {e}");
         failed = true;

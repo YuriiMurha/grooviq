@@ -86,7 +86,7 @@ pub fn markdown(rows: &[Row], reps: usize) -> String {
     out
 }
 
-pub fn json(rows: &[Row], frames: usize, reps: usize) -> String {
+pub fn json(rows: &[Row], reps: usize) -> String {
     let results: Vec<_> = rows
         .iter()
         .map(|row| {
@@ -114,7 +114,6 @@ pub fn json(rows: &[Row], frames: usize, reps: usize) -> String {
         .collect();
     let report = json!({
         "sample_rate": SAMPLE_RATE,
-        "frames": frames,
         "reps": reps,
         "results": results,
     });
@@ -184,7 +183,7 @@ mod tests {
     fn json_preserves_hash_keys_and_reports_each_promotion_result() {
         let statuses = ["promoted", "not promoted: denied | \"policy\""];
         let rows = statuses.map(|status| row(128, status));
-        let report: serde_json::Value = serde_json::from_str(&json(&rows, 256_000, 1)).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&json(&rows, 1)).unwrap();
         for (i, status) in statuses.into_iter().enumerate() {
             let row = &report["results"][i];
             assert_eq!(row["scene"], "test_scene");

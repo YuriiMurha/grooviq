@@ -13,6 +13,7 @@ use grooviq_project::{SampleFiles, engine_state, session::Session};
 
 use crate::{SAMPLE_RATE, decode_samples, drums_4ch_project, kit_dir};
 
+pub mod export_budget;
 pub mod report;
 
 /// A scene to time: an engine state, and the commands sent before the first block.
