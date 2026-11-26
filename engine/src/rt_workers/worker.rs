@@ -107,10 +107,11 @@ pub(super) fn spawn<J: Jobs + 'static>(
 ) -> io::Result<JoinHandle<()>> {
     let slot = index + 1;
     let name = format!("grooviq-worker-{slot}");
+    // Tracy can exhaust its process-wide context IDs across pool rebuilds. Tracing
+    // is optional, so a failed trace lane must not prevent the worker from starting.
     #[cfg(feature = "profiling")]
-    let trace = tracy_client::Client::running()
-        .map(|client| WorkerTrace::start(client, &name))
-        .transpose()?;
+    let trace =
+        tracy_client::Client::running().and_then(|client| WorkerTrace::start(client, &name).ok());
     let (ready, initialized) = mpsc::sync_channel(0);
     let thread = thread::Builder::new().name(name.clone()).spawn(move || {
         let priority = setup(&config, slot, &name);

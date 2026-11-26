@@ -31,3 +31,8 @@ impl<T> MailboxCell<T> {
         access(self.0.get())
     }
 }
+
+#[cfg(all(test, loom))]
+pub(super) use loom::thread::yield_now as spin_loop;
+#[cfg(not(all(test, loom)))]
+pub(super) use std::hint::spin_loop;

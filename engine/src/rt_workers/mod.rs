@@ -27,7 +27,7 @@ use std::ptr;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use sync::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering, fence};
+use sync::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering, fence, spin_loop};
 use worker::{Command, Worker};
 
 pub type JobId = u32;
@@ -588,7 +588,7 @@ fn run_level<J: Jobs>(
         } else if !waiting {
             return true;
         } else {
-            std::hint::spin_loop();
+            spin_loop();
         }
     }
 }

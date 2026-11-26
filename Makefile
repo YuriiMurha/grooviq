@@ -23,6 +23,10 @@ merge-train: ## Quality only: advance a tested batch (ORDER="12=<approved SHA> 3
 test-merge-train: ## Test ordered protected merges without calling GitHub
 	python3 -B -m unittest discover -s scripts -p test_merge_train.py -v
 
+.PHONY: test-loom
+test-loom: ## Model the real-time worker protocol with Loom
+	RUSTFLAGS="--cfg loom" CARGO_TARGET_DIR=target/loom $(CARGO) test -p grooviq-engine --lib rt_workers::loom -- --test-threads=1
+
 .PHONY: test-pre-commit
 test-pre-commit: ## Exercise staged conflict checks in disposable Git repositories
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_pre_commit.py -v

@@ -41,13 +41,7 @@ fn production_mailbox_publication_claim_and_settlement() {
             .admit(Schedule::build(1, &[], &config).unwrap(), Payload::new())
             .unwrap();
         let shared = Arc::clone(&pool.shared);
-        let worker = thread::spawn(move || {
-            shared.workers[0].poll(
-                1,
-                #[cfg(feature = "profiling")]
-                None,
-            )
-        });
+        let worker = thread::spawn(move || poll_worker(&shared.workers[0]));
 
         let pin = CallbackPin::new(&pool.shared, id).unwrap();
         let admitted = pin.state();
@@ -102,4 +96,118 @@ fn production_callback_pin_excludes_reclamation() {
         }
         callback.join().unwrap();
     });
+}
+
+#[test]
+fn production_level_barrier_acquires_worker_results() {
+    model(|| {
+        struct Level {
+            written: AtomicBool,
+            result: UnsafeCell<u32>,
+        }
+
+        // SAFETY: only job 1 writes result. The callback reads it after run_level
+        // collects job 1's completion. The relaxed flag only arranges the claim.
+        unsafe impl Sync for Level {}
+        unsafe impl Jobs for Level {
+            fn run(&self, job: JobId, _: WorkerSlot) {
+                if job == 0 {
+                    while !self.written.load(Ordering::Relaxed) {
+                        thread::yield_now();
+                    }
+                } else {
+                    self.result.with_mut(|value| unsafe { *value = 42 });
+                    self.written.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let config = PoolConfig {
+            workers: 1,
+            max_jobs: 2,
+            ..PoolConfig::default()
+        };
+        let mut pool = WorkerPool::prepare(config.clone()).unwrap();
+        let id = pool
+            .admit(
+                Schedule::build(2, &[], &config).unwrap(),
+                Level {
+                    written: AtomicBool::new(false),
+                    result: UnsafeCell::new(0),
+                },
+            )
+            .unwrap();
+        let shared = Arc::clone(&pool.shared);
+        let worker = thread::spawn(move || {
+            while !poll_worker(&shared.workers[0]) {
+                thread::yield_now();
+            }
+        });
+
+        let pin = CallbackPin::new(&pool.shared, id).unwrap();
+        let admitted = pin.state();
+        // SAFETY: this thread owns the callback pin and is the only block-state accessor.
+        let block = unsafe { &mut *admitted.block.get() };
+        assert!(run_level(
+            &pool.shared,
+            &mut [None],
+            admitted,
+            block,
+            &[0, 1],
+            Instant::now(),
+            Duration::MAX,
+        ));
+        // Read before joining, which would hide a weakened acquire load.
+        let payload = unsafe { &*admitted.jobs.get() };
+        assert_eq!(payload.result.with(|value| unsafe { *value }), 42);
+        worker.join().unwrap();
+    });
+}
+
+#[test]
+fn production_idle_acquire_protects_mailbox_reuse_after_swap() {
+    model(|| {
+        let config = PoolConfig {
+            workers: 1,
+            max_jobs: 1,
+            ..PoolConfig::default()
+        };
+        let mut pool = WorkerPool::prepare(config.clone()).unwrap();
+        let old = pool
+            .admit(Schedule::build(1, &[], &config).unwrap(), Payload::new())
+            .unwrap();
+        {
+            let pin = CallbackPin::new(&pool.shared, old).unwrap();
+            offer_job(&pool.shared.workers[0], pin.state(), 0);
+        }
+        let shared = Arc::clone(&pool.shared);
+        let worker = thread::spawn(move || {
+            assert!(poll_worker(&shared.workers[0]));
+            while !poll_worker(&shared.workers[0]) {
+                thread::yield_now();
+            }
+        });
+
+        let new = pool
+            .admit(Schedule::build(1, &[], &config).unwrap(), Payload::new())
+            .unwrap();
+        let pin = CallbackPin::new(&pool.shared, new).unwrap();
+        let mailbox = &pool.shared.workers[0];
+        // The old generation may still own the slot. There is no read of its done
+        // flag: the mailbox's idle handoff alone must order its read before reuse.
+        while !mailbox.is_idle() {
+            thread::yield_now();
+        }
+        offer_job(mailbox, pin.state(), 0);
+        worker.join().unwrap();
+        assert!(pin.state().done[0].load(Ordering::Acquire));
+    });
+}
+
+fn poll_worker<J: Jobs>(worker: &Worker<J>) -> bool {
+    worker.poll(
+        1,
+        #[cfg(feature = "profiling")]
+        None,
+    )
 }

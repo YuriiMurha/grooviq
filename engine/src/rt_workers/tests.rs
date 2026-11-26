@@ -749,3 +749,69 @@ fn deadline_settlement_never_reruns_an_already_completed_worker_job() {
     );
     assert_eq!(calls.each_ref().map(|n| n.load(Ordering::Relaxed)), [1, 1]);
 }
+
+#[test]
+fn later_level_fault_never_reruns_a_collected_worker_job() {
+    static FIRST_POLL_COMPLETED: AtomicBool = AtomicBool::new(false);
+
+    struct Calls {
+        counts: Arc<[AtomicUsize; 4]>,
+        later: Arc<Gate>,
+    }
+
+    // SAFETY: all shared state is atomic, and each test-only spin has an upper bound.
+    unsafe impl Jobs for Calls {
+        fn run(&self, job: JobId, slot: WorkerSlot) {
+            self.counts[job as usize].fetch_add(1, Ordering::Relaxed);
+            let flag = match (job, slot) {
+                (0, 0) => &FIRST_POLL_COMPLETED,
+                (2, 0) => &self.later.entered,
+                (3, 1) => {
+                    self.later.entered.store(true, Ordering::Release);
+                    &self.later.released
+                }
+                _ => return,
+            };
+            let start = Instant::now();
+            while !flag.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(2) {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    let config = PoolConfig {
+        test_worker_context: Some(|poll| {
+            let completed = poll();
+            if completed {
+                FIRST_POLL_COMPLETED.store(true, Ordering::Release);
+            }
+            completed
+        }),
+        ..config(1)
+    };
+    let mut pool = WorkerPool::start(config.clone()).unwrap();
+    let mut runner = pool.take_runner().unwrap();
+    let counts = Arc::new(std::array::from_fn(|_| AtomicUsize::new(0)));
+    let later = Arc::new(Gate::new());
+    let id = pool
+        .admit(
+            Schedule::build(4, &[(2, 0), (2, 1), (3, 0), (3, 1)], &config).unwrap(),
+            Calls {
+                counts: counts.clone(),
+                later: later.clone(),
+            },
+        )
+        .unwrap();
+
+    wait_for(|| pool.shared.workers[0].acknowledged() == id.number);
+    let outcome = runner.run_block(id, Mode::Pool, Duration::from_millis(40));
+    later.release();
+    assert!(
+        matches!(outcome, BlockOutcome::Faulted { job: 3, .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        counts.each_ref().map(|n| n.load(Ordering::Relaxed)),
+        [1, 1, 1, 1]
+    );
+}
