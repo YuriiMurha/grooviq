@@ -28,8 +28,8 @@ test-pre-commit: ## Exercise staged conflict checks in disposable Git repositori
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_pre_commit.py -v
 
 .PHONY: reclaim-caches disk-check test-reclaim-caches
-reclaim-caches: ## Preview idle worktree target cleanup (APPLY=1 deletes, RECENT_MINUTES=45)
-	@python3 -B scripts/reclaim_caches.py reclaim-caches --apply="$(APPLY)" --recent-minutes="$(or $(RECENT_MINUTES),45)"
+reclaim-caches: ## Preview idle worktree target cleanup (RECLAIM_APPLY=1 deletes, RECENT_MINUTES=45)
+	@python3 -B scripts/reclaim_caches.py reclaim-caches $(if $(filter command line,$(origin RECLAIM_APPLY)),--apply="$$RECLAIM_APPLY") --recent-minutes="$(or $(RECENT_MINUTES),45)"
 
 disk-check: ## Require free space on the repo volume (MIN_GIB=20)
 	@python3 -B scripts/reclaim_caches.py disk-check --min-gib="$(or $(MIN_GIB),20)"
