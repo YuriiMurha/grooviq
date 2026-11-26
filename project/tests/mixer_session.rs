@@ -975,6 +975,89 @@ fn structural_pattern_edit_preserves_interleaved_mixer_undo_and_redo() {
 }
 
 #[test]
+fn deleting_pattern_drops_redo_for_routes_to_a_discarded_playlist_track() {
+    use grooviq_project::{arrangement_edit::HistoryEffect, pattern_edit::PatternEdit};
+    let (c, _processor) = engine::engine(engine::EngineConfig {
+        sample_rate: 48_000.0,
+    });
+    let mut session = Session::new(Arc::new(Mutex::new(c)));
+    let now = Instant::now();
+    let stamp = session.patterns();
+    let created = session
+        .edit_patterns(
+            stamp.generation,
+            stamp.revision,
+            PatternEdit::Create { name: "P".into() },
+            now,
+        )
+        .unwrap();
+    let pattern = created.patterns[1].id;
+    let created = arrangement(
+        &mut session,
+        vec![
+            ArrangementEdit::CreateTrack {
+                name: "Playlist".into(),
+                color: 0,
+            },
+            ArrangementEdit::CreateClipOnCreatedTrack {
+                track_operation: 0,
+                name: "P clip".into(),
+                start_tick: 0,
+                muted: false,
+                content: ClipContent::Pattern {
+                    pattern,
+                    offset_tick: 0,
+                    length_ticks: 960,
+                },
+            },
+        ],
+    );
+    let source = SourceKey::AudioTrack(created.created_ids[0]);
+    mixer(
+        &mut session,
+        vec![
+            Op::CreateTrack {
+                name: "Bus".into(),
+                output: IdRef::Id(0),
+            },
+            Op::Assign {
+                source,
+                destination: IdRef::Created(0),
+            },
+        ],
+    );
+    assert!(
+        session
+            .project()
+            .mixer
+            .sources
+            .iter()
+            .any(|a| a.source == source)
+    );
+
+    for _ in 0..2 {
+        assert!(matches!(
+            history(&mut session, true),
+            HistoryEffect::Arrangement
+        ));
+    }
+    let stamp = session.patterns();
+    session
+        .edit_patterns(
+            stamp.generation,
+            stamp.revision,
+            PatternEdit::Delete { pattern },
+            now,
+        )
+        .unwrap();
+
+    let before = session.project().clone();
+    assert!(matches!(history(&mut session, false), HistoryEffect::Empty));
+    assert_eq!(session.project(), &before);
+    assert!(session.project().mixer.sources.is_empty());
+}
+
+#[test]
 fn mixer_mute_and_solo_each_refuse_compile_and_save() {
     for (mute, solo) in [(true, false), (false, true)] {
         let mut project = Project::new();

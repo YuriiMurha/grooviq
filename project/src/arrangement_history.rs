@@ -661,6 +661,60 @@ mod tests {
     }
 
     #[test]
+    fn forgotten_pattern_step_blocks_dependent_loop_edits_on_both_stacks() {
+        let remaining = [true, false].map(|undo| {
+            let mut p = Project::new();
+            p.arrangement.tracks.push(PlaylistTrack {
+                id: 1,
+                name: "Playlist".into(),
+                color: 0,
+                mute: false,
+            });
+            p.patterns.push(Pattern::new(2, "P"));
+            let clip = pattern_clip(3, 2);
+            let region = |end_tick| {
+                Some(LoopRegion {
+                    start_tick: 0,
+                    end_tick,
+                    enabled: true,
+                })
+            };
+            p.arrangement.loop_region = region(960);
+            if undo {
+                p.arrangement.clips.push(clip.clone());
+            }
+            let mut middle = p.clone();
+            middle.arrangement.loop_region = region(1920);
+            let mut last = middle.clone();
+            last.arrangement.loop_region = region(2880);
+            if undo {
+                // Undo encounters the combined clip deletion and loop edit first.
+                last.arrangement.clips.clear();
+            } else {
+                // Redo encounters the combined clip creation and loop edit first.
+                middle.arrangement.clips.push(clip.clone());
+                last.arrangement.clips.push(clip);
+            }
+            let first = Change::between(&p, &middle);
+            let second = Change::between(&middle, &last);
+            let mut history = if undo {
+                ArrangementHistory {
+                    undo: vec![first, second],
+                    ..Default::default()
+                }
+            } else {
+                ArrangementHistory {
+                    redo: vec![second, first],
+                    ..Default::default()
+                }
+            };
+            history.forget_pattern(2, Some(1), &mut HashMap::new());
+            (history.undo.len(), history.redo.len())
+        });
+        assert_eq!(remaining, [(0, 0), (0, 0)], "undo case, then redo case");
+    }
+
+    #[test]
     fn deleting_pattern_drops_shifted_slots_and_releases_history_bytes() {
         let mut p = Project::new();
         p.arrangement.tracks.push(PlaylistTrack {
