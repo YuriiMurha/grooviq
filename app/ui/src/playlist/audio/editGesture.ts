@@ -62,7 +62,8 @@ export class AudioEditGesture {
       return;
     }
     const edge = kind === "resizeStart" ? "start" : "end";
-    const deltaTicks = snapTick(tick - originTick, quantum, -MAX_SONG_TICKS);
+    // A left edge can't snap before tick 0: native start ticks are unsigned.
+    const deltaTicks = snapTick(tick - originTick, quantum, edge === "start" ? -clip.startTick : -MAX_SONG_TICKS);
     const frames = sourceFrameDelta(deltaTicks, sourceRate, bpm);
     const deltaFrames = edge === "start" ? Math.max(-this.maxExtension, frames) : Math.min(this.maxExtension, frames);
     const trimmed = trimAudio(content, edge, deltaFrames, sourceFrames);

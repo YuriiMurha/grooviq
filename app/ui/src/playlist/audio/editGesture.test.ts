@@ -54,6 +54,20 @@ describe("audio edit gestures", () => {
   });
 
   it.each([
+    { reverse: false, rate: 44100, bpm: 120, quantum: 1, startTick: 16, frames: 1011, tick: -1 },
+    { reverse: true, rate: 8000, bpm: 87.3, quantum: 24, startTick: 2591, frames: 82148, tick: 0 },
+  ])("never extends a left edge before tick 0 (reverse=$reverse, $rate Hz)", ({ reverse, rate, bpm, quantum, startTick, frames, tick }) => {
+    const source = { ...content, reverse, sourceStart: 200_000, sourceEnd: 200_000 + frames };
+    const gesture = new AudioEditGesture({ ...input, content: source, sourceRate: rate, sourceFrames: 400_000, bpm, quantum,
+      originTick: startTick, clip: { ...input.clip, startTick } });
+    gesture.update(tick);
+    expect(gesture.preview.startTick).toBeGreaterThanOrEqual(0);
+    const [operation] = gesture.take(guard) ?? [];
+    expect(operation).toMatchObject({ kind: "resize", startTick: gesture.preview.startTick });
+    expect(gesture.preview.startTick).toBe(0);
+  });
+
+  it.each([
     { reverse: false, sourceStart: 29513, sourceEnd: 46969 },
     { reverse: true, sourceStart: 24000, sourceEnd: 41456 },
   ])("keeps an unclamped 44.1 kHz left trim on the grid with reverse=$reverse", ({ reverse, sourceStart, sourceEnd }) => {
