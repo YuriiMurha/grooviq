@@ -218,6 +218,8 @@ struct Voice {
     pitch: f32,
     target: f32,
     glide_step: f32,
+    /// Whether the pitch still differs from the glide target.
+    gliding: bool,
     /// Frames until a glide recomputes the rate (0: this frame).
     gctl: u8,
     /// Fading out: frames left (0: not fading).
@@ -271,6 +273,7 @@ impl Voice {
         pitch: 0.0,
         target: 0.0,
         glide_step: 0.0,
+        gliding: false,
         gctl: 0,
         fade: 0,
         start: 0.0,
@@ -319,6 +322,7 @@ impl Voice {
             self.glide_step = (key - self.pitch).abs() / (ms * 0.001 * sr).max(1.0);
             self.gctl = 0;
         }
+        self.gliding = self.pitch != self.target;
     }
 
     /// One frame of a glide: the pitch moves one step; the rate follows at control rate, counted
@@ -329,9 +333,11 @@ impl Voice {
         if self.glide_step <= 0.0 || d.abs() <= self.glide_step {
             self.pitch = self.target;
             self.step = self.rate(self.pitch);
+            self.gliding = false;
             return;
         }
         self.pitch += self.glide_step.copysign(d);
+        self.gliding = self.pitch != self.target;
         if self.gctl == 0 {
             let reach = GLIDE_AHEAD * self.glide_step;
             let ahead = (self.target - self.pitch).min(reach).max(-reach);
@@ -1016,6 +1022,31 @@ impl Device for Sampler {
 impl Sampler {
     // Tests use eager filter coefficient updates as an oracle.
     fn render<const EAGER: bool>(&mut self, l: &mut [f32], r: &mut [f32], events: &[NoteEvent]) {
+        let span = if self.sample.is_some() {
+            self.voices.span()
+        } else {
+            VOICES
+        };
+        // With no events, a block that starts without tails cannot add any.
+        if !EAGER && events.is_empty() && span == VOICES {
+            self.render_block::<EAGER, true, false>(l, r, events, span);
+        } else {
+            self.render_block::<EAGER, false, false>(l, r, events, span);
+        }
+    }
+
+    #[cfg(test)]
+    fn render_reference(&mut self, l: &mut [f32], r: &mut [f32], events: &[NoteEvent]) {
+        self.render_block::<false, false, true>(l, r, events, self.voices.span());
+    }
+
+    fn render_block<const EAGER: bool, const NOTES_ONLY: bool, const REFERENCE: bool>(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        events: &[NoteEvent],
+        mut span: usize,
+    ) {
         l.fill(0.0);
         r.fill(0.0);
         let n = l.len().min(r.len());
@@ -1043,13 +1074,15 @@ impl Sampler {
         let filter_on = kind != 0;
         let (env_amount, flt_sustain) = (p[FILTER_ENV], p[FLT_SUSTAIN]);
         let mut ev = events.iter().peekable();
-        // Only events (and a choke, before the block) put voices in fade slots.
-        let mut span = voices.span();
+        let fade_frames = voices.fade as f32;
+        // An equal finite target takes the snap branch on every frame.
+        let settled_out = !REFERENCE && out.map(f32::to_bits) == c.out.map(f32::to_bits);
         if !EAGER {
             if filter_on && *filter_bypassed {
                 // A parameter change between ticks must use the previous tick's inputs until
                 // the next one. New notes and reset slots carry no pending inputs.
-                for v in &mut voices.v[..span] {
+                let limit = if NOTES_ONLY { VOICES } else { span };
+                for v in &mut voices.v[..limit] {
                     if let Some((octaves, damp)) = v.pending_filter.take() {
                         v.filter_coefs(octaves, damp, *sr);
                     }
@@ -1058,32 +1091,34 @@ impl Sampler {
             *filter_bypassed = !filter_on;
         }
         for f in 0..n {
-            let mut evented = false;
-            while let Some(e) = ev.next_if(|e| e.offset as usize <= f) {
-                voices.event(p, *sr, buf, e);
-                evented = true;
+            if !NOTES_ONLY {
+                let mut evented = false;
+                while let Some(e) = ev.next_if(|e| e.offset as usize <= f) {
+                    voices.event(p, *sr, buf, e);
+                    evented = true;
+                }
+                if evented {
+                    span = voices.span();
+                }
             }
-            if evented {
-                span = voices.span();
-            }
-            let fade_frames = voices.fade;
             let sustain = sustain.next();
             let log2_cutoff = cutoff.next();
             let (mut sl, mut sr_) = (0.0f32, 0.0f32);
-            for v in voices.v[..span].iter_mut() {
-                if v.stage == Stage::Off {
+            let limit = if NOTES_ONLY { VOICES } else { span };
+            for v in &mut voices.v[..limit] {
+                if !NOTES_ONLY && v.stage == Stage::Off {
                     continue;
                 }
                 // Fading out (stolen, cut or choked): a straight line to silence, then the slot
                 // is free.
                 let mut fade = None;
-                if v.fade > 0 {
+                if !NOTES_ONLY && v.fade > 0 {
                     v.fade -= 1;
                     if v.fade == 0 {
                         *v = Voice::OFF;
                         continue;
                     }
-                    fade = Some(v.fade as f32 / fade_frames as f32);
+                    fade = Some(v.fade as f32 / fade_frames);
                 }
                 match v.stage {
                     Stage::Off => continue,
@@ -1153,7 +1188,11 @@ impl Sampler {
                     v.ctl = CONTROL_FRAMES;
                 }
                 v.ctl -= 1;
-                if v.pitch != v.target {
+                if if REFERENCE {
+                    v.pitch != v.target
+                } else {
+                    v.gliding
+                } {
                     v.glide();
                 }
                 let mut amp = v.env * v.vel;
@@ -1211,20 +1250,24 @@ impl Sampler {
                     *v = Voice::OFF;
                 }
             }
-            for ch in 0..2 {
-                let d = c.out[ch] - out[ch];
-                out[ch] = if d.abs() < 1e-6 {
-                    c.out[ch]
-                } else {
-                    out[ch] + d * *smooth
-                };
+            if !settled_out {
+                for ch in 0..2 {
+                    let d = c.out[ch] - out[ch];
+                    out[ch] = if d.abs() < 1e-6 {
+                        c.out[ch]
+                    } else {
+                        out[ch] + d * *smooth
+                    };
+                }
             }
             l[f] = sl * out[0];
             r[f] = sr_ * out[1];
         }
         // Events past the block's end still apply (at its end).
-        for e in ev {
-            voices.event(p, *sr, buf, e);
+        if !NOTES_ONLY {
+            for e in ev {
+                voices.event(p, *sr, buf, e);
+            }
         }
     }
 }
