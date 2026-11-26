@@ -153,9 +153,11 @@ test.describe("compact project identity", () => {
     await fits(projectColumn.getByText("Unsaved changes", { exact: true }));
     await controlsFit();
 
+    const menu = toolbar.getByRole("menu", { name: "Project" });
     await longProject.press("Enter");
-    await expect(toolbar.getByRole("menu", { name: "Project" }).getByRole("menuitem", { name: "Open…" })).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: "New", exact: true })).toBeFocused();
     await app.keyboard.press("Escape");
+    await expect(menu).toBeHidden();
     await expect(longProject).toBeFocused();
   });
 });
