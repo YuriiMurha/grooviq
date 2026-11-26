@@ -199,8 +199,12 @@ test.describe("the synth editor", () => {
       }).toBe(true);
       await shot(app, info, "measured-release-900x560");
       await app.setViewportSize({ width: 1280, height: 800 });
-      await snapshot(1, 0.4, 987654321);
+      // A live capture first: the dot returns to the attack position once the window settles.
+      await snapshot(1, 0.4);
       await expect.poll(() => x(amp)).toBe(attackX);
+      // Then a capture that never advances: it expires and clears. Its single draw can come after
+      // the expiry on a slow frame, so only the clearing is asserted here.
+      await snapshot(1, 0.4, 987654321);
       await expect(amp).toBeHidden();
       await expect(flt).toBeHidden();
       await expect(lfo).toBeHidden();

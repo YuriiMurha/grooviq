@@ -126,7 +126,7 @@ test.describe("with a second synth editor selected", () => {
     await expect.poll(async () => (await strokePixel(bass))[3]).toBeGreaterThan(100);
     const originalPixel = await strokePixel(bass);
     expect(colourDistance(originalPixel, probeColour)).toBeGreaterThan(80);
-    const idleStrokes = await bass.evaluate(async (canvas: HTMLCanvasElement) => {
+    const idleStrokes = () => bass.evaluate(async (canvas: HTMLCanvasElement) => {
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("No synth output context");
       const stroke = ctx.stroke;
@@ -142,7 +142,9 @@ test.describe("with a second synth editor selected", () => {
         ctx.stroke = stroke;
       }
     });
-    expect(idleStrokes, "the Bass scope is inactive and runs no frame loop").toBe(0);
+    // Deactivating draws the silent state once, which a slow frame can push into the first
+    // window; after that the inactive scope must stay quiet.
+    await expect.poll(idleStrokes, { message: "the Bass scope is inactive and runs no frame loop" }).toBe(0);
 
     await setTheme(app, "scope-probe");
     await expect.poll(async () => colourDistance(await strokePixel(bass), probeColour),
