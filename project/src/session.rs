@@ -572,6 +572,21 @@ fn mixer_error(error: crate::mixer::MixerError) -> SessionError {
     SessionError::InvalidValue(error.to_string())
 }
 
+#[derive(PartialEq, Eq)]
+struct HistoryPosition {
+    notes: HashMap<u32, u64>,
+    // Mixer and arrangement deltas share one stack.
+    arrangement: Option<u64>,
+    // A sampler's reset can be undone directly, out of order with other channels.
+    trim: Vec<u64>,
+}
+
+struct SavedState {
+    position: HistoryPosition,
+    project_json: Vec<u8>,
+    files: SampleFiles,
+}
+
 /// The open project. See the module docs.
 pub struct Session {
     controller: Arc<Mutex<Controller>>,
@@ -589,7 +604,9 @@ pub struct Session {
     path: Option<PathBuf>,
     /// Counts changes; a save clears `dirty` only if none came in while it was written.
     revision: u64,
-    saved_revision: u64,
+    saved: Option<SavedState>,
+    dirty: bool,
+    last_history_order: Option<u64>,
     /// Counts projects: opening, starting a new one or restoring one moves it on.
     generation: u64,
     /// A save is being written (between `begin_save` and `finish_save` or `save_failed`).
@@ -761,7 +778,9 @@ impl Session {
             decoded: HashMap::new(),
             path: None,
             revision: 0,
-            saved_revision: 0,
+            saved: None,
+            dirty: false,
+            last_history_order: None,
             generation: 0,
             saving: false,
             pending_since: None,
@@ -891,6 +910,30 @@ impl Session {
         }
     }
     fn install_histories(&mut self, mut h: crate::arrangement_history::Histories) {
+        let is_new = |order| self.last_history_order.is_none_or(|last| order > last);
+        let new_steps = h.protected.iter().filter(|&&order| is_new(order)).count();
+        if self.saved.is_some() {
+            // Admission protects every new step. A missing step was evicted or its redo
+            // branch was discarded. An empty stack can now stand for a different base.
+            let before = Self::history_steps(
+                &self.history,
+                &self.pattern_histories,
+                &self.arrangement_history,
+                &self.trim_history,
+            );
+            let after = Self::history_steps(&h.current, &h.patterns, &h.arrangement, &h.trim);
+            let replaced_media = h.arrangement.undo.last().is_some_and(|step| {
+                is_new(step.order) && step.media.iter().any(|(_, after)| after.file.is_some())
+            });
+            if after < before + new_steps || replaced_media {
+                self.saved = None;
+            }
+        }
+        if let Some(&order) = h.protected.iter().max()
+            && self.last_history_order.is_none_or(|last| order > last)
+        {
+            self.last_history_order = Some(order);
+        }
         h.current.staged = false;
         for p in h.patterns.values_mut() {
             p.staged = false;
@@ -900,6 +943,19 @@ impl Session {
         self.arrangement_history = h.arrangement;
         self.trim_history = h.trim;
         self.pattern_note_floors = h.floors;
+    }
+    fn history_steps(
+        current: &NoteHistory,
+        patterns: &HashMap<u32, NoteHistory>,
+        arrangement: &crate::arrangement_history::ArrangementHistory,
+        trim: &sampler_trim::TrimHistory,
+    ) -> usize {
+        current.retained().0
+            + patterns.values().map(|h| h.retained().0).sum::<usize>()
+            + arrangement.undo.len()
+            + arrangement.redo.len()
+            + trim.undo.len()
+            + trim.redo.len()
     }
     fn admit_histories(
         &self,
@@ -1433,7 +1489,7 @@ impl Session {
             self.publish_candidate(&candidate)?;
         }
         self.project = candidate;
-        self.changed(true, now);
+        self.changed_outside_history(true, now);
         Ok(())
     }
 
@@ -1539,7 +1595,7 @@ impl Session {
             self.trim_history = Default::default();
         }
         self.patterns_revision += 1;
-        self.changed(true, now);
+        self.changed_outside_history(true, now);
         Ok(self.patterns())
     }
 
@@ -1554,7 +1610,47 @@ impl Session {
     }
 
     fn dirty(&self) -> bool {
-        self.revision != self.saved_revision
+        self.dirty
+    }
+
+    fn history_position(&self) -> HistoryPosition {
+        HistoryPosition {
+            notes: std::iter::once((self.project.current_pattern, &self.history))
+                .chain(self.pattern_histories.iter().map(|(&id, h)| (id, h)))
+                .filter_map(|(id, h)| h.next_order(true).map(|order| (id, order)))
+                .collect(),
+            arrangement: self.arrangement_history.undo.last().map(|step| step.order),
+            trim: self
+                .trim_history
+                .undo
+                .iter()
+                .map(|step| step.order)
+                .collect(),
+        }
+    }
+
+    fn remember_saved_state(&mut self) {
+        self.saved = serde_json::to_vec(&self.project)
+            .ok()
+            .map(|project_json| SavedState {
+                position: self.history_position(),
+                project_json,
+                files: self.files.clone(),
+            });
+        self.dirty = self.saved.is_none();
+    }
+
+    fn matches_saved_state(&self, saved: &SavedState) -> bool {
+        self.history_position() == saved.position
+            && self.files.len() == saved.files.len()
+            && self.files.iter().all(|(id, file)| {
+                saved.files.get(id).is_some_and(|old| {
+                    old.name == file.name && Arc::ptr_eq(&old.bytes, &file.bytes)
+                })
+            })
+            // History can restore a whole pattern or advance an allocator floor. Compare
+            // the serialized model too, so a matching position alone cannot hide changes.
+            && serde_json::to_vec(&self.project).is_ok_and(|json| json == saved.project_json)
     }
 
     fn current(&self) -> &Pattern {
@@ -1728,10 +1824,20 @@ impl Session {
     fn changed(&mut self, structural: bool, now: Instant) {
         self.revision += 1;
         self.arrangement_revision += 1;
+        self.dirty = self.saving
+            || self
+                .saved
+                .as_ref()
+                .is_none_or(|saved| !self.matches_saved_state(saved));
         self.pending_since.get_or_insert(now);
         if structural {
             self.structural_since.get_or_insert(now);
         }
+    }
+
+    fn changed_outside_history(&mut self, structural: bool, now: Instant) {
+        self.saved = None;
+        self.changed(structural, now);
     }
 
     /// [`Self::apply`] for a request made in the project of `generation` (the UI's): if another
@@ -1770,6 +1876,10 @@ impl Session {
             self.next_trim_epoch()?;
         }
         let structural = edit.structural();
+        let undoable = matches!(
+            edit,
+            Edit::ToggleStep { .. } | Edit::SetStepVelocity { .. } | Edit::ClearStep { .. }
+        );
         if self.apply_inner(edit)? {
             if let Some(channel) = invalidates {
                 self.invalidate_trim(channel, false);
@@ -1777,7 +1887,11 @@ impl Session {
                     self.trim_identities.remove(&channel);
                 }
             }
-            self.changed(structural, now);
+            if undoable {
+                self.changed(structural, now);
+            } else {
+                self.changed_outside_history(structural, now);
+            }
         }
         Ok(self.view())
     }
@@ -2404,7 +2518,7 @@ impl Session {
         self.project = candidate;
         self.files = files;
         self.decoded = decoded;
-        self.changed(true, now);
+        self.changed_outside_history(true, now);
         Ok(self.view())
     }
 
@@ -2449,7 +2563,7 @@ impl Session {
         candidate.channels.push(channel);
         self.publish_candidate(&candidate)?;
         self.project = candidate;
-        self.changed(true, now);
+        self.changed_outside_history(true, now);
         Ok(self.view())
     }
 
@@ -2955,7 +3069,7 @@ impl Session {
         self.files.insert(channel, file);
         self.decoded.insert(channel, sample);
         self.invalidate_trim(channel, true);
-        self.changed(true, now);
+        self.changed_outside_history(true, now);
         Ok(self.view())
     }
 
@@ -3063,7 +3177,9 @@ impl Session {
         self.cancelled_media_tickets.clear();
         self.media_peaks.clear();
         self.revision += 1;
-        self.saved_revision = self.revision;
+        self.last_history_order = None;
+        self.saved = None;
+        self.dirty = false;
         self.generation += 1;
         self.trim_identities.clear();
         self.arrangement_revision = 0;
@@ -3126,7 +3242,7 @@ impl Session {
     ) -> Result<OpenReport, SessionError> {
         let mut report = self.open(original.unwrap_or(Path::new("")), loaded, decoded)?;
         self.path = original.map(Path::to_path_buf);
-        self.changed(true, now);
+        self.changed_outside_history(true, now);
         report.view = self.view();
         Ok(report)
     }
@@ -3176,9 +3292,13 @@ impl Session {
         self.path = Some(job.path.clone());
         self.project.name = job.project.name.clone();
         if self.revision == job.revision {
-            self.saved_revision = job.revision;
+            self.remember_saved_state();
             self.pending_since = None;
             self.structural_since = None;
+        } else {
+            // The old checkpoint is obsolete as soon as this save replaces its file.
+            self.saved = None;
+            self.dirty = true;
         }
         true
     }
@@ -3191,9 +3311,8 @@ impl Session {
         }
         self.path = Some(job.path.clone());
         self.project.name = job.project.name.clone();
-        if self.revision == self.saved_revision {
-            self.revision = self.revision.wrapping_add(1);
-        }
+        self.saved = None;
+        self.dirty = true;
         self.pending_since.get_or_insert_with(Instant::now);
     }
 
@@ -3554,6 +3673,322 @@ mod release_progress_tests {
         }
         s.collect_recorded(&[], Instant::now());
         assert!(s.live_presses.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod dirty_tests {
+    use super::*;
+    use crate::arrangement_edit::{ArrangementEdit, HistoryEffect};
+    use crate::mixer::Level;
+    use crate::mixer_edit::{IdRef, MixerEdit};
+    use crate::pattern_edit::PatternEdit;
+    use grooviq_engine::{EngineConfig, engine};
+
+    fn rig() -> (Session, tempfile::TempDir, Instant) {
+        let (controller, _processor) = engine(EngineConfig {
+            sample_rate: 48_000.0,
+        });
+        (
+            Session::new(Arc::new(Mutex::new(controller))),
+            tempfile::tempdir().unwrap(),
+            Instant::now(),
+        )
+    }
+
+    fn save(s: &mut Session, dir: &tempfile::TempDir) -> PathBuf {
+        s.save(Some(&dir.path().join("beat.grooviq")), dir.path())
+            .unwrap()
+    }
+
+    fn fader(s: &mut Session, db: f32, now: Instant) {
+        let stamp = s.mixer_view();
+        assert!(
+            s.edit_mixer(
+                stamp.generation,
+                stamp.revision,
+                vec![MixerEdit::SetFader {
+                    track: IdRef::Id(0),
+                    level: Level::Db(db),
+                    pan: 0.0,
+                }],
+                now,
+            )
+            .unwrap()
+            .changed
+        );
+    }
+
+    fn step(s: &mut Session, undo: bool, now: Instant) -> HistoryEffect {
+        let stamp = s.arrangement_view();
+        s.step_project_history(stamp.generation, stamp.revision, undo, now)
+            .unwrap()
+            .effect
+    }
+
+    #[test]
+    fn mixer_undo_and_redo_report_the_saved_position() {
+        let (mut s, dir, now) = rig();
+        save(&mut s, &dir);
+        fader(&mut s, -3.0, now);
+        assert!(s.view().dirty);
+        step(&mut s, true, now);
+        assert!(!s.needs_confirmation());
+        step(&mut s, false, now);
+        assert!(s.needs_confirmation());
+        step(&mut s, true, now);
+        assert!(!s.needs_confirmation());
+    }
+
+    #[test]
+    fn save_after_edit_makes_undo_dirty_and_redo_clean() {
+        let (mut s, dir, now) = rig();
+        save(&mut s, &dir);
+        fader(&mut s, -3.0, now);
+        save(&mut s, &dir);
+        step(&mut s, true, now);
+        assert!(s.needs_confirmation());
+        step(&mut s, false, now);
+        assert!(!s.needs_confirmation());
+    }
+
+    #[test]
+    fn redo_can_restore_saved_notes_in_an_inactive_pattern() {
+        let (mut s, dir, now) = rig();
+        let channel = s.add_synth_channel("Init", now).unwrap().channels[0].id;
+        let pattern = s.current().id;
+        s.apply(Edit::ToggleStep { channel, step: 0 }, now).unwrap();
+        let stamp = s.patterns();
+        s.edit_patterns(
+            stamp.generation,
+            stamp.revision,
+            PatternEdit::Create {
+                name: "Other".into(),
+            },
+            now,
+        )
+        .unwrap();
+        let other = s.project.patterns.last().unwrap().id;
+        let stamp = s.patterns();
+        s.edit_patterns(
+            stamp.generation,
+            stamp.revision,
+            PatternEdit::Select { pattern: other },
+            now,
+        )
+        .unwrap();
+        save(&mut s, &dir);
+        assert!(
+            matches!(step(&mut s, true, now), HistoryEffect::Notes { pattern: id } if id == pattern)
+        );
+        assert!(s.needs_confirmation());
+        step(&mut s, false, now);
+        assert_eq!(s.current().id, other);
+        assert!(!s.needs_confirmation());
+        step(&mut s, true, now);
+        save(&mut s, &dir);
+        step(&mut s, false, now);
+        assert!(s.needs_confirmation());
+        step(&mut s, true, now);
+        assert!(!s.needs_confirmation());
+    }
+
+    #[test]
+    fn remaining_note_and_arrangement_edits_keep_the_project_dirty() {
+        let (mut s, dir, now) = rig();
+        let channel = s.add_synth_channel("Init", now).unwrap().channels[0].id;
+        s.apply(Edit::ToggleStep { channel, step: 0 }, now).unwrap();
+        save(&mut s, &dir);
+        s.apply(Edit::ClearStep { channel, step: 0 }, now).unwrap();
+        let stamp = s.arrangement_view();
+        s.edit_arrangement(
+            stamp.generation,
+            stamp.revision,
+            vec![ArrangementEdit::SetLoop {
+                region: Some(crate::LoopRegion {
+                    start_tick: 0,
+                    end_tick: 3840,
+                    enabled: false,
+                }),
+            }],
+            now,
+        )
+        .unwrap();
+        fader(&mut s, -3.0, now);
+        step(&mut s, true, now);
+        assert!(s.needs_confirmation());
+        step(&mut s, true, now);
+        assert!(s.needs_confirmation());
+        step(&mut s, true, now);
+        assert!(!s.needs_confirmation());
+    }
+
+    #[test]
+    fn replacing_sample_bytes_keeps_confirmation_through_undo_and_redo() {
+        let (mut s, dir, now) = rig();
+        let sample = Arc::new(SampleBuf {
+            rate: 48_000.0,
+            l: vec![0.0; 8],
+            r: vec![0.0; 8],
+        });
+        let file = |byte| crate::SampleFile {
+            name: "beat.wav".into(),
+            bytes: Arc::new(vec![byte; 8]),
+        };
+        let path = Path::new("beat.wav");
+        let channel = s
+            .add_channel(path, file(0), sample.clone(), now)
+            .unwrap()
+            .channels[0]
+            .id;
+        save(&mut s, &dir);
+        s.set_channel_sample(channel, path, file(1), sample, now)
+            .unwrap();
+        fader(&mut s, -3.0, now);
+        step(&mut s, true, now);
+        assert!(s.needs_confirmation());
+        step(&mut s, false, now);
+        assert!(s.needs_confirmation());
+    }
+
+    #[test]
+    fn undo_sampler_trim_restores_the_saved_configuration() {
+        let (mut s, dir, now) = rig();
+        let channel = s
+            .add_channel(
+                Path::new("clip.wav"),
+                crate::SampleFile {
+                    name: "clip.wav".into(),
+                    bytes: Arc::new(Vec::new()),
+                },
+                Arc::new(SampleBuf {
+                    rate: 48_000.0,
+                    l: vec![0.0; 8],
+                    r: vec![0.0; 8],
+                }),
+                now,
+            )
+            .unwrap()
+            .channels[0]
+            .id;
+        s.apply(
+            Edit::SetSamplerParam {
+                channel,
+                param: "start".into(),
+                value: 0.25,
+            },
+            now,
+        )
+        .unwrap();
+        save(&mut s, &dir);
+        let before = s.sampler_trim_view(channel).unwrap();
+        let reset = s.sampler_trim_reset(channel, &before.stamp, now).unwrap();
+        assert!(reset.changed);
+        assert!(s.needs_confirmation());
+        s.sampler_trim_undo(
+            channel,
+            &reset.state.stamp,
+            reset.state.undo.as_deref().unwrap(),
+            now,
+        )
+        .unwrap();
+        assert!(!s.needs_confirmation());
+    }
+
+    #[test]
+    fn autosave_and_recovery_do_not_establish_a_clean_position() {
+        let (mut s, dir, now) = rig();
+        let path = save(&mut s, &dir);
+        fader(&mut s, -3.0, now);
+        let (project, samples, original) = s.autosave_snapshot(now).unwrap();
+        assert!(s.autosaved(s.generation(), 1));
+        assert!(s.needs_confirmation());
+        step(&mut s, true, now);
+        assert!(!s.needs_confirmation());
+        let loaded = Loaded {
+            project,
+            samples,
+            warnings: Vec::new(),
+        };
+        let decoded = decode_samples(&loaded);
+        assert_eq!(original.as_ref(), Some(&path));
+        s.open_recovered(original.as_deref(), loaded, decoded, now)
+            .unwrap();
+        assert!(s.needs_confirmation());
+        fader(&mut s, -6.0, now);
+        step(&mut s, true, now);
+        assert!(s.needs_confirmation());
+    }
+
+    #[test]
+    fn replacing_a_redo_branch_keeps_the_project_dirty_until_save() {
+        let (mut s, dir, now) = rig();
+        save(&mut s, &dir);
+        fader(&mut s, -3.0, now);
+        step(&mut s, true, now);
+        assert!(!s.needs_confirmation());
+        fader(&mut s, -6.0, now);
+        step(&mut s, true, now);
+        assert!(s.needs_confirmation());
+        save(&mut s, &dir);
+        assert!(!s.needs_confirmation());
+    }
+
+    #[test]
+    fn eviction_cannot_make_a_trimmed_history_match_an_empty_checkpoint() {
+        let (mut s, dir, now) = rig();
+        s.set_history_limits(crate::HistoryLimits {
+            steps: 1,
+            ..Default::default()
+        });
+        save(&mut s, &dir);
+        fader(&mut s, -3.0, now);
+        fader(&mut s, 0.0, now);
+        fader(&mut s, -6.0, now);
+        assert_eq!(s.history_usage().0, 1);
+        step(&mut s, true, now);
+        assert!(matches!(step(&mut s, true, now), HistoryEffect::Empty));
+        assert_eq!(s.project.mixer, crate::mixer::Mixer::default());
+        assert!(s.needs_confirmation());
+    }
+
+    #[test]
+    fn a_setting_change_keeps_the_project_dirty_even_if_reentered() {
+        let (mut s, dir, now) = rig();
+        let saved_bpm = s.project.bpm;
+        save(&mut s, &dir);
+        s.apply(Edit::SetTempo { bpm: 120.0 }, now).unwrap();
+        s.apply(Edit::SetTempo { bpm: saved_bpm }, now).unwrap();
+        fader(&mut s, -3.0, now);
+        step(&mut s, true, now);
+        assert!(s.needs_confirmation());
+    }
+
+    #[test]
+    fn undo_does_not_hide_a_changed_persisted_id_floor() {
+        let (mut s, dir, now) = rig();
+        let channel = s.add_synth_channel("Init", now).unwrap().channels[0].id;
+        let path = save(&mut s, &dir);
+        s.apply(Edit::ToggleStep { channel, step: 0 }, now).unwrap();
+        step(&mut s, true, now);
+        assert!(s.current().notes.is_empty());
+        assert!(
+            s.current().next_note_id > crate::load(&path).unwrap().project.patterns[0].next_note_id
+        );
+        assert!(s.needs_confirmation());
+    }
+
+    #[test]
+    fn completed_in_flight_save_cannot_leave_the_previous_file_as_checkpoint() {
+        let (mut s, dir, now) = rig();
+        save(&mut s, &dir);
+        fader(&mut s, -3.0, now);
+        let job = s.begin_save(None).unwrap();
+        step(&mut s, true, now);
+        assert!(s.needs_confirmation());
+        job.write(dir.path()).unwrap();
+        assert!(s.finish_save(&job));
+        assert!(s.needs_confirmation());
     }
 }
 
