@@ -47,10 +47,16 @@ impl Session {
 }
 
 impl Session {
+    /// The generation and revision of the mixer view, without cloning its contents.
+    pub fn mixer_stamp(&self) -> (u64, u64) {
+        (self.generation, self.arrangement_revision)
+    }
+
     pub fn mixer_view(&self) -> MixerView {
+        let (generation, revision) = self.mixer_stamp();
         MixerView {
-            generation: self.generation,
-            revision: self.arrangement_revision,
+            generation,
+            revision,
             mixer: self.project.mixer.clone(),
         }
     }

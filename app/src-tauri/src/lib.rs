@@ -23,6 +23,7 @@ mod macos_quit;
 mod menu;
 pub mod midi;
 mod midi_cmds;
+mod mixer_meter_cmd;
 mod notes_cmds;
 mod output_mode;
 pub mod panic_hook;
@@ -565,6 +566,7 @@ pub fn run() {
             notes_cmds::channel_note,
             notes_cmds::channel_param_live,
             notes_cmds::synth_meter,
+            mixer_meter_cmd::mixer_meter,
             notes_cmds::channel_select,
             notes_cmds::channel_waveform,
             notes_cmds::record_set,
