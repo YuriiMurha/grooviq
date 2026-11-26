@@ -42,13 +42,61 @@
       }
     },
     {
+      "ok": false
+    },
+    {
+      "ok": false
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 0,
+        "message": "Invalid media ticket",
+        "reload": true,
+        "request": null,
+        "revision": 1,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 0,
+        "message": "Invalid media ticket",
+        "reload": true,
+        "request": null,
+        "revision": 1,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": false
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 0,
+        "message": "Media ticket cancelled",
+        "reload": true,
+        "request": null,
+        "revision": 1,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
       "ok": {
         "changed": false,
         "createdIds": [],
         "generation": 0,
         "message": "Media preparation failed: Decode(\"This file is not a sound Grooviq can open; use WAV, AIFF, FLAC, MP3 or OGG.\")",
         "reload": true,
-        "request": 1,
+        "request": 4,
         "revision": 1,
         "status": "refused",
         "warnings": []
@@ -87,11 +135,17 @@
         "generation": 0,
         "message": null,
         "reload": false,
-        "request": 2,
+        "request": 5,
         "revision": 2,
         "status": "applied",
         "warnings": []
       }
+    },
+    {
+      "ok": false
+    },
+    {
+      "ok": false
     },
     {
       "ok": {
@@ -329,7 +383,7 @@
         "generation": 0,
         "message": null,
         "reload": false,
-        "request": 3,
+        "request": 6,
         "revision": 7,
         "status": "applied",
         "warnings": [
@@ -1072,7 +1126,7 @@
         "generation": 2,
         "message": null,
         "reload": false,
-        "request": 4,
+        "request": 7,
         "revision": 1,
         "status": "applied",
         "warnings": [
@@ -1832,6 +1886,7 @@
         "path": "/qa/generated.wav",
         "revision": 0,
         "startTick": 240,
+        "ticket": 11,
         "track": 1
       },
       "command": "audio_import"
@@ -1843,7 +1898,62 @@
         "path": "/qa/generated.wav",
         "revision": 1,
         "startTick": 240,
+        "ticket": 12,
         "track": 2
+      },
+      "command": "audio_import"
+    },
+    {
+      "args": {
+        "ticket": 0
+      },
+      "command": "audio_cancel_ticket"
+    },
+    {
+      "args": {
+        "ticket": 9007199254740992
+      },
+      "command": "audio_cancel_ticket"
+    },
+    {
+      "args": {
+        "generation": 0,
+        "name": "  Take 01 / edit  ",
+        "path": "/qa/never-read.wav",
+        "revision": 1,
+        "startTick": 240,
+        "ticket": 0,
+        "track": 1
+      },
+      "command": "audio_import"
+    },
+    {
+      "args": {
+        "generation": 0,
+        "name": "  Take 01 / edit  ",
+        "path": "/qa/never-read.wav",
+        "revision": 1,
+        "startTick": 240,
+        "ticket": 9007199254740992,
+        "track": 1
+      },
+      "command": "audio_import"
+    },
+    {
+      "args": {
+        "ticket": 9007199254740991
+      },
+      "command": "audio_cancel_ticket"
+    },
+    {
+      "args": {
+        "generation": 0,
+        "name": "  Take 01 / edit  ",
+        "path": "/qa/never-read.wav",
+        "revision": 1,
+        "startTick": 240,
+        "ticket": 9007199254740991,
+        "track": 1
       },
       "command": "audio_import"
     },
@@ -1854,6 +1964,7 @@
         "path": "/qa/refused.wav",
         "revision": 1,
         "startTick": 240,
+        "ticket": 13,
         "track": 1
       },
       "command": "audio_import"
@@ -1872,9 +1983,22 @@
         "path": "/qa/generated.wav",
         "revision": 1,
         "startTick": 240,
+        "ticket": 13,
         "track": 1
       },
       "command": "audio_import"
+    },
+    {
+      "args": {
+        "request": 5
+      },
+      "command": "audio_cancel"
+    },
+    {
+      "args": {
+        "ticket": 13
+      },
+      "command": "audio_cancel_ticket"
     },
     {
       "args": {
@@ -1949,7 +2073,8 @@
         "asset": 2,
         "generation": 0,
         "path": "/qa/relinked.wav",
-        "revision": 6
+        "revision": 6,
+        "ticket": 24
       },
       "command": "audio_relink"
     },
@@ -2073,7 +2198,8 @@
         "asset": 2,
         "generation": 2,
         "path": "/qa/mono.wav",
-        "revision": 0
+        "revision": 0,
+        "ticket": 9007199254740991
       },
       "command": "audio_relink"
     },

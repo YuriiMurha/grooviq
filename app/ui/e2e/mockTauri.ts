@@ -290,10 +290,42 @@ export function installMockTauri(seed: MockSeed): void {
   type ClipChange = { order: number; before: Arrangement; after: Arrangement; addedPatterns: AddedPattern[];
     media?: { asset: number; before: AudioSource | undefined; after: AudioSource } };
   const audioSources = new Map<number, AudioSource>();
-  const pendingMedia = new Map<number, number>();
+  type MediaIntent = { request: number; cancelled: boolean };
+  const pendingMedia = new Map<number, MediaIntent>();
+  const latestMediaRequests = new Map<number, number>();
+  const mediaTickets = new Map<number, MediaIntent>();
+  const cancelledMediaTickets = new Set<number>();
+  const validMediaTicket = (ticket: number) => Number.isSafeInteger(ticket) && ticket > 0;
+  const cancelMediaRequest = (request: number) => {
+    for (const [key, intent] of pendingMedia) {
+      if (intent.request === request) {
+        pendingMedia.delete(key);
+        intent.cancelled = true;
+        return true;
+      }
+    }
+    return false;
+  };
+  const cancelMediaTicket = (ticket: number) => {
+    if (!validMediaTicket(ticket)) return false;
+    const intent = mediaTickets.get(ticket);
+    if (intent) {
+      intent.cancelled = true;
+      return true;
+    }
+    if (!cancelledMediaTickets.has(ticket)) {
+      if (cancelledMediaTickets.size === 64) {
+        cancelledMediaTickets.delete(cancelledMediaTickets.values().next().value!);
+      }
+      cancelledMediaTickets.add(ticket);
+    }
+    return false;
+  };
   let nextMediaRequest = 1;
   type MediaHold = { promise: Promise<boolean>; release: (decode: boolean) => void };
+  const mediaReadHolds = new Map<string, MediaHold>();
   const mediaHolds = new Map<string, MediaHold>();
+  const mediaPublicationHolds = new Map<string, MediaHold>();
   const waveformHolds = new Map<number, MediaHold>();
   const holdMedia = <K,>(holds: Map<K, MediaHold>, key: K) => {
     if (holds.has(key)) throw new Error("Media is already held");
@@ -1025,7 +1057,11 @@ export function installMockTauri(seed: MockSeed): void {
     s.generation += 1;
     trimIdentities.clear(); trimUndo = []; trimRedo = []; clipUndo = []; clipRedo = []; arrangementRevision = 0; workspaceRefusal = null;
     s.project = normalise(clone(p));
+    for (const intent of pendingMedia.values()) intent.cancelled = true;
     pendingMedia.clear();
+    latestMediaRequests.clear();
+    mediaTickets.clear();
+    cancelledMediaTickets.clear();
     openArrangementMedia();
     clearHistory();
     notesChanged();
@@ -1390,7 +1426,7 @@ export function installMockTauri(seed: MockSeed): void {
     const offset = Number(args.offset);
     return { generation: s.generation, revision: arrangementRevision, offset, total: arrangement.clips.length,
       clips: clone(arrangement.clips.slice(offset, offset + limit)), tracks: clone(arrangement.tracks), audioAssets: clone(arrangement.audioAssets), loopRegion: arrangement.loopRegion, playMode: s.project.playMode ?? "pattern",
-      songError: null, pendingRequests: [...pendingMedia.values()], warnings: mediaWarnings() };
+      songError: null, pendingRequests: Array.from(pendingMedia.values(), intent => intent.request), warnings: mediaWarnings() };
   };
   const workspaceMode = (args: Record<string, unknown>) => {
     try {
@@ -1597,6 +1633,8 @@ export function installMockTauri(seed: MockSeed): void {
     }
     // Match the worker's equal-byte reuse while a worker-decoded source is still owned.
     // Open decodes archive bytes separately from the worker.
+    // This finite fixture does not model the worker's 32-entry FIFO eviction
+    // (project/src/audio_assets.rs). An older live or history-owned source can still match here.
     return retained.find(source => source.fromWorker && sameAudioBytes(source.bytes, bytes));
   };
   const openArrangementMedia = () => {
@@ -1615,7 +1653,8 @@ export function installMockTauri(seed: MockSeed): void {
   ) => {
     const path = String(args.path);
     const key = target.kind === "import" ? 0xffffffff : target.asset;
-    let request: number | null = null;
+    const ticket = Number(args.ticket);
+    let intent: MediaIntent | undefined;
     try {
       workspaceStamp(args);
       const before = s.project.arrangement ?? emptyArrangement();
@@ -1627,17 +1666,34 @@ export function installMockTauri(seed: MockSeed): void {
         throw "Audio asset removed";
       }
       if (nextMediaRequest >= Number.MAX_SAFE_INTEGER) throw "Request identities exhausted";
-      request = nextMediaRequest++;
+      const request = nextMediaRequest++;
+      if (!validMediaTicket(ticket)) throw "Invalid media ticket";
+      if (cancelledMediaTickets.has(ticket)) throw "Media ticket cancelled";
+      if (mediaTickets.has(ticket)) throw "Media ticket already in use";
+      intent = { request, cancelled: false };
+      mediaTickets.set(ticket, intent);
+      const reading = mediaReadHolds.get(path);
+      if (reading) await reading.promise;
       const file = files.get(path);
       if (!file) throw "No such file or directory (os error 2)";
       if (file.kind === "folder") throw "not a regular file";
-      pendingMedia.set(key, request);
-      // Pause at the worker's receive/publication boundary. Outcome is deterministic per path.
+      workspaceStamp(args);
+      if (intent.cancelled || (latestMediaRequests.get(key) ?? 0) > request) {
+        throw "Older or cancelled media request";
+      }
+      const old = pendingMedia.get(key);
+      if (old) old.cancelled = true;
+      latestMediaRequests.set(key, request);
+      pendingMedia.set(key, intent);
+      // Pause before the worker returns so cancellation here reaches receive().
       const held = mediaHolds.get(path);
       const decoded = held ? await held.promise : true;
+      if (intent.cancelled) throw "Media preparation failed: Cancelled";
       const prepared = decodeAudio(decoded && file.kind === "sample" ? file.wav : undefined, true);
+      const publishing = mediaPublicationHolds.get(path);
+      if (publishing) await publishing.promise;
       workspaceStamp(args);
-      if (pendingMedia.get(key) !== request) throw "Media request cancelled or superseded";
+      if (intent.cancelled || pendingMedia.get(key) !== intent) throw "Media request cancelled or superseded";
       const candidate = clone(s.project);
       const arrangement = candidate.arrangement ?? emptyArrangement();
       candidate.arrangement = arrangement;
@@ -1688,9 +1744,10 @@ export function installMockTauri(seed: MockSeed): void {
       changed();
       return arrangementReply(request, true, createdIds);
     } catch (error) {
-      return arrangementReply(request, false, [], String(error));
+      return arrangementReply(intent?.request ?? null, false, [], String(error));
     } finally {
-      if (request !== null && pendingMedia.get(key) === request) pendingMedia.delete(key);
+      if (intent && pendingMedia.get(key) === intent) pendingMedia.delete(key);
+      if (intent && mediaTickets.get(ticket) === intent) mediaTickets.delete(ticket);
     }
   };
 
@@ -1759,8 +1816,8 @@ export function installMockTauri(seed: MockSeed): void {
     arrangement_curve: nativeArrangementOnly,
     audio_import: (a) => prepareAudio(a, { kind: "import", track: Number(a.track), startTick: Number(a.startTick), name: String(a.name) }),
     audio_relink: (a) => prepareAudio(a, { kind: "relink", asset: Number(a.asset) }),
-    audio_cancel: nativeArrangementOnly,
-    audio_cancel_ticket: nativeArrangementOnly,
+    audio_cancel: (a) => cancelMediaRequest(Number(a.request)),
+    audio_cancel_ticket: (a) => cancelMediaTicket(Number(a.ticket)),
     arrangement_waveform: arrangementWaveform,
     arrangement_mode: workspaceMode,
     arrangement_loop: nativeArrangementOnly,
@@ -2211,6 +2268,7 @@ export function installMockTauri(seed: MockSeed): void {
   const isInt = (v: unknown, max: number) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= max;
   const u8: Check = (v) => (isInt(v, 255) ? null : `invalid value: ${JSON.stringify(v)}, expected u8`);
   const u32: Check = (v) => (isInt(v, 0xffffffff) ? null : `invalid value: ${JSON.stringify(v)}, expected u32`);
+  const wireU64: Check = (v) => isInt(v, 2 ** 64) && Number(v) < 2 ** 64 ? null : "expected u64";
   // A u64 as JavaScript numbers carry it exactly (the presses the shell hands out stay far below).
   const u64: Check = (v) => (isInt(v, Number.MAX_SAFE_INTEGER) ? null : `invalid value: ${JSON.stringify(v)}, expected u64`);
   // JSON has no NaN or infinity: they arrive as null.
@@ -2277,10 +2335,11 @@ export function installMockTauri(seed: MockSeed): void {
     arrangement_mode: { generation: u64, revision: u64, mode: (value) => value === "pattern" || value === "song" ? null : "expected pattern or song" },
     arrangement_history: { generation: u64, revision: u64, undo: bool },
     arrangement_edit: { generation: u64, revision: u64, editsJson: str },
-    audio_import: { generation: u64, revision: u64, track: u32, startTick: u64, name: str, path: str, ticket: optional(u64) },
-    audio_relink: { generation: u64, revision: u64, asset: u32, path: str, ticket: optional(u64) },
-    arrangement_waveform: { generation: u64, asset: u32, start: u64, end: u64, bins: u64,
-      request: (v) => isInt(v, 2 ** 64) && Number(v) < 2 ** 64 ? null : "expected u64" },
+    audio_import: { generation: u64, revision: u64, track: u32, startTick: u64, name: str, path: str, ticket: wireU64 },
+    audio_relink: { generation: u64, revision: u64, asset: u32, path: str, ticket: wireU64 },
+    audio_cancel: { request: wireU64 },
+    audio_cancel_ticket: { ticket: wireU64 },
+    arrangement_waveform: { generation: u64, asset: u32, start: u64, end: u64, bins: u64, request: wireU64 },
     sampler_trim_view: { channel:u32 },
     sampler_trim_reset: { channel:u32,stamp:str },
     sampler_trim_undo: { channel:u32,stamp:str,token:str },
@@ -2411,8 +2470,14 @@ export function installMockTauri(seed: MockSeed): void {
       s.exitCount += 1;
       return false;
     },
-    holdAudio: (path: string) => holdMedia(mediaHolds, path),
-    releaseAudio: (path: string) => releaseMedia(mediaHolds, path),
+    holdAudioRead: (path: string) => holdMedia(mediaReadHolds, path),
+    releaseAudioRead: (path: string) => releaseMedia(mediaReadHolds, path),
+    holdAudio: (path: string, phase: "worker" | "publication" = "worker") =>
+      holdMedia(phase === "worker" ? mediaHolds : mediaPublicationHolds, path),
+    releaseAudio: (path: string) => {
+      releaseMedia(mediaHolds, path);
+      releaseMedia(mediaPublicationHolds, path);
+    },
     refuseAudio: (path: string) => releaseMedia(mediaHolds, path, false),
     holdWaveform: (request: number) => holdMedia(waveformHolds, request),
     releaseWaveform: (request: number) => releaseMedia(waveformHolds, request),
