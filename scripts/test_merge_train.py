@@ -423,6 +423,7 @@ class MergeTrainTests(unittest.TestCase):
         self.git.batch([20, 10], [30, 40, 50])
         output = self.run_tick()
         self.assertEqual(self.repo.merged, [(20, sha(20)), (10, sha(10))])
+        self.assertIn(f"Tested batch {ACTIVE}", output.splitlines())
         self.assertIn(f"Merged #20 at {sha(320)}", output)
         self.assertIn(f"Merged #10 at {sha(310)}", output)
         self.written([30, 40], [50], expected=ACTIVE, base=sha(310))
@@ -696,6 +697,7 @@ class MergeTrainTests(unittest.TestCase):
         self.git.history[BASE, ACTIVE] = [sha(490), ACTIVE]
         self.git.trees[sha(490)] = self.git.landed_tree
         output = self.run_tick((10, 20, 30))
+        self.assertIn(f"Tested batch {ACTIVE}", output.splitlines())
         self.assertIn(f"Merged #10 at {landed}", output)
         self.assertIn("prefix", output)
         self.assertNotIn("BYPASS", output)
@@ -973,6 +975,20 @@ class GitHubTests(unittest.TestCase):
                 repo.api = lambda *args, **kwargs: [{"check_runs": checks}]
                 with self.assertRaises(RuntimeError):
                     repo.checks(sha(10))
+
+    def test_remote_write_attempts_are_visible_before_ambiguous_failures(self):
+        for layer, operation, marker in (
+            (train.Git(), lambda layer: layer.publish(sha(10), ""), "Git push"),
+            (GitHub(), lambda layer: layer.api("issues/10/comments", method="POST"), "GitHub POST"),
+        ):
+            with self.subTest(marker=marker), patch.object(train.subprocess, "run") as run, \
+                    patch("sys.stderr", new_callable=io.StringIO) as errors:
+                def fail(*args, **kwargs):
+                    self.assertIn(marker, errors.getvalue())
+                    raise subprocess.CalledProcessError(1, args[0], stderr="HTTP 502")
+                run.side_effect = fail
+                with self.assertRaises(subprocess.CalledProcessError):
+                    operation(layer)
 
     def test_changed_head_after_comment_keeps_label(self):
         repo = GitHub()
