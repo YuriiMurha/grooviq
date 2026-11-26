@@ -1,4 +1,4 @@
-//! Frozen render loop from main at 5d0f46c6, including event and span handling.
+//! Frozen render loop from main at 038c058a, including event and span handling.
 
 use super::*;
 
@@ -171,12 +171,7 @@ impl Sampler {
                         }
                     }
                 }
-                let (mut xl, mut xr) = if v.looping {
-                    let at = |k| v.loop_index(k);
-                    (hermite(&buf.l, v.pos, at), hermite(&buf.r, v.pos, at))
-                } else {
-                    (hermite(&buf.l, v.pos, |k| k), hermite(&buf.r, v.pos, |k| k))
-                };
+                let (mut xl, mut xr) = resample::read(buf, v);
                 if filter_on {
                     xl = v.filter(0, kind, xl);
                     xr = v.filter(1, kind, xr);

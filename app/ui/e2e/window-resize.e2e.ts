@@ -1,4 +1,5 @@
 import type { Locator } from "@playwright/test";
+import { DESIGN_W, fitScale } from "../src/devices/windowPlacement";
 import { expect, presetValues, project, soundsFor, test } from "./fixture";
 
 const seed = project(["Kick"]);
@@ -22,6 +23,20 @@ async function stable(dialog: Locator) {
     throw new Error("Device geometry did not settle");
   });
 }
+
+// Before shrinking again, observe a rendered frame at the larger layout's scale.
+async function waitForExpandedLayout(dialog: Locator, width: number, height: number) {
+  await dialog.evaluate(async (el, { width, height, renderedWidth }) => {
+    for (let frame = 0; frame < 120; frame++) {
+      await new Promise(requestAnimationFrame);
+      const r = el.getBoundingClientRect();
+      if (innerWidth === width && innerHeight === height && r.width === renderedWidth &&
+          r.x >= 0 && r.y >= 0 && r.right <= innerWidth && r.bottom <= innerHeight) return;
+    }
+    throw new Error(`Device did not render within the ${width}×${height} viewport at width ${renderedWidth}`);
+  }, { width, height, renderedWidth: DESIGN_W * fitScale(width, height) });
+}
+
 async function contained(dialog: Locator) {
   const r = await stable(dialog);
   expect(r.x).toBeGreaterThanOrEqual(0);
@@ -40,21 +55,18 @@ async function contained(dialog: Locator) {
 test.use({ seed: { audioLog: [], project: seed, files: soundsFor(["Kick"]) } });
 for (const device of ["Kick sampler", "Bass synth"]) {
   for (const [width, height] of [[1280, 800], [1440, 900], [1920, 1080]]) {
-    test(`${device} remains reachable after ${width} resize`, async ({ app, mock }, info) => {
+    test(`${device} remains reachable after ${width} resize`, async ({ app, mock }) => {
       await app.setViewportSize({ width, height });
       const opener = app.getByRole("button", { name: `Edit the ${device}` });
       await opener.click();
       const dialog = app.getByRole("dialog", { name: device });
-      await stable(dialog);
+      await waitForExpandedLayout(dialog, width, height);
       const param = device.includes("synth") ? "osc1_semi" : "tune";
       const knob = dialog.locator(`[data-param="${param}"]`);
       await knob.focus();
       await app.setViewportSize({ width: 900, height: 560 });
-      await stable(dialog);
-      await app.screenshot({ path: info.outputPath("before-assert.png") });
       await contained(dialog);
       await expect(knob).toBeFocused();
-      await app.screenshot({ path: info.outputPath("compact.png") });
       const before = Number(await knob.getAttribute("aria-valuenow"));
       const box = (await knob.boundingBox())!;
       await app.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -79,7 +91,7 @@ for (const device of ["Kick sampler", "Bass synth"]) {
       }
       for (let i = 0; i < 2; i++) {
         await app.setViewportSize({ width, height });
-        await stable(dialog);
+        await waitForExpandedLayout(dialog, width, height);
         await app.setViewportSize({ width: 900, height: 560 });
         await contained(dialog);
       }

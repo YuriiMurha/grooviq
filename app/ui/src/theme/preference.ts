@@ -1,5 +1,11 @@
 /** Only shipped themes are registered. Proposed variants must not resolve until ready. */
-export const themes = [{ id: "riso", name: "Riso Ink" }] as const;
+export const themes = [
+  { id: "riso", name: "Riso Ink" },
+  { id: "taste", name: "Taste" },
+  { id: "luminous", name: "Luminous" },
+  { id: "slate-system", name: "Slate System" },
+  { id: "console", name: "Console" },
+] as const;
 export type ThemeId = typeof themes[number]["id"];
 export const DEFAULT_THEME: ThemeId = "riso";
 export const THEME_PREFERENCE_KEY = "grooviq.theme";

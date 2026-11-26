@@ -119,63 +119,100 @@ test.describe("the synth editor", () => {
     expect((await mock.calls("synth_meter")).length).toBeLessThanOrEqual(before + 1);
   });
 
-  test("measured_stage_and_phase_drive_read_only_motion_and_frozen_capture_clears", async ({ app, mock }, info) => {
+  test("deselecting_the_synth_mid_note_clears_its_scope_and_stops_its_reads", async ({ app, mock }) => {
     await open(app);
-    const before = await mock.eval("m => m.state.project");
+    const scope = editor(app).getByLabel("Synth output waveform");
+    const status = editor(app).locator(".synth-output-status");
     const amp = editor(app).locator('[data-synth-meter="amp"]');
-    const flt = editor(app).locator('[data-synth-meter="flt"]');
-    const lfo = editor(app).locator('[data-synth-meter="lfo"]');
-    const snapshot = async (ampStage: number, phase: number, frames?: number) => {
-      await mock.eval(`m => m.setSynthMotion(${JSON.stringify({ ampStage, filterStage: 2, lfoPhase: phase, ampLevel: 0.25, filterLevel: 0.75, lfoValue: -0.3, voices: 1, frames })})`);
-    };
-    const x = (dot: Locator) => dot.evaluate(e => Number(e.getAttribute("cx")));
-    await snapshot(1, 0.1);
-    await expect(amp).toBeVisible();
-    const geometry = await amp.evaluate(e => ({
-      left: Number((e as SVGElement).dataset.meterLeft), attack: Number((e as SVGElement).dataset.meterAttack),
-      top: Number((e as SVGElement).dataset.meterTop), bottom: Number((e as SVGElement).dataset.meterBottom),
-    }));
-    const attackX = await x(amp);
-    expect(attackX).toBeCloseTo((geometry.left + geometry.attack) / 2, 4);
-    expect(Number(await amp.getAttribute("cy"))).toBeCloseTo(geometry.bottom - 0.25 * (geometry.bottom - geometry.top), 4);
-    const phaseX = await x(lfo);
-    const filterDecayX = await flt.evaluate(e => (Number((e as SVGElement).dataset.meterAttack) + Number((e as SVGElement).dataset.meterDecay)) / 2);
-    await expect.poll(() => x(flt)).toBeCloseTo(filterDecayX, 4);
-    await snapshot(3, 0.7);
-    await expect.poll(() => x(amp)).toBeGreaterThan(attackX);
-    await expect.poll(() => x(lfo)).toBeGreaterThan(phaseX);
-    const sustainX = await x(amp);
-    await snapshot(3, 0.7);
-    await expect.poll(() => x(amp)).toBe(sustainX);
-    await snapshot(4, 0.2);
-    await expect.poll(() => x(amp)).toBeGreaterThan(sustainX);
-    await shot(app, info, "measured-release");
-    await app.setViewportSize({ width: 900, height: 800 });
-    await expect.poll(async () => {
-      const bounds = await editor(app).boundingBox();
-      return bounds !== null && bounds.x >= 0 && bounds.x + bounds.width <= 900.5;
-    }).toBe(true);
-    await shot(app, info, "measured-release-900");
-    await app.getByRole("button", { name: "Dismiss", exact: true }).click();
-    await app.setViewportSize({ width: 900, height: 560 });
-    await expect(amp).toBeVisible();
-    await expect(lfo).toBeVisible();
-    await expect(control(app, "amp_release")).toBeVisible();
-    await expect.poll(async () => {
-      const bounds = await amp.boundingBox();
-      return bounds !== null && bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 900 && bounds.y + bounds.height <= 560;
-    }).toBe(true);
-    await shot(app, info, "measured-release-900x560");
-    await app.setViewportSize({ width: 1280, height: 800 });
-    await snapshot(1, 0.4, 987654321);
-    await expect.poll(() => x(amp)).toBe(attackX);
-    await expect(amp).toBeHidden();
-    await expect(flt).toBeHidden();
-    await expect(lfo).toBeHidden();
-    await expect(editor(app).locator('[data-synth-stage="amp"]')).toBeHidden();
-    expect(await mock.eval("m => m.state.project")).toEqual(before);
-    expect((await mock.calls("channel_param_live")).length).toBe(0);
-    await mock.eval("m => m.setSynthMotion(null)");
+    const pixels = () => scope.evaluate((c: HTMLCanvasElement) => c.toDataURL());
+    const bassReads = async () => (await mock.calls("synth_meter")).filter((c) => c.args.channel === SYNTH_ID).length;
+    await expect(status).toContainText("0 voices");
+    const silent = await pixels();
+    await app.keyboard.down("z");
+    try {
+      await expect(status).toContainText("1 voice");
+      await expect(amp).toBeVisible();
+      // Selecting another channel deactivates the editor while the key is still held.
+      await app.getByRole("button", { name: "Mute Kick", exact: true }).focus();
+      await expect(app.locator("button.channel-name", { hasText: "Kick" })).toHaveAttribute("aria-current", "true");
+      await expect(status).toContainText("0 voices");
+      await expect(amp).toBeHidden();
+      await expect.poll(pixels).toBe(silent);
+      // The inactive scope stops sampling: no Bass reads across several polling intervals.
+      const reads = await bassReads();
+      expect(reads, "the scope read Bass's meter while it was active").toBeGreaterThan(0);
+      await app.evaluate(() => new Promise((resolve) => setTimeout(resolve, 200)));
+      expect(await bassReads(), "an inactive scope sends no meter reads").toBe(reads);
+    } finally {
+      await app.keyboard.up("z");
+    }
+  });
+
+  test.describe("without the startup audio warning", () => {
+    // The default mock warning expires after six seconds; a slow run would race its Dismiss button.
+    test.use({ seed: { project: withSynth(), files: soundsFor(KIT), audioLog: [] } });
+
+    test("measured_stage_and_phase_drive_read_only_motion_and_frozen_capture_clears", async ({ app, mock }, info) => {
+      await open(app);
+      const before = await mock.eval("m => m.state.project");
+      const amp = editor(app).locator('[data-synth-meter="amp"]');
+      const flt = editor(app).locator('[data-synth-meter="flt"]');
+      const lfo = editor(app).locator('[data-synth-meter="lfo"]');
+      const snapshot = async (ampStage: number, phase: number, frames?: number) => {
+        await mock.eval(`m => m.setSynthMotion(${JSON.stringify({ ampStage, filterStage: 2, lfoPhase: phase, ampLevel: 0.25, filterLevel: 0.75, lfoValue: -0.3, voices: 1, frames })})`);
+      };
+      const x = (dot: Locator) => dot.evaluate(e => Number(e.getAttribute("cx")));
+      await snapshot(1, 0.1);
+      await expect(amp).toBeVisible();
+      const geometry = await amp.evaluate(e => ({
+        left: Number((e as SVGElement).dataset.meterLeft), attack: Number((e as SVGElement).dataset.meterAttack),
+        top: Number((e as SVGElement).dataset.meterTop), bottom: Number((e as SVGElement).dataset.meterBottom),
+      }));
+      const attackX = await x(amp);
+      expect(attackX).toBeCloseTo((geometry.left + geometry.attack) / 2, 4);
+      expect(Number(await amp.getAttribute("cy"))).toBeCloseTo(geometry.bottom - 0.25 * (geometry.bottom - geometry.top), 4);
+      const phaseX = await x(lfo);
+      const filterDecayX = await flt.evaluate(e => (Number((e as SVGElement).dataset.meterAttack) + Number((e as SVGElement).dataset.meterDecay)) / 2);
+      await expect.poll(() => x(flt)).toBeCloseTo(filterDecayX, 4);
+      await snapshot(3, 0.7);
+      await expect.poll(() => x(amp)).toBeGreaterThan(attackX);
+      await expect.poll(() => x(lfo)).toBeGreaterThan(phaseX);
+      const sustainX = await x(amp);
+      await snapshot(3, 0.7);
+      await expect.poll(() => x(amp)).toBe(sustainX);
+      await snapshot(4, 0.2);
+      await expect.poll(() => x(amp)).toBeGreaterThan(sustainX);
+      await shot(app, info, "measured-release");
+      await app.setViewportSize({ width: 900, height: 800 });
+      await expect.poll(async () => {
+        const bounds = await editor(app).boundingBox();
+        return bounds !== null && bounds.x >= 0 && bounds.x + bounds.width <= 900.5;
+      }).toBe(true);
+      await shot(app, info, "measured-release-900");
+      await app.setViewportSize({ width: 900, height: 560 });
+      await expect(amp).toBeVisible();
+      await expect(lfo).toBeVisible();
+      await expect(control(app, "amp_release")).toBeVisible();
+      await expect.poll(async () => {
+        const bounds = await amp.boundingBox();
+        return bounds !== null && bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 900 && bounds.y + bounds.height <= 560;
+      }).toBe(true);
+      await shot(app, info, "measured-release-900x560");
+      await app.setViewportSize({ width: 1280, height: 800 });
+      // A live capture first: the dot returns to the attack position once the window settles.
+      await snapshot(1, 0.4);
+      await expect.poll(() => x(amp)).toBe(attackX);
+      // Then a capture that never advances: it expires and clears. Its single draw can come after
+      // the expiry on a slow frame, so only the clearing is asserted here.
+      await snapshot(1, 0.4, 987654321);
+      await expect(amp).toBeHidden();
+      await expect(flt).toBeHidden();
+      await expect(lfo).toBeHidden();
+      await expect(editor(app).locator('[data-synth-stage="amp"]')).toBeHidden();
+      expect(await mock.eval("m => m.state.project")).toEqual(before);
+      expect((await mock.calls("channel_param_live")).length).toBe(0);
+      await mock.eval("m => m.setSynthMotion(null)");
+    });
   });
 
   test("held_meter_request_stays_bounded_across_selection_and_reopening", async ({ app, mock }) => {

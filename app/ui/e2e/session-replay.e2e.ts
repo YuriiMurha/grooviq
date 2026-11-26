@@ -33,3 +33,35 @@ test("mock replays the real offline Session transcript", async ({ page }) => {
   }, replay.steps);
   expect(actual).toEqual(replay.expected);
 });
+
+const mediaReplay = JSON.parse(readFileSync(new URL("../../../tests/fixtures/arrangement-media-replay.json", import.meta.url), "utf8")) as {
+  files: Record<string, number[] | null>;
+  steps: typeof replay.steps;
+  expected: unknown[];
+};
+
+test("mock replays offline arrangement media replies and WFP1 bytes", async ({ page }) => {
+  const files: MockSeed["files"] = Object.fromEntries(
+    Object.entries(mediaReplay.files).map(([path, wav]) => [path, { kind: "sample", wav }]),
+  );
+  await page.evaluate(installMockTauri, { samplerParams: params.sampler, synthParams: params.synth, synthPresets: presets, files });
+  const actual = await page.evaluate(async (steps) => {
+    const { invoke } = (window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (command: string, args: Record<string, unknown>) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    const results = [];
+    for (const { command, args } of steps) {
+      try {
+        let ok = await invoke(command, args);
+        if (ok instanceof ArrayBuffer) ok = Array.from(new Uint8Array(ok));
+        if (command === "project_save_as" || command === "project_new") ok = null;
+        if (command === "project_open") ok = (ok as { warnings: string[] }).warnings;
+        results.push({ ok });
+      } catch (error) {
+        results.push({ error: String(error) });
+      }
+    }
+    return results;
+  }, mediaReplay.steps);
+  expect(actual).toEqual(mediaReplay.expected);
+});

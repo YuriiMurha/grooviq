@@ -67,9 +67,8 @@ pub(crate) struct ChannelNode {
     fade: Option<Ramp>,
     /// Removed: fading out, then silent until the graph hands it to the trash queue.
     leaving: bool,
-    /// A sampler with no voice sounding: blocks without events are skipped (the ramps and the
-    /// fade still advance, so skipping never changes the output). Never set for the synth,
-    /// whose LFO runs on while it is silent.
+    /// A silent sampler or synth skips blocks without events. A skipped synth still advances
+    /// its LFO, smoothers and meters through [`Synth::advance_silent`].
     idle: bool,
     events: [NoteEvent; CHANNEL_EVENTS],
     count: usize,
@@ -356,6 +355,20 @@ impl ChannelNode {
         let skip = true;
         // A choke of a silent instrument does nothing.
         if skip && self.idle && count == 0 {
+            if let Source::Synth(synth) = &mut self.source {
+                // Keep the original span boundaries: each span decays the peak meters once.
+                let mut start = 0;
+                for end in chokes.iter().copied().chain(std::iter::once(BLOCK as u32)) {
+                    if end > start {
+                        let frames = end - start;
+                        if let Some(host) = self.host {
+                            synth.set_transport(&host.span(start, frames).unwrap());
+                        }
+                        synth.advance_silent(frames as usize);
+                        start = end;
+                    }
+                }
+            }
             // Everything that moves with time still moves, exactly as if the block of silence
             // were rendered: the gains (a mix change completes on time) and the fade (which
             // must end, not wait to fade the next note).
@@ -416,18 +429,19 @@ impl ChannelNode {
                 self.reset();
             }
         }
-        if let Source::Sampler(sampler) = &mut self.source {
-            if sampler.active_voices() == 0 {
-                // Settles the sampler's output smoothing, as it would on its own once idle.
-                // Not a reset: a note that ended before its note-off must still take that
-                // note-off, or it cuts the next hit on the key when a block ends between the
-                // two.
-                sampler.settle();
-                self.idle = true;
-            } else {
-                self.idle = false;
+        self.idle = match &mut self.source {
+            Source::Sampler(sampler) => {
+                let idle = sampler.active_voices() == 0;
+                if idle {
+                    // Settle output smoothing while preserving note-off ownership.
+                    sampler.settle();
+                }
+                idle
             }
-        }
+            Source::Synth(synth) => synth.is_silent(),
+            #[cfg(test)]
+            Source::Recording(_) => false,
+        };
         true
     }
 
@@ -435,7 +449,12 @@ impl ChannelNode {
     pub(crate) fn reset(&mut self) {
         self.source.device().reset();
         self.fade = None;
-        self.idle = matches!(self.source, Source::Sampler(_));
+        self.idle = match &self.source {
+            Source::Sampler(_) => true,
+            Source::Synth(synth) => synth.is_silent(),
+            #[cfg(test)]
+            Source::Recording(_) => false,
+        };
     }
 }
 
@@ -566,6 +585,108 @@ mod tests {
             assert!(sl == fl && sr == fr, "block {block}");
         }
         assert!(skipped > 150, "the skip ran: {skipped}");
+    }
+
+    #[test]
+    fn skipping_silent_synth_blocks_preserves_audio_and_meters() {
+        use grooviq_dsp::synth::{PARAM_IDS, SPEC};
+
+        let param = |name| PARAM_IDS.iter().position(|&id| id == name).unwrap() as u32;
+        let setup = ChannelSetup::synth(
+            ChannelId(1),
+            SPEC.iter().map(|&(_, _, d)| d).collect(),
+            ChannelMix::default(),
+        );
+        for with_host in [false, true] {
+            let mut skip = ChannelNode::new(SR, ramp_len(SR), &setup, false);
+            let mut full = ChannelNode::new(SR, ramp_len(SR), &setup, false);
+            full.never_skip = true;
+            let mut clock = crate::transport::TransportClock::new(SR, 140.0);
+            clock.start(0, None);
+            let mut skipped = 0;
+            for block in 0..460 {
+                let frame = block * BLOCK as u64;
+                if block == 130 {
+                    clock.set_bpm(frame, 82.0);
+                }
+                let host = with_host.then(|| clock.host(frame, 0, 0, false, None));
+                for node in [&mut skip, &mut full] {
+                    node.set_host(host);
+                    match block {
+                        0 => {
+                            node.set_param(param("lfo_amount"), 0.85);
+                            node.set_param(param("lfo_target"), 1.0);
+                            node.set_param(param("amp_release"), 18.0);
+                        }
+                        72 => {
+                            node.set_param(param("lfo_rate"), 17.0);
+                            node.set_mix(ChannelMix {
+                                volume: 0.5,
+                                pan: -0.3,
+                                ..ChannelMix::default()
+                            });
+                            node.retarget(false);
+                        }
+                        73 => assert!(node.push_event(note(0))),
+                        80 => assert!(node.push_event(NoteEvent {
+                            on: false,
+                            ..note(11)
+                        })),
+                        82 => node.set_param(param("master"), -20.0),
+                        180 => assert!(node.push_event(note(63))),
+                        270 => node.fade_out(),
+                        350 => assert!(node.push_event(note(17))),
+                        360 => node.reset(),
+                        450 => assert!(node.push_event(note(1))),
+                        _ => {}
+                    }
+                }
+
+                // A group peer's chokes split silent blocks while the previous note's peaks
+                // decay. The note at frame 63 of block 180 exposes those peaks again.
+                let chokes: &[u32] = match block {
+                    110..=149 | 182 | 183 | 240 => &[0, 11, 37, 63],
+                    _ => &[],
+                };
+                let sentinel = [1.0; BLOCK];
+                let (mut sl, mut sr) = (sentinel, sentinel);
+                let (mut fl, mut fr) = ([0.0; BLOCK], [0.0; BLOCK]);
+                let rendered = skip.render(&mut sl, &mut sr, chokes);
+                assert!(full.render(&mut fl, &mut fr, chokes));
+                if !rendered {
+                    skipped += 1;
+                    assert_eq!((sl, sr), (sentinel, sentinel), "block {block}");
+                    sl.fill(0.0);
+                    sr.fill(0.0);
+                }
+                assert_eq!(sl.map(f32::to_bits), fl.map(f32::to_bits), "left {block}");
+                assert_eq!(sr.map(f32::to_bits), fr.map(f32::to_bits), "right {block}");
+                let (a, b) = (skip.synth_meter().unwrap(), full.synth_meter().unwrap());
+                assert_eq!(
+                    a.motion.map(f32::to_bits),
+                    b.motion.map(f32::to_bits),
+                    "motion {block}"
+                );
+                assert_eq!(
+                    a.levels.map(f32::to_bits),
+                    b.levels.map(f32::to_bits),
+                    "levels {block}"
+                );
+                assert_eq!(
+                    a.scope.map(f32::to_bits),
+                    b.scope.map(f32::to_bits),
+                    "scope {block}"
+                );
+                if matches!(block, 81 | 182 | 359) {
+                    assert!(rendered && b.levels[2] > 0.0, "active tail/voice {block}");
+                    assert!(fl.iter().any(|&x| x != 0.0), "audible block {block}");
+                }
+                if matches!(block, 72 | 110..=149 | 240 | 270 | 274 | 360) {
+                    assert!(!rendered, "silent block {block} must skip");
+                }
+            }
+            assert!(skipped > 350, "the skip ran: {skipped}");
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 # Repeatable commands. `make help` lists them. macOS or Linux shell.
-.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan bench bench-roll-operations bench-instructions profile profile-tracy build-app install-app qa-ui qa-app
+.PHONY: help hooks ui-install fmt check check-changed golden-update rtsan bench bench-roll-operations roll-timing-test bench-instructions profile profile-tracy build-app install-app qa-ui qa-app
 
 # rustup installs cargo into ~/.cargo/bin, which is often not on PATH.
 export PATH := $(HOME)/.cargo/bin:$(PATH)
@@ -26,6 +26,16 @@ test-merge-train: ## Test ordered protected merges without calling GitHub
 .PHONY: test-pre-commit
 test-pre-commit: ## Exercise staged conflict checks in disposable Git repositories
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_pre_commit.py -v
+
+.PHONY: reclaim-caches disk-check test-reclaim-caches
+reclaim-caches: ## Preview idle worktree target cleanup (RECLAIM_APPLY=1 deletes, RECENT_MINUTES=45)
+	@python3 -B scripts/reclaim_caches.py reclaim-caches $(if $(filter command line,$(origin RECLAIM_APPLY)),--apply="$$RECLAIM_APPLY") --recent-minutes="$${RECENT_MINUTES:-45}"
+
+disk-check: ## Require free space on the repo volume (MIN_GIB=20)
+	@python3 -B scripts/reclaim_caches.py disk-check --min-gib="$${MIN_GIB:-20}"
+
+test-reclaim-caches: ## Exercise cache reclamation in temporary repositories
+	python3 -B -m unittest discover -s scripts -p test_reclaim_caches.py -v
 
 ui-install: ## Install the UI's locked dependencies (npm ci)
 	npm --prefix $(UI) ci --no-audit --no-fund
@@ -103,7 +113,14 @@ bench: ## Render speed, block times and determinism of the reference scenes, the
 	$(CARGO) bench -p grooviq-dsp --bench kernels
 
 bench-roll-operations: ## The six piano-roll timing budgets, without work counters (run on a quiet host)
-	GROOVIQ_ROLL_PERF=1 npm --prefix $(UI) test -- --run src/roll/budgets.test.ts --maxWorkers=1 --disableConsoleIntercept
+	@set --; \
+	if [ -n "$$ROLL_TIMING_REPORT" ]; then \
+		set -- --reporter=default --reporter=json --outputFile.json="$$ROLL_TIMING_REPORT"; \
+	fi; \
+	GROOVIQ_ROLL_PERF=1 npm --prefix $(UI) test -- --run src/roll/budgets.test.ts --maxWorkers=1 --disableConsoleIntercept "$$@"
+
+roll-timing-test: ## Test evidence validation and the bounded piano-roll timing rerun
+	node --test scripts/roll-timing.test.cjs
 
 bench-instructions: ## Instruction counts (Linux only: needs valgrind and gungraun-runner)
 	$(CARGO) bench -p grooviq-golden --bench instructions

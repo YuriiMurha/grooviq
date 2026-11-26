@@ -1,10 +1,8 @@
 name: perf
 
-# Speed numbers for every change, in each job's summary and as artifacts. Timings on shared
-# runners are noisy, so they never fail a job; the render benchmark fails only when a scene's
-# bits depend on the block size. Instruction counts are exact: that job fails when a benchmark
-# runs more than 1 % more instructions than on the pull request's base. None of these jobs is
-# a required check.
+# Speed numbers for benchmark inputs. Render timing is informational; roll timing retries a
+# budget failure once. Instruction counts are exact: that job fails when a benchmark runs
+# more than 1 % more instructions than on the pull request's base. None is a required check.
 
 on:
   push:
@@ -30,8 +28,9 @@ permissions:
 
 concurrency:
   group: >-
-    perf-${{ (inputs.capture_only && github.run_id) || github.event.pull_request.number ||
-    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
+    perf-${{ (inputs.capture_only && github.run_id) ||
+    (github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.ref)) ||
+    github.event.pull_request.number ||
     github.ref }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' ||
@@ -40,7 +39,7 @@ concurrency:
 jobs:
   optional-inputs:
     if: ${{ !inputs.capture_only }}
-    name: Optional Rust inputs
+    name: Optional performance inputs
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -48,21 +47,52 @@ jobs:
       pull-requests: read
     outputs:
       run: ${{ steps.select.outputs.result }}
+      roll: ${{ steps.select.outputs.roll }}
     steps:
       - uses: actions/checkout@v5
+      - run: rustup toolchain install
+        timeout-minutes: 3
       - run: make optional-rust-policy-test
       - uses: actions/github-script@v8
         id: select
         with:
           script: |
             const { shouldRun } = require('./scripts/optional-rust-checks.cjs');
-            return await shouldRun({
+            const request = {
               eventName: context.eventName,
               pullRequest: context.payload.pull_request,
               repo: context.repo,
               rest: github.rest,
               paginate: github.paginate,
-            });
+            };
+            core.setOutput('roll', await shouldRun({ ...request, workflow: 'roll' }));
+            return await shouldRun({ ...request, workflow: 'perf' });
+
+  roll:
+    needs: optional-inputs
+    if: >-
+      ${{ always() && !cancelled() && needs.optional-inputs.outputs.roll != 'false' &&
+      (github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    name: roll timing (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: make roll-timing-test
+      - run: npm --prefix app/ui ci --no-audit --no-fund
+      - name: Measure piano-roll operations
+        run: node scripts/roll-timing.cjs "$RUNNER_TEMP/roll-timing"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: roll-timing-ubuntu-latest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/roll-timing/
+          retention-days: 7
 
   bench:
     needs: optional-inputs
@@ -134,7 +164,7 @@ jobs:
 
   # The same scene must render the same bits on every platform (the export rule).
   determinism:
-    if: ${{ !inputs.capture_only }}
+    if: ${{ !inputs.capture_only && !cancelled() && needs.bench.result == 'success' }}
     name: determinism (macOS vs Windows)
     needs: bench
     runs-on: ubuntu-latest
@@ -182,6 +212,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+      - name: Key the Rust cache on the root manifest
+        shell: bash
+        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
       - name: Valgrind and ALSA headers
         run: |
           sudo apt-get update -qq

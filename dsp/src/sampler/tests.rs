@@ -216,20 +216,34 @@ fn render_matches_main_through_both_sample_edges_and_smoothed_pan() {
 
 #[test]
 fn render_matches_main_for_one_ulp_pan_change_with_three_voices() {
-    let mut pair = RenderPair::new(4096);
     let chord = [note(59, 0.7), note(61, 0.8), note(64, 0.9)];
-    assert!(pair.exact_block(17, &chord, "start three notes"));
-    assert!(pair.exact_block(64, &[], "settled output"));
-    pair.set(&[(PAN, 1e-7)]);
-    assert_eq!(pair.actual.active_voices(), 3);
-    let distance_in_bits = pair.actual.out[0]
-        .to_bits()
-        .abs_diff(pair.actual.c.out[0].to_bits());
-    assert_eq!(distance_in_bits, 1);
-    assert!(pair.exact_block(1, &[], "snap a one-ulp output change"));
-    assert!(pair.exact_block(63, &[], "settled at the new gain"));
-    pair.set(&[(FILTER_TYPE, 1.0)]);
-    assert!(pair.exact_block(17, &[], "enable filter between control ticks"));
+    // At unity the quieter channel crosses an exponent boundary. One ULP above
+    // unity, its change instead shares the same bits after discarding the low bit.
+    for (gain, differs_after_shift) in [(0.0, true), (6e-7, false)] {
+        let mut pair = RenderPair::new(4096);
+        pair.set(&[(GAIN, gain)]);
+        assert!(pair.exact_block(17, &chord, "start three notes"));
+        assert!(pair.exact_block(64, &[], "settled output"));
+        assert_eq!(pair.actual.active_voices(), 3);
+        for (pan, distances) in [(1e-7, [1, 0]), (-1e-7, [0, 1])] {
+            pair.set(&[(PAN, pan)]);
+            let before = pair.actual.out.map(f32::to_bits);
+            let target = pair.actual.c.out.map(f32::to_bits);
+            let steps = std::array::from_fn(|ch| before[ch].abs_diff(target[ch]));
+            assert_eq!(steps, distances);
+            assert_eq!(
+                before.map(|bits| bits >> 1) != target.map(|bits| bits >> 1),
+                differs_after_shift
+            );
+            assert!(pair.exact_block(1, &[], "snap a one-ulp output change"));
+            assert_eq!(pair.actual.out.map(f32::to_bits), target);
+            pair.set(&[(PAN, 0.0)]);
+            assert!(pair.exact_block(1, &[], "restore centered pan"));
+        }
+        assert!(pair.exact_block(63, &[], "settled at the new gain"));
+        pair.set(&[(FILTER_TYPE, 1.0)]);
+        assert!(pair.exact_block(17, &[], "enable filter between control ticks"));
+    }
 }
 
 #[test]

@@ -9,10 +9,13 @@ permissions:
   contents: read
 
 concurrency:
-  # A concurrency group has one pending slot by default. Give each main push its own group.
+  # Main pushes share one group without cancel-in-progress: a started run always finishes (rust-cache
+  # saves only on main), and each newly queued run replaces the pending one in queue-arrival order, so
+  # at most one runs and one waits (#693). A batch tip, even main's latest tree, may get no main run
+  # until a later push. That is not a gap: its tested record is the merge-train/batch run on the same
+  # tree plus the train's tree-equality check. PRs and merge-train/batch: per ref, cancel older.
   group: >-
     ci-${{ github.workflow }}-${{ github.event.pull_request.number ||
-    (github.event_name == 'push' && github.ref == 'refs/heads/main' && format('main-{0}', github.sha)) ||
     github.ref }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' ||
@@ -62,33 +65,12 @@ jobs:
       - name: Key the Rust cache on the root manifest
         shell: bash
         run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
-      - name: Create Windows Dev Drive
-        if: runner.os == 'Windows'
-        uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
-        with:
-          drive-size: 32GB
-          drive-path: ${{ runner.temp }}/grooviq-dev-drive.vhdx
-          mount-path: target/dev-drive
-          # Hosted Windows runners disable Defender real-time monitoring. Speed gains come from ReFS and the VHDX.
-          trusted-dev-drive: false
-          env-mapping: |
-            CARGO_TARGET_DIR,{{ DEV_DRIVE }}/cargo
-      - name: Check Windows Dev Drive mount
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $expectedTarget = Join-Path $env:GITHUB_WORKSPACE 'target/dev-drive/cargo'
-          if ([IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) -ne [IO.Path]::GetFullPath($expectedTarget)) {
-            throw "Cargo target $env:CARGO_TARGET_DIR does not match the rust-cache workspace target $expectedTarget"
-          }
       - run: rustup toolchain install
       # The Actions cache is over its 10 GB limit, and PR copies evict main's caches.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          # rust-cache joins the target to the workspace root.
-          workspaces: ${{ runner.os == 'Windows' && '. -> target/dev-drive/cargo' || '.' }}
       # `tauri-build` needs the built UI (`frontendDist`) to compile the app crate.
       - uses: actions/setup-node@v5
         with:
@@ -113,7 +95,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rust-junit-${{ runner.os }}-${{ github.run_attempt }}
-          path: ${{ env.CARGO_TARGET_DIR || 'target' }}/nextest/ci/junit.xml
+          path: target/nextest/ci/junit.xml
           retention-days: 7
       - name: Run workspace doctests
         run: cargo test --workspace --all-features --doc
@@ -126,20 +108,6 @@ jobs:
 
       - name: Optimized 8-second export budget
         run: node scripts/export-budget.mjs
-      - name: Report Windows Dev Drive usage
-        if: always() && runner.os == 'Windows'
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          if (!$env:DEV_DRIVE_PATH) {
-            Write-Warning 'Dev Drive setup did not export a VHDX path.'
-            return
-          }
-          $volume = Get-DiskImage -ImagePath $env:DEV_DRIVE_PATH | Get-Disk | Get-Partition | Get-Volume
-          $used = ($volume.Size - $volume.SizeRemaining) / 1GB
-          Write-Host ('Dev Drive: {0:N2} GiB used, {1:N2} GiB free ({2})' -f $used, ($volume.SizeRemaining / 1GB), $volume.FileSystem)
-          $hostVolume = Get-Volume -FilePath $env:DEV_DRIVE_PATH
-          Write-Host ('VHDX host volume: {0:N2} GiB free of {1:N2} GiB' -f ($hostVolume.SizeRemaining / 1GB), ($hostVolume.Size / 1GB))
 
   rust-windows:
     name: rust (windows-latest)
@@ -227,11 +195,12 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.e2e != 'false' }}
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       matrix:
         browser: [webkit, chromium]
+        shard: [1, 2]
     runs-on: ubuntu-latest
-    # 4 setup + 9 suite + 3 diagnostics + 1 container minute.
+    # Minutes per shard: 4 setup + 9 suite + 3 diagnostics + 1 container.
     timeout-minutes: 17
     container:
       # Keep this version equal to @playwright/test in app/ui/package-lock.json.
@@ -260,7 +229,7 @@ jobs:
         run: |
           mkdir browser-accounting
           npm run --silent e2e -- --list --project=webkit --project=chromium --reporter=json > browser-accounting/inventory.json
-          npm run e2e -- --project=${{ matrix.browser }} --workers=2
+          npm run e2e -- --project=${{ matrix.browser }} --shard=${{ matrix.shard }}/2 --workers=2
       - name: Record external step outcome
         if: always()
         timeout-minutes: 1
@@ -268,13 +237,13 @@ jobs:
           SUITE_OUTCOME: ${{ steps.suite.outcome }}
         run: |
           mkdir -p browser-accounting
-          node ../../scripts/e2e-browser-results.mjs receipt browser-accounting ${{ matrix.browser }}
+          node ../../scripts/e2e-browser-results.mjs receipt browser-accounting ${{ matrix.browser }} ${{ matrix.shard }} 2
       - name: Upload browser accounting
         if: always()
         timeout-minutes: 1
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-accounting-${{ matrix.browser }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: e2e-accounting-${{ matrix.browser }}-${{ matrix.shard }}-of-2-${{ github.run_id }}-${{ github.run_attempt }}
           path: app/ui/browser-accounting/receipt.json
           if-no-files-found: error
           retention-days: 7
@@ -283,19 +252,19 @@ jobs:
         timeout-minutes: 1
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-results-${{ matrix.browser }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: e2e-results-${{ matrix.browser }}-${{ matrix.shard }}-of-2-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             app/ui/e2e-results
             app/ui/playwright-report/diagnostics-*
           retention-days: 7
 
-  # Four workers across two hosts, plus setup and aggregation cost (previously two).
+  # Eight workers across four hosts, plus setup and aggregation cost.
   # A runner hard kill can prevent artifact delivery; absence must fail this gate.
   e2e:
     if: ${{ always() && !(needs.changes.outputs.e2e == 'false' && needs.e2e-browser.result == 'skipped') }}
     needs: [changes, e2e-browser]
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v5
         timeout-minutes: 1
@@ -306,13 +275,23 @@ jobs:
       - uses: actions/download-artifact@v4
         timeout-minutes: 1
         with:
-          name: e2e-accounting-webkit-${{ github.run_id }}-${{ github.run_attempt }}
-          path: browser-accounting/webkit
+          name: e2e-accounting-webkit-1-of-2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: browser-accounting/webkit/1-of-2
       - uses: actions/download-artifact@v4
         timeout-minutes: 1
         with:
-          name: e2e-accounting-chromium-${{ github.run_id }}-${{ github.run_attempt }}
-          path: browser-accounting/chromium
+          name: e2e-accounting-webkit-2-of-2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: browser-accounting/webkit/2-of-2
+      - uses: actions/download-artifact@v4
+        timeout-minutes: 1
+        with:
+          name: e2e-accounting-chromium-1-of-2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: browser-accounting/chromium/1-of-2
+      - uses: actions/download-artifact@v4
+        timeout-minutes: 1
+        with:
+          name: e2e-accounting-chromium-2-of-2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: browser-accounting/chromium/2-of-2
       - name: Require both complete successful browser projects
         timeout-minutes: 1
         env:

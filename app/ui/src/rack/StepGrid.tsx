@@ -36,6 +36,7 @@ import { readPalette, type GridRenderer, type Palette } from "./palette";
 import { subscribeThemeChange } from "../theme/changes";
 import { createCanvasRenderer } from "./canvasRenderer";
 import { createGlRenderer } from "./glRenderer";
+import { createGridWake, subscribeGridDpr } from "./gridWake";
 import { rollInstances } from "./rollPreview";
 
 /** A step is a sixteenth: 240 ticks. */
@@ -68,6 +69,8 @@ interface Props {
   bpm: number;
   /** The live stream's latest frame, read once per animation frame for the playhead. */
   latest: RefObject<LiveFrame | null>;
+  /** Wakes the grid when the first playing frame arrives. */
+  subscribePlaybackStart: (wake: () => void) => () => void;
   /** The output's rate, for the latency shift of the playhead. */
   sampleRate: number;
   /** The pattern's notes: roll channels (`ChannelView.roll`) show them instead of steps. */
@@ -117,6 +120,7 @@ export function StepGrid({
   pattern,
   bpm,
   latest,
+  subscribePlaybackStart,
   sampleRate,
   notes = NO_NOTES,
   onOpenRoll = () => {},
@@ -148,7 +152,10 @@ export function StepGrid({
   const layout: GridLayout = { rows, steps, cell: CELL, gap: GAP, dpr: scale };
 
   const scene = useRef<Scene | null>(null);
-  const dirty = useRef(true);
+  const wake = useRef<ReturnType<typeof createGridWake> | null>(null);
+  const markDirty = useCallback(() => wake.current?.markDirty(), []);
+
+  useEffect(() => subscribeGridDpr(window, setDpr), []);
   const override = useRef<Override | null>(null);
   // Set once a velocity edit is applied: the next view holds the value, so the override goes.
   const settled = useRef(false);
@@ -184,8 +191,8 @@ export function StepGrid({
       bpm,
       sampleRate,
     };
-    dirty.current = true;
-  }, [channels, pattern, notes, scale, focusRow, focusStep, bpm, sampleRate]);
+    markDirty();
+  }, [channels, pattern, notes, scale, focusRow, focusStep, bpm, sampleRate, markDirty]);
 
   useEffect(() => {
     if (!reveal.current || !hasFocus) return;
@@ -206,7 +213,7 @@ export function StepGrid({
     };
     const refreshPalette = () => {
       palette.current = paletteOf(document.documentElement);
-      dirty.current = true;
+      markDirty();
     };
     const build = () => {
       clearTimeout(wait);
@@ -240,35 +247,21 @@ export function StepGrid({
       renderer.current?.dispose();
       renderer.current = null;
     };
-  }, [use2d]);
+  }, [use2d, markDirty]);
 
-  // The draw loop: the playhead is read every frame; the grid is drawn only when the playhead's
-  // step, the cells, the focus, the size or the palette changed.
   useEffect(() => {
-    let raf = 0;
-    let shown: number | null | undefined;
-    // The device pixel ratio changes with zoom and when the window moves to another screen, and
-    // the second fires no `resize` (nor a resolution media query change) everywhere: it is read
-    // every frame instead.
-    let ratio = window.devicePixelRatio || 1;
-    const tick = () => {
-      raf = requestAnimationFrame(tick);
-      const nowRatio = window.devicePixelRatio || 1;
-      if (nowRatio !== ratio) {
-        ratio = nowRatio;
-        setDpr(nowRatio);
-      }
+    const readPlayhead = () => {
+      const frame = latest.current;
+      const s = scene.current;
+      if (!frame?.playing || !s || s.layout.steps <= 0) return null;
+      const ticks = displayTicks(frame.positionTicks, frame.outputLatencyFrames, s.bpm, s.sampleRate);
+      return Number((ticks / TICKS_PER_STEP) % BigInt(s.layout.steps));
+    };
+    const draw = (playhead: number | null) => {
       const s = scene.current;
       const r = renderer.current;
       const p = palette.current;
-      if (!s || !r || !p) return;
-      const frame = latest.current;
-      let playhead: number | null = null;
-      if (frame?.playing && s.layout.steps > 0) {
-        const ticks = displayTicks(frame.positionTicks, frame.outputLatencyFrames, s.bpm, s.sampleRate);
-        playhead = Number((ticks / TICKS_PER_STEP) % BigInt(s.layout.steps));
-      }
-      if (!dirty.current && playhead === shown) return;
+      if (!s || !r || !p) return false;
       const o = override.current;
       const shownCells = o
         ? s.cells.map((row, i) => {
@@ -279,12 +272,18 @@ export function StepGrid({
           })
         : s.cells;
       r.draw(buildInstances(s.layout, shownCells, s.inks, s.focus, playhead, s.roll), s.layout, p);
-      dirty.current = false;
-      shown = playhead;
+      return true;
     };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [latest]);
+    const scheduler = createGridWake(readPlayhead, draw);
+    wake.current = scheduler;
+    const unsubscribe = subscribePlaybackStart(scheduler.startPlayback);
+    scheduler.markDirty();
+    return () => {
+      unsubscribe();
+      wake.current = null;
+      scheduler.cancel();
+    };
+  }, [latest, subscribePlaybackStart]);
 
   const valueAt = (cell: Cell): number | null => cells[cell.row]?.[cell.step] ?? null;
   const channelAt = (cell: Cell) => channels[cell.row];
@@ -321,6 +320,7 @@ export function StepGrid({
     // A roll channel's preview opens the piano roll on release; it never edits a step.
     const value = channelAt(cell)?.roll ? null : valueAt(cell);
     press.current = { origin: stamp(), cell, y: e.clientY, start: value ?? 0, lit: value !== null, moved: false };
+    markDirty();
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
@@ -340,13 +340,14 @@ export function StepGrid({
     p.moved = true;
     settled.current = false;
     override.current = { ...p.cell, velocity: velocityFromDrag(p.start, dy) };
-    dirty.current = true;
+    markDirty();
   };
 
   const onPointerUp = (e: PointerEvent<HTMLCanvasElement>) => {
     const p = press.current;
     press.current = null;
     if (!p || e.button !== 0) return;
+    markDirty();
     const ch = channelAt(p.cell);
     if (!ch) return;
     if (ch.roll) {
@@ -364,7 +365,7 @@ export function StepGrid({
         if (!applied || scene.current?.cells[row]?.[step] === velocity) {
           // Refused (the view is unchanged), or the new view is already in the scene.
           override.current = null;
-          dirty.current = true;
+          markDirty();
         } else {
           settled.current = true;
         }
@@ -375,17 +376,17 @@ export function StepGrid({
   };
 
   useEffect(() => registerGestureCancellation(() => {
-    press.current = null; override.current = null; dirty.current = true;
-  }), []);
+    press.current = null; override.current = null; markDirty();
+  }), [markDirty]);
 
   useEffect(() => {
-    press.current = null; override.current = null; dirty.current = true;
-  }, [pattern.id, projectView?.generation]);
+    press.current = null; override.current = null; markDirty();
+  }, [pattern.id, projectView?.generation, markDirty]);
 
   const onPointerCancel = () => {
     press.current = null;
     override.current = null;
-    dirty.current = true;
+    markDirty();
   };
 
   const onContextMenu = (e: MouseEvent<HTMLCanvasElement>) => {

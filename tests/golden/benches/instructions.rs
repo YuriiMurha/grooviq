@@ -27,7 +27,10 @@ mod counts {
     use grooviq_dsp::sampler::{PARAM_IDS, SampleBuf, Sampler, VOICES};
     use grooviq_dsp::synth::{Synth, preset};
     use grooviq_dsp::{Device, NoteEvent};
-    use grooviq_engine::{AudioProcessor, Controller, EngineConfig, engine_with};
+    use grooviq_engine::{
+        AudioProcessor, ChannelId, ChannelMix, ChannelSetup, Command, Controller, EngineConfig,
+        EngineState, NoteId, engine_with,
+    };
     use grooviq_golden::SAMPLE_RATE;
     use grooviq_golden::perf::perf_scenes;
     use gungraun::{library_benchmark, library_benchmark_group};
@@ -173,10 +176,42 @@ mod counts {
         (controller, processor, vec![0.0; BLOCK * 2])
     }
 
+    fn synth_scene(with_chord: bool) -> (Controller, AudioProcessor, Vec<f32>) {
+        let channels = (1..=16)
+            .map(|id| ChannelSetup::synth(ChannelId(id), Vec::new(), ChannelMix::default()))
+            .collect();
+        let state = EngineState {
+            channels,
+            ..EngineState::default()
+        };
+        let (mut controller, mut processor) = engine_with(EngineConfig { sample_rate: SR }, state);
+        if with_chord {
+            for key in [48, 52, 55, 60] {
+                controller
+                    .send(Command::ChannelNote {
+                        channel: ChannelId(1),
+                        key,
+                        velocity: 0.8,
+                        on: true,
+                        id: NoteId::live(),
+                    })
+                    .expect("the chord fits the command queue");
+            }
+        }
+        let mut buf = vec![0.0; BLOCK * 2];
+        for _ in 0..SETTLE_BLOCKS {
+            processor.process(&mut buf, 2);
+        }
+        assert_eq!(buf.iter().any(|&sample| sample != 0.0), with_chord);
+        (controller, processor, buf)
+    }
+
     // One second of the scene, in 64-frame `process` calls.
     #[library_benchmark]
     #[bench::drums_4ch(scene("drums_4ch"))]
     #[bench::beat_16ch(scene("beat_16ch"))]
+    #[bench::synth_16ch_idle(synth_scene(false))]
+    #[bench::synth_16ch_chord(synth_scene(true))]
     fn scene_second(
         engine: (Controller, AudioProcessor, Vec<f32>),
     ) -> (Controller, AudioProcessor, Vec<f32>) {

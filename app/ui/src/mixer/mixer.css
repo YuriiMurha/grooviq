@@ -175,8 +175,8 @@
 }
 
 .mx-tool[aria-pressed="true"] {
-  background: color-mix(in srgb, var(--ink-3) 22%, var(--raised));
-  border-color: var(--ink-3);
+  background: color-mix(in srgb, var(--mute) 22%, var(--raised));
+  border-color: var(--mute);
   color: var(--text);
 }
 
@@ -568,7 +568,7 @@
 .mx-notice {
   min-height: 18px;
   margin: 12px 0 0;
-  color: var(--ink-3b);
+  color: var(--error);
   font-size: 12px;
   font-weight: 600;
 }

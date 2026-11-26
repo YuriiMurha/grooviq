@@ -1635,6 +1635,31 @@ impl Synth {
         }
     }
 
+    /// Whether every voice, including release tails and fade slots, has stopped.
+    pub fn is_silent(&self) -> bool {
+        self.voices.iter().all(|v| !v.active)
+    }
+
+    /// Advances an event-free span of `frames` without writing output buffers.
+    /// Call only when [`Self::is_silent`] is true.
+    pub fn advance_silent(&mut self, mut frames: usize) {
+        debug_assert!(self.is_silent());
+        self.fresh = false;
+        while frames > 0 {
+            let len = frames.min(MAX_BLOCK);
+            self.advance_idle(len);
+            // The skipped post pass would write zero to the scope for each silent frame.
+            let end = self.scope_pos + len;
+            self.scope[self.scope_pos..end.min(SCOPE_LEN)].fill(0.0);
+            let wrapped = end.saturating_sub(SCOPE_LEN);
+            self.scope[..wrapped].fill(0.0);
+            self.scope_pos = end % SCOPE_LEN;
+            self.level_l.update(0.0, len, self.cx.sr);
+            self.level_r.update(0.0, len, self.cx.sr);
+            frames -= len;
+        }
+    }
+
     fn render(&mut self, start: usize, end: usize, l: &mut [f32], r: &mut [f32]) {
         let Synth {
             cx,

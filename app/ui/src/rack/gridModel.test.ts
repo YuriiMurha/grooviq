@@ -116,31 +116,58 @@ describe("buildInstances", () => {
 
   it("the_largest_grid_reads_each_cell_once", () => {
     const layout: GridLayout = { rows: 256, steps: 256, cell: 28, gap: 6, dpr: 2 };
-    const cells = Array.from({ length: 256 }, (_, r) =>
-      Array.from({ length: 256 }, (_, s) => ((r + s) % 3 === 0 ? 0.8 : null)),
+    const cells = Array.from({ length: layout.rows }, (_, row) =>
+      Array.from({ length: layout.steps }, (_, step) => ((row + step) % 3 === 0 ? 0.8 : null)),
     );
-    const inks = Array.from({ length: 256 }, (_, r) => r % 6);
+    const inks = Array.from({ length: layout.rows }, (_, row) => row % 6);
+    const readsByRow = cells.map(() => new Uint32Array(layout.steps));
     let reads = 0;
-    const observed = cells.map((row) => new Proxy(row, {
+    const observed = cells.map((row, rowIndex) => new Proxy(row, {
       get(target, key, receiver) {
-        if (typeof key === "string" && /^\d+$/.test(key)) reads++;
+        if (typeof key === "string" && /^\d+$/.test(key)) {
+          reads++;
+          const step = Number(key);
+          if (step < layout.steps && String(step) === key) readsByRow[rowIndex][step]++;
+        }
         return Reflect.get(target, key, receiver);
       },
     }));
     const data = buildInstances(layout, observed, inks, { row: 3, step: 3 }, 7);
-    expect(data.length).toBe(256 * 256 * STRIDE);
-    expect(reads).toBe(256 * 256);
-    for (let r = 0; r < 256; r++) {
-      for (let step = 0; step < 256; step++) {
-        expect(record(data, r * 256 + step)).toEqual({
-          x: step * 34, y: r * 34, w: 28, h: 28, ink: r % 6,
-          velocity: (r + step) % 3 === 0 ? Math.fround(0.8) : -1,
+    const mismatches: string[] = [];
+    const cellCount = layout.rows * layout.steps;
+    const expectedLength = cellCount * STRIDE;
+    if (data.length !== expectedLength) {
+      mismatches.push(`buffer length expected ${expectedLength}, received ${data.length}`);
+    }
+    if (reads !== cellCount) {
+      mismatches.push(`total reads expected ${cellCount}, received ${reads}`);
+    }
+
+    const fields = ["x", "y", "w", "h", "ink", "velocity", "flags"] as const;
+    // Cap the failure output while still checking every cell.
+    const mismatchLimit = 8;
+    for (let row = 0; row < layout.rows; row++) {
+      for (let step = 0; step < layout.steps; step++) {
+        const cellReads = readsByRow[row][step];
+        if (cellReads !== 1 && mismatches.length < mismatchLimit) {
+          mismatches.push(`row ${row}, step ${step}, reads expected 1, received ${cellReads}`);
+        }
+        const actual = record(data, row * layout.steps + step);
+        const expected = {
+          x: step * 34, y: row * 34, w: 28, h: 28, ink: row % 6,
+          velocity: (row + step) % 3 === 0 ? Math.fround(0.8) : -1,
           flags: (Math.floor(step / 4) % 2 === 1 ? FLAG_BEAT_B : 0)
-            | (r === 3 && step === 3 ? FLAG_FOCUS : 0)
+            | (row === 3 && step === 3 ? FLAG_FOCUS : 0)
             | (step === 7 ? FLAG_PLAYHEAD : 0),
-        });
+        };
+        for (const field of fields) {
+          if (!Object.is(actual[field], expected[field]) && mismatches.length < mismatchLimit) {
+            mismatches.push(`row ${row}, step ${step}, ${field} expected ${expected[field]}, received ${actual[field]}`);
+          }
+        }
       }
     }
+    expect(mismatches).toEqual([]);
   });
 });
 

@@ -1,13 +1,13 @@
 import { expect, test } from "vitest";
-import { readThemePreference, resolveThemeId } from "./preference";
+import { readThemePreference, resolveThemeId, themes } from "./preference";
 
-test.each([null, undefined, "", "taste", "riso.css", " RISO ", '{"theme":"riso"}', 1, {}])(
+test.each([null, undefined, "", "future-theme", "riso.css", " RISO ", '{"theme":"riso"}', 1, {}])(
   "unregistered preference %j falls back without coercing it",
   (value) => expect(resolveThemeId(value)).toBe("riso"),
 );
 
-test("the available Riso preference is retained", () => {
-  expect(resolveThemeId("riso")).toBe("riso");
+test.each(themes)("the available $name preference is retained", ({ id }) => {
+  expect(readThemePreference(() => id)).toBe(id);
 });
 
 test("unavailable storage cannot stop appearance bootstrap", () => {
