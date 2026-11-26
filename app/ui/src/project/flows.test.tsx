@@ -64,6 +64,9 @@ const VIEW: ProjectView = {
   recording: false,
   canUndo: false,
   canRedo: false,
+  projectCanUndo: false,
+  projectCanRedo: false,
+  patternRevision: 0,
 };
 const CLEAN: ProjectView = { ...VIEW, dirty: false };
 const UNTITLED: ProjectView = { ...VIEW, name: "Untitled", path: null };

@@ -89,7 +89,10 @@ pub(super) fn commands<'a>(
             return Err(format!("duplicate Tauri command name {name}"));
         }
         let signature = if reason.is_none() {
-            Some(signature(item, items, snake_case).map_err(|error| format!("{path}: {error}"))?)
+            Some(
+                signature(&path, item, items, snake_case)
+                    .map_err(|error| format!("{path}: {error}"))?,
+            )
         } else {
             None
         };
@@ -227,10 +230,24 @@ fn imports(items: &[Item]) -> BTreeMap<String, String> {
         };
         found.insert(local.to_string(), format!("self::{local}"));
     }
+    for item in items {
+        if let Item::Type(alias) = item
+            && alias.generics.params.is_empty()
+            && let Ok(target) = ty(&alias.ty, &found)
+            && target.params.is_empty()
+        {
+            found.insert(alias.ident.to_string(), target.name);
+        }
+    }
     found
 }
 
-fn signature(item: &ItemFn, items: &[Item], snake_case: bool) -> Result<Signature, String> {
+fn signature(
+    path: &str,
+    item: &ItemFn,
+    items: &[Item],
+    snake_case: bool,
+) -> Result<Signature, String> {
     let imports = imports(items);
     let mut args = Vec::new();
     let mut names = BTreeSet::new();
@@ -261,10 +278,20 @@ fn signature(item: &ItemFn, items: &[Item], snake_case: bool) -> Result<Signatur
             return Err(format!("duplicate IPC argument {key}"));
         }
         let optional = if name == "Option" { "?" } else { "" };
-        args.push(format!(
-            "{key}{optional}: {}",
-            ts_type(&name, &params, &imports)?
-        ));
+        let (typescript, range) = match (name.as_str(), params.as_slice(), key.as_str(), path) {
+            // JSON range: 0 through 2^53 - 1 replacements in one session, as in PatternStamp.
+            (
+                "u64",
+                [],
+                "generation",
+                "project_cmds::project_edit"
+                | "project_cmds::channel_add"
+                | "project_cmds::channel_set_sample"
+                | "notes_cmds::channel_add_synth",
+            ) => ("number".into(), "/** JSON range: 0 through 2^53 - 1. */ "),
+            _ => (ts_type(&name, &params, &imports)?, ""),
+        };
+        args.push(format!("{range}{key}{optional}: {typescript}"));
     }
     let reply = match &item.sig.output {
         ReturnType::Default => "null".into(),
@@ -359,10 +386,23 @@ fn ts_type(
         ("u8" | "u16" | "u32" | "i8" | "i16" | "i32" | "f32" | "f64", []) => Ok("number".into()),
         ("Option", [value]) => Ok(format!("{} | null", render_type(value, imports)?)),
         ("Vec", [value]) => Ok(format!("Array<{}>", render_type(value, imports)?)),
+        ("grooviq_project::session::Edit", []) => Ok(dto::<grooviq_project::session::Edit>()),
+        ("grooviq_project::session::PatternStamp", []) => {
+            Ok(dto::<grooviq_project::session::PatternStamp>())
+        }
+        ("grooviq_project::session::ProjectView", []) => {
+            Ok(dto::<grooviq_project::session::ProjectView>())
+        }
+        ("grooviq_project::session::OpenReport", []) => {
+            Ok(dto::<grooviq_project::session::OpenReport>())
+        }
         ("grooviq_project::session::sampler_trim::TrimView", []) => {
-            use grooviq_project::session::sampler_trim::TrimView;
-            Ok(TrimView::name(&ts_rs::Config::default()))
+            Ok(dto::<grooviq_project::session::sampler_trim::TrimView>())
         }
         _ => Err(format!("unknown IPC type {name}")),
     }
+}
+
+fn dto<T: TS>() -> String {
+    T::name(&ts_rs::Config::default())
 }

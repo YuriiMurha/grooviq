@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { ProjectView } from "./project";
 import { beginProjectTransition, settleProjectEdits } from "../project/pending";
 
-export type PatternStamp = { generation: number; patternId: number; revision: number };
+export type { PatternStamp } from "./generated/contract";
 
 export interface PatternsView {
   generation: number;

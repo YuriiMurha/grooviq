@@ -57,6 +57,7 @@ const INIT_PRESET: &str = "Init";
 
 /// One change the UI asks for. JSON: `{"kind": "toggleStep", "channel": 1, "step": 4}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-contract", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Edit {
     RemoveChannel {
@@ -147,6 +148,7 @@ impl Edit {
 
 /// What the UI draws.
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(feature = "ipc-contract", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectView {
     /// The file's name without its extension, or the project's own name while untitled.
@@ -159,6 +161,11 @@ pub struct ProjectView {
     pub channels: Vec<ChannelView>,
     pub pattern: PatternView,
     /// When the last autosave was written, in unix seconds.
+    #[cfg_attr(
+        feature = "ipc-contract",
+        doc = " JSON range: 0 through 2^53 - 1 Unix seconds, or null.",
+        ts(type = "number | null")
+    )]
     pub autosaved_at: Option<u64>,
     pub key: Option<ProjectKey>,
     /// The current pattern's revision: bumped by every note change, and the number
@@ -175,12 +182,23 @@ pub struct ProjectView {
     pub project_can_redo: bool,
     /// Counts projects ([`Session::generation`]): requests that edit the project carry it, so
     /// one made for a project that was replaced since is refused.
+    #[cfg_attr(
+        feature = "ipc-contract",
+        doc = " JSON range: 0 through 2^53 - 1 project replacements in one session.",
+        ts(type = "number")
+    )]
     pub generation: u64,
+    #[cfg_attr(
+        feature = "ipc-contract",
+        doc = " JSON range: 0 through 2^53 - 1 pattern revisions in one session.",
+        ts(type = "number")
+    )]
     pub pattern_revision: u64,
 }
 
 /// A channel's instrument, as the UI names it: `"sampler"` or `"synth"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ipc-contract", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ChannelKind {
     Sampler,
@@ -189,6 +207,7 @@ pub enum ChannelKind {
 
 /// Where the display name came from, independently of playback decoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ipc-contract", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub enum SampleNameBasis {
     AvailableFile,
@@ -197,6 +216,7 @@ pub enum SampleNameBasis {
 
 /// One channel of the rack.
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(feature = "ipc-contract", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelView {
     pub id: u32,
@@ -212,6 +232,11 @@ pub struct ChannelView {
     pub missing: bool,
     /// The loaded sample's length in frames (`None` without one): the sampler editor keeps a
     /// region at least one frame long.
+    #[cfg_attr(
+        feature = "ipc-contract",
+        doc = " JSON range: 0 through 600 * (2^32 - 1) decoded frames, or null.",
+        ts(type = "number | null")
+    )]
     pub sample_frames: Option<u64>,
     pub volume: f32,
     pub pan: f32,
@@ -233,6 +258,7 @@ pub struct ChannelView {
 
 /// The current pattern as a grid.
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(feature = "ipc-contract", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PatternView {
     pub id: u32,
@@ -270,6 +296,7 @@ pub struct RecordingStopped {
 
 /// What [`Session::open`] gives back.
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(feature = "ipc-contract", derive(ts_rs::TS))]
 pub struct OpenReport {
     pub view: ProjectView,
     /// Things the person should know: fixes, missing samples, samples that did not decode.
@@ -738,8 +765,14 @@ pub struct PatternSettlement {
 
 /// A gesture's origin, captured before it can be queued or held.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "ipc-contract", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PatternStamp {
+    #[cfg_attr(
+        feature = "ipc-contract",
+        doc = " JSON range: 0 through 2^53 - 1 project replacements in one session.",
+        ts(type = "number")
+    )]
     pub generation: u64,
     pub pattern_id: u32,
     pub revision: u32,

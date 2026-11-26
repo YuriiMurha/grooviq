@@ -87,13 +87,13 @@ fn validate_fields<'a>(
             let ts_type = number_type(&field.ty, aliases, &mut BTreeSet::new()).ok_or_else(|| {
                 format!("{owner}.{label}: unsupported container or ambiguous alias for wide IPC integer")
             })?;
-            if override_type.as_deref() != Some(ts_type) || !has_range(&field.attrs) {
+            if override_type.as_deref() != Some(ts_type) || !has_range(&field.attrs)? {
                 return Err(format!(
                     "{owner}.{label}: wide IPC integer requires ts(type = \"{ts_type}\") and a JSON range: doc comment"
                 ));
             }
         } else if matches!(override_type.as_deref(), Some("number" | "number | null"))
-            && !has_range(&field.attrs)
+            && !has_range(&field.attrs)?
         {
             return Err(format!(
                 "{owner}.{label}: IPC number override requires a JSON range: doc comment"
@@ -215,12 +215,17 @@ fn type_override(attrs: &[Attribute]) -> Result<Option<String>, String> {
     Ok(found)
 }
 
-fn has_range(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        matches!(&attr.meta, Meta::NameValue(pair)
+fn has_range(attrs: &[Attribute]) -> Result<bool, String> {
+    let gated = feature_attributes(attrs)?;
+    Ok(attrs
+        .iter()
+        .map(|attr| &attr.meta)
+        .chain(&gated)
+        .any(|meta| {
+            matches!(meta, Meta::NameValue(pair)
         if pair.path.is_ident("doc") && string(&pair.value).is_some_and(|doc|
             doc.trim().strip_prefix("JSON range:").is_some_and(|range| !range.trim().is_empty())))
-    })
+        }))
 }
 
 fn string(value: &Expr) -> Option<String> {
