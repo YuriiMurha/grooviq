@@ -178,9 +178,21 @@ fn read(path: &Path) -> Result<String, String> {
 }
 
 fn write_contract(directory: &Path, contract: &str) -> Result<(), String> {
-    fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     let path = directory.join(FILE);
     fs::write(&path, contract).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn update_contract(directory: &Path, contract: &str) -> Result<(), String> {
+    fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
+    let existing = inventory(directory)?;
+    write_contract(directory, contract)?;
+    for file in existing {
+        if file != Path::new(FILE) {
+            let path = directory.join(file);
+            fs::remove_file(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn inventory(directory: &Path) -> Result<BTreeSet<PathBuf>, String> {
@@ -232,7 +244,7 @@ fn paths() -> (PathBuf, PathBuf) {
 
 pub fn update() -> Result<(), String> {
     let (source, committed) = paths();
-    write_contract(&committed, &render(&source)?)
+    update_contract(&committed, &render(&source)?)
 }
 
 pub fn check() -> Result<(), String> {

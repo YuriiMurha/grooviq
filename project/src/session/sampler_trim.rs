@@ -32,6 +32,11 @@ pub struct TrimView {
     pub stamp: String,
     pub start: f32,
     pub end: f32,
+    #[cfg_attr(
+        feature = "ipc-contract",
+        doc = " JSON range: 0 through 600 * (2^32 - 1) decoded frames, or null.",
+        ts(type = "number | null")
+    )]
     pub frames: Option<usize>,
     pub undo: Option<String>,
 }

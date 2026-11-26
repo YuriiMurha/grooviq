@@ -133,7 +133,11 @@ beats: number,
  */
 unit: number, };
 
-export type TrimView = { stamp: string, start: number, end: number, frames: number | null, undo: string | null, };
+export type TrimView = { stamp: string, start: number, end: number,
+/**
+ * JSON range: 0 through 600 * (2^32 - 1) decoded frames, or null.
+ */
+frames: number | null, undo: string | null, };
 
 export type CommandMap = {
   channel_add: { args: { path: string; /** JSON range: 0 through 2^53 - 1. */ generation: number }; reply: ProjectView };

@@ -112,6 +112,24 @@ fn inventory_rejects_unclassified_and_empty_registries() {
 }
 
 #[test]
+fn inventory_rejects_classifications_absent_from_the_registry() {
+    let error = commands(
+        REGISTRY,
+        &["sample::read", "sample::gone"],
+        &[],
+        &mut Declarations::default(),
+        |_| Ok(COMMAND.to_owned()),
+    )
+    .err()
+    .expect("sample::gone is no longer registered");
+    assert!(
+        error.contains("classified commands absent from generate_handler!")
+            && error.contains("sample::gone"),
+        "{error}"
+    );
+}
+
+#[test]
 fn comparison_accepts_crlf_and_rejects_shape_and_file_inventory_changes() {
     let expected = tempfile::tempdir().unwrap();
     let actual = tempfile::tempdir().unwrap();
@@ -148,4 +166,23 @@ fn comparison_accepts_crlf_and_rejects_shape_and_file_inventory_changes() {
             .unwrap_err()
             .contains("empty")
     );
+}
+
+#[test]
+fn update_replaces_stale_contents_and_removes_obsolete_files() {
+    let expected = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let source = "export type Reply = { frames: number };\n";
+    write_contract(expected.path(), source).unwrap();
+    fs::write(checkout.path().join(FILE), "stale").unwrap();
+    fs::write(checkout.path().join("obsolete.ts"), source).unwrap();
+    assert!(
+        compare(expected.path(), checkout.path())
+            .unwrap_err()
+            .contains("inventory differs")
+    );
+
+    update_contract(checkout.path(), source).unwrap();
+
+    compare(expected.path(), checkout.path()).unwrap();
 }

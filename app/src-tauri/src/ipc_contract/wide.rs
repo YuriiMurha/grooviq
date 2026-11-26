@@ -116,10 +116,14 @@ fn is_wide(part: &syn::PathSegment) -> bool {
             | "i64"
             | "u128"
             | "i128"
+            | "usize"
+            | "isize"
             | "NonZeroU64"
             | "NonZeroI64"
             | "NonZeroU128"
             | "NonZeroI128"
+            | "NonZeroUsize"
+            | "NonZeroIsize"
     )
 }
 
@@ -296,6 +300,20 @@ mod tests {
         ] {
             let error = validate(&mutation).unwrap_err();
             assert!(error.contains("Stamp.count: wide IPC integer"), "{error}");
+        }
+    }
+
+    #[test]
+    fn pointer_width_integer_mutations_require_number_annotations() {
+        for ty in ["usize", "isize", "NonZeroUsize", "NonZeroIsize"] {
+            let source = WITH_RANGE.replace("Option<u64>", &format!("Option<{ty}>"));
+            validate(&source).unwrap();
+            let mutation = source.replace("ts(type = \"number | null\")", "ts(rename = \"count\")");
+            let error = validate(&mutation).unwrap_err();
+            assert!(
+                error.contains("Stamp.count: wide IPC integer"),
+                "{ty}: {error}"
+            );
         }
     }
 }
