@@ -82,7 +82,10 @@ mod counts {
             x ^= x << 5;
             (x as f32 / u32::MAX as f32) - 0.5
         };
-        let len = 2 * SAMPLE_RATE as usize;
+        // Leave an extra block past the measurement so fixed-step voices stay in the interior.
+        let output_frames = (SETTLE_BLOCKS + COUNTED_BLOCKS + 1) * BLOCK;
+        let source_frames = output_frames as f32 * fixed_step.unwrap_or(1.0);
+        let len = (2 * SAMPLE_RATE as usize).max(source_frames.ceil() as usize);
         let l: Vec<f32> = (0..len).map(|_| next()).collect();
         let r: Vec<f32> = (0..len).map(|_| next()).collect();
         let mut s = Sampler::new(SR);
@@ -114,6 +117,7 @@ mod counts {
     #[bench::voices_2(sampler(2, None))]
     #[bench::voices_16(sampler(16, None))]
     #[bench::step_4_voices_16(sampler(16, Some(4.0)))]
+    #[bench::step_16_voices_16(sampler(16, Some(16.0)))]
     #[bench::filter_static_16(scenario(0.0, false))]
     #[bench::filter_envelope_16(scenario(0.7, false))]
     #[bench::filter_velocity_16(scenario(0.7, true))]
