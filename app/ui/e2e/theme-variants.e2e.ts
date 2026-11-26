@@ -4,6 +4,7 @@ import { parseColor } from "../src/rack/palette";
 import { contrastRatio, oklabDeltaE } from "../src/theme/contrast";
 import { THEME_COLOR_TOKENS, themeTokenProblems } from "../src/theme/contract";
 import { themes, THEME_PREFERENCE_KEY } from "../src/theme/preference";
+import { roundedVelocityFills } from "../src/theme/velocityFills";
 
 const drums = project(["Kick", "Snare", "Hat"], { 1: [0, 4, 8, 12], 2: [4, 12], 3: [2, 6, 10, 14] });
 const beat = twoChannels([
@@ -22,7 +23,6 @@ type Renderer = "webgl2" | "canvas2d";
 type RenderProbe = Window & { themeTestRenderers?: WeakMap<HTMLCanvasElement, Renderer> };
 
 const quietNoteStrength = 0.45;
-const noteStrengths = Array.from({ length: 551 }, (_, index) => quietNoteStrength + index / 1000);
 
 function nearestVelocityShadeDistance(primary: number[], slide: number[]) {
   // Both renderers scale the primary RGB from 45% to 100%. Project onto that segment.
@@ -130,9 +130,8 @@ for (const { id } of themes) {
           if (ink.endsWith("b")) {
             expect(oklabDeltaE(outline, fill), `${state} versus ${ink} in OKLab`).toBeGreaterThanOrEqual(0.10);
           } else {
-            const [r, g, b] = fill;
-            const nearest = Math.min(...noteStrengths.map((strength) =>
-              oklabDeltaE(outline, [r * strength, g * strength, b * strength])));
+            const nearest = Math.min(...roundedVelocityFills(fill, quietNoteStrength, renderer).map(([r, g, b]) =>
+              oklabDeltaE(outline, [r / 255, g / 255, b / 255])));
             expect(nearest, `${state} versus ${ink} velocity shades in OKLab`).toBeGreaterThanOrEqual(0.10);
           }
         }
