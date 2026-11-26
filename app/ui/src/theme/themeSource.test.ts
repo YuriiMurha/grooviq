@@ -56,7 +56,12 @@ test("rejects imports before the theme rule", () => {
 
 test("rejects an important value that would bypass a later override", () => {
   const css = `${testSelector} { --ink: oklch(0.7 0.1 20) !important; --ink: #123; }`;
-  expect(() => parseThemeDeclarations(css, testSelector)).toThrow("--ink must not use !important");
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported CSS "!" while reading ${testSelector}`);
+});
+
+test("rejects a bare ! in a value that would overwrite a valid declaration", () => {
+  const css = `${testSelector} { --ink-1:#123; --ink-1:#456 ! x; }`;
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported CSS "!" while reading ${testSelector}`);
 });
 
 test("rejects an escaped custom-property name that would override a plain name", () => {
@@ -88,7 +93,7 @@ test.each([
 
 test("rejects an escaped important annotation that would bypass a later override", () => {
   const css = `${testSelector} { --ink-1: #456 !\\important; --ink-1: #123; }`;
-  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported CSS escape while reading ${testSelector}`);
+  expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unsupported CSS "!" while reading ${testSelector}`);
 });
 
 test("rejects an unsupported declaration", () => {
@@ -101,9 +106,14 @@ test("rejects an unterminated comment", () => {
   expect(() => parseThemeDeclarations(css, testSelector)).toThrow(`Unterminated CSS comment while reading ${testSelector}`);
 });
 
-test("keeps escaped quotes and url() text inside strings", () => {
-  const css = `${testSelector} { --font: "a\\"url(b)"; --ink-1: #123; }`;
-  expect(parseThemeDeclarations(css, testSelector).get("--font")).toBe('"a\\"url(b)"');
+test("keeps escaped quotes, url() text and exclamation marks inside strings", () => {
+  const css = `${testSelector} { --font: "a\\"url(b)!"; --ink-1: #123; }`;
+  expect(parseThemeDeclarations(css, testSelector).get("--font")).toBe('"a\\"url(b)!"');
+});
+
+test("ignores backslashes and exclamation marks inside comments", () => {
+  const css = `${testSelector} { /* a\\ b */ /* ! */ --ink-1:#123; }`;
+  expect(parseThemeDeclarations(css, testSelector).get("--ink-1")).toBe("#123");
 });
 
 test("rejects a theme selector inside a conditional rule", () => {

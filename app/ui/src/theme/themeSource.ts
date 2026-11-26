@@ -7,9 +7,10 @@ export function parseThemeDeclarations(css: string, selector: string): Map<strin
   let inThemeRule = false;
   let seenThemeRule = false;
   // Consume complete comments and strings before looking for unsupported tokens or delimiters.
-  const syntax = /(\/\*.*?\*\/)|"(?:\\(?:\r\n|.)|[^"\\\n\r\f])*"|'(?:\\(?:\r\n|.)|[^'\\\n\r\f])*'|((?<![\w\u0080-\uFFFF-])url\(|["'\\]|\/\*)|([{};()[\]])/gis;
+  const syntax = /(\/\*.*?\*\/)|"(?:\\(?:\r\n|.)|[^"\\\n\r\f])*"|'(?:\\(?:\r\n|.)|[^'\\\n\r\f])*'|((?<![\w\u0080-\uFFFF-])url\(|[!"'\\]|\/\*)|([{};()[\]])/gis;
   for (const match of css.matchAll(syntax)) {
     const [token, comment, unsupported, delimiter] = match;
+    if (unsupported === "!") throw new Error(`Unsupported CSS "!" while reading ${selector}`);
     if (unsupported === "\\") throw new Error(`Unsupported CSS escape while reading ${selector}`);
     if (unsupported === '"' || unsupported === "'") throw new Error(`Unterminated CSS string while reading ${selector}`);
     if (unsupported === "/*") throw new Error(`Unterminated CSS comment while reading ${selector}`);
@@ -53,7 +54,6 @@ export function parseThemeDeclarations(css: string, selector: string): Map<strin
     }
     if (declaration) {
       const [, name, value] = declaration;
-      if (/!\s*important$/i.test(value)) throw new Error(`${selector} ${name} must not use !important`);
       declarations.set(name, value);
     }
     if (delimiter === "}") inThemeRule = false;
