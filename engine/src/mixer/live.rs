@@ -4,15 +4,17 @@
 //! audio thread only swaps boxes and devices at a block boundary.
 //!
 //! The kernel prepares compensation from the devices' actual latency after preset setup.
-//! Declared bounds still govern admission. No pan law, mute or solo beyond the admitted
-//! track coefficients.
+//! Declared bounds still govern admission. A controlled setup prepares its audible and
+//! detector targets as part of the same transaction.
 
 use super::compile::{ROUTING_BYTES_PER_ITEM, admit};
+use super::controls::{GATE_TABLE_BYTES, ROLE_BYTES};
 use super::memory::{MixerMemory, Reservation};
-use super::runtime::TRACK_TABLE_BYTES;
+use super::runtime::{BYPASS_TABLE_BYTES, PATH_TABLE_BYTES, STEREO_FRAME_BYTES, TRACK_TABLE_BYTES};
 use super::{
-    Budget, InsertId, InsertIdentity, Mixer, MixerTrackId, PrepareConfig, PreparedInsert,
-    PreparedMixer, Source, SourceBuffers, SourceId, TrackGain, compile,
+    Budget, InsertBypass, InsertId, InsertIdentity, Mixer, MixerControls, MixerTrackId,
+    PrepareConfig, PreparedInsert, PreparedMixer, Source, SourceBuffers, SourceId, TrackGain,
+    compile,
 };
 use crate::BLOCK;
 use crate::controller::ControlError;
@@ -86,6 +88,11 @@ pub enum MixSetup {
     /// Keyed sources into a compiled mixer. Sources the mixer does not name are still
     /// rendered (their voices and time advance) but are not heard.
     Routed(RoutedMix),
+    /// Routed audio with atomic mixer control targets.
+    Controlled {
+        mix: RoutedMix,
+        controls: MixerControls,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -185,9 +192,16 @@ impl RoutedMix {
 }
 
 impl MixSetup {
+    pub(crate) fn routed(&self) -> Option<&RoutedMix> {
+        match self {
+            Self::LegacyDirect => None,
+            Self::Routed(mix) | Self::Controlled { mix, .. } => Some(mix),
+        }
+    }
+
     /// Checks this mix against the actual engine rate during control-side preparation.
     pub fn check_sample_rate(&self, rate: f32) -> Result<(), UnsupportedInsertRate> {
-        let Self::Routed(mix) = self else {
+        let Some(mix) = self.routed() else {
             return Ok(());
         };
         let mut inserts: Vec<_> = mix
@@ -224,15 +238,12 @@ impl MixSetup {
 
     /// Where the mix sends `source`, if it names it.
     pub(crate) fn destination(&self, source: SourceId) -> Option<MixerTrackId> {
-        match self {
-            Self::LegacyDirect => None,
-            Self::Routed(mix) => mix
-                .mixer
-                .sources
-                .iter()
-                .find(|s| s.id == source)
-                .map(|s| s.destination),
-        }
+        self.routed()?
+            .mixer
+            .sources
+            .iter()
+            .find(|s| s.id == source)
+            .map(|s| s.destination)
     }
 
     /// [`Self::validate`] plus the fade routes a graph built for `channels` adds (one per
@@ -243,7 +254,7 @@ impl MixSetup {
         &self,
         channels: impl IntoIterator<Item = crate::ChannelId>,
     ) -> Result<(), ControlError> {
-        if let Self::Routed(mix) = self {
+        if let Some(mix) = self.routed() {
             mix.normalized_bytes()?;
             mix.checked()?;
             let mut mixer = mix.mixer.clone();
@@ -255,7 +266,11 @@ impl MixSetup {
                     });
                 }
             }
-            compile(&mixer, budget()).map_err(|_| ControlError::Rejected)?;
+            let compiled = compile(&mixer, budget()).map_err(|_| ControlError::Rejected)?;
+            if let Self::Controlled { controls, .. } = self {
+                PreparedMixer::validate_controls(&compiled, controls)
+                    .map_err(|_| ControlError::Rejected)?;
+            }
         }
         Ok(())
     }
@@ -286,7 +301,8 @@ impl MixSetup {
     }
 
     pub(crate) fn has_track(&self, track: MixerTrackId) -> bool {
-        matches!(self, Self::Routed(mix) if mix.mixer.tracks.iter().any(|t| t.id == track))
+        self.routed()
+            .is_some_and(|mix| mix.mixer.tracks.iter().any(|t| t.id == track))
     }
 }
 
@@ -332,14 +348,17 @@ pub(crate) fn prepare(
     aliases: impl Iterator<Item = (u64, MixerTrackId)> + Clone,
     memory: &MixerMemory,
 ) -> Result<Option<Box<LiveMix>>, ControlError> {
-    let MixSetup::Routed(mix) = setup else {
-        return Ok(None);
+    let empty = MixerControls::default();
+    let (mix, controls) = match setup {
+        MixSetup::LegacyDirect => return Ok(None),
+        MixSetup::Routed(mix) => (mix, &empty),
+        MixSetup::Controlled { mix, controls } => (mix, controls),
     };
     setup
         .check_sample_rate(rate)
         .map_err(|_| ControlError::Rejected)?;
     let (peak, device_bytes) = preparation_bound(mix, aliases.clone().count() as u64)?;
-    let mut charge = memory.reserve(peak)?;
+    let mut charge = memory.reserve(sum([peak, bypass_bound(&mix.mixer, &controls.bypass)?])?)?;
     let (devices, kinds) = mix.checked()?;
     let mut mixer = mix.mixer.clone();
     mixer
@@ -358,10 +377,11 @@ pub(crate) fn prepare(
             InsertIdentity { kind, seed: d.seed },
         ));
     }
-    let kernel = PreparedMixer::prepare_compensated(
+    let kernel = PreparedMixer::prepare_compensated_with_controls(
         compiled,
         bindings,
         &mix.gains,
+        controls,
         PrepareConfig {
             sample_rate: rate,
             max_frames: BLOCK,
@@ -388,6 +408,36 @@ pub(crate) fn prepare(
         sources,
         _charge: charge,
     })))
+}
+
+fn bypass_bound(mixer: &Mixer, targets: &[InsertBypass]) -> Result<u64, ControlError> {
+    if targets.is_empty() {
+        return Ok(0);
+    }
+    if targets
+        .windows(2)
+        .any(|pair| pair[0].insert >= pair[1].insert)
+    {
+        return Err(ControlError::Rejected);
+    }
+    let mut matched = 0;
+    let mut frames = 0;
+    for insert in mixer.tracks.iter().flat_map(|track| &track.inserts) {
+        if targets
+            .binary_search_by_key(&insert.id, |target| target.insert)
+            .is_ok()
+        {
+            matched += 1;
+            frames = sum([frames, u64::from(insert.latency_frames)])?;
+        }
+    }
+    if matched != targets.len() {
+        return Err(ControlError::Rejected);
+    }
+    sum([
+        product(sum([frames, BLOCK as u64])?, STEREO_FRAME_BYTES)?,
+        product(targets.len() as u64, BYPASS_TABLE_BYTES)?,
+    ])
 }
 
 // The compiler allowance covers topology copies, adjacency, sort scratch and the
@@ -424,6 +474,12 @@ fn preparation_bound(mix: &RoutedMix, aliases: u64) -> Result<(u64, u64), Contro
         pulls,
         2 * stereo_block,
         size_of::<LiveMix>() as u64,
+        product(topology.edges, GATE_TABLE_BYTES)?,
+        // Every live routed kernel can be followed by a controlled install.
+        product(
+            mix.mixer.tracks.len() as u64,
+            sum([ROLE_BYTES, PATH_TABLE_BYTES])?,
+        )?,
     ])?;
     Ok((peak, device_bytes))
 }
@@ -457,7 +513,7 @@ pub(crate) fn plan(
     new: &MixSetup,
     memory: &MixerMemory,
 ) -> Result<MixChanges, ControlError> {
-    let (MixSetup::Routed(old), MixSetup::Routed(new)) = (old, new) else {
+    let (Some(old), Some(new)) = (old.routed(), new.routed()) else {
         return Ok(MixChanges::default());
     };
     let inserts = new.devices.len();
@@ -504,7 +560,7 @@ pub(crate) fn plan(
 }
 
 impl LiveMix {
-    /// Takes compatible device, delay and fader histories from `old`, applying parameter
+    /// Takes compatible device, delay, gate and fader histories from `old`, applying parameter
     /// deltas only to transferred devices. Other inserts use their prepared parameter banks.
     /// Real-time safe.
     pub(crate) fn adopt(&mut self, old: &mut LiveMix, changes: &MixChanges) {
@@ -634,6 +690,208 @@ mod tests {
             assert_eq!(left, dry_left);
             assert_eq!(right, dry_right);
         }
+    }
+
+    #[test]
+    fn stale_controlled_install_leaves_the_master_gate_ramping() {
+        let memory = MixerMemory::default();
+        let mut graph = Graph::new(FADER_RATE, 0);
+        let mut reference = Graph::new(FADER_RATE, 0);
+        let install = |graph: &mut Graph, generation, base, revision, mute| {
+            let setup = MixSetup::Controlled {
+                mix: RoutedMix {
+                    mixer: Mixer {
+                        tracks: vec![Track {
+                            id: MASTER,
+                            output: None,
+                            inserts: vec![],
+                        }],
+                        sources: vec![Source {
+                            id: FADER_SOURCE,
+                            destination: MASTER,
+                        }],
+                        ..Mixer::default()
+                    },
+                    gains: vec![],
+                    devices: vec![],
+                },
+                controls: MixerControls {
+                    muted_tracks: if mute { vec![MASTER] } else { vec![] },
+                    ..MixerControls::default()
+                },
+            };
+            let mut update = MixInstall {
+                generation,
+                base,
+                revision,
+                changes: MixChanges::default(),
+                live: prepare(&setup, FADER_RATE, std::iter::empty(), &memory).unwrap(),
+                installed: false,
+            };
+            graph.install_mix(&mut update);
+            update.installed
+        };
+        let [mut left, mut right, mut expected_l, mut expected_r] = [[0.0; BLOCK]; 4];
+        for graph in [&mut graph, &mut reference] {
+            graph.set_initial_mix(Some(master_fader(&memory, 1.0)), 0);
+            graph.set_tone(true, 437.0, -12.0);
+            graph.render(&mut left, &mut right, &[]);
+            assert!(install(graph, 0, 0, 1, true));
+            graph.render(&mut left, &mut right, &[]);
+        }
+        assert!(!install(&mut graph, 0, 0, 2, false));
+        assert!(!install(&mut graph, 1, 1, 2, false));
+        for _ in 0..4 {
+            graph.render(&mut left, &mut right, &[]);
+            reference.render(&mut expected_l, &mut expected_r, &[]);
+            assert_eq!(left, expected_l);
+            assert_eq!(right, expected_r);
+        }
+        assert_eq!(graph.mix_revision(), 1);
+        assert_eq!(right, [0.0; BLOCK]);
+    }
+
+    #[test]
+    fn bypass_admission_and_latency_change_keep_retired_storage_until_reclaim() {
+        let id = InsertId(12);
+        let setup = |oversampling| {
+            MixSetup::Routed(RoutedMix {
+                mixer: Mixer {
+                    tracks: vec![Track {
+                        id: MASTER,
+                        output: None,
+                        inserts: vec![super::super::Insert {
+                            id,
+                            latency_frames: 64,
+                            memory_bytes: 0,
+                        }],
+                    }],
+                    sources: vec![Source {
+                        id: FADER_SOURCE,
+                        destination: MASTER,
+                    }],
+                    ..Mixer::default()
+                },
+                gains: vec![],
+                devices: vec![InsertDevice {
+                    insert: id,
+                    kind: "drive".into(),
+                    seed: 0,
+                    params: vec![1.0, 6.0, 0.0, 1.0, 0.0, oversampling],
+                }],
+            })
+        };
+        let before = setup(2.0);
+        let after = setup(1.0);
+        let MixSetup::Routed(mix) = &before else {
+            unreachable!()
+        };
+        let (base_peak, device_bytes) = preparation_bound(mix, 0).unwrap();
+        let extra_tables = BYPASS_TABLE_BYTES;
+        let extra_peak = (64 + BLOCK as u64) * 8 + extra_tables;
+        let mut memory = MixerMemory::default();
+        let bind = |setup: &MixSetup, bypassed, memory: &MixerMemory| {
+            let setup = MixSetup::Controlled {
+                mix: setup.routed().unwrap().clone(),
+                controls: MixerControls {
+                    bypass: vec![InsertBypass {
+                        insert: id,
+                        bypassed,
+                    }],
+                    ..MixerControls::default()
+                },
+            };
+            prepare(&setup, FADER_RATE, std::iter::empty(), memory)
+        };
+        memory.set_limit(base_peak + extra_peak - 1);
+        assert!(matches!(
+            bind(&before, false, &memory),
+            Err(ControlError::Rejected)
+        ));
+        let standard = prepare(&before, FADER_RATE, std::iter::empty(), &memory)
+            .unwrap()
+            .unwrap();
+        let standard_resources = standard.kernel.resources();
+        drop(standard);
+        memory.set_limit(base_peak + extra_peak);
+        let mut old = bind(&before, false, &memory).unwrap().unwrap();
+        let opted_resources = old.kernel.resources();
+        assert_eq!(
+            opted_resources.audio_bytes - standard_resources.audio_bytes,
+            (49 + BLOCK as u64) * 8
+        );
+        assert_eq!(
+            opted_resources.table_bytes - standard_resources.table_bytes,
+            extra_tables
+        );
+        assert_eq!(old.kernel.master_latency_frames(), Some(49));
+
+        let host = HostTransport {
+            domain: HostDomain::Pattern,
+            frame: 0,
+            frames: BLOCK as u32,
+            sample_rate: FADER_RATE,
+            bpm: 120.0,
+            playing: false,
+            anchor_frame: 0,
+            anchor_tick: 0.0,
+            shift: 0,
+            loop_start: 0,
+            loop_end: 0,
+            stream_generation: 0,
+            discontinuity: 0,
+            changed: false,
+        };
+        let mut impulse = [0.0; BLOCK];
+        impulse[BLOCK - 1] = 0.5;
+        let blocks = [SourceBlock {
+            id: FADER_SOURCE,
+            left: &[0.0; BLOCK],
+            right: &impulse,
+        }];
+        let [mut left, mut right] = [[0.0; BLOCK]; 2];
+        old.kernel
+            .render(&host, &blocks, &mut left, &mut right)
+            .unwrap();
+
+        let limit = 64 << 20;
+        memory.set_limit(limit);
+        let candidate = bind(&after, true, &memory).unwrap().unwrap();
+        assert_eq!(candidate.kernel.master_latency_frames(), Some(43));
+        let retained = |live: &LiveMix| {
+            let r = live.kernel.resources();
+            r.audio_bytes
+                + r.table_bytes
+                + live.sources.storage_bytes().unwrap()
+                + device_bytes
+                + size_of::<LiveMix>() as u64
+        };
+        let held = retained(&old) + retained(&candidate);
+        let mut graph = Graph::new(FADER_RATE, 0);
+        graph.set_initial_mix(Some(old), 0);
+        let mut install = MixInstall {
+            generation: 0,
+            base: 0,
+            revision: 1,
+            live: Some(candidate),
+            changes: plan(&before, &after, &memory).unwrap(),
+            installed: false,
+        };
+        graph.install_mix(&mut install);
+        assert!(install.installed);
+        assert_eq!(graph.render(&mut left, &mut right, &[]), (0, true));
+        assert_eq!(
+            right, [0.0; BLOCK],
+            "latency change starts with a fresh dry history"
+        );
+        // Isolate the mix charges from the retired parameter-delta charge.
+        drop(std::mem::take(&mut install.changes));
+        assert!(matches!(
+            memory.reserve(limit - held + 1),
+            Err(ControlError::Full)
+        ));
+        drop(install);
+        assert!(memory.reserve(limit - held + 1).is_ok());
     }
 
     fn oracle(kind: &str, seed: u64) -> Box<dyn Device> {

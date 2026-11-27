@@ -561,6 +561,8 @@ impl Graph {
     /// Renders one block into the master bus `l`/`r` (overwritten); `events` are sorted by
     /// offset. Returns how many nodes the NaN guard silenced.
     /// Returns the guard hit count and whether this render filled the routed taps.
+    // Keep the block renderer separate so the compiler can vectorize its finite-sample guard.
+    #[inline(never)]
     pub(crate) fn render(
         &mut self,
         l: &mut [f32; BLOCK],
