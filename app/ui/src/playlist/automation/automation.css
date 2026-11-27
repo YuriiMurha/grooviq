@@ -89,3 +89,12 @@
 .automation-point[aria-pressed="true"] { z-index: 1; }
 .automation-point[aria-pressed="true"]::before { background: var(--select); border-color: var(--select); }
 .automation-value { color: var(--text); font-variant-numeric: tabular-nums; }
+
+@media (max-width: 960px) {
+  /* A pending edit must not add a status row and resize the workspace beneath the dock. */
+  .playlist:has(.automation-dock) .playlist-status {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content 16ch;
+  }
+  .playlist:has(.automation-dock) .playlist-status [role="status"] { text-align: end; }
+}

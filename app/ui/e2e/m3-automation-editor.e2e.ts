@@ -158,7 +158,17 @@ test("edits a trimmed linked curve with one history entry per gesture and saves 
   await graph.press("ControlOrMeta+Shift+z");
   await settle([before, moved, added, second, after], 2);
 
-  await interpolation.selectOption("hold");
+  const workspaceHeight = () => app.locator(".workspace-viewport").evaluate(element => element.clientHeight);
+  const readyHeight = await workspaceHeight();
+  expect(readyHeight).toBeGreaterThan(0);
+  await mock.eval('m => m.holdCommand("arrangement_edit")');
+  try {
+    await interpolation.selectOption("hold");
+    await expect(playlist.locator(".playlist-status").getByRole("status")).toHaveText("Updating playlist…");
+    await expect.poll(workspaceHeight).toBe(readyHeight);
+  } finally {
+    await mock.eval('m => m.releaseCommand("arrangement_edit")');
+  }
   const held = { ...moved, mode: "hold" } as const;
   await settle([before, held, added, second, after], 3);
   await interpolation.selectOption("linear");
