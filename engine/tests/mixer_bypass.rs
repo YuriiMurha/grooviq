@@ -359,6 +359,144 @@ fn dry_history_follows_the_serial_stage_and_its_transitive_input() {
 }
 
 #[test]
+fn compensation_keeps_only_compatible_inputs_to_a_rerouted_dry_path() {
+    use grooviq_engine::mixer::{MixerTrackId, Sidechain, Tap};
+
+    const STABLE: SourceId = SourceId::Channel(5);
+    const ALIGNER: InsertId = InsertId(8);
+    const COMPRESSOR: InsertId = InsertId(11);
+    let build = |route, opted_in: bool, stage_delay: bool| {
+        let track = |id, output: Option<u64>, inserts| Track {
+            id: MixerTrackId(id),
+            output: output.map(MixerTrackId),
+            inserts,
+        };
+        let insert = |id, latency_frames| Insert {
+            id,
+            latency_frames,
+            memory_bytes: 0,
+        };
+        let master_chain = if stage_delay {
+            vec![]
+        } else {
+            vec![insert(SLOT, 49)]
+        };
+        let mut tracks = vec![
+            track(0, None, master_chain),
+            track(1, Some(3), vec![]),
+            track(2, Some(3), vec![]),
+            track(3, Some(if stage_delay { 6 } else { 0 }), vec![]),
+            track(4, Some(0), vec![insert(ALIGNER, 49)]),
+            track(5, Some(0), vec![]),
+        ];
+        let mut bindings = vec![
+            PreparedInsert::new(ALIGNER, device("drive", 48_000.0)),
+            PreparedInsert::new(SLOT, device("drive", 48_000.0)),
+        ];
+        let mut sidechains = Vec::new();
+        if stage_delay {
+            // The later detector requires a serial stage delay on the compressor input.
+            tracks.push(track(
+                6,
+                Some(0),
+                vec![insert(COMPRESSOR, 0), insert(SLOT, 49)],
+            ));
+            bindings.push(PreparedInsert::new(COMPRESSOR, device("comp", 48_000.0)));
+            sidechains.push(Sidechain {
+                from: MixerTrackId(4),
+                to: COMPRESSOR,
+                tap: Tap::PostFader,
+            });
+        }
+        let mixer = Mixer {
+            tracks,
+            sidechains,
+            sources: vec![
+                Source {
+                    id: INPUT,
+                    destination: MixerTrackId(route),
+                },
+                Source {
+                    id: STABLE,
+                    destination: MixerTrackId(5),
+                },
+            ],
+            ..Mixer::default()
+        };
+        let target = opted_in.then_some(InsertBypass {
+            insert: SLOT,
+            bypassed: true,
+        });
+        PreparedMixer::prepare_compensated_with_bypass(
+            compile(&mixer, Budget::default()).unwrap(),
+            bindings,
+            &[],
+            target.as_slice(),
+            PrepareConfig {
+                sample_rate: 48_000.0,
+                max_frames: BLOCK,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap()
+    };
+    let render = |kernel: &mut PreparedMixer, frame, changed: &[f32], stable: &[f32]| {
+        let zero = [0.0; BLOCK];
+        let frames = changed.len();
+        let inputs = [
+            SourceBlock {
+                id: INPUT,
+                left: &zero[..frames],
+                right: changed,
+            },
+            SourceBlock {
+                id: STABLE,
+                left: &zero[..frames],
+                right: stable,
+            },
+        ];
+        let [mut left, mut right] = [[0.0; BLOCK]; 2];
+        kernel
+            .render(
+                &transport(48_000.0, frame, frames),
+                &inputs,
+                &mut left,
+                &mut right,
+            )
+            .unwrap();
+        assert_eq!(left, zero);
+        right
+    };
+
+    let mut changed = [0.0; 32];
+    let mut stable = [0.0; 32];
+    changed[0] = 0.75;
+    stable[3] = 0.375;
+    let zero = [0.0; BLOCK];
+    let mut expected = zero;
+    expected[5] = 0.375; // The unrelated feed still arrives at frame 3 + 49 + 49.
+    for stage_delay in [false, true] {
+        let survivors: &[_] = if stage_delay {
+            &[ALIGNER, COMPRESSOR, SLOT]
+        } else {
+            &[ALIGNER, SLOT]
+        };
+        for previously_opted_in in [true, false] {
+            let mut old = build(1, previously_opted_in, stage_delay);
+            let mut rerouted = build(2, true, stage_delay);
+            assert_eq!(old.master_latency_frames(), Some(98));
+            assert_eq!(render(&mut old, 0, &changed, &stable), zero);
+            rerouted.transfer_from(&mut old, survivors).unwrap();
+
+            assert_eq!(render(&mut rerouted, 32, &zero, &zero), zero);
+            let actual = render(&mut rerouted, 96, &zero, &zero);
+            assert_eq!(actual[2], 0.0, "the retired input must not reach frame 98");
+            assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[test]
 fn sample_rate_and_latency_refuse_partial_kernel_transfer() {
     use grooviq_engine::mixer::TransferError;
     let mut old = kernel("limiter", 48_000.0, Some(true));

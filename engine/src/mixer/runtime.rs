@@ -149,6 +149,7 @@ struct Node {
 struct BypassPath {
     track: MixerTrackId,
     // Set in execution order during bypass adoption for later dependent nodes.
+    previous: Option<u32>,
     continues: bool,
 }
 
@@ -664,6 +665,7 @@ impl PreparedMixer {
             if !bypass.is_empty() {
                 bypass_paths.push(BypassPath {
                     track: id,
+                    previous: None,
                     continues: false,
                 });
             }
@@ -1130,46 +1132,73 @@ impl PreparedMixer {
                 }
             }
         }
-        if !self.bypass.is_empty() && !old.bypass.is_empty() {
+        self.delays.transfer_from(&mut old.delays);
+        if !self.bypass.is_empty() {
             self.carry_bypass(old, inserts);
         }
-        self.delays.transfer_from(&mut old.delays);
     }
 
     /// Compare the signal-producing prefix of each chain in execution order. A retargeted
     /// upstream send or replaced predecessor can invalidate dry history even when the
     /// slot itself, its immediate predecessor and its latency all match.
     fn carry_bypass(&mut self, old: &mut Self, survivors: &[InsertId]) {
+        let stride = 4 * self.max_frames;
         for i in 0..self.nodes.len() {
             let node = self.nodes[i];
             let track = self.bypass_paths[i].track;
-            let Ok(j) = old.track_nodes.binary_search_by_key(&track, |(id, _)| *id) else {
-                self.bypass_paths[i].continues = false;
-                continue;
-            };
-            let previous = old.nodes[old.track_nodes[j].1 as usize];
-            let mut continues = self.same_feeds(
-                &self.audible[node.audible.0 as usize..node.audible.1 as usize],
-                old,
-                &old.audible[previous.audible.0 as usize..previous.audible.1 as usize],
+            let previous_index = old
+                .track_nodes
+                .binary_search_by_key(&track, |(id, _)| *id)
+                .ok()
+                .map(|j| old.track_nodes[j].1);
+            self.bypass_paths[i].previous = previous_index;
+            let previous = previous_index.map(|j| old.nodes[j as usize]);
+            let audible = &self.audible[node.audible.0 as usize..node.audible.1 as usize];
+            Self::clear_discontinuous_tap_delays(
+                audible,
+                &self.bypass_paths,
+                stride,
+                &mut self.delays,
             );
+            let mut continues = previous.is_some_and(|previous| {
+                self.same_feeds(
+                    audible,
+                    old,
+                    &old.audible[previous.audible.0 as usize..previous.audible.1 as usize],
+                )
+            });
             let chain = &self.inserts[node.inserts.0 as usize..node.inserts.1 as usize];
-            let old_chain = &old.inserts[previous.inserts.0 as usize..previous.inserts.1 as usize];
-            for (offset, (slot, prior)) in chain.iter().zip(old_chain).enumerate() {
-                continues &= slot.id == prior.id
-                    && slot.identity == prior.identity
-                    && slot.latency == prior.latency
-                    && self.delays.frames(slot.delay) == old.delays.frames(prior.delay)
-                    && survivors.binary_search(&slot.id).is_ok();
-                if !continues {
-                    break;
-                }
+            let old_range = previous.map_or(0..0, |previous| {
+                previous.inserts.0 as usize..previous.inserts.1 as usize
+            });
+            let old_start = old_range.start;
+            let old_chain = &old.inserts[old_range];
+            for (offset, slot) in chain.iter().enumerate() {
+                let detector = &self.detector[slot.detector.0 as usize..slot.detector.1 as usize];
+                Self::clear_discontinuous_tap_delays(
+                    detector,
+                    &self.bypass_paths,
+                    stride,
+                    &mut self.delays,
+                );
+                let Some(prior) = old_chain.get(offset).filter(|prior| {
+                    continues
+                        && slot.id == prior.id
+                        && slot.identity == prior.identity
+                        && slot.latency == prior.latency
+                        && self.delays.frames(slot.delay) == old.delays.frames(prior.delay)
+                        && survivors.binary_search(&slot.id).is_ok()
+                }) else {
+                    self.delays.clear(slot.delay);
+                    continues = false;
+                    continue;
+                };
                 let a = self
                     .bypass
                     .binary_search_by_key(&(node.inserts.0 as usize + offset), |b| b.slot);
                 let b = old
                     .bypass
-                    .binary_search_by_key(&(previous.inserts.0 as usize + offset), |b| b.slot);
+                    .binary_search_by_key(&(old_start + offset), |b| b.slot);
                 if let (Ok(a), Ok(b)) = (a, b) {
                     self.bypass[a].transfer_from(&mut old.bypass[b], self.fader_samples);
                 }
@@ -1177,15 +1206,29 @@ impl PreparedMixer {
                 // its output, which is on the path of every later slot and feed.
                 continues &= a.is_ok() == b.is_ok()
                     && self.same_feeds(
-                        &self.detector[slot.detector.0 as usize..slot.detector.1 as usize],
+                        detector,
                         old,
                         &old.detector[prior.detector.0 as usize..prior.detector.1 as usize],
                     );
-                if !continues {
-                    break;
-                }
             }
             self.bypass_paths[i].continues = continues && chain.len() == old_chain.len();
+        }
+    }
+
+    // Compensation keys describe the immediate tap. Discard its transferred samples if
+    // the signal producing that tap changed transitively, without touching other feeds.
+    fn clear_discontinuous_tap_delays(
+        feeds: &[Feed],
+        paths: &[BypassPath],
+        stride: usize,
+        delays: &mut DelayBank,
+    ) {
+        for feed in feeds {
+            if let FeedInput::Tap { at, .. } = feed.input
+                && !paths[at as usize / stride].continues
+            {
+                delays.clear(feed.delay);
+            }
         }
     }
 
@@ -1206,7 +1249,7 @@ impl PreparedMixer {
                             let b = b as usize / (2 * old.max_frames);
                             let upstream = self.bypass_paths[a / 2];
                             upstream.continues
-                                && upstream.track == old.bypass_paths[b / 2].track
+                                && upstream.previous.map(|index| index as usize) == Some(b / 2)
                                 && a % 2 == b % 2
                                 && gain.to_bits() == g.to_bits()
                         }
