@@ -506,13 +506,15 @@ fn an_extra_sounding_channel_continues_when_fade_capacity_is_full() {
         let mut faded = [0.0; 4 * BLOCK * 2];
         p.process(&mut faded, 2);
         for (frame, (actual, dry)) in faded
-            .chunks_exact(2)
-            .zip(expected[4 * BLOCK * 2..].chunks_exact(2))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(expected[4 * BLOCK * 2..].as_chunks::<2>().0)
             .enumerate()
         {
             let gain = RAMP.saturating_sub(frame + 1) as f32 / RAMP as f32;
             if gain == 0.0 {
-                assert_eq!(actual, [0.0; 2], "frame {frame}");
+                assert_eq!(*actual, [0.0; 2], "frame {frame}");
             } else {
                 for (&actual, &dry) in actual.iter().zip(dry) {
                     assert!(
