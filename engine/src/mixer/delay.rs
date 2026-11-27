@@ -132,6 +132,10 @@ impl DelayBank {
         Ok(total)
     }
 
+    pub(super) fn ring(&mut self, index: DelayIndex) -> Option<&mut Ring> {
+        index.map(|index| &mut self.rings[index.get() as usize - 1])
+    }
+
     pub(super) fn frames(&self, index: DelayIndex) -> usize {
         index.map_or(0, |index| self.rings[index.get() as usize - 1].audio.len())
     }

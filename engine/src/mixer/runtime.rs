@@ -14,11 +14,12 @@
 //!
 //! Dropping a `PreparedMixer` frees its devices and buffers: do it off the audio thread.
 
+use super::controls::{FeedGate, GATE_TABLE_BYTES, GatePlan, ROLE_BYTES};
 use super::delay::{DelayBank, DelayIndex, Ring};
 use super::insert::{BypassState, InsertSlot, ParamError, PreparedInsert, find};
 use super::{
-    ActualLatency, CompiledMixer, InputId, InsertId, LatencyError, MASTER, MixerTrackId, PdcBudget,
-    PdcDelay, PdcPoint, SourceId, Tap, TrackArrival, plan_latency,
+    ActualLatency, CompiledMixer, InputId, InsertId, LatencyError, MASTER, MixerControls,
+    MixerTrackId, PdcBudget, PdcDelay, PdcPoint, SourceId, Tap, TrackArrival, plan_latency,
 };
 use crate::graph::ramp_len;
 use grooviq_dsp::{HostTransport, MAX_BLOCK};
@@ -103,6 +104,7 @@ pub enum PrepareError {
     DuplicateGain(MixerTrackId),
     InvalidGain(MixerTrackId),
     UnorderedBypass,
+    InvalidControls,
     Overflow,
     Budget { required: u64, limit: u64 },
     Allocation,
@@ -138,6 +140,51 @@ enum FeedInput {
     },
 }
 
+struct RouteSpan<'a> {
+    feeds: &'a [Feed],
+    delays: &'a DelayBank,
+    half_stride: usize,
+}
+
+impl RouteSpan<'_> {
+    fn same_route(&self, a: Feed, old: &Self, b: Feed, paths: &[SignalPath]) -> bool {
+        if self.delays.frames(a.delay) != old.delays.frames(b.delay) {
+            return false;
+        }
+        match (a.input, b.input) {
+            (FeedInput::Source { .. }, FeedInput::Source { .. }) => true, // same gate ID
+            (FeedInput::Tap { at: a, .. }, FeedInput::Tap { at: b, .. }) => {
+                let a = a as usize / self.half_stride;
+                let b = b as usize / old.half_stride;
+                let upstream = paths[a / 2];
+                upstream.continues
+                    && upstream.previous.map(|index| index as usize) == Some(b / 2)
+                    && a % 2 == b % 2
+            }
+            _ => false,
+        }
+    }
+
+    fn carry_gates(
+        &self,
+        new_gates: &mut [FeedGate],
+        old: &Self,
+        old_gates: &[FeedGate],
+        paths: &[SignalPath],
+        samples: u32,
+    ) {
+        let mut previous = old_gates.iter().zip(old.feeds).peekable();
+        for (gate, feed) in new_gates.iter_mut().zip(self.feeds) {
+            while previous.next_if(|(prior, _)| prior.id < gate.id).is_some() {}
+            if let Some((prior, prior_feed)) = previous.next_if(|(prior, _)| prior.id == gate.id)
+                && self.same_route(*feed, old, *prior_feed, paths)
+            {
+                carry_gain(&mut gate.gain, prior.gain, samples);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Node {
     audible: (u32, u32),
@@ -146,7 +193,7 @@ struct Node {
 }
 
 #[derive(Clone, Copy)]
-struct BypassPath {
+struct SignalPath {
     track: MixerTrackId,
     // Set in execution order during bypass adoption for later dependent nodes.
     previous: Option<u32>,
@@ -189,6 +236,10 @@ impl FaderGain {
         self.step = (f64::from(target) - f64::from(self.start)) / f64::from(samples);
     }
 
+    fn is_unity(&self) -> bool {
+        self.target == 1.0 && self.remaining == 0
+    }
+
     pub(super) fn next(&mut self, samples: u32) -> f32 {
         if self.remaining != 0 {
             self.remaining -= 1;
@@ -216,8 +267,32 @@ impl FaderGain {
 pub(super) const TRACK_TABLE_BYTES: u64 =
     (size_of::<Node>() + size_of::<(MixerTrackId, u32)>()) as u64;
 pub(super) const BYPASS_TABLE_BYTES: u64 = size_of::<BypassState>() as u64;
-pub(super) const BYPASS_PATH_BYTES: u64 = size_of::<BypassPath>() as u64;
+pub(super) const PATH_TABLE_BYTES: u64 = size_of::<SignalPath>() as u64;
 pub(super) const STEREO_FRAME_BYTES: u64 = size_of::<[f32; 2]>() as u64;
+
+struct Gates {
+    audible: Vec<FeedGate>,
+    detector: Vec<FeedGate>,
+    master: FaderGain,
+}
+
+impl Gates {
+    fn active(&self) -> bool {
+        !self.master.is_unity()
+            || self
+                .audible
+                .iter()
+                .chain(&self.detector)
+                .any(|gate| !gate.gain.is_unity())
+    }
+
+    fn reset(&mut self) {
+        self.master = FaderGain::at(self.master.target);
+        for gate in self.audible.iter_mut().chain(&mut self.detector) {
+            gate.gain = FaderGain::at(gate.gain.target);
+        }
+    }
+}
 
 pub struct PreparedMixer {
     sample_rate: f32,
@@ -233,8 +308,9 @@ pub struct PreparedMixer {
     sources: Vec<SourceId>,
     /// Sparse opted-in states in render slot order.
     bypass: Vec<BypassState>,
-    /// One per node only when bypass is enabled; used solely to carry dry history.
-    bypass_paths: Vec<BypassPath>,
+    /// One per node in a kernel that carries control state across installs.
+    paths: Vec<SignalPath>,
+    gates: Option<Gates>,
     /// Per node: pre L, pre R, post L, post R; then work L/R, detector L/R and
     /// optional shared dry L/R.
     buffers: Vec<f32>,
@@ -329,7 +405,7 @@ impl PreparedMixer {
         gains: &[TrackGain],
         config: PrepareConfig,
     ) -> Result<Self, PrepareError> {
-        Self::prepare_inner(compiled, bindings, gains, &[], config, false)
+        Self::prepare_inner(compiled, bindings, gains, &[], None, config, false)
     }
 
     /// Queries the prepared devices' actual latency and reserves compensation histories.
@@ -354,7 +430,63 @@ impl PreparedMixer {
         bypass: &[InsertBypass],
         config: PrepareConfig,
     ) -> Result<Self, PrepareError> {
-        Self::prepare_inner(compiled, bindings, gains, bypass, config, true)
+        Self::prepare_inner(compiled, bindings, gains, bypass, None, config, true)
+    }
+
+    /// Prepares an atomic set of track, detector and insert targets. A new
+    /// kernel starts at these targets. Transfer from a compatible controlled kernel
+    /// to de-click later changes. Off-thread only.
+    pub fn prepare_compensated_with_controls(
+        compiled: CompiledMixer,
+        bindings: Vec<PreparedInsert>,
+        gains: &[TrackGain],
+        controls: &MixerControls,
+        config: PrepareConfig,
+    ) -> Result<Self, PrepareError> {
+        Self::prepare_inner(
+            compiled,
+            bindings,
+            gains,
+            &controls.bypass,
+            Some(controls),
+            config,
+            true,
+        )
+    }
+
+    pub(super) fn validate_controls(
+        compiled: &CompiledMixer,
+        controls: &MixerControls,
+    ) -> Result<(), PrepareError> {
+        let node_of: BTreeMap<_, _> = compiled
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.track.id, i))
+            .collect();
+        GatePlan::validate(controls, compiled, &node_of)?;
+        if controls
+            .bypass
+            .windows(2)
+            .any(|pair| pair[0].insert >= pair[1].insert)
+        {
+            return Err(PrepareError::UnorderedBypass);
+        }
+        let found = compiled
+            .tracks
+            .iter()
+            .flat_map(|t| &t.track.inserts)
+            .filter(|i| {
+                controls
+                    .bypass
+                    .binary_search_by_key(&i.id, |target| target.insert)
+                    .is_ok()
+            })
+            .count();
+        if found != controls.bypass.len() {
+            return Err(PrepareError::InvalidControls);
+        }
+        Ok(())
     }
 
     fn prepare_inner(
@@ -362,6 +494,7 @@ impl PreparedMixer {
         bindings: Vec<PreparedInsert>,
         gains: &[TrackGain],
         bypass: &[InsertBypass],
+        controls: Option<&MixerControls>,
         config: PrepareConfig,
         compensate: bool,
     ) -> Result<Self, PrepareError> {
@@ -519,12 +652,42 @@ impl PreparedMixer {
         let mut keys = reserved(owner.len())?;
         let mut track_nodes = reserved(order.len())?;
         let mut bypass_states = reserved(bypass.len())?;
-        let mut bypass_paths = reserved(if bypass.is_empty() { 0 } else { order.len() })?;
+        let track_paths = !bypass.is_empty() || controls.is_some();
+        let mut paths = reserved(if track_paths { order.len() } else { 0 })?;
+        let (mut gates, gate_plan) = if let Some(controls) = controls {
+            let n_detector = compiled
+                .tracks
+                .iter()
+                .flat_map(|t| &t.inputs)
+                .filter(|input| matches!(input.id, InputId::Sidechain { .. }))
+                .count();
+            let requested = (n_inputs as u64)
+                .checked_mul(GATE_TABLE_BYTES)
+                .and_then(|n| n.checked_add((order.len() as u64) * (PATH_TABLE_BYTES + ROLE_BYTES)))
+                .ok_or(PrepareError::Overflow)?;
+            if requested > config.max_bytes {
+                return Err(PrepareError::Budget {
+                    required: requested,
+                    limit: config.max_bytes,
+                });
+            }
+            let plan = GatePlan::new(controls, &compiled, &order, &node_of)?;
+            (
+                Some(Gates {
+                    audible: reserved(n_inputs - n_detector)?,
+                    detector: reserved(n_detector)?,
+                    master: FaderGain::at(f32::from(plan.track_open(MASTER))),
+                }),
+                Some(plan),
+            )
+        } else {
+            (None, None)
+        };
         let mut bypass_ring_bytes = 0u64;
         let mut sources = reserved(source_set.len())?;
         sources.extend(source_set.iter().copied());
 
-        for &ti in &order {
+        for (node_index, &ti) in order.iter().enumerate() {
             let t = &compiled.tracks[ti];
             let id = t.track.id;
             track_nodes.push((id, to_u32(nodes.len())?));
@@ -539,6 +702,14 @@ impl PreparedMixer {
             for input in &t.inputs {
                 if !input.gain.is_finite() {
                     return Err(plan(PlanError::MalformedInput(id)));
+                }
+                if let (Some(gates), Some(plan)) = (&mut gates, &gate_plan)
+                    && !matches!(input.id, InputId::Sidechain { .. })
+                {
+                    gates.audible.push(FeedGate::at(
+                        input.id,
+                        plan.audible_open(input, node_index, &node_of),
+                    ));
                 }
                 let from = match input.id {
                     InputId::Source(source) => {
@@ -617,6 +788,11 @@ impl PreparedMixer {
                             insert: insert.id,
                             input: input.id,
                         });
+                        if let (Some(gates), Some(plan)) = (&mut gates, &gate_plan) {
+                            gates
+                                .detector
+                                .push(FeedGate::at(input.id, plan.detector_open(input.id)));
+                        }
                         detector.push(Feed {
                             input: FeedInput::Tap {
                                 at: tap_at(node_of[&from], tap)?,
@@ -662,8 +838,8 @@ impl PreparedMixer {
                 inserts: (first_insert, to_u32(inserts.len())?),
                 fader: [FaderGain::at(left), FaderGain::at(right)],
             });
-            if !bypass.is_empty() {
-                bypass_paths.push(BypassPath {
+            if track_paths {
+                paths.push(SignalPath {
                     track: id,
                     previous: None,
                     continues: false,
@@ -674,6 +850,7 @@ impl PreparedMixer {
         keys.sort_unstable_by_key(|(id, _)| *id);
         track_nodes.sort_unstable_by_key(|(id, _)| *id);
 
+        drop(gate_plan);
         let samples = order
             .len()
             .checked_add(1)
@@ -695,7 +872,17 @@ impl PreparedMixer {
             bytes(&track_nodes)?,
             bytes(&sources)?,
             bytes(&bypass_states)?,
-            bytes(&bypass_paths)?,
+            bytes(&paths)?,
+            if let Some(gates) = &gates {
+                bytes(&gates.audible)?
+            } else {
+                0
+            },
+            if let Some(gates) = &gates {
+                bytes(&gates.detector)?
+            } else {
+                0
+            },
             timing.bank.table_bytes()?,
         ]
         .into_iter()
@@ -747,7 +934,8 @@ impl PreparedMixer {
             track_nodes,
             sources,
             bypass: bypass_states,
-            bypass_paths,
+            paths,
+            gates,
             buffers,
             delays: timing.bank,
             master_latency: timing.master_latency,
@@ -929,7 +1117,11 @@ impl PreparedMixer {
             wl.fill(0.0);
             wr.fill(0.0);
             let feeds = &self.audible[node.audible.0 as usize..node.audible.1 as usize];
-            for feed in feeds {
+            for (offset, feed) in feeds.iter().enumerate() {
+                let gate = self
+                    .gates
+                    .as_mut()
+                    .map(|gates| &mut gates.audible[node.audible.0 as usize + offset].gain);
                 let (l, r, gain) = match feed.input {
                     FeedInput::Tap { at, gain } => {
                         let at = at as usize;
@@ -940,11 +1132,18 @@ impl PreparedMixer {
                         (l, r, gain)
                     }
                 };
-                if let Some(delay) = feed.delay {
-                    self.delays.accumulate(delay, wl, wr, l, r, gain);
-                } else {
-                    accumulate(wl, wr, l, r, gain);
-                }
+                let mut target = StereoSum {
+                    left: wl,
+                    right: wr,
+                };
+                target.feed(
+                    &mut self.delays,
+                    feed.delay,
+                    gate,
+                    (l, r),
+                    gain,
+                    self.fader_samples,
+                );
             }
             let chain = node.inserts.0 as usize..node.inserts.1 as usize;
             let first_bypass = bypass_at;
@@ -957,15 +1156,26 @@ impl PreparedMixer {
                 } else {
                     dl.fill(0.0);
                     dr.fill(0.0);
-                    for feed in &self.detector[d0..d1] {
+                    for (offset, feed) in self.detector[d0..d1].iter().enumerate() {
                         if let FeedInput::Tap { at, gain } = feed.input {
                             let at = at as usize;
                             let (l, r) = (&taps[at..at + n], &taps[at + mf..at + mf + n]);
-                            if let Some(delay) = feed.delay {
-                                self.delays.accumulate(delay, dl, dr, l, r, gain);
-                            } else {
-                                accumulate(dl, dr, l, r, gain);
-                            }
+                            let gate = self
+                                .gates
+                                .as_mut()
+                                .map(|gates| &mut gates.detector[d0 + offset].gain);
+                            let mut target = StereoSum {
+                                left: dl,
+                                right: dr,
+                            };
+                            target.feed(
+                                &mut self.delays,
+                                feed.delay,
+                                gate,
+                                (l, r),
+                                gain,
+                                self.fader_samples,
+                            );
                         }
                     }
                     Some((&dl[..], &dr[..]))
@@ -1025,8 +1235,20 @@ impl PreparedMixer {
         }
         // Master is the final node (checked in prepare).
         let master = (self.nodes.len() - 1) * stride + 2 * mf;
-        out_l[..n].copy_from_slice(&taps[master..master + n]);
-        out_r[..n].copy_from_slice(&taps[master + mf..master + mf + n]);
+        let l = &taps[master..master + n];
+        let r = &taps[master + mf..master + mf + n];
+        if let Some(gates) = &mut self.gates
+            && !gates.master.is_unity()
+        {
+            for i in 0..n {
+                let gain = gates.master.next(self.fader_samples);
+                out_l[i] = l[i] * gain;
+                out_r[i] = r[i] * gain;
+            }
+        } else {
+            out_l[..n].copy_from_slice(l);
+            out_r[..n].copy_from_slice(r);
+        }
         RenderReport {
             frames: n as u32,
             silenced,
@@ -1133,39 +1355,66 @@ impl PreparedMixer {
             }
         }
         self.delays.transfer_from(&mut old.delays);
-        if !self.bypass.is_empty() {
-            self.carry_bypass(old, inserts);
+        if !self.paths.is_empty() {
+            self.carry_controls(old, inserts);
         }
     }
 
     /// Compare the signal-producing prefix of each chain in execution order. A retargeted
     /// upstream send or replaced predecessor can invalidate dry history even when the
     /// slot itself, its immediate predecessor and its latency all match.
-    fn carry_bypass(&mut self, old: &mut Self, survivors: &[InsertId]) {
+    fn carry_controls(&mut self, old: &mut Self, survivors: &[InsertId]) {
+        if self.bypass.is_empty()
+            && !self.gates.as_ref().is_some_and(Gates::active)
+            && !old.gates.as_ref().is_some_and(Gates::active)
+        {
+            return;
+        }
+        if let (Some(new), Some(old)) = (&mut self.gates, &old.gates) {
+            carry_gain(&mut new.master, old.master, self.fader_samples);
+        }
         let stride = 4 * self.max_frames;
         for i in 0..self.nodes.len() {
             let node = self.nodes[i];
-            let track = self.bypass_paths[i].track;
+            let track = self.paths[i].track;
             let previous_index = old
                 .track_nodes
                 .binary_search_by_key(&track, |(id, _)| *id)
                 .ok()
                 .map(|j| old.track_nodes[j].1);
-            self.bypass_paths[i].previous = previous_index;
+            self.paths[i].previous = previous_index;
             let previous = previous_index.map(|j| old.nodes[j as usize]);
-            let audible = &self.audible[node.audible.0 as usize..node.audible.1 as usize];
-            Self::clear_discontinuous_tap_delays(
-                audible,
-                &self.bypass_paths,
-                stride,
-                &mut self.delays,
-            );
+            let audible = span(&self.audible, node.audible);
+            Self::clear_discontinuous_tap_delays(audible, &self.paths, stride, &mut self.delays);
+            if let (Some(previous), Some(new), Some(prior)) =
+                (previous, &mut self.gates, &old.gates)
+            {
+                RouteSpan {
+                    feeds: audible,
+                    delays: &self.delays,
+                    half_stride: 2 * self.max_frames,
+                }
+                .carry_gates(
+                    span_mut(&mut new.audible, node.audible),
+                    &RouteSpan {
+                        feeds: span(&old.audible, previous.audible),
+                        delays: &old.delays,
+                        half_stride: 2 * old.max_frames,
+                    },
+                    span(&prior.audible, previous.audible),
+                    &self.paths,
+                    self.fader_samples,
+                );
+            }
             let mut continues = previous.is_some_and(|previous| {
-                self.same_feeds(
-                    audible,
-                    old,
-                    &old.audible[previous.audible.0 as usize..previous.audible.1 as usize],
-                )
+                same_gate_ids(
+                    self.gates
+                        .as_ref()
+                        .map(|gates| span(&gates.audible, node.audible)),
+                    old.gates
+                        .as_ref()
+                        .map(|gates| span(&gates.audible, previous.audible)),
+                ) && self.same_feeds(audible, old, span(&old.audible, previous.audible))
             });
             let chain = &self.inserts[node.inserts.0 as usize..node.inserts.1 as usize];
             let old_range = previous.map_or(0..0, |previous| {
@@ -1177,7 +1426,7 @@ impl PreparedMixer {
                 let detector = &self.detector[slot.detector.0 as usize..slot.detector.1 as usize];
                 Self::clear_discontinuous_tap_delays(
                     detector,
-                    &self.bypass_paths,
+                    &self.paths,
                     stride,
                     &mut self.delays,
                 );
@@ -1193,6 +1442,24 @@ impl PreparedMixer {
                     continues = false;
                     continue;
                 };
+                if let (Some(new), Some(old_gates)) = (&mut self.gates, &old.gates) {
+                    RouteSpan {
+                        feeds: detector,
+                        delays: &self.delays,
+                        half_stride: 2 * self.max_frames,
+                    }
+                    .carry_gates(
+                        span_mut(&mut new.detector, slot.detector),
+                        &RouteSpan {
+                            feeds: span(&old.detector, prior.detector),
+                            delays: &old.delays,
+                            half_stride: 2 * old.max_frames,
+                        },
+                        span(&old_gates.detector, prior.detector),
+                        &self.paths,
+                        self.fader_samples,
+                    );
+                }
                 let a = self
                     .bypass
                     .binary_search_by_key(&(node.inserts.0 as usize + offset), |b| b.slot);
@@ -1205,13 +1472,17 @@ impl PreparedMixer {
                 // This slot's detector is not part of its dry input, but may affect
                 // its output, which is on the path of every later slot and feed.
                 continues &= a.is_ok() == b.is_ok()
-                    && self.same_feeds(
-                        detector,
-                        old,
-                        &old.detector[prior.detector.0 as usize..prior.detector.1 as usize],
-                    );
+                    && same_gate_ids(
+                        self.gates
+                            .as_ref()
+                            .map(|gates| span(&gates.detector, slot.detector)),
+                        old.gates
+                            .as_ref()
+                            .map(|gates| span(&gates.detector, prior.detector)),
+                    )
+                    && self.same_feeds(detector, old, span(&old.detector, prior.detector));
             }
-            self.bypass_paths[i].continues = continues && chain.len() == old_chain.len();
+            self.paths[i].continues = continues && chain.len() == old_chain.len();
         }
     }
 
@@ -1219,7 +1490,7 @@ impl PreparedMixer {
     // the signal producing that tap changed transitively, without touching other feeds.
     fn clear_discontinuous_tap_delays(
         feeds: &[Feed],
-        paths: &[BypassPath],
+        paths: &[SignalPath],
         stride: usize,
         delays: &mut DelayBank,
     ) {
@@ -1247,7 +1518,7 @@ impl PreparedMixer {
                         (FeedInput::Tap { at: a, gain }, FeedInput::Tap { at: b, gain: g }) => {
                             let a = a as usize / (2 * self.max_frames);
                             let b = b as usize / (2 * old.max_frames);
-                            let upstream = self.bypass_paths[a / 2];
+                            let upstream = self.paths[a / 2];
                             upstream.continues
                                 && upstream.previous.map(|index| index as usize) == Some(b / 2)
                                 && a % 2 == b % 2
@@ -1262,12 +1533,15 @@ impl PreparedMixer {
         self.sample_rate
     }
 
-    /// Clears devices, taps and histories and snaps to the admitted fader and bypass targets.
+    /// Clears devices, taps and histories and snaps to the admitted control targets.
     pub fn reset(&mut self) {
         for slot in &mut self.inserts {
             slot.device.reset();
         }
         self.bypass.iter_mut().for_each(BypassState::reset);
+        if let Some(gates) = &mut self.gates {
+            gates.reset();
+        }
         for node in &mut self.nodes {
             for gain in &mut node.fader {
                 *gain = FaderGain::at(gain.target);
@@ -1377,4 +1651,63 @@ fn accumulate(acc_l: &mut [f32], acc_r: &mut [f32], l: &[f32], r: &[f32], gain: 
     for (a, x) in acc_r.iter_mut().zip(r) {
         *a += *x * gain;
     }
+}
+
+struct StereoSum<'a> {
+    left: &'a mut [f32],
+    right: &'a mut [f32],
+}
+
+impl StereoSum<'_> {
+    fn feed(
+        &mut self,
+        delays: &mut DelayBank,
+        delay: DelayIndex,
+        gate: Option<&mut FaderGain>,
+        (left, right): (&[f32], &[f32]),
+        gain: f32,
+        duration: u32,
+    ) {
+        if let Some(gate) = gate
+            && !gate.is_unity()
+        {
+            let mut ring = delays.ring(delay);
+            for i in 0..left.len() {
+                let [l, r] = ring
+                    .as_deref_mut()
+                    .map_or([left[i], right[i]], |ring| ring.exchange(left[i], right[i]));
+                let amount = gate.next(duration);
+                if amount != 0.0 {
+                    let gain = gain * amount;
+                    self.left[i] += l * gain;
+                    self.right[i] += r * gain;
+                }
+            }
+        } else if let Some(delay) = delay {
+            delays.accumulate(delay, self.left, self.right, left, right, gain);
+        } else {
+            accumulate(self.left, self.right, left, right, gain);
+        }
+    }
+}
+
+fn carry_gain(new: &mut FaderGain, mut old: FaderGain, duration: u32) {
+    old.retarget(new.target, duration);
+    *new = old;
+}
+
+fn span<T>(items: &[T], (start, end): (u32, u32)) -> &[T] {
+    &items[start as usize..end as usize]
+}
+
+fn span_mut<T>(items: &mut [T], (start, end): (u32, u32)) -> &mut [T] {
+    &mut items[start as usize..end as usize]
+}
+
+fn same_gate_ids(new: Option<&[FeedGate]>, old: Option<&[FeedGate]>) -> bool {
+    new.zip(old).is_none_or(|(new, old)| {
+        new.iter()
+            .map(|gate| gate.id)
+            .eq(old.iter().map(|gate| gate.id))
+    })
 }

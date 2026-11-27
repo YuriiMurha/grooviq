@@ -543,3 +543,87 @@ fn mixer_meter_full_lease_and_invalidation_never_allocate() {
     realtime_process(&mut p, &mut out);
     assert!(c.mixer_meter(&tracks).is_none());
 }
+
+#[test]
+fn controlled_mix_adopts_and_retires_with_no_callback_allocation() {
+    let drive = InsertId(31);
+    let detector = DetectorFeed {
+        from: MixerTrackId(1),
+        insert: InsertId(20),
+        tap: Tap::PreFader,
+    };
+    let scene = |closed| MixSetup::Controlled {
+        mix: RoutedMix {
+            mixer: Mixer {
+                tracks: vec![track(0, None, &[(20, 0)]), track(1, Some(0), &[(31, 49)])],
+                sends: vec![],
+                sidechains: vec![Sidechain {
+                    from: detector.from,
+                    to: detector.insert,
+                    tap: detector.tap,
+                }],
+                sources: vec![Source {
+                    id: SourceId::System(SystemSource::Tone),
+                    destination: MixerTrackId(1),
+                }],
+            },
+            devices: vec![
+                device(20, "comp", vec![-30.0, 8.0, 1.0, 5.0, 0.0, 0.0, 1.0, 1.0]),
+                device(31, "drive", vec![1.0, 6.0, 0.0, 0.75, 0.0, 2.0]),
+            ],
+            gains: vec![],
+        },
+        controls: MixerControls {
+            muted_tracks: if closed {
+                vec![MixerTrackId(1)]
+            } else {
+                vec![]
+            },
+            soloed_tracks: vec![MASTER],
+            muted_detectors: if closed { vec![detector] } else { vec![] },
+            bypass: vec![InsertBypass {
+                insert: drive,
+                bypassed: closed,
+            }],
+        },
+    };
+    let (mut controller, mut processor) = engine_with(
+        EngineConfig {
+            sample_rate: 48_000.0,
+        },
+        EngineState {
+            mix: scene(false),
+            ..EngineState::default()
+        },
+    );
+    controller
+        .send(Command::TestTone {
+            on: true,
+            hz: 437.0,
+            gain_db: -12.0,
+        })
+        .unwrap();
+    let mut output = [0.0; BLOCK * 2];
+    super::realtime(|| processor.process(&mut output, 2));
+    assert!(output.iter().any(|sample| *sample != 0.0));
+    controller.set_mix(scene(true)).unwrap();
+    for _ in 0..5 {
+        super::realtime(|| processor.process(&mut output, 2));
+    }
+    assert_eq!(output, [0.0; BLOCK * 2]);
+    controller.set_mix(scene(false)).unwrap();
+    super::realtime(|| processor.process(&mut output, 2));
+    assert!(output.iter().any(|sample| *sample != 0.0));
+    // Allow backpressure to retain owning transactions until a control-side drain.
+    for i in 0..80 {
+        let _ = controller.set_mix(scene(i % 2 == 0));
+        super::realtime(|| processor.process(&mut output, 2));
+    }
+    let _ = controller.check_health();
+    controller.set_mix(scene(true)).unwrap();
+    for _ in 0..8 {
+        super::realtime(|| processor.process(&mut output, 2));
+        let _ = controller.check_health();
+    }
+    assert_eq!(output, [0.0; BLOCK * 2]);
+}
