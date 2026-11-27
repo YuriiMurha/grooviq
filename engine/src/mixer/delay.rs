@@ -15,14 +15,36 @@ struct Key {
     frames: usize,
 }
 
-struct Ring {
+pub(super) struct Ring {
     audio: Vec<[f32; 2]>,
     cursor: usize,
     unfilled: usize,
 }
 
 impl Ring {
-    fn exchange(&mut self, l: f32, r: f32) -> [f32; 2] {
+    pub(super) fn allocate(frames: usize) -> Result<Self, PrepareError> {
+        let mut audio = reserved(frames)?;
+        audio.resize(frames, [0.0; 2]);
+        Ok(Self {
+            audio,
+            cursor: 0,
+            unfilled: 0,
+        })
+    }
+
+    pub(super) fn bytes(&self) -> Result<u64, PrepareError> {
+        bytes(&self.audio)
+    }
+
+    pub(super) fn swap_compatible(&mut self, old: &mut Self) -> bool {
+        if self.audio.capacity() != old.audio.capacity() {
+            return false;
+        }
+        std::mem::swap(self, old);
+        true
+    }
+
+    pub(super) fn exchange(&mut self, l: f32, r: f32) -> [f32; 2] {
         let frame = std::mem::replace(&mut self.audio[self.cursor], [l, r]);
         self.cursor += 1;
         if self.cursor == self.audio.len() {
@@ -36,7 +58,7 @@ impl Ring {
         }
     }
 
-    fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         // Long histories are made silent in constant time, including on the fault path.
         // Each slot is overwritten before it can be read again.
         self.unfilled = self.audio.len();
@@ -101,14 +123,17 @@ impl DelayBank {
         self.keys.sort_unstable();
         let mut total = 0u64;
         for &(key, index) in &self.keys {
-            let mut audio = reserved(key.frames)?;
-            audio.resize(key.frames, [0.0; 2]);
+            let ring = Ring::allocate(key.frames)?;
             total = total
-                .checked_add(bytes(&audio)?)
+                .checked_add(ring.bytes()?)
                 .ok_or(PrepareError::Overflow)?;
-            self.rings[index].audio = audio;
+            self.rings[index] = ring;
         }
         Ok(total)
+    }
+
+    pub(super) fn frames(&self, index: DelayIndex) -> usize {
+        index.map_or(0, |index| self.rings[index.get() as usize - 1].audio.len())
     }
 
     pub(super) fn apply(&mut self, index: DelayIndex, l: &mut [f32], r: &mut [f32]) {
@@ -155,10 +180,8 @@ impl DelayBank {
             }
             // The retained charges belong to their kernels, so allocations may only
             // trade places if their charged capacities agree.
-            if let Some(&(_, other)) = candidates.next_if(|(other, _)| *other == key)
-                && self.rings[index].audio.capacity() == old.rings[other].audio.capacity()
-            {
-                std::mem::swap(&mut self.rings[index], &mut old.rings[other]);
+            if let Some(&(_, other)) = candidates.next_if(|(other, _)| *other == key) {
+                self.rings[index].swap_compatible(&mut old.rings[other]);
             }
         }
     }

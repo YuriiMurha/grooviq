@@ -331,3 +331,87 @@ fn mixer_runtime_realtime() {
         assert_ne!(fl.to_vec(), s1l[..128].to_vec());
     }
 }
+
+#[test]
+fn mixer_bypass_realtime_transfer_render_fault_and_reset() {
+    const SR: f32 = 48_000.0;
+    let (drive, fault) = (InsertId(1), InsertId(2));
+    let mut master = track(0, None, &[drive.0, fault.0]);
+    master.inserts[0].latency_frames = 49;
+    let mixer = Mixer {
+        tracks: vec![master],
+        sources: vec![source(1, 0)],
+        ..Mixer::default()
+    };
+    let prepare = |bypassed, armed| {
+        let mut device = grooviq_dsp::create("drive", SR).unwrap();
+        device.set_param(5, 2.0);
+        PreparedMixer::prepare_compensated_with_bypass(
+            compile(&mixer, Budget::default()).unwrap(),
+            vec![
+                PreparedInsert::new(drive, device),
+                PreparedInsert::new(fault, Box::new(Fault(armed))),
+            ],
+            &[],
+            &[
+                InsertBypass {
+                    insert: drive,
+                    bypassed,
+                },
+                InsertBypass {
+                    insert: fault,
+                    bypassed: true,
+                },
+            ],
+            PrepareConfig {
+                sample_rate: SR,
+                max_frames: 64,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap()
+    };
+    let mut active = prepare(false, false);
+    let mut candidate = prepare(true, true);
+    let warm = [0.5; 64];
+    let source = |right| {
+        [SourceBlock {
+            id: SourceId::Channel(1),
+            left: &[0.0; 64],
+            right,
+        }]
+    };
+    let [mut left, mut right] = [[0.0; 64]; 2];
+    let mut reports = [RenderReport::default(); 3];
+    super::realtime(|| {
+        reports[0] = active
+            .render(&transport(SR, 0, 64), &source(&warm), &mut left, &mut right)
+            .unwrap();
+        candidate.transfer_from(&mut active, &[drive]).unwrap();
+        reports[1] = candidate
+            .render(
+                &transport(SR, 64, 64),
+                &source(&warm),
+                &mut left,
+                &mut right,
+            )
+            .unwrap();
+        reports[2] = candidate
+            .render(
+                &transport(SR, 128, 64),
+                &source(&warm),
+                &mut left,
+                &mut right,
+            )
+            .unwrap();
+    });
+    assert_eq!(reports.map(|report| report.silenced), [0, 1, 0]);
+    assert_eq!(left, [0.0; 64]);
+    assert_eq!(right[..49], [0.0; 49], "fault clears the warm dry history");
+    assert_eq!(
+        right[49..],
+        [0.5; 15],
+        "fault snaps to the admitted dry endpoint"
+    );
+    super::realtime(|| candidate.reset());
+}
