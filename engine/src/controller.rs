@@ -387,7 +387,7 @@ impl Controller {
     /// dropped; a choke group past [`crate::MAX_CHOKE_GROUP`] is `Rejected`.
     pub fn add_channel(&mut self, setup: ChannelSetup) -> Result<(), ControlError> {
         // A routed mix needs a route for the new instance in the same installation.
-        if matches!(self.state.mix, crate::mixer::MixSetup::Routed(_)) {
+        if self.state.mix.routed().is_some() {
             let mix = self.state.mix.clone();
             return self
                 .set_sources_and_mix(SourceEdit {
@@ -944,7 +944,7 @@ impl Controller {
     pub fn mixer_meter(&mut self, tracks: &[MixerTrackId]) -> Option<MixerMeter> {
         let mut selected = [MASTER; MIXER_METER_MAX_TRACKS];
         let mut count = 0;
-        if let crate::mixer::MixSetup::Routed(_) = &self.state.mix {
+        if self.state.mix.routed().is_some() {
             for &id in tracks {
                 if id != MASTER && !selected[..count].contains(&id) && self.state.mix.has_track(id)
                 {
@@ -1353,7 +1353,9 @@ fn aliases<'a>(
     use crate::mixer::{MixSetup, SourceId};
     if fades.iter().any(|f| match mix {
         MixSetup::LegacyDirect => f.track.is_some(),
-        MixSetup::Routed(_) => f.track.is_none_or(|track| !mix.has_track(track)),
+        MixSetup::Routed(_) | MixSetup::Controlled { .. } => {
+            f.track.is_none_or(|track| !mix.has_track(track))
+        }
     }) {
         return Err(ControlError::Busy);
     }
