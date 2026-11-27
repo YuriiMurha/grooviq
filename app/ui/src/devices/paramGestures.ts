@@ -83,6 +83,15 @@ export class ParamGestures {
     private readonly suspended: () => boolean = () => false,
   ) {}
 
+  /** A live preview may have changed before its gesture can enqueue a project edit. */
+  hasActiveChanges(): boolean {
+    for (const [id, { origin }] of this.active) {
+      const preview = this.moving[id];
+      if (preview !== undefined && preview !== origin) return true;
+    }
+    return false;
+  }
+
   /** Starts a gesture. A gesture already running on `id` (a wheel turn, then a drag) hands over
    * to it and keeps its start. */
   begin(id: string): Gesture {

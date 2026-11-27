@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { channelWaveform } from "../../api/notes";
 import { useSampleRevision } from "../../rack/sampleRevision";
 import type { ChannelView } from "../../api/project";
-import { useAutomationCreation } from "../../playlist/automation/creationContext";
+import { useAutomationCreation, useAutomationGestureGuard } from "../../playlist/automation/creationContext";
 import { EnvelopeGraph } from "../controls/EnvelopeGraph";
 import type { ParamControl } from "../controls/gesture";
 import { Knob } from "../controls/Knob";
@@ -78,6 +78,7 @@ export function SamplerEditor({ channel, index, z, opener, onClose, onRaise, onE
   const params = useDeviceParams(channel.id, channel.sampler, (id) => samplerParam(id).default, onError);
   const v = params.value;
   const automation = useAutomationCreation();
+  useAutomationGestureGuard(params.hasActiveChanges);
   const revision = useSampleRevision(channel.id);
   const repair = useTrimRepair(`${channel.id}:${channel.sampleName}:${channel.missing}:${revision}`, channel.sampler.start ?? 0, channel.sampler.end ?? 1, channel.sampler, params.trim, onError);
   const diagnosis = trimRepairState({ start:v("start"), end:v("end"), frames:channel.missing || !channel.sampleName ? null : channel.sampleFrames, loopStart:v("loop_start"), reverse:v("reverse") >= 0.5 });

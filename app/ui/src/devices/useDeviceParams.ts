@@ -67,6 +67,7 @@ export function useDeviceParams(channel: number, stored: Record<string, number>,
   const group = useCallback((): GestureGroup => owner.current?.group() ?? DEAD_GROUP, []);
   const set = useCallback((id: string, v: number) => owner.current?.set(id, v), []);
   const cancelAll = useCallback(() => owner.current?.cancelAll(), []);
+  const hasActiveChanges = useCallback(() => owner.current?.hasActiveChanges() ?? false, []);
   /** Any other edit (a preset, ...): running gestures end first, then it goes through the sink's
    * guard (refused while a replacement is on its way, checked again when it runs). */
   const send = useCallback(async (edit: Edit): Promise<boolean> => {
@@ -77,5 +78,5 @@ export function useDeviceParams(channel: number, stored: Record<string, number>,
     if (action.kind !== "view") owner.current?.cancelAll();
     return (await trimRef.current?.(action)) ?? null;
   }, []);
-  return { value, begin, group, set, cancelAll, trim: trim as GuardedTrim, send: send as GuardedEdit };
+  return { value, begin, group, set, cancelAll, hasActiveChanges, trim: trim as GuardedTrim, send: send as GuardedEdit };
 }

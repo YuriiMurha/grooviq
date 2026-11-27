@@ -39,6 +39,12 @@ export function AutomationCreation({ model, rulerPosition, children }: Props) {
   const { view } = useProject();
   const [invocation, setInvocation] = useState<Invocation | null>(null);
   const selection = useRef<PlaylistSelection | null>(null);
+  const gestureReaders = useRef(new Set<() => boolean>());
+  const registerDeviceGesture = useCallback((hasActiveChanges: () => boolean) => {
+    const readers = gestureReaders.current;
+    readers.add(hasActiveChanges);
+    return () => { readers.delete(hasActiveChanges); };
+  }, []);
   const setSelection = useCallback((next: PlaylistSelection | null) => { selection.current = next; }, []);
   const dismiss = useCallback(() => setInvocation(null), []);
   const snapshot = model.state.snapshot;
@@ -46,11 +52,24 @@ export function AutomationCreation({ model, rulerPosition, children }: Props) {
     sameStamp(snapshot, invocation.stamp) && !model.state.busy && model.state.media === null && !model.state.requiresRefresh ? invocation : null;
   if (invocation && !active) setInvocation(null);
 
-  const available = () => {
+  const deviceGestureActive = () => Array.from(gestureReaders.current).some(hasActiveChanges => hasActiveChanges());
+  const editableArrangement = () => {
     const { sessionView, state } = model.automationContext();
-    if (!sessionView || !state.snapshot || sessionView.generation !== state.snapshot.generation ||
-        state.busy || state.media !== null || state.requiresRefresh || isProjectReplacing() || modalIsOpen()) return null;
+    if (!state.snapshot || state.busy || state.media !== null || state.requiresRefresh || isProjectReplacing() || modalIsOpen()) return null;
     return { sessionView, snapshot: state.snapshot };
+  };
+  const available = () => {
+    const current = editableArrangement();
+    if (!current?.sessionView || current.sessionView.generation !== current.snapshot.generation || deviceGestureActive()) return null;
+    return { sessionView: current.sessionView, snapshot: current.snapshot };
+  };
+  const stillCurrent = (sessionView: ProjectView) => () =>
+    model.automationContext().sessionView === sessionView && !modalIsOpen() && !deviceGestureActive();
+  const captureEditGuard = (stamp: ArrangementStamp) => {
+    const current = editableArrangement();
+    if (!current || !sameStamp(current.snapshot, stamp)) return null;
+    if (!current.sessionView || deviceGestureActive()) return "devicePending" as const;
+    return current.sessionView.generation === stamp.generation ? stillCurrent(current.sessionView) : null;
   };
 
   const open = (target: ControlTarget, shown: number, anchor: HTMLElement, at: Point) => {
@@ -80,15 +99,14 @@ export function AutomationCreation({ model, rulerPosition, children }: Props) {
     if (!spec || !placement) return;
     const batch = buildAutomationCreation(request.target, request.value, spec.name, placement, snapshot.tracks, track);
     if (!batch) return;
-    const result = await model.mutate(request.stamp, batch, () =>
-      model.automationContext().sessionView === sessionView && !modalIsOpen());
+    const result = await model.mutate(request.stamp, batch, stillCurrent(sessionView));
     if (result.status === "applied" && projectGeneration() === request.replacements) {
       const clip = result.reply.createdIds.at(-1);
       if (clip !== undefined) selection.current?.selectCreated(result.reply.generation, clip);
     }
   };
 
-  return <AutomationCreationContext.Provider value={{ open, setSelection }}>
+  return <AutomationCreationContext.Provider value={{ open, setSelection, registerDeviceGesture, captureEditGuard }}>
     {children}
     {active && snapshot && createPortal(<CreationMenu request={active} tracks={snapshot.tracks}
       starts={active.starts} dismiss={dismiss} submit={(track, start) => { void submit(active, track, start); }} />, document.body)}

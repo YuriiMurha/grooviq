@@ -5,7 +5,7 @@ import type { ChannelView } from "../../api/project";
 import { EnvelopeGraph } from "../controls/EnvelopeGraph";
 import type { ParamControl } from "../controls/gesture";
 import { Knob } from "../controls/Knob";
-import { useAutomationCreation } from "../../playlist/automation/creationContext";
+import { useAutomationCreation, useAutomationGestureGuard } from "../../playlist/automation/creationContext";
 import { Segmented } from "../controls/Segmented";
 import { DeviceWindow } from "../DeviceWindow";
 import { useDeviceParams } from "../useDeviceParams";
@@ -51,6 +51,7 @@ export function SynthEditor({ generation, active, channel, index, z, opener, onC
   const params = useDeviceParams(channel.id, channel.synth, (id) => synthParam(id).default, onError);
   const v = params.value;
   const automation = useAutomationCreation();
+  useAutomationGestureGuard(params.hasActiveChanges);
   const ctl = (id: string): ParamControl => ({ begin: () => params.begin(id), set: (x) => params.set(id, x) });
 
   const control = ({ id, kind }: Placement, opts: { row?: boolean; size?: number } = {}) => {

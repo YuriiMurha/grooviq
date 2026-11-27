@@ -277,8 +277,8 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
     if (gesture instanceof ClipGroupGesture) setCapturedMembers(gesture.memberIds);
     else { showClipPreview(gesture); setPreviewIndex(index); }
   };
-  const commit = async (stamp: ArrangementStamp, operations: Parameters<typeof mutate>[1], selectCreated = true, createdCount = 1) => {
-    const result = await mutate(stamp, operations, operations[0]?.kind === "setAutomationClip" ? () => !modalIsOpen() : undefined);
+  const commit = async (stamp: ArrangementStamp, operations: Parameters<typeof mutate>[1], selectCreated = true, createdCount = 1, still?: () => boolean) => {
+    const result = await mutate(stamp, operations, still);
     if (result.status === "applied" && selectCreated) {
       const id = result.reply.createdIds.at(-1);
       if (id !== undefined) setSelected({ generation: result.reply.generation, ids: result.reply.createdIds.slice(-createdCount) });
@@ -623,7 +623,7 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
     {snapshot && selectedAutomation &&
       <AutomationPointEditor key={`${snapshot.generation}:${selectedAutomation.id}`}
         clip={selectedAutomation} stamp={snapshot} curve={automationCurve} disabled={busy}
-        onEdit={(stamp, operation) => { cancel(); void commit(stamp, [operation], false); }} />}
+        onEdit={(stamp, operation, still) => { cancel(); void commit(stamp, [operation], false, 1, still); }} />}
     {message && <p role="alert" className="playlist-error">{message}</p>}
     {missingAsset !== null && <p className="playlist-readonly">The audio file for this clip is missing.</p>}
     {!state.busy && state.media === null && snapshot?.total === 0 && <p className="playlist-empty">Draw a pattern or drop an audio file onto a track.</p>}

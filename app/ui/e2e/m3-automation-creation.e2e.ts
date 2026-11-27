@@ -97,14 +97,16 @@ test("creates a sampler clip on the selected track at loop start, then edits, un
 
   const target = dock.getByRole("combobox", { name: "Automation target" });
   const priority = dock.getByRole("textbox", { name: "Overlap priority" });
+  const apply = dock.getByRole("button", { name: "Apply settings" });
   await target.selectOption("1:sampler:tune");
   await priority.fill("10");
   const beforeSettings = await readArrangement(app);
-  await dock.getByRole("button", { name: "Apply settings" }).click();
+  await apply.press("Enter");
   const changedTarget = { ...createdTarget, param: "tune" };
   await expect.poll(async () => (await readArrangement(app)).clips.find(item => item.id === clip)?.content)
     .toMatchObject({ target: changedTarget, priority: 10, pointCount: 1 });
   await expect(canvas).toHaveAttribute("aria-disabled", "false");
+  await expect(apply).toBeFocused();
   const edits = await mock.calls("arrangement_edit");
   expect(edits).toHaveLength(3);
   expect(edits[2].args).toMatchObject({ generation: beforeSettings.generation, revision: beforeSettings.revision });
@@ -132,6 +134,18 @@ test("creates a sampler clip on the selected track at loop start, then edits, un
   expect((await readProject(app)).channels[0].sampler.fine).toBe(-6.25);
   expect((await readProject(app)).channels[0].sampler.tune).toBe(0);
   await expectSilent(mock);
+
+  await app.getByRole("button", { name: "Playback mode: Pattern" }).click();
+  await app.getByRole("listbox", { name: "Playback mode" }).getByRole("option", { name: "Song", exact: true }).click();
+  await expect(app.getByRole("button", { name: "Playback mode: Song" })).toBeEnabled();
+  await app.getByRole("button", { name: "Play", exact: true }).click();
+  await expect.poll(async () => (await mock.calls("transport_play")).length).toBe(1);
+  await app.getByRole("button", { name: "Stop", exact: true }).click();
+  expect((await mock.calls()).filter(({ cmd }) => cmd === "transport_play" || cmd === "transport_stop").map(({ cmd }) => cmd))
+    .toEqual(["transport_play", "transport_stop"]);
+  expect((await readArrangement(app)).playMode).toBe("song");
+  expect(await readPoints(app, clip)).toEqual([hold]);
+  expect((await readProject(app)).channels[0].sampler.tune).toBe(0);
 });
 
 test.describe("when the song has no tracks", () => {
@@ -267,4 +281,143 @@ test("keeps normal knob editing and drops a command during pending edits and a m
   expect((await readArrangement(app)).clips).toEqual([pattern]);
   expect((await readProject(app)).channels[0].sampler.fine).toBe(-6.25);
   expect((await readProject(app)).channels[0].sampler.tune).toBe(0);
+});
+
+test("keeps staged settings while both a held and a queued knob edit settle", async ({ app, mock }) => {
+  const { select, dock, graph, canvas } = await openPlaylist(app);
+  await select("Beat · Track 1 · 0 ticks");
+  const { knob, close } = await openKnob(app, "Kick");
+  await knob.press("Shift+F10");
+  await menuAction(app).press("Enter");
+  await choose(app, "Automation start", "Loop start");
+  await placementDialog(app).getByRole("button", { name: "Create clip" }).click();
+  await close();
+  await expect(graph).toHaveAttribute("aria-disabled", "false");
+  const priority = dock.getByRole("textbox", { name: "Overlap priority" });
+  const apply = dock.getByRole("button", { name: "Apply settings" });
+  await priority.fill("10");
+
+  const { editor, knob: fine, close: closeAgain } = await openKnob(app, "Kick");
+  const tune = editor.locator('[data-param="tune"]');
+  await mock.eval('m => m.holdCommand("project_edit")');
+  try {
+    await tune.press("ArrowRight");
+    await expect.poll(async () => (await mock.calls("project_edit")).length).toBe(1);
+    await fine.press("ArrowRight");
+    await expect(fine).not.toHaveAttribute("aria-valuenow", "-6.25");
+    await apply.press("Enter");
+    await expect(priority).toHaveValue("10");
+    expect(await mock.calls("arrangement_edit")).toHaveLength(1);
+  } finally {
+    await mock.eval('m => m.releaseCommand("project_edit")');
+  }
+  await expect.poll(async () => (await mock.calls("project_edit")).map(call => call.args.edit))
+    .toEqual([expect.objectContaining({ param: "tune" }), expect.objectContaining({ param: "fine" })]);
+  await expect.poll(async () => (await readProject(app)).channels[0].sampler.fine).toBeGreaterThan(-6.25);
+  expect((await readProject(app)).channels[0].sampler.tune).toBeGreaterThan(0);
+  await closeAgain();
+  await expect(canvas).toHaveAttribute("aria-disabled", "false");
+  await expect(priority).toHaveValue("10");
+  const before = await readArrangement(app);
+  await apply.press("Enter");
+  await expect.poll(async () => (await readArrangement(app)).clips[1].content).toMatchObject({ priority: 10 });
+  expect((await mock.calls("arrangement_edit"))[1].args).toMatchObject({ generation: before.generation, revision: before.revision });
+  await expect(canvas).toHaveAttribute("aria-disabled", "false");
+
+  await priority.fill("11");
+  await app.getByRole("textbox", { name: "BPM", exact: true }).fill("126");
+  // Preserve focus on the tempo draft, so the transition itself settles it after settings admission.
+  await dock.getByRole("form", { name: "Automation clip settings" }).evaluate((form: HTMLFormElement) => form.requestSubmit());
+  await expect.poll(async () => (await mock.view()).bpm).toBe(126);
+  await expect(canvas).toHaveAttribute("aria-disabled", "false");
+  expect(await mock.calls("arrangement_edit")).toHaveLength(2);
+  expect((await readArrangement(app)).clips[1].content).toMatchObject({ priority: 10 });
+
+  await expect(graph).toHaveAttribute("aria-disabled", "false");
+  await priority.fill("11");
+  const { editor: revised, close: closeRevised } = await openKnob(app, "Kick");
+  const previous = await readArrangement(app);
+  const clip = previous.clips[1].id;
+  const lastTune = (await readProject(app)).channels[0].sampler.tune;
+  const sameCount = [{ tick: 0, value: -4, mode: "linear" }] satisfies CurvePoint[];
+  await mock.eval('m => m.holdCommand("project_edit")');
+  try {
+    await revised.locator('[data-param="tune"]').press("ArrowRight");
+    await expect.poll(async () => (await mock.calls("project_edit")).length).toBe(4);
+    await apply.press("Enter");
+    await expect(priority).toHaveValue("11");
+    const updated = await invoke<ArrangementReply>(app, "arrangement_edit", {
+      generation: previous.generation, revision: previous.revision,
+      editsJson: JSON.stringify([{ kind: "setAutomationPoints", clip, points: sameCount }]),
+    });
+    expect(updated.status).toBe("applied");
+  } finally {
+    await mock.eval('m => m.releaseCommand("project_edit")');
+  }
+  await expect.poll(async () => (await readProject(app)).channels[0].sampler.tune).toBeGreaterThan(lastTune);
+  await closeRevised();
+  await expect(graph).toHaveAttribute("aria-disabled", "false");
+  await expect(priority).toHaveValue("10");
+  expect(await readPoints(app, clip)).toEqual(sameCount);
+  expect(await mock.calls("arrangement_edit")).toHaveLength(3);
+});
+
+test("lets the device owner finish a live wheel gesture before creating on another knob", async ({ app, mock }) => {
+  const { select, graph } = await openPlaylist(app);
+  await select("Beat · Track 1 · 0 ticks");
+  const { editor, knob, close } = await openKnob(app, "Kick");
+  const tune = editor.locator('[data-param="tune"]');
+  const openedWhileWheeling = await editor.evaluate(async element => {
+    const tuneControl = element.querySelector('[data-param="tune"]')!;
+    const fineControl = element.querySelector('[data-param="fine"]')!;
+    tuneControl.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -100 }));
+    // One input task guarantees the wheel timer has not enqueued a project edit yet.
+    fineControl.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "F10", shiftKey: true }));
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    return document.querySelector('[aria-label="Parameter actions"]') !== null;
+  });
+  expect(openedWhileWheeling).toBe(false);
+  await expect.poll(async () => (await readProject(app)).channels[0].sampler.tune).toBeGreaterThan(0);
+  await expect(tune).not.toHaveAttribute("aria-valuenow", "0");
+  expect((await mock.calls("project_edit")).map(call => call.args.edit)).toEqual([expect.objectContaining({ param: "tune" })]);
+  const before = await readArrangement(app);
+  await knob.press("Shift+F10");
+  await menuAction(app).press("Enter");
+  await choose(app, "Automation start", "Loop start");
+  await placementDialog(app).getByRole("button", { name: "Create clip" }).click();
+  await close();
+  await expect(graph).toHaveAttribute("aria-disabled", "false");
+  const [created] = await mock.calls("arrangement_edit");
+  expect(created.args).toMatchObject({ generation: before.generation, revision: before.revision });
+  expect(await mock.calls("project_edit")).toHaveLength(1);
+});
+
+test.describe("in a compact workspace with a long target name", () => {
+  test.use({ viewport: { width: 900, height: 560 }, seed: { project: {
+    ...scene,
+    channels: [{ ...scene.channels[0], name: "Generated sampler target ".repeat(8).trim() }, scene.channels[1]],
+    arrangement: { ...arrangement, clips: [pattern, { id: 6, track: track.id, name: "Pan sweep", startTick: 0, muted: false,
+      content: { type: "automation", target: { type: "channelPan", channel: 1 }, priority: 7, offsetTick: 0, lengthTicks: 3840,
+        points: [{ tick: 0, value: 0, mode: "linear" }] } }] },
+  }, files: soundsFor(["Kick"]) } });
+
+  test("keeps the workspace, target and priority controls reachable", async ({ app }) => {
+    const { select, dock, graph } = await openPlaylist(app);
+    await select("Pan sweep · Track 1 · 0 ticks");
+    await expect(graph).toHaveAttribute("aria-disabled", "false");
+    const target = dock.getByRole("combobox", { name: "Automation target" });
+    const priority = dock.getByRole("textbox", { name: "Overlap priority" });
+    const apply = dock.getByRole("button", { name: "Apply settings" });
+    const targetFits = await target.evaluate(element => {
+      const dock = element.closest(".automation-dock")!.getBoundingClientRect();
+      const select = element.getBoundingClientRect();
+      return select.width > 0 && select.right <= dock.right;
+    });
+    expect(targetFits).toBe(true);
+    expect(await app.locator(".workspace-viewport").evaluate(element => element.clientHeight)).toBeGreaterThan(0);
+    await target.selectOption("1:channelVolume");
+    await priority.fill("8");
+    await apply.click();
+    await expect.poll(async () => (await readArrangement(app)).clips[1].content).toMatchObject({ priority: 8 });
+  });
 });
