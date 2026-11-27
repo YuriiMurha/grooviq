@@ -283,6 +283,75 @@ fn realtime_process(p: &mut AudioProcessor, out: &mut [f32]) {
     super::realtime(|| p.process(out, 2));
 }
 
+#[test]
+fn active_fader_install_render_and_retirement_are_realtime_safe() {
+    let strip = MixerTrackId(1);
+    let initial = RoutedMix {
+        mixer: Mixer {
+            tracks: vec![track(0, None, &[]), track(1, Some(0), &[])],
+            sources: vec![Source {
+                id: SourceId::System(SystemSource::Tone),
+                destination: strip,
+            }],
+            ..Mixer::default()
+        },
+        gains: vec![],
+        devices: vec![],
+    };
+    let tone = || {
+        let (mut c, p) = engine_with(
+            EngineConfig {
+                sample_rate: 48_000.0,
+            },
+            EngineState {
+                mix: MixSetup::Routed(initial.clone()),
+                ..EngineState::default()
+            },
+        );
+        c.send(Command::TestTone {
+            on: true,
+            hz: 437.0,
+            gain_db: -12.0,
+        })
+        .unwrap();
+        (c, p)
+    };
+    let (mut c, mut p) = tone();
+    let (_reference_controller, mut reference) = tone();
+    let mut out = [0.0; BLOCK * 2];
+    let mut dry = [0.0; BLOCK * 2];
+    for _ in 0..5 {
+        realtime_process(&mut p, &mut out);
+        realtime_process(&mut reference, &mut dry);
+    }
+    let mut edit = initial.clone();
+    edit.gains.push(TrackGain {
+        track: strip,
+        left: 0.0,
+        right: 0.5,
+    });
+    for block in 0..4 {
+        if block <= 1 {
+            c.set_mix(MixSetup::Routed(edit.clone())).unwrap();
+        }
+        realtime_process(&mut p, &mut out);
+        realtime_process(&mut reference, &mut dry);
+        for (frame, (&[l, r], &[dl, dr])) in out
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(dry.as_chunks::<2>().0)
+            .enumerate()
+        {
+            let elapsed = (BLOCK * block + frame + 1).min(240) as f64;
+            assert_eq!(l, dl * (1.0 - elapsed / 240.0) as f32);
+            assert_eq!(r, dr * (1.0 - elapsed / 480.0) as f32);
+        }
+        // Drain the old owning box on the control thread before the next edit.
+        assert!(c.check_health().is_empty());
+    }
+}
+
 const FADING_CAPACITY: u32 = MAX_CHANNELS as u32;
 
 fn synth(id: u32) -> ChannelSetup {

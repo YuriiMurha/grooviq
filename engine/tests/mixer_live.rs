@@ -629,7 +629,6 @@ fn manual(iso: &Isolated, change: Option<Change>, start: usize) -> Vec<f32> {
     let mut c2 = fresh("comp", 0, &comp_params(-18.0));
     let mut r3 = fresh("reverb", 0, &[]);
     let mut eq: Option<Box<dyn Device>> = None;
-    let mut master = 0.8;
     let mut routes = routes();
     let mut track9 = false;
     let mut out = Vec::with_capacity(BLOCKS * N * 2);
@@ -644,7 +643,6 @@ fn manual(iso: &Isolated, change: Option<Change>, start: usize) -> Vec<f32> {
         if let Some(ch) = &change
             && ch.at == b
         {
-            master = ch.master;
             if let Some(t) = ch.threshold {
                 c2.set_param(0, t);
             }
@@ -714,7 +712,19 @@ fn manual(iso: &Isolated, change: Option<Change>, start: usize) -> Vec<f32> {
             acc(&mut w, &post1[ch], 1.0);
             acc(&mut w, &post2[ch], 1.0);
             acc(&mut w, &t3[ch], 1.0);
-            for (o, x) in lr[ch].iter_mut().zip(&w) {
+            for (frame, (o, x)) in lr[ch].iter_mut().zip(&w).enumerate() {
+                let master = match &change {
+                    Some(edit) if b >= edit.at => {
+                        let elapsed = (b - edit.at) * N + frame + 1;
+                        if elapsed >= 240 {
+                            edit.master
+                        } else {
+                            let t = elapsed as f64 / 240.0;
+                            (f64::from(0.8f32) * (1.0 - t) + f64::from(edit.master) * t) as f32
+                        }
+                    }
+                    _ => 0.8,
+                };
                 *o = *x * master;
             }
         }

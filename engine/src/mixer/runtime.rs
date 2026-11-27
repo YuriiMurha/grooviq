@@ -4,7 +4,7 @@
 //!
 //! Per node, in the compiled level order: audible inputs are summed in the compiled vector
 //! order, the inserts run in chain order (each sidechain-carrying insert gets its own
-//! detector sum, never audible), the result is the pre-fader tap and the fixed stereo
+//! detector sum, never audible), the result is the pre-fader tap and the stereo fader
 //! coefficients make the post-fader tap. Master runs last and its post-fader tap is the output.
 //!
 //! Fault convention (same as the legacy graph): a node whose pre- or post-fader block holds
@@ -20,12 +20,13 @@ use super::{
     ActualLatency, CompiledMixer, InputId, InsertId, LatencyError, MASTER, MixerTrackId, PdcBudget,
     PdcDelay, PdcPoint, SourceId, Tap, TrackArrival, plan_latency,
 };
+use crate::graph::ramp_len;
 use grooviq_dsp::{HostTransport, MAX_BLOCK};
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem::size_of;
 
-/// Fixed linear coefficients from the pre-fader to the post-fader tap. A track without an
-/// entry is unity. No pan law, mute or solo is implied.
+/// Target linear coefficients from the pre-fader to the post-fader tap. A track without an
+/// entry has unity targets. No pan law, mute or solo is implied.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrackGain {
     pub track: MixerTrackId,
@@ -133,19 +134,77 @@ enum FeedInput {
 struct Node {
     audible: (u32, u32),
     inserts: (u32, u32),
-    left: f32,
-    right: f32,
+    fader: [FaderGain; 2],
 }
+
+#[derive(Clone, Copy, Debug)]
+struct FaderGain {
+    start: f32,
+    current: f32,
+    target: f32,
+    remaining: u32,
+    step: f64,
+}
+
+impl FaderGain {
+    fn at(target: f32) -> Self {
+        Self {
+            start: target,
+            current: target,
+            target,
+            remaining: 0,
+            step: 0.0,
+        }
+    }
+
+    fn retarget(&mut self, target: f32, samples: u32) {
+        if self.target.to_bits() == target.to_bits() {
+            return;
+        }
+        if self.current.to_bits() == target.to_bits() {
+            *self = Self::at(target);
+            return;
+        }
+        self.start = self.current;
+        self.target = target;
+        self.remaining = samples;
+        // TrackGain accepts every finite f32. Subtraction in f32 can overflow
+        // when the endpoints have opposite signs.
+        self.step = (f64::from(target) - f64::from(self.start)) / f64::from(samples);
+    }
+
+    fn apply(&mut self, samples: u32, input: &[f32], output: &mut [f32]) {
+        let active = input.len().min(self.remaining as usize);
+        for (o, x) in output[..active].iter_mut().zip(&input[..active]) {
+            self.remaining -= 1;
+            self.current = if self.remaining == 0 {
+                self.target
+            } else {
+                (f64::from(self.start) + self.step * f64::from(samples - self.remaining)) as f32
+            };
+            *o = *x * self.current;
+        }
+        for (o, x) in output[active..].iter_mut().zip(&input[active..]) {
+            *o = *x * self.current;
+        }
+    }
+}
+
+// Per-track capacity reserved during live preparation.
+pub(super) const TRACK_TABLE_BYTES: u64 =
+    (size_of::<Node>() + size_of::<(MixerTrackId, u32)>()) as u64;
 
 pub struct PreparedMixer {
     sample_rate: f32,
+    fader_samples: u32,
     max_frames: usize,
     nodes: Vec<Node>,
     audible: Vec<Feed>,
     detector: Vec<Feed>,
     inserts: Vec<InsertSlot>,
     keys: Vec<(InsertId, u32)>,
-    meter_taps: Vec<(MixerTrackId, u32)>,
+    /// Sorted persistent track IDs and their indices in compiled execution order.
+    track_nodes: Vec<(MixerTrackId, u32)>,
     sources: Vec<SourceId>,
     /// Per node: pre L, pre R, post L, post R; then work L/R and detector L/R.
     buffers: Vec<f32>,
@@ -401,16 +460,14 @@ impl PreparedMixer {
         let mut detector = reserved(n_inputs)?;
         let mut inserts = reserved(owner.len())?;
         let mut keys = reserved(owner.len())?;
-        let mut meter_taps = reserved(order.len() - 1)?;
+        let mut track_nodes = reserved(order.len())?;
         let mut sources = reserved(source_set.len())?;
         sources.extend(source_set.iter().copied());
 
         for &ti in &order {
             let t = &compiled.tracks[ti];
             let id = t.track.id;
-            if id != MASTER {
-                meter_taps.push((id, tap_at(nodes.len(), Tap::PostFader)?));
-            }
+            track_nodes.push((id, to_u32(nodes.len())?));
             let level = level_of[&id];
             for pair in t.inputs.windows(2) {
                 if pair[0].id >= pair[1].id {
@@ -533,13 +590,12 @@ impl PreparedMixer {
             nodes.push(Node {
                 audible: audible_range,
                 inserts: (first_insert, to_u32(inserts.len())?),
-                left,
-                right,
+                fader: [FaderGain::at(left), FaderGain::at(right)],
             });
         }
         assert!(timing.points.len() == 0 && timing.tracks.len() == 0);
         keys.sort_unstable_by_key(|(id, _)| *id);
-        meter_taps.sort_unstable_by_key(|(id, _)| *id);
+        track_nodes.sort_unstable_by_key(|(id, _)| *id);
 
         let samples = order
             .len()
@@ -557,7 +613,7 @@ impl PreparedMixer {
             bytes(&detector)?,
             bytes(&inserts)?,
             bytes(&keys)?,
-            bytes(&meter_taps)?,
+            bytes(&track_nodes)?,
             bytes(&sources)?,
             timing.bank.table_bytes()?,
         ]
@@ -589,13 +645,14 @@ impl PreparedMixer {
         }
         Ok(Self {
             sample_rate: config.sample_rate,
+            fader_samples: ramp_len(config.sample_rate),
             max_frames: mf,
             nodes,
             audible,
             detector,
             inserts,
             keys,
-            meter_taps,
+            track_nodes,
             sources,
             buffers,
             delays: timing.bank,
@@ -609,11 +666,15 @@ impl PreparedMixer {
 
     /// Call after a successful render of `frames` samples, whose taps the guard has checked.
     pub(crate) fn post_fader_peaks(&self, track: MixerTrackId, frames: usize) -> Option<[f32; 2]> {
+        if track == MASTER {
+            return None;
+        }
         let index = self
-            .meter_taps
+            .track_nodes
             .binary_search_by_key(&track, |&(id, _)| id)
             .ok()?;
-        let left = self.meter_taps[index].1 as usize;
+        let node = self.track_nodes[index].1 as usize;
+        let left = (4 * node + 2) * self.max_frames;
         let right = left + self.max_frames;
         let mut peak = [0.0f32; 2];
         for (&l, &r) in self.buffers[left..left + frames]
@@ -768,7 +829,7 @@ impl PreparedMixer {
         let (wl, wr, dl, dr) = (&mut wl[..n], &mut wr[..n], &mut dl[..n], &mut dr[..n]);
         let mut silenced = 0;
 
-        for (k, node) in self.nodes.iter().enumerate() {
+        for (k, node) in self.nodes.iter_mut().enumerate() {
             wl.fill(0.0);
             wr.fill(0.0);
             let feeds = &self.audible[node.audible.0 as usize..node.audible.1 as usize];
@@ -823,12 +884,8 @@ impl PreparedMixer {
             let (post_l, post_r) = (&mut post_l[..n], &mut post_r[..n]);
             pre_l.copy_from_slice(wl);
             pre_r.copy_from_slice(wr);
-            for (o, x) in post_l.iter_mut().zip(wl.iter()) {
-                *o = *x * node.left;
-            }
-            for (o, x) in post_r.iter_mut().zip(wr.iter()) {
-                *o = *x * node.right;
-            }
+            node.fader[0].apply(self.fader_samples, wl, post_l);
+            node.fader[1].apply(self.fader_samples, wr, post_r);
             let finite = pre_l
                 .iter()
                 .chain(pre_r.iter())
@@ -888,6 +945,22 @@ impl PreparedMixer {
     ) {
         if self.validate_transfer(old, inserts, false).is_ok() {
             self.swap_survivors(old, inserts, params);
+            self.carry_faders(old);
+        }
+    }
+
+    fn carry_faders(&mut self, old: &PreparedMixer) {
+        let mut previous = old.track_nodes.iter().copied().peekable();
+        for &(id, new_index) in &self.track_nodes {
+            while previous.next_if(|&(old_id, _)| old_id < id).is_some() {}
+            if let Some((_, old_index)) = previous.next_if(|&(old_id, _)| old_id == id) {
+                let new = &mut self.nodes[new_index as usize].fader;
+                let old = old.nodes[old_index as usize].fader;
+                for (gain, mut carried) in new.iter_mut().zip(old) {
+                    carried.retarget(gain.target, self.fader_samples);
+                    *gain = carried;
+                }
+            }
         }
     }
 
@@ -954,10 +1027,15 @@ impl PreparedMixer {
         self.sample_rate
     }
 
-    /// Clears all devices, taps and compensation histories without resizing or freeing.
+    /// Clears devices, taps and compensation histories and snaps to the admitted fader targets.
     pub fn reset(&mut self) {
         for slot in &mut self.inserts {
             slot.device.reset();
+        }
+        for node in &mut self.nodes {
+            for gain in &mut node.fader {
+                *gain = FaderGain::at(gain.target);
+            }
         }
         self.buffers.fill(0.0);
         self.delays.reset();

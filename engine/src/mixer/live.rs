@@ -4,11 +4,12 @@
 //! audio thread only swaps boxes and devices at a block boundary.
 //!
 //! The kernel prepares compensation from the devices' actual latency after preset setup.
-//! Declared bounds still govern admission. No pan law, mute or solo beyond the fixed
+//! Declared bounds still govern admission. No pan law, mute or solo beyond the admitted
 //! track coefficients.
 
 use super::compile::{ROUTING_BYTES_PER_ITEM, admit};
 use super::memory::{MixerMemory, Reservation};
+use super::runtime::TRACK_TABLE_BYTES;
 use super::{
     Budget, InsertId, InsertIdentity, Mixer, MixerTrackId, PrepareConfig, PreparedInsert,
     PreparedMixer, Source, SourceBuffers, SourceId, TrackGain, compile,
@@ -418,10 +419,7 @@ fn preparation_bound(mix: &RoutedMix, aliases: u64) -> Result<(u64, u64), Contro
     let peak = sum([
         topology.memory_bytes,
         routing_tables,
-        product(
-            mix.mixer.tracks.len() as u64,
-            size_of::<(MixerTrackId, u32)>() as u64,
-        )?,
+        product(mix.mixer.tracks.len() as u64, TRACK_TABLE_BYTES)?,
         normalized,
         pulls,
         2 * stereo_block,
@@ -506,8 +504,8 @@ pub(crate) fn plan(
 }
 
 impl LiveMix {
-    /// Takes compatible device and delay histories out of `old`, applying parameter deltas
-    /// only to transferred devices. The other inserts use their prepared parameter banks.
+    /// Takes compatible device, delay and fader histories from `old`, applying parameter
+    /// deltas only to transferred devices. Other inserts use their prepared parameter banks.
     /// Real-time safe.
     pub(crate) fn adopt(&mut self, old: &mut LiveMix, changes: &MixChanges) {
         // Same kind and sample rate imply the same registry payload bound. Only those
@@ -519,7 +517,124 @@ impl LiveMix {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{MASTER, SourceBlock, SystemSource, Track};
     use super::*;
+    use crate::graph::Graph;
+    use grooviq_dsp::{HostDomain, HostTransport};
+
+    const FADER_RATE: f32 = 48_000.0;
+    const FADER_SOURCE: SourceId = SourceId::System(SystemSource::Tone);
+
+    fn master_fader(memory: &MixerMemory, target: f32) -> Box<LiveMix> {
+        let mix = MixSetup::Routed(RoutedMix {
+            mixer: Mixer {
+                tracks: vec![Track {
+                    id: MASTER,
+                    output: None,
+                    inserts: vec![],
+                }],
+                sources: vec![Source {
+                    id: FADER_SOURCE,
+                    destination: MASTER,
+                }],
+                ..Mixer::default()
+            },
+            gains: vec![TrackGain {
+                track: MASTER,
+                left: target,
+                right: target,
+            }],
+            devices: vec![],
+        });
+        prepare(&mix, FADER_RATE, std::iter::empty(), memory)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn valid_empty_kernel_renders_consume_no_fader_samples() {
+        let memory = MixerMemory::default();
+        let mut old = master_fader(&memory, 1.0);
+        let mut next = master_fader(&memory, 0.0);
+        next.adopt(&mut old, &MixChanges::default());
+        let mut host = HostTransport {
+            domain: HostDomain::Pattern,
+            frame: 0,
+            frames: 0,
+            sample_rate: FADER_RATE,
+            bpm: 120.0,
+            playing: false,
+            anchor_frame: 0,
+            anchor_tick: 0.0,
+            shift: 0,
+            loop_start: 0,
+            loop_end: 0,
+            stream_generation: 0,
+            discontinuity: 0,
+            changed: false,
+        };
+        let source = |samples| {
+            [SourceBlock {
+                id: FADER_SOURCE,
+                left: samples,
+                right: samples,
+            }]
+        };
+        let [mut left, mut right] = [[-1.0]; 2];
+        next.kernel
+            .render(&host, &source(&[]), &mut left, &mut right)
+            .unwrap();
+        next.kernel
+            .render_pulled(&host, &next.sources, &mut left, &mut right)
+            .unwrap();
+        assert_eq!([left, right], [[-1.0]; 2]);
+        host.frames = 1;
+        next.kernel
+            .render(&host, &source(&[1.0]), &mut left, &mut right)
+            .unwrap();
+        assert_eq!([left, right], [[239.0 / 240.0]; 2]);
+    }
+
+    #[test]
+    fn refused_stale_or_foreign_install_keeps_an_active_fader_waveform() {
+        let memory = MixerMemory::default();
+        let mut edited = Graph::new(FADER_RATE, 0);
+        let mut reference = Graph::new(FADER_RATE, 0);
+        let install = |graph: &mut Graph, generation, base, revision, target| {
+            let mut candidate = MixInstall {
+                generation,
+                base,
+                revision,
+                live: Some(master_fader(&memory, target)),
+                changes: MixChanges::default(),
+                installed: false,
+            };
+            graph.install_mix(&mut candidate);
+            candidate.installed
+        };
+        let [mut left, mut right, mut dry_left, mut dry_right] = [[0.0; BLOCK]; 4];
+        for graph in [&mut edited, &mut reference] {
+            graph.set_initial_mix(Some(master_fader(&memory, 1.0)), 0);
+            graph.set_tone(true, 437.0, -12.0);
+            for _ in 0..5 {
+                assert_eq!(graph.render(&mut left, &mut right, &[]), (0, true));
+            }
+            assert!(install(graph, 0, 0, 1, 0.25));
+            assert_eq!(graph.render(&mut left, &mut right, &[]), (0, true));
+        }
+        assert!(!install(&mut edited, 0, 0, 2, 3.0));
+        assert!(!install(&mut edited, 1, 1, 2, 4.0));
+        assert_eq!(edited.mix_revision(), 1);
+        for _ in 0..4 {
+            assert_eq!(edited.render(&mut left, &mut right, &[]), (0, true));
+            assert_eq!(
+                reference.render(&mut dry_left, &mut dry_right, &[]),
+                (0, true)
+            );
+            assert_eq!(left, dry_left);
+            assert_eq!(right, dry_right);
+        }
+    }
 
     fn oracle(kind: &str, seed: u64) -> Box<dyn Device> {
         // Independent expected mapping: XOR the two 32-bit halves for 32-bit RNGs.
