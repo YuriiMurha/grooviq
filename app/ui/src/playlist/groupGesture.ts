@@ -14,7 +14,7 @@ export function marqueeRect(start: Point, end: Point): Rect {
 export function marqueeSelection(clips: readonly RenderClip[], rect: Rect, view: PlaylistView): number[] {
   if (rect.width === 0 || rect.height === 0) return [];
   return clips.flatMap(clip => {
-    if (clip.kind === "automation" || clip.id === null) return [];
+    if (clip.id === null) return [];
     const bounds = projectClipRect(clip, view);
     return bounds.x < rect.x + rect.width && bounds.x + bounds.width > rect.x && bounds.y < rect.y + rect.height && bounds.y + bounds.height > rect.y ? [clip.id] : [];
   });
@@ -36,14 +36,13 @@ export class ClipGroupGesture {
 
   constructor(input: ClipGroupInput, clips: readonly RenderClip[]) {
     const kind = input.kind;
-    const members = clips.filter(clip => clip.kind !== "automation");
-    if (!members.length) throw new RangeError("Invalid clip group");
+    if (!clips.length) throw new RangeError("Invalid clip group");
     this.tracks = input.tracks.map(track => track.id);
     this.input = { pointerId: input.pointerId, stamp: { ...input.stamp }, replacements: input.replacements,
       originTick: input.originTick, originTrack: input.originTrack, quantum: input.quantum };
     let firstTick = MAX_SONG_TICKS, lastTick = 0, firstTrack = this.tracks.length, lastTrack = 0;
     const ids = new Set<number>();
-    this.clips = members.map(({ id, startTick, trackIndex, lengthTicks }) => {
+    this.clips = clips.map(({ id, startTick, trackIndex, lengthTicks }) => {
       integer(startTick, "clip start");
       integer(lengthTicks, "clip length", 1, MAX_SONG_TICKS - startTick);
       integer(trackIndex, "track index", 0, this.tracks.length - 1);

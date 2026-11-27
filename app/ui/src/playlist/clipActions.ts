@@ -1,21 +1,20 @@
-import type { ArrangementOperation, AudioContent, ClipSummary, PatternContent } from "../api/arrangement";
+import type { ArrangementOperation, ClipSummary } from "../api/arrangement";
 import { audioDurationTicks } from "./audio/geometry";
 import { MAX_SONG_TICKS } from "./geometry";
 
 export type ClipAction = "delete" | "mute" | "duplicate";
-type EditableClip = ClipSummary & { content: PatternContent | AudioContent };
 
-export function selectedEditableClips(clips: readonly ClipSummary[], selection: ReadonlySet<number>): EditableClip[] {
+export function selectedClips(clips: readonly ClipSummary[], selection: ReadonlySet<number>): ClipSummary[] {
   if (!selection.size) return [];
-  return clips.filter((clip): clip is EditableClip => selection.has(clip.id) && clip.content.type !== "automation");
+  return clips.filter(clip => selection.has(clip.id));
 }
 
-export function selectionIsMuted(clips: readonly EditableClip[]): boolean {
+export function selectionIsMuted(clips: readonly ClipSummary[]): boolean {
   return clips.length > 0 && clips.every(clip => clip.muted);
 }
 
 export function buildClipAction(
-  action: ClipAction, clips: readonly EditableClip[], audioAssets: ReadonlyMap<number, { sourceRate: number }>, bpm: number,
+  action: ClipAction, clips: readonly ClipSummary[], audioAssets: ReadonlyMap<number, { sourceRate: number }>, bpm: number,
 ): ArrangementOperation[] {
   if (!clips.length) return [];
   switch (action) {

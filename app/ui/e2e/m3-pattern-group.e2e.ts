@@ -66,14 +66,14 @@ test.describe("existing clip order", () => {
   });
 });
 
-test("a loaded read-only clip does not join a pattern group preview", async ({ app, mock }) => {
+test("a loaded automation clip joins the pattern group preview and release batch", async ({ app, mock }) => {
   const { box, playlist, canvas } = await setup(app);
-  await mock.eval(`m => m.state.project.arrangement.clips.push({
+  await mock.eval(`m => { m.state.project.nextId = 102; m.state.project.arrangement.clips.push({
     id: 100, track: m.state.project.arrangement.tracks[0].id, name: "Automation",
     startTick: 10560, muted: false, content: { type: "automation",
-      target: { type: "channelVolume", channel: 1 }, priority: 100,
+      target: { type: "channelVolume", channel: 1 }, priority: 101,
       offsetTick: 0, lengthTicks: 1920, points: [] }
-  })`);
+  }); }`);
   await playlist.getByRole("button", { name: "Refresh playlist" }).click();
   await expect(canvas).toHaveAttribute("aria-disabled", "false");
   await expect(playlist.getByRole("status")).toHaveText("3 clips");
@@ -86,16 +86,24 @@ test("a loaded read-only clip does not join a pattern group preview", async ({ a
   await app.mouse.click(box.x + 140, box.y + 40);
   await app.mouse.click(box.x + 380, box.y + 40);
   await app.keyboard.up("Shift");
-  await expect(playlist.getByText("2 selected", { exact: true })).toBeVisible();
-  const calls = await mock.calls("arrangement_edit");
+  await expect(playlist.getByText("3 selected", { exact: true })).toBeVisible();
+  const before = await state(app), calls = await mock.calls("arrangement_edit");
   await app.mouse.move(box.x + 140, box.y + 40);
   await app.mouse.down();
   await app.mouse.move(box.x + 188, box.y + 40);
-  await expect(label).toHaveCSS("left", "534px");
+  await expect(label).toHaveCSS("left", "582px");
   expect(await mock.calls("arrangement_edit")).toHaveLength(calls.length);
+  expect((await state(app)).clips).toEqual(before.clips);
   await app.mouse.up();
-  await expect.poll(async () => (await mock.calls("arrangement_edit")).length).toBe(calls.length + 1);
-  expect((await state(app)).clips.find(clip => clip.id === 100)).toEqual(original);
+  await expect.poll(async () => (await state(app)).clips.map(clip => clip.startTick)).toEqual([1920, 6720, 11520]);
+  const sent = (await mock.calls("arrangement_edit")).slice(calls.length);
+  expect(sent).toHaveLength(1);
+  expect(JSON.parse(String(sent[0].args.editsJson))).toEqual([
+    { kind: "move", clip: 3, track: 2, startTick: 1920 },
+    { kind: "move", clip: 4, track: 2, startTick: 6720 },
+    { kind: "move", clip: 100, track: 2, startTick: 11520 },
+  ]);
+  expect((await state(app)).clips.find(clip => clip.id === 100)).toEqual({ ...original, startTick: 11520 });
 });
 test("marquee group move and Alt-copy send one release batch and Undo restores both", async ({ app, mock }) => {
   const { box, playlist } = await setup(app);

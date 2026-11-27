@@ -62,7 +62,7 @@ it("marquees pattern rectangles in either direction using the current camera", (
   expect(marqueeSelection(clips, { x: 40, y: 24, width: 0, height: 20 }, view)).toEqual([]);
 });
 
-it.each(["move", "copy"] as const)("builds one ordered mixed %s batch and skips automation", kind => {
+it.each(["move", "copy"] as const)("builds one ordered mixed %s batch with automation", kind => {
   const mixed: RenderClip[] = [
     { ...clips[1], id: 3, kind: "audio", lengthTicks: 250 },
     { ...clips[0], id: 4, kind: "automation" },
@@ -70,16 +70,17 @@ it.each(["move", "copy"] as const)("builds one ordered mixed %s batch and skips 
   ];
   const gesture = new ClipGroupGesture({ ...input, kind }, mixed);
   gesture.update(360, 1);
-  expect([...gesture.memberIds]).toEqual([3, 1]);
+  expect([...gesture.memberIds]).toEqual([3, 4, 1]);
   expect(gesture.take(guard)).toEqual([
     { kind, clip: 3, track: 40, startTick: 660 },
+    { kind, clip: 4, track: 20, startTick: 360 },
     { kind, clip: 1, track: 20, startTick: 360 },
   ]);
   expect(gesture.take(guard)).toBeNull();
 });
 
-it("selects audio in a marquee and skips automation", () => {
+it("selects all three clip kinds in a marquee", () => {
   const mixed: RenderClip[] = [clips[0], { ...clips[1], kind: "audio" }, { ...clips[0], id: 3, kind: "automation" }];
   const view = { width: 700, height: 300, tickWidth: 1, rowHeight: 64, scrollTick: 0, scrollTrack: 0 };
-  expect(marqueeSelection(mixed, { x: 0, y: 0, width: 600, height: 250 }, view)).toEqual([1, 2]);
+  expect(marqueeSelection(mixed, { x: 0, y: 0, width: 600, height: 250 }, view)).toEqual([1, 2, 3]);
 });

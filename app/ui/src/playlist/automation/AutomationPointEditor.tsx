@@ -1,24 +1,21 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
-import { arrangementCurve, type ArrangementOperation, type ArrangementStamp, type ClipSummary, type CurvePoint } from "../../api/arrangement";
-import { errorText } from "../../api/project";
+import type { ArrangementOperation, ArrangementStamp, ClipSummary, CurvePoint } from "../../api/arrangement";
 import { registerGestureCancellation } from "../../project/pending";
 import { isProjectReplacing, projectGeneration } from "../../project/replacement";
 import { modalIsOpen } from "../../project/shortcuts";
 import { addPoint, clippedCurve, evaluate, freeTick, movePoint, pointAt, pointPosition, previewSource, windowPoints } from "./curve";
 import { pointTarget } from "./target";
+import type { AutomationCurve } from "./useAutomationCurve";
 import "./automation.css";
 
 type CurveContent = Extract<ClipSummary["content"], { type: "automation" }>;
 type Props = {
   clip: { id: number; name: string; content: CurveContent };
   stamp: ArrangementStamp;
+  curve: AutomationCurve;
   disabled: boolean;
   onEdit: (stamp: ArrangementStamp, operation: Extract<ArrangementOperation, { kind: "setAutomationPoints" }>) => void;
 };
-type CurveRead = { revision: number; attempt: number } & (
-  | { points: readonly CurvePoint[]; error?: never }
-  | { error: string; points?: never }
-);
 type Drag = {
   id: number;
   host: HTMLDivElement;
@@ -32,7 +29,7 @@ type Drag = {
   moved: boolean;
 };
 
-export function AutomationPointEditor({ clip, stamp, disabled, onEdit }: Props) {
+export function AutomationPointEditor({ clip, stamp, curve, disabled, onEdit }: Props) {
   const { generation, revision } = stamp;
   const { id, content } = clip;
   const { offsetTick, lengthTicks } = content;
@@ -40,26 +37,7 @@ export function AutomationPointEditor({ clip, stamp, disabled, onEdit }: Props) 
   const target = useMemo(() => pointTarget(content.target), [content.target]);
   const helpId = useId();
 
-  const [attempt, setAttempt] = useState(0);
-  const [read, setRead] = useState<CurveRead | null>(null);
-  useEffect(() => {
-    let active = true;
-    const replacements = projectGeneration();
-    const current = () => active && projectGeneration() === replacements;
-    void arrangementCurve({ generation, revision }, id).then(reply => {
-      if (!current()) return;
-      if (reply.generation !== generation || reply.revision !== revision || reply.clip !== id) {
-        setRead({ revision, attempt, error: "The curve changed while loading." });
-        return;
-      }
-      setRead({ revision, attempt, points: reply.points });
-    }).catch(error => {
-      if (current()) setRead({ revision, attempt, error: errorText(error) });
-    });
-    return () => { active = false; };
-  }, [generation, revision, id, attempt]);
-  const loaded = read?.revision === revision && read.attempt === attempt ? read : null;
-  const source = loaded?.points;
+  const source = curve.points;
   const points = useMemo(() => source ? windowPoints(source, windowRange) : [], [source, windowRange]);
   const [selection, setSelection] = useState(0);
   const index = Math.min(selection, points.length - 1);
@@ -246,10 +224,10 @@ export function AutomationPointEditor({ clip, stamp, disabled, onEdit }: Props) 
             onContextMenu={event => { event.preventDefault(); remove(pointIndex); }} />;
         })}
         {(!target || !source) && <div className="automation-graph-message" role="status">
-          {!target ? "Target unavailable" : loaded?.error ? <>
-            <span>{loaded.error}</span><button type="button" onClick={() => {
+          {!target ? "Target unavailable" : curve.error ? <>
+            <span>{curve.error}</span><button type="button" onClick={() => {
               graph.current?.focus({ preventScroll: true });
-              setAttempt(attempt + 1);
+              curve.retry();
             }}>Retry curve</button>
           </> : "Loading curve…"}
         </div>}

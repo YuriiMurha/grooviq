@@ -20,7 +20,7 @@ it("keeps high tick coordinates exact before near-camera shader subtraction", ()
   expect(() => splitTick(Infinity)).toThrow();
 });
 
-it("represents loaded audio and automation read-only without hiding their extents", () => {
+it("projects the timeline extents of all clip kinds", () => {
   const page: ArrangementPage = { generation: 1, revision: 2, offset: 0, total: 3, tracks: [{ id: 5, name: "T", color: 2, mute: false }], clips: [
     { id: 10, track: 5, name: "Pattern", startTick: 960, muted: false, content: { type: "pattern", pattern: 1, offsetTick: 480, lengthTicks: 1920 } },
     { id: 11, track: 5, name: "Audio", startTick: 960, muted: false, content: { type: "audio", asset: 20, sourceStart: 0, sourceEnd: 48000, gain: 1, reverse: false, fadeIn: 0, fadeOut: 0 } },
