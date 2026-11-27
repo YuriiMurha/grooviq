@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import type { ArrangementOperation, ArrangementPage, ArrangementReply } from "../api/arrangement";
+import type { ArrangementOperation, ArrangementPage, ArrangementReply, ArrangementStamp } from "../api/arrangement";
 import type { ProjectView } from "../api/project";
 import type { PatternsView } from "../api/patterns";
 import { beginProjectTransition, ProjectCommandQueue, registerSettlement, settleProjectEdits } from "../project/pending";
@@ -70,7 +70,7 @@ function rig() {
   let seekNative: PlaylistAdapter["seek"] = async () => { effects.push("native-seek"); return { status: "applied", generation: 2, revision: 9, changed: false, request: null, createdIds: [], reload: false, message: null, warnings: [] }; };
   let current = true, blocked = false, seekBlocked = false, snapshot = page();
   const views: PlaylistState[] = [];
-  let invoke: (ops: readonly ArrangementOperation[]) => Promise<ArrangementReply> = async () => {
+  let invoke: (ops: readonly ArrangementOperation[], stamp: ArrangementStamp) => Promise<ArrangementReply> = async () => {
     effects.push("native-edit"); snapshot = { ...snapshot, revision: 10 };
     return { status: "applied", generation: 2, revision: 10, request: null, createdIds: [20], changed: true, reload: false, message: null, warnings: [] };
   };
@@ -92,7 +92,7 @@ function rig() {
     blocked: () => blocked, seekBlocked: () => seekBlocked, beginTransition: beginProjectTransition,
     enqueueRead: command => readQueue(command), enqueueMutation: command => queue.enqueue(command, true),
     seek: (stamp, tick) => seekNative(stamp, tick),
-    readPage: () => read(), edit: (_stamp, ops) => invoke(ops),
+    readPage: () => read(), edit: (stamp, ops) => invoke(ops, stamp),
     selectPattern: (base, pattern) => select(base, pattern),
     importAudio: (stamp, input, ticket) => audioImport(stamp, input, ticket), relinkAudio: async () => { throw new Error("Unexpected relink"); },
     cancelAudio: (ticket: number) => cancelAudio(ticket),
@@ -178,6 +178,36 @@ describe("playlist intent and native publication in the existing Session lane", 
     held.resolve({ status: "applied", generation: 2, revision: 10, changed: true, createdIds: [20], reload: false, message: null, request: null, warnings: [] });
     r.replaceSnapshot({ ...page(), revision: 10 });
     expect((await first).status).toBe("applied");
+  });
+
+  it("observes the settled revision after cancellation before allowing a fresh Apply and Save", async () => {
+    const r = rig();
+    await r.controller.reload();
+    const settling = deferred<void>();
+    const settled = deferred<boolean>();
+    const unregister = registerSettlement(() => { settling.resolve(); return settled.promise; });
+    cleanups.push(unregister);
+    const settings: readonly ArrangementOperation[] = [{
+      kind: "setAutomationClip", clip: 12, target: { type: "channelPan", channel: 1 }, priority: 8,
+    }];
+    const edits: ArrangementStamp[] = [];
+    r.invoke(async (_ops, stamp) => {
+      edits.push(stamp);
+      r.replaceSnapshot({ ...page(), revision: 11 });
+      return { status: "applied", generation: 2, revision: 11, changed: true, request: null, createdIds: [], reload: false, message: null, warnings: [] };
+    });
+    const pending = r.controller.mutate({ generation: 2, revision: 9 }, settings, () => false);
+    await settling.promise;
+    r.replaceSnapshot({ ...page(), revision: 10 });
+    const observedDuringSettlement = await r.controller.reload();
+    settled.resolve(true);
+    expect(observedDuringSettlement).toBe(false);
+    expect(await pending).toEqual({ status: "cancelled" });
+    expect(edits).toEqual([]);
+    expect(r.controller.state.snapshot?.revision).toBe(10);
+    expect((await r.controller.mutate({ generation: 2, revision: 10 }, settings)).status).toBe("applied");
+    expect(edits).toEqual([{ generation: 2, revision: 10 }]);
+    expect(await settleProjectEdits()).toBe(true);
   });
 
   it("keeps native refusal distinct and consumes its failure once at Save settlement", async () => {

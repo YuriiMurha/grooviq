@@ -101,7 +101,15 @@ test("creates a sampler clip on the selected track at loop start, then edits, un
   await target.selectOption("1:sampler:tune");
   await priority.fill("10");
   const beforeSettings = await readArrangement(app);
-  await apply.press("Enter");
+  await mock.eval('m => m.holdCommand("arrangement_edit")');
+  try {
+    await priority.press("Enter");
+    await expect.poll(async () => (await mock.calls("arrangement_edit")).length).toBe(3);
+    await expect(priority).toBeDisabled();
+    await expect(apply).toBeFocused();
+  } finally {
+    await mock.eval('m => m.releaseCommand("arrangement_edit")');
+  }
   const changedTarget = { ...createdTarget, param: "tune" };
   await expect.poll(async () => (await readArrangement(app)).clips.find(item => item.id === clip)?.content)
     .toMatchObject({ target: changedTarget, priority: 10, pointCount: 1 });
@@ -226,8 +234,16 @@ test("invalid ranges, linked sources and invalid priorities leave the stored set
   await refresh();
 
   await priority.fill("4294967295");
-  await apply.click();
+  await mock.eval('m => m.holdCommand("arrangement_edit")');
+  try {
+    await priority.press("Enter");
+    await expect(priority).toBeDisabled();
+    await expect(apply).toBeFocused();
+  } finally {
+    await mock.eval('m => m.releaseCommand("arrangement_edit")');
+  }
   await expect(alert).toContainText("exceeds the next available id");
+  await expect(apply).toBeFocused();
   expect((await readArrangement(app)).clips).toEqual(original.clips);
   await app.keyboard.press("ControlOrMeta+s");
   await expect(app.getByText(/the project was not saved/)).toHaveCount(2);
@@ -290,11 +306,21 @@ test("keeps staged settings while both a held and a queued knob edit settle", as
   await knob.press("Shift+F10");
   await menuAction(app).press("Enter");
   await choose(app, "Automation start", "Loop start");
-  await placementDialog(app).getByRole("button", { name: "Create clip" }).click();
-  await close();
-  await expect(graph).toHaveAttribute("aria-disabled", "false");
   const priority = dock.getByRole("textbox", { name: "Overlap priority" });
   const apply = dock.getByRole("button", { name: "Apply settings" });
+  await mock.eval('m => m.holdCommand("arrangement_curve")');
+  try {
+    await placementDialog(app).getByRole("button", { name: "Create clip" }).click();
+    await close();
+    await expect.poll(async () => (await mock.calls("arrangement_curve")).length).toBe(1);
+    await expect(canvas).toHaveAttribute("aria-disabled", "false");
+    await expect(priority).toBeDisabled();
+    await expect(dock.getByRole("combobox", { name: "Automation target" })).toBeDisabled();
+    await expect(apply).toHaveAttribute("aria-disabled", "true");
+  } finally {
+    await mock.eval('m => m.releaseCommand("arrangement_curve")');
+  }
+  await expect(graph).toHaveAttribute("aria-disabled", "false");
   await priority.fill("10");
 
   const { editor, knob: fine, close: closeAgain } = await openKnob(app, "Kick");

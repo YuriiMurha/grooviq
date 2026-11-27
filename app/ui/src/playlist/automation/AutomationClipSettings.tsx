@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { ArrangementOperation, ArrangementStamp, ClipSummary, CurvePoint } from "../../api/arrangement";
 import { useProject } from "../../project/context";
 import { registerGestureCancellation } from "../../project/pending";
@@ -37,9 +37,10 @@ export function AutomationClipSettings({ clip, points, stamp, disabled, onEdit }
   const { view } = useProject();
   const automation = useAutomationCreation();
   const [draft, setDraft] = useState<Draft | null>(null);
+  const applyButton = useRef<HTMLButtonElement>(null);
   const { target, priority } = clip.content;
   const currentKey = automationTargetKey(target);
-  const active = !disabled && view?.generation === stamp.generation;
+  const active = !disabled && points !== undefined && view?.generation === stamp.generation;
   const revalidating = draft !== null && draft.revision !== stamp.revision;
   if (revalidating) {
     const previous = draft.waitingForDevice;
@@ -88,6 +89,7 @@ export function AutomationClipSettings({ clip, points, stamp, disabled, onEdit }
       return;
     }
     if (!still) return;
+    if (event.currentTarget.contains(document.activeElement)) applyButton.current?.focus({ preventScroll: true });
     setDraft(null);
     onEdit({ kind: "setAutomationClip", clip: clip.id, target: choice.target, priority: next }, still);
   };
@@ -110,6 +112,6 @@ export function AutomationClipSettings({ clip, points, stamp, disabled, onEdit }
       <input aria-label="Overlap priority" inputMode="numeric" aria-invalid={!valid || undefined} value={text}
         disabled={!active || revalidating} onChange={event => stage(key, event.currentTarget.value)} />
     </label>
-    <button type="submit" aria-disabled={!canApply}>Apply settings</button>
+    <button ref={applyButton} type="submit" aria-disabled={!canApply}>Apply settings</button>
   </form>;
 }
