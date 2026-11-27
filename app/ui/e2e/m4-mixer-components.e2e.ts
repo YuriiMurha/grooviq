@@ -905,11 +905,13 @@ test("a strip or send removed or replaced mid-gesture: nothing reaches it or its
   await page.mouse.move(at.x, at.y - 20, { steps: 3 });
   await page.evaluate(() => window.mixerFixture.remove("n-kick"));
   await expect(strip(page, "Kick")).toHaveCount(0);
+  const afterKickRemoval = (await log(page)).length;
   await page.mouse.move(at.x, at.y - 40, { steps: 3 });
   await page.mouse.up();
   let cmds = await log(page);
   expect(cmds.filter((c) => c.type === "param" && c.phase !== "live")).toEqual([]);
   expect(new Set(cmds.map(nodeOf))).toEqual(new Set(["n-kick"]));
+  expect(cmds.slice(afterKickRemoval)).toEqual([]);
 
   // Replaced under a new id during a drag: the replacement hears nothing.
   await clearLog(page);
@@ -918,29 +920,38 @@ test("a strip or send removed or replaced mid-gesture: nothing reaches it or its
   await page.mouse.move(at.x, at.y);
   await page.mouse.down();
   await page.mouse.move(at.x, at.y - 20, { steps: 3 });
+  expect(await log(page)).toContainEqual(expect.objectContaining({
+    type: "param", target: { kind: "level", nodeId: "n-snare" }, phase: "live",
+  }));
   await page.evaluate(() => window.mixerFixture.replace("n-snare", "n-snare-2"));
+  await expect(strip(page, "Snare")).toHaveAttribute("data-node", "n-snare-2");
+  const afterSnareReplacement = (await log(page)).length;
   await page.mouse.move(at.x, at.y - 40, { steps: 3 });
   await page.mouse.up();
   cmds = await log(page);
   expect(cmds.some((c) => nodeOf(c) === "n-snare-2")).toBe(false);
   expect(cmds.filter((c) => c.type === "param" && c.phase !== "live")).toEqual([]);
+  expect(cmds.slice(afterSnareReplacement)).toEqual([]);
   await expect(page.getByRole("slider", { name: "Snare level" })).toHaveAttribute("aria-valuenow", "-8");
 
   // A send removed during an amount drag, its strip still there.
   await clearLog(page);
-  const amount = strip(page, "Vocal take").getByRole("slider", { name: "Send to Echo amount" });
+  const echo = strip(page, "Vocal take").getByRole("group", { name: "Send to Echo", exact: true });
+  const amount = echo.getByRole("slider", { name: "Send to Echo amount" });
   at = await center(amount);
   await page.mouse.move(at.x, at.y);
   await page.mouse.down();
   await page.mouse.move(at.x, at.y - 20, { steps: 3 });
-  const live = (await log(page)).find((c) => c.type === "param") as Extract<MixerCommand, { type: "param" }>;
-  expect(live.target.kind).toBe("send");
-  await page.evaluate((id) => window.mixerFixture.removeSend("n-vocal", id), live.target.kind === "send" ? live.target.sendId : "");
+  const live = (await log(page)).find((c) => c.type === "param");
+  expect(live).toMatchObject({ phase: "live", target: { kind: "send", nodeId: "n-vocal" } });
+  await page.evaluate((id) => window.mixerFixture.removeSend("n-vocal", id), live?.target.kind === "send" ? live.target.sendId : "");
+  await expect(echo).toHaveCount(0);
+  const afterSendRemoval = (await log(page)).length;
   await page.mouse.move(at.x, at.y - 40, { steps: 3 });
   await page.mouse.up();
   cmds = await log(page);
   expect(cmds.filter((c) => c.type === "param" && c.phase !== "live")).toEqual([]);
-  await expect(strip(page, "Vocal take").getByRole("group", { name: "Send to Echo" })).toHaveCount(0);
+  expect(cmds.slice(afterSendRemoval)).toEqual([]);
 });
 
 test("a removed selection shows its own state, and a renamed strip keeps its id", async ({ fixture }) => {
