@@ -3950,6 +3950,2090 @@
     },
     {
       "error": "Stale curve request; reload"
+    },
+    {
+      "ok": null
+    },
+    {
+      "ok": null
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [
+          2,
+          3,
+          5,
+          7,
+          9,
+          10,
+          11
+        ],
+        "generation": 6,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 2,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [
+          13
+        ],
+        "generation": 6,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 3,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "audioAssets": [],
+        "clips": [
+          {
+            "content": {
+              "lengthTicks": 50,
+              "offsetTick": 100,
+              "pointCount": 6,
+              "priority": 4,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 3,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 960,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 100,
+              "offsetTick": 100,
+              "pointCount": 5,
+              "priority": 6,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 5,
+            "muted": false,
+            "name": "Independent",
+            "startTick": 1920,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 100,
+              "offsetTick": 100,
+              "pointCount": 6,
+              "priority": 12,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 7,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 2880,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 50,
+              "offsetTick": 150,
+              "pointCount": 6,
+              "priority": 4,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 9,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 1010,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 0,
+              "pattern": 0,
+              "type": "pattern"
+            },
+            "id": 10,
+            "muted": false,
+            "name": "Notes",
+            "startTick": 0,
+            "track": 2
+          }
+        ],
+        "generation": 6,
+        "loopRegion": null,
+        "offset": 0,
+        "pendingRequests": [],
+        "playMode": "pattern",
+        "revision": 3,
+        "songError": null,
+        "total": 5,
+        "tracks": [
+          {
+            "color": 0,
+            "id": 2,
+            "mute": false,
+            "name": "Automation edits"
+          },
+          {
+            "color": 0,
+            "id": 11,
+            "mute": false,
+            "name": "Allocator probe"
+          },
+          {
+            "color": 0,
+            "id": 13,
+            "mute": false,
+            "name": "Allocator probe"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 3,
+        "generation": 6,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.4000000059604645
+          },
+          {
+            "mode": "hold",
+            "tick": 149,
+            "value": 0.699999988079071
+          },
+          {
+            "mode": "linear",
+            "tick": 150,
+            "value": 1.5
+          },
+          {
+            "mode": "hold",
+            "tick": 199,
+            "value": 0.800000011920929
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 3
+      }
+    },
+    {
+      "ok": {
+        "clip": 7,
+        "generation": 6,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.4000000059604645
+          },
+          {
+            "mode": "hold",
+            "tick": 149,
+            "value": 0.699999988079071
+          },
+          {
+            "mode": "linear",
+            "tick": 150,
+            "value": 1.5
+          },
+          {
+            "mode": "hold",
+            "tick": 199,
+            "value": 0.800000011920929
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 3
+      }
+    },
+    {
+      "ok": {
+        "clip": 9,
+        "generation": 6,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.4000000059604645
+          },
+          {
+            "mode": "hold",
+            "tick": 149,
+            "value": 0.699999988079071
+          },
+          {
+            "mode": "linear",
+            "tick": 150,
+            "value": 1.5
+          },
+          {
+            "mode": "hold",
+            "tick": 199,
+            "value": 0.800000011920929
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 3
+      }
+    },
+    {
+      "ok": {
+        "clip": 5,
+        "generation": 6,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "hold",
+            "tick": 100,
+            "value": 0.20000000298023224
+          },
+          {
+            "mode": "linear",
+            "tick": 150,
+            "value": 1.5
+          },
+          {
+            "mode": "hold",
+            "tick": 199,
+            "value": 0.800000011920929
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 3
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 3,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 3,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "effect": {
+          "kind": "arrangement"
+        },
+        "generation": 6,
+        "revision": 4,
+        "status": "applied"
+      }
+    },
+    {
+      "ok": {
+        "audioAssets": [],
+        "clips": [
+          {
+            "content": {
+              "lengthTicks": 50,
+              "offsetTick": 100,
+              "pointCount": 5,
+              "priority": 4,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 3,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 960,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 100,
+              "offsetTick": 100,
+              "pointCount": 5,
+              "priority": 6,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 5,
+            "muted": false,
+            "name": "Independent",
+            "startTick": 1920,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 100,
+              "offsetTick": 100,
+              "pointCount": 5,
+              "priority": 8,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 7,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 2880,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 50,
+              "offsetTick": 150,
+              "pointCount": 5,
+              "priority": 4,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 9,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 1010,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 0,
+              "pattern": 0,
+              "type": "pattern"
+            },
+            "id": 10,
+            "muted": false,
+            "name": "Notes",
+            "startTick": 0,
+            "track": 2
+          }
+        ],
+        "generation": 6,
+        "loopRegion": null,
+        "offset": 0,
+        "pendingRequests": [],
+        "playMode": "pattern",
+        "revision": 4,
+        "songError": null,
+        "total": 5,
+        "tracks": [
+          {
+            "color": 0,
+            "id": 2,
+            "mute": false,
+            "name": "Automation edits"
+          },
+          {
+            "color": 0,
+            "id": 11,
+            "mute": false,
+            "name": "Allocator probe"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 7,
+        "generation": 6,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "hold",
+            "tick": 100,
+            "value": 0.20000000298023224
+          },
+          {
+            "mode": "linear",
+            "tick": 150,
+            "value": 1.5
+          },
+          {
+            "mode": "hold",
+            "tick": 199,
+            "value": 0.800000011920929
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 4
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 4,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "effect": {
+          "kind": "arrangement"
+        },
+        "generation": 6,
+        "revision": 5,
+        "status": "applied"
+      }
+    },
+    {
+      "ok": {
+        "audioAssets": [],
+        "clips": [
+          {
+            "content": {
+              "lengthTicks": 50,
+              "offsetTick": 100,
+              "pointCount": 6,
+              "priority": 4,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 3,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 960,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 100,
+              "offsetTick": 100,
+              "pointCount": 5,
+              "priority": 6,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 5,
+            "muted": false,
+            "name": "Independent",
+            "startTick": 1920,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 100,
+              "offsetTick": 100,
+              "pointCount": 6,
+              "priority": 12,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 7,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 2880,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 50,
+              "offsetTick": 150,
+              "pointCount": 6,
+              "priority": 4,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 9,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 1010,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 0,
+              "pattern": 0,
+              "type": "pattern"
+            },
+            "id": 10,
+            "muted": false,
+            "name": "Notes",
+            "startTick": 0,
+            "track": 2
+          }
+        ],
+        "generation": 6,
+        "loopRegion": null,
+        "offset": 0,
+        "pendingRequests": [],
+        "playMode": "pattern",
+        "revision": 5,
+        "songError": null,
+        "total": 5,
+        "tracks": [
+          {
+            "color": 0,
+            "id": 2,
+            "mute": false,
+            "name": "Automation edits"
+          },
+          {
+            "color": 0,
+            "id": 11,
+            "mute": false,
+            "name": "Allocator probe"
+          },
+          {
+            "color": 0,
+            "id": 13,
+            "mute": false,
+            "name": "Allocator probe"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 9,
+        "generation": 6,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.4000000059604645
+          },
+          {
+            "mode": "hold",
+            "tick": 149,
+            "value": 0.699999988079071
+          },
+          {
+            "mode": "linear",
+            "tick": 150,
+            "value": 1.5
+          },
+          {
+            "mode": "hold",
+            "tick": 199,
+            "value": 0.800000011920929
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 5
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [],
+        "generation": 6,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 6,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 3,
+        "generation": 6,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.4000000059604645
+          },
+          {
+            "mode": "hold",
+            "tick": 149,
+            "value": 0.699999988079071
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 6
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [],
+        "generation": 6,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 7,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 7,
+        "generation": 6,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.4000000059604645
+          },
+          {
+            "mode": "hold",
+            "tick": 149,
+            "value": 0.699999988079071
+          },
+          {
+            "mode": "hold",
+            "tick": 150,
+            "value": 0.6000000238418579
+          },
+          {
+            "mode": "linear",
+            "tick": 199,
+            "value": 2.0
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 7
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 9: point is outside the automation source range",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 9: point is outside the automation source range",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 9: automation ticks must be strictly increasing",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 9: automation ticks must be strictly increasing",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 3 (Shared): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 3 (Shared): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 10 is not an automation clip",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Unknown clip 99",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 10 is not an automation clip",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Unknown clip 99",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Stale arrangement revision; reload arrangement",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "unknown variant `step`, expected `linear` or `hold` at line 1 column 64",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "invalid value: integer `-1`, expected u64 at line 1 column 74",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "invalid value: integer `-1`, expected u32 at line 1 column 11",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "invalid type: null, expected f32 at line 1 column 88",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "missing field `points` at line 1 column 41",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "invalid value: integer `-1`, expected u32 at line 1 column 51",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "missing field `param` at line 1 column 120",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "unknown variant `trackVolume`, expected one of `channelVolume`, `channelPan`, `instrumentParam` at line 1 column 95",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 3 shares its automation source with clip 7 (Shared) on a different target; make it unique first.",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 3 shares its automation source with clip 9 (Shared) on a different target; make it unique first.",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 5: automation priority 15 exceeds the next available id 14",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Invalid arrangement: bounds, identity, reference or native parameter range.",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Automation fragments sharing a priority must use one target and remain disjoint; copy to create a new layer.",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 5 (Independent): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 5 (Independent): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 5 (Independent): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 5 (Independent): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 5: automation priority 15 exceeds the next available id 14",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 5: point is outside the automation source range",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 5 (Independent): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "audioAssets": [],
+        "clips": [
+          {
+            "content": {
+              "lengthTicks": 50,
+              "offsetTick": 100,
+              "pointCount": 6,
+              "priority": 4,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 3,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 960,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 100,
+              "offsetTick": 100,
+              "pointCount": 5,
+              "priority": 6,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 5,
+            "muted": false,
+            "name": "Independent",
+            "startTick": 1920,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 100,
+              "offsetTick": 100,
+              "pointCount": 6,
+              "priority": 12,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 7,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 2880,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 50,
+              "offsetTick": 150,
+              "pointCount": 6,
+              "priority": 4,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 9,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 1010,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 0,
+              "pattern": 0,
+              "type": "pattern"
+            },
+            "id": 10,
+            "muted": false,
+            "name": "Notes",
+            "startTick": 0,
+            "track": 2
+          }
+        ],
+        "generation": 6,
+        "loopRegion": null,
+        "offset": 0,
+        "pendingRequests": [],
+        "playMode": "pattern",
+        "revision": 7,
+        "songError": null,
+        "total": 5,
+        "tracks": [
+          {
+            "color": 0,
+            "id": 2,
+            "mute": false,
+            "name": "Automation edits"
+          },
+          {
+            "color": 0,
+            "id": 11,
+            "mute": false,
+            "name": "Allocator probe"
+          },
+          {
+            "color": 0,
+            "id": 13,
+            "mute": false,
+            "name": "Allocator probe"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 9,
+        "generation": 6,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.4000000059604645
+          },
+          {
+            "mode": "hold",
+            "tick": 149,
+            "value": 0.699999988079071
+          },
+          {
+            "mode": "hold",
+            "tick": 150,
+            "value": 0.6000000238418579
+          },
+          {
+            "mode": "linear",
+            "tick": 199,
+            "value": 2.0
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 7
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 5: automation priority 15 exceeds the next available id 14",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [
+          15
+        ],
+        "generation": 6,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 8,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 5 (Independent): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 8,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 5 (Independent): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 8,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [],
+        "generation": 6,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 9,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 6,
+        "message": "Clip 5 (Independent): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 9,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [
+          16
+        ],
+        "generation": 6,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 10,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "effect": {
+          "kind": "arrangement"
+        },
+        "generation": 6,
+        "revision": 11,
+        "status": "applied"
+      }
+    },
+    {
+      "ok": {
+        "effect": {
+          "kind": "arrangement"
+        },
+        "generation": 6,
+        "revision": 12,
+        "status": "applied"
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [],
+        "generation": 6,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 13,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 3,
+        "generation": 6,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.44999998807907104
+          },
+          {
+            "mode": "hold",
+            "tick": 150,
+            "value": 0.6000000238418579
+          },
+          {
+            "mode": "linear",
+            "tick": 199,
+            "value": 2.0
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 13
+      }
+    },
+    {
+      "ok": {
+        "clip": 9,
+        "generation": 6,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.44999998807907104
+          },
+          {
+            "mode": "hold",
+            "tick": 150,
+            "value": 0.6000000238418579
+          },
+          {
+            "mode": "linear",
+            "tick": 199,
+            "value": 2.0
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 13
+      }
+    },
+    {
+      "ok": null
+    },
+    {
+      "ok": null
+    },
+    {
+      "ok": []
+    },
+    {
+      "ok": {
+        "audioAssets": [],
+        "clips": [
+          {
+            "content": {
+              "lengthTicks": 50,
+              "offsetTick": 100,
+              "pointCount": 5,
+              "priority": 4,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 3,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 960,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 100,
+              "offsetTick": 100,
+              "pointCount": 4,
+              "priority": 14,
+              "target": {
+                "channel": 1,
+                "instrument": "synth",
+                "param": "osc1_level",
+                "type": "instrumentParam"
+              },
+              "type": "automation"
+            },
+            "id": 5,
+            "muted": false,
+            "name": "Independent",
+            "startTick": 1920,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 100,
+              "offsetTick": 100,
+              "pointCount": 5,
+              "priority": 12,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 7,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 2880,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 50,
+              "offsetTick": 150,
+              "pointCount": 5,
+              "priority": 4,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 9,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 1010,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 0,
+              "pattern": 0,
+              "type": "pattern"
+            },
+            "id": 10,
+            "muted": false,
+            "name": "Notes",
+            "startTick": 0,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 50,
+              "offsetTick": 100,
+              "pointCount": 5,
+              "priority": 17,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 16,
+            "muted": false,
+            "name": "Shared",
+            "startTick": 3840,
+            "track": 2
+          }
+        ],
+        "generation": 8,
+        "loopRegion": null,
+        "offset": 0,
+        "pendingRequests": [],
+        "playMode": "pattern",
+        "revision": 0,
+        "songError": null,
+        "total": 6,
+        "tracks": [
+          {
+            "color": 0,
+            "id": 2,
+            "mute": false,
+            "name": "Automation edits"
+          },
+          {
+            "color": 0,
+            "id": 11,
+            "mute": false,
+            "name": "Allocator probe"
+          },
+          {
+            "color": 0,
+            "id": 13,
+            "mute": false,
+            "name": "Allocator probe"
+          },
+          {
+            "color": 0,
+            "id": 15,
+            "mute": false,
+            "name": "Allocator probe"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 5,
+        "generation": 8,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "hold",
+            "tick": 100,
+            "value": 0.0
+          },
+          {
+            "mode": "linear",
+            "tick": 199,
+            "value": 1.0
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 0
+      }
+    },
+    {
+      "ok": {
+        "clip": 7,
+        "generation": 8,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.44999998807907104
+          },
+          {
+            "mode": "hold",
+            "tick": 150,
+            "value": 0.6000000238418579
+          },
+          {
+            "mode": "linear",
+            "tick": 199,
+            "value": 2.0
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 0
+      }
+    },
+    {
+      "ok": {
+        "clip": 9,
+        "generation": 8,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.44999998807907104
+          },
+          {
+            "mode": "hold",
+            "tick": 150,
+            "value": 0.6000000238418579
+          },
+          {
+            "mode": "linear",
+            "tick": 199,
+            "value": 2.0
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 0
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [
+          19
+        ],
+        "generation": 8,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 1,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 3,
+        "generation": 8,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "hold",
+            "tick": 150,
+            "value": 0.6000000238418579
+          },
+          {
+            "mode": "linear",
+            "tick": 199,
+            "value": 2.0
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 1
+      }
+    },
+    {
+      "ok": {
+        "clip": 7,
+        "generation": 8,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.44999998807907104
+          },
+          {
+            "mode": "hold",
+            "tick": 150,
+            "value": 0.6000000238418579
+          },
+          {
+            "mode": "linear",
+            "tick": 199,
+            "value": 2.0
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 1
+      }
+    },
+    {
+      "ok": {
+        "clip": 9,
+        "generation": 8,
+        "points": [
+          {
+            "mode": "linear",
+            "tick": 99,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 100,
+            "value": 0.44999998807907104
+          },
+          {
+            "mode": "hold",
+            "tick": 150,
+            "value": 0.6000000238418579
+          },
+          {
+            "mode": "linear",
+            "tick": 199,
+            "value": 2.0
+          },
+          {
+            "mode": "linear",
+            "tick": 200,
+            "value": 0.30000001192092896
+          }
+        ],
+        "revision": 1
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": "arrangement list limit exceeded at line 1 column 661036",
+        "reload": true,
+        "request": null,
+        "revision": 1,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": "total automation point limit exceeded at line 1 column 40343319",
+        "reload": true,
+        "request": null,
+        "revision": 1,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": "Stale arrangement revision; reload arrangement",
+        "reload": true,
+        "request": null,
+        "revision": 1,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": "total automation point limit exceeded at line 1 column 40343301",
+        "reload": true,
+        "request": null,
+        "revision": 1,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": "Clip 20 (Large curve): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 1,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": "Clip 142 (Large curve): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 1,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [
+          20
+        ],
+        "generation": 8,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 2,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [],
+        "generation": 8,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 3,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [],
+        "generation": 8,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 4,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": "Automation source range overflow",
+        "reload": true,
+        "request": null,
+        "revision": 4,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": "automation end overflow",
+        "reload": true,
+        "request": null,
+        "revision": 4,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": "invalid value: integer `256`, expected u8 at line 1 column 22",
+        "reload": true,
+        "request": null,
+        "revision": 4,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": "unknown variant `step`, expected `linear` or `hold` at line 1 column 64",
+        "reload": true,
+        "request": null,
+        "revision": 4,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 8,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 4,
+        "status": "applied",
+        "warnings": []
+      }
     }
   ],
   "files": {
@@ -5265,6 +7349,906 @@
         "revision": 0
       },
       "command": "arrangement_curve"
+    },
+    {
+      "args": {},
+      "command": "project_new"
+    },
+    {
+      "args": {
+        "generation": 6,
+        "preset": "Init"
+      },
+      "command": "channel_add_synth"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"color\":0,\"kind\":\"createTrack\",\"name\":\"Automation edits\"},{\"content\":{\"lengthTicks\":100,\"offsetTick\":100,\"points\":[{\"mode\":\"linear\",\"tick\":99,\"value\":0.1},{\"mode\":\"hold\",\"tick\":100,\"value\":0.2},{\"mode\":\"linear\",\"tick\":150,\"value\":1.5},{\"mode\":\"hold\",\"tick\":199,\"value\":0.8},{\"mode\":\"linear\",\"tick\":200,\"value\":0.3}],\"priority\":99,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Shared\",\"startTick\":960,\"track\":2},{\"content\":{\"lengthTicks\":100,\"offsetTick\":100,\"points\":[{\"mode\":\"linear\",\"tick\":99,\"value\":0.1},{\"mode\":\"hold\",\"tick\":100,\"value\":0.2},{\"mode\":\"linear\",\"tick\":150,\"value\":1.5},{\"mode\":\"hold\",\"tick\":199,\"value\":0.8},{\"mode\":\"linear\",\"tick\":200,\"value\":0.3}],\"priority\":99,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Independent\",\"startTick\":1920,\"track\":2},{\"clip\":3,\"kind\":\"copy\",\"startTick\":2880,\"track\":2},{\"clip\":3,\"kind\":\"slice\",\"tick\":1010},{\"content\":{\"lengthTicks\":960,\"offsetTick\":0,\"pattern\":0,\"type\":\"pattern\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Notes\",\"startTick\":0,\"track\":2},{\"color\":0,\"kind\":\"createTrack\",\"name\":\"Allocator probe\"}]",
+        "generation": 6,
+        "revision": 1
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"linear\",\"tick\":100,\"value\":0.4},{\"mode\":\"hold\",\"tick\":149,\"value\":0.7}]},{\"clip\":7,\"kind\":\"setAutomationClip\",\"priority\":12,\"target\":{\"channel\":1,\"type\":\"channelVolume\"}},{\"color\":0,\"kind\":\"createTrack\",\"name\":\"Allocator probe\"}]",
+        "generation": 6,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "limit": 32,
+        "offset": 0
+      },
+      "command": "arrangement_view"
+    },
+    {
+      "args": {
+        "clip": 3,
+        "generation": 6,
+        "revision": 3
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 7,
+        "generation": 6,
+        "revision": 3
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 9,
+        "generation": 6,
+        "revision": 3
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 5,
+        "generation": 6,
+        "revision": 3
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"linear\",\"tick\":100,\"value\":0.4},{\"mode\":\"hold\",\"tick\":149,\"value\":0.7}]},{\"clip\":7,\"kind\":\"setAutomationClip\",\"priority\":12,\"target\":{\"channel\":1,\"type\":\"channelVolume\"}}]",
+        "generation": 6,
+        "revision": 3
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[]},{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"linear\",\"tick\":100,\"value\":0.4},{\"mode\":\"hold\",\"tick\":149,\"value\":0.7}]}]",
+        "generation": 6,
+        "revision": 3
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "generation": 6,
+        "revision": 3,
+        "undo": true
+      },
+      "command": "arrangement_history"
+    },
+    {
+      "args": {
+        "limit": 32,
+        "offset": 0
+      },
+      "command": "arrangement_view"
+    },
+    {
+      "args": {
+        "clip": 7,
+        "generation": 6,
+        "revision": 4
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":100,\"value\":0.2}]},{\"clip\":7,\"kind\":\"setAutomationClip\",\"priority\":8,\"target\":{\"channel\":1,\"type\":\"channelVolume\"}}]",
+        "generation": 6,
+        "revision": 4
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "generation": 6,
+        "revision": 4,
+        "undo": false
+      },
+      "command": "arrangement_history"
+    },
+    {
+      "args": {
+        "limit": 32,
+        "offset": 0
+      },
+      "command": "arrangement_view"
+    },
+    {
+      "args": {
+        "clip": 9,
+        "generation": 6,
+        "revision": 5
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":9,\"kind\":\"setAutomationPoints\",\"points\":[]}]",
+        "generation": 6,
+        "revision": 5
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "clip": 3,
+        "generation": 6,
+        "revision": 6
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":9,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":150,\"value\":0.6},{\"mode\":\"linear\",\"tick\":199,\"value\":2.00000001}]}]",
+        "generation": 6,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "clip": 7,
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":9,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":149,\"value\":0.1}]}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":9,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":200,\"value\":0.1},{\"mode\":\"hold\",\"tick\":150,\"value\":0.1}]}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":9,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":150,\"value\":0.1},{\"mode\":\"linear\",\"tick\":150,\"value\":0.2}]}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":9,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":151,\"value\":0.1},{\"mode\":\"linear\",\"tick\":150,\"value\":0.2}]}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":9,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":150,\"value\":-0.1}]}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":9,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":150,\"value\":2.01}]}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":10,\"kind\":\"setAutomationPoints\",\"points\":[]}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":99,\"kind\":\"setAutomationPoints\",\"points\":[]}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":10,\"kind\":\"setAutomationClip\",\"priority\":8,\"target\":{\"channel\":1,\"type\":\"channelVolume\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":99,\"kind\":\"setAutomationClip\",\"priority\":8,\"target\":{\"channel\":1,\"type\":\"channelVolume\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"linear\",\"tick\":100,\"value\":0.4},{\"mode\":\"hold\",\"tick\":149,\"value\":0.7}]}]",
+        "generation": 6,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"step\",\"tick\":100,\"value\":0.2}]}]",
+        "generation": 6,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":-1,\"value\":0.2}]}]",
+        "generation": 6,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":-1,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"step\",\"tick\":100,\"value\":0.2}]}]",
+        "generation": 6,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":100,\"value\":null}]}]",
+        "generation": 6,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\"}]",
+        "generation": 6,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":-1,\"target\":{\"channel\":1,\"type\":\"channelVolume\"}}]",
+        "generation": 6,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":6,\"target\":{\"channel\":1,\"instrument\":\"synth\",\"type\":\"instrumentParam\"}}]",
+        "generation": 6,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":6,\"target\":{\"channel\":1,\"type\":\"trackVolume\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationClip\",\"priority\":4294967295,\"target\":{\"channel\":1,\"type\":\"channelPan\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":7,\"kind\":\"deleteClip\"},{\"clip\":3,\"kind\":\"setAutomationClip\",\"priority\":4,\"target\":{\"channel\":1,\"type\":\"channelPan\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":15,\"target\":{\"channel\":1,\"type\":\"channelVolume\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":2,\"target\":{\"channel\":1,\"type\":\"channelVolume\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":12,\"target\":{\"channel\":1,\"type\":\"channelPan\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":6,\"target\":{\"channel\":99,\"type\":\"channelVolume\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":6,\"target\":{\"channel\":1,\"instrument\":\"sampler\",\"param\":\"start\",\"type\":\"instrumentParam\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":6,\"target\":{\"channel\":1,\"instrument\":\"synth\",\"param\":\"missing\",\"type\":\"instrumentParam\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":6,\"target\":{\"channel\":1,\"type\":\"channelPan\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":9,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":150,\"value\":3.0}]},{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":15,\"target\":{\"channel\":1,\"type\":\"channelVolume\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":14,\"target\":{\"channel\":1,\"type\":\"channelVolume\"}},{\"color\":0,\"kind\":\"createTrack\",\"name\":\"Allocator probe\"},{\"clip\":9,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":150,\"value\":0.25}]},{\"clip\":5,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":200,\"value\":0.1}]}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":9,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":150,\"value\":0.25}]},{\"clip\":5,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":100,\"value\":3.0}]},{\"color\":0,\"kind\":\"createTrack\",\"name\":\"Allocator probe\"}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "limit": 32,
+        "offset": 0
+      },
+      "command": "arrangement_view"
+    },
+    {
+      "args": {
+        "clip": 9,
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":15,\"target\":{\"channel\":1,\"type\":\"channelVolume\"}}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":100,\"value\":-1.0},{\"mode\":\"linear\",\"tick\":199,\"value\":1.0}]},{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":14,\"target\":{\"channel\":1,\"type\":\"channelPan\"}},{\"color\":0,\"kind\":\"createTrack\",\"name\":\"Allocator probe\"}]",
+        "generation": 6,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":100,\"value\":-1.01}]}]",
+        "generation": 6,
+        "revision": 8
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":100,\"value\":1.01}]}]",
+        "generation": 6,
+        "revision": 8
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":100,\"value\":0.0},{\"mode\":\"linear\",\"tick\":199,\"value\":1.0}]},{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":14,\"target\":{\"channel\":1,\"instrument\":\"synth\",\"param\":\"osc1_level\",\"type\":\"instrumentParam\"}}]",
+        "generation": 6,
+        "revision": 8
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"hold\",\"tick\":100,\"value\":1.01}]}]",
+        "generation": 6,
+        "revision": 9
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[]},{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"linear\",\"tick\":100,\"value\":0.4},{\"mode\":\"hold\",\"tick\":149,\"value\":0.7}]},{\"clip\":3,\"kind\":\"copy\",\"startTick\":3840,\"track\":2}]",
+        "generation": 6,
+        "revision": 9
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "generation": 6,
+        "revision": 10,
+        "undo": true
+      },
+      "command": "arrangement_history"
+    },
+    {
+      "args": {
+        "generation": 6,
+        "revision": 11,
+        "undo": false
+      },
+      "command": "arrangement_history"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":16,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"linear\",\"tick\":100,\"value\":0.45}]}]",
+        "generation": 6,
+        "revision": 12
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "clip": 3,
+        "generation": 6,
+        "revision": 13
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 9,
+        "generation": 6,
+        "revision": 13
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "path": "/qa/edited-automation.grooviq"
+      },
+      "command": "project_save_as"
+    },
+    {
+      "args": {},
+      "command": "project_new"
+    },
+    {
+      "args": {
+        "path": "/qa/edited-automation.grooviq"
+      },
+      "command": "project_open"
+    },
+    {
+      "args": {
+        "limit": 32,
+        "offset": 0
+      },
+      "command": "arrangement_view"
+    },
+    {
+      "args": {
+        "clip": 5,
+        "generation": 8,
+        "revision": 0
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 7,
+        "generation": 8,
+        "revision": 0
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 9,
+        "generation": 8,
+        "revision": 0
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[]},{\"clip\":3,\"kind\":\"setAutomationClip\",\"priority\":18,\"target\":{\"channel\":1,\"type\":\"channelVolume\"}},{\"color\":0,\"kind\":\"createTrack\",\"name\":\"Allocator probe\"}]",
+        "generation": 8,
+        "revision": 0
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "clip": 3,
+        "generation": 8,
+        "revision": 1
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 7,
+        "generation": 8,
+        "revision": 1
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 9,
+        "generation": 8,
+        "revision": 1
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "generation": 8,
+        "pointRuns": [
+          {
+            "count": 16385,
+            "op": {
+              "clip": 99,
+              "kind": "setAutomationPoints",
+              "points": []
+            },
+            "repeats": 1,
+            "start": 100
+          }
+        ],
+        "revision": 0
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "generation": 8,
+        "pointRuns": [
+          {
+            "count": 16384,
+            "op": {
+              "clip": 99,
+              "kind": "setAutomationPoints",
+              "points": []
+            },
+            "repeats": 61,
+            "start": 100
+          },
+          {
+            "count": 577,
+            "op": {
+              "content": {
+                "lengthTicks": 16384,
+                "offsetTick": 100,
+                "points": [
+                  {
+                    "mode": "hold",
+                    "tick": 0,
+                    "value": 0.5
+                  }
+                ],
+                "priority": 0,
+                "target": {
+                  "channel": 1,
+                  "type": "channelVolume"
+                },
+                "type": "automation"
+              },
+              "kind": "createClip",
+              "muted": false,
+              "name": "Large curve",
+              "startTick": 8000,
+              "track": 2
+            },
+            "repeats": 1,
+            "start": 100
+          }
+        ],
+        "revision": 0
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "generation": 8,
+        "pointRuns": [
+          {
+            "count": 16384,
+            "op": {
+              "clip": 99,
+              "kind": "setAutomationPoints",
+              "points": []
+            },
+            "repeats": 61,
+            "start": 100
+          },
+          {
+            "count": 576,
+            "op": {
+              "clip": 99,
+              "kind": "deleteClip"
+            },
+            "repeats": 1,
+            "start": 100
+          }
+        ],
+        "revision": 0
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "generation": 8,
+        "pointRuns": [
+          {
+            "count": 16384,
+            "op": {
+              "clip": 99,
+              "kind": "setAutomationPoints",
+              "points": []
+            },
+            "repeats": 61,
+            "start": 100
+          },
+          {
+            "count": 577,
+            "op": {
+              "clip": 99,
+              "kind": "deleteClip"
+            },
+            "repeats": 1,
+            "start": 100
+          }
+        ],
+        "revision": 0
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "generation": 8,
+        "pointRuns": [
+          {
+            "count": 0,
+            "op": {
+              "content": {
+                "lengthTicks": 16384,
+                "offsetTick": 100,
+                "points": [
+                  {
+                    "mode": "hold",
+                    "tick": 0,
+                    "value": 0.5
+                  }
+                ],
+                "priority": 0,
+                "target": {
+                  "channel": 1,
+                  "type": "channelVolume"
+                },
+                "type": "automation"
+              },
+              "kind": "createClip",
+              "muted": false,
+              "name": "Large curve",
+              "startTick": 8000,
+              "track": 2
+            },
+            "repeats": 1,
+            "start": 0
+          },
+          {
+            "count": 16384,
+            "op": {
+              "clip": 20,
+              "kind": "setAutomationPoints",
+              "points": []
+            },
+            "repeats": 1,
+            "start": 100
+          }
+        ],
+        "revision": 1
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "generation": 8,
+        "pointRuns": [
+          {
+            "count": 0,
+            "op": {
+              "content": {
+                "lengthTicks": 16384,
+                "offsetTick": 100,
+                "points": [
+                  {
+                    "mode": "hold",
+                    "tick": 0,
+                    "value": 0.5
+                  }
+                ],
+                "priority": 0,
+                "target": {
+                  "channel": 1,
+                  "type": "channelVolume"
+                },
+                "type": "automation"
+              },
+              "kind": "createClip",
+              "muted": false,
+              "name": "Large curve",
+              "startTick": 8000,
+              "track": 2
+            },
+            "repeats": 1,
+            "start": 0
+          },
+          {
+            "count": 16383,
+            "op": {
+              "clip": 20,
+              "kind": "setAutomationPoints",
+              "points": []
+            },
+            "repeats": 1,
+            "start": 100
+          },
+          {
+            "count": 0,
+            "op": {
+              "clip": 20,
+              "kind": "copy",
+              "startTick": 24000,
+              "track": 2
+            },
+            "repeats": 61,
+            "start": 0
+          }
+        ],
+        "revision": 1
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"color\":0,\"kind\":\"createTrack\",\"name\":\"Allocator probe\"}]",
+        "generation": 8,
+        "revision": 1
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":21,\"target\":{\"channel\":1,\"instrument\":\"synth\",\"param\":\"osc1_level\",\"type\":\"instrumentParam\"}}]",
+        "generation": 8,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":5,\"kind\":\"setAutomationClip\",\"priority\":22,\"target\":{\"channel\":1,\"instrument\":\"synth\",\"param\":\"osc1_level\",\"type\":\"instrumentParam\"}}]",
+        "generation": 8,
+        "revision": 3
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"content\":{\"lengthTicks\":18446744073709551615,\"offsetTick\":100,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.5}],\"priority\":0,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Large curve\",\"startTick\":8000,\"track\":2},{\"clip\":23,\"kind\":\"setAutomationPoints\",\"points\":[]}]",
+        "generation": 8,
+        "revision": 4
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"content\":{\"lengthTicks\":18446744073709551615,\"offsetTick\":100,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.5}],\"priority\":0,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Large curve\",\"startTick\":8000,\"track\":2}]",
+        "generation": 8,
+        "revision": 4
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"color\":256,\"kind\":\"setAutomationPoints\",\"points\":[{\"mode\":\"linear\",\"tick\":100,\"value\":0.4}]}]",
+        "generation": 8,
+        "revision": 4
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"kind\":\"setAutomationPoints\",\"clip\":3,\"points\":[{\"mode\":\"step\",\"tick\":-1,\"value\":0.2}]}]",
+        "generation": 8,
+        "revision": 0
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":3,\"kind\":\"setAutomationPoints\",\"points\":[],\"region\":[0,960,true]}]",
+        "generation": 8,
+        "revision": 4
+      },
+      "command": "arrangement_edit"
     }
   ]
 }
