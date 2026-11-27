@@ -42,16 +42,26 @@ export interface KnobProps {
   row?: boolean;
   /** Knob diameter, CSS px. */
   size?: number;
+  onContextAction?: (anchor: HTMLDivElement, at: { x: number; y: number }) => void;
 }
 
 /** A device control: drag vertically (Shift fine), wheel, arrow keys, Home/End, double-click for
  * the default. Drags and wheel turns are gestures of the editor's owner; keys and the
  * double-click are one-shot changes. */
-export function Knob({ id, param, value, label, name, format, does, variant = "knob", row, size, control }: KnobProps) {
+export function Knob({ id, param, value, label, name, format, does, variant = "knob", row, size, control, onContextAction }: KnobProps) {
   const el = useRef<HTMLDivElement>(null);
   const { dragging, pointer } = useVerticalDrag(param, value, control, el);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (onContextAction && (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10"))) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.repeat && !dragging) {
+        const rect = e.currentTarget.getBoundingClientRect();
+        onContextAction(e.currentTarget, { x: rect.left, y: rect.bottom });
+      }
+      return;
+    }
     const next = keyValue(param, value, e.key, e.shiftKey);
     if (next === null) return;
     e.preventDefault();
@@ -75,10 +85,17 @@ export function Knob({ id, param, value, label, name, format, does, variant = "k
       aria-valuemax={param.max}
       aria-valuenow={Number(value.toFixed(4))}
       aria-valuetext={text}
+      aria-haspopup={onContextAction ? "menu" : undefined}
+      aria-keyshortcuts={onContextAction ? "Shift+F10" : undefined}
       data-param={id}
       data-hint={`${does} ${GESTURES}`}
       style={size ? ({ "--ks": `${size}px` } as CSSProperties) : undefined}
       onKeyDown={onKeyDown}
+      onContextMenu={onContextAction && (event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!dragging) onContextAction(event.currentTarget, { x: event.clientX, y: event.clientY });
+      })}
       onDoubleClick={() => {
         if (value !== param.default) control.set(param.default);
       }}

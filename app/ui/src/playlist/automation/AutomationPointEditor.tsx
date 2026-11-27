@@ -1,20 +1,20 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
-import type { ArrangementOperation, ArrangementStamp, ClipSummary, CurvePoint } from "../../api/arrangement";
+import type { ArrangementOperation, ArrangementStamp, CurvePoint } from "../../api/arrangement";
 import { registerGestureCancellation } from "../../project/pending";
 import { isProjectReplacing, projectGeneration } from "../../project/replacement";
 import { modalIsOpen } from "../../project/shortcuts";
+import { AutomationClipSettings, type AutomationClipSummary } from "./AutomationClipSettings";
 import { addPoint, clippedCurve, evaluate, freeTick, movePoint, pointAt, pointPosition, previewSource, windowPoints } from "./curve";
 import { pointTarget } from "./target";
 import type { AutomationCurve } from "./useAutomationCurve";
 import "./automation.css";
 
-type CurveContent = Extract<ClipSummary["content"], { type: "automation" }>;
 type Props = {
-  clip: { id: number; name: string; content: CurveContent };
+  clip: AutomationClipSummary;
   stamp: ArrangementStamp;
   curve: AutomationCurve;
   disabled: boolean;
-  onEdit: (stamp: ArrangementStamp, operation: Extract<ArrangementOperation, { kind: "setAutomationPoints" }>) => void;
+  onEdit: (stamp: ArrangementStamp, operation: Extract<ArrangementOperation, { kind: "setAutomationPoints" | "setAutomationClip" }>, still?: () => boolean) => void;
 };
 type Drag = {
   id: number;
@@ -195,6 +195,9 @@ export function AutomationPointEditor({ clip, stamp, curve, disabled, onEdit }: 
         <button type="button" aria-disabled={unavailable || !selected} onClick={() => remove(index)}>Delete point</button>
       </div>
     </header>
+    <AutomationClipSettings clip={clip} points={source} stamp={stamp}
+      disabled={disabled || visiblePreview !== null}
+      onEdit={(operation, still) => { if (!drag.current) onEdit(stamp, operation, still); }} />
     <div className="automation-plot">
       {target && <div className="automation-axis" aria-label="Value range"><span>{target.format(target.max)}</span><span>{target.format(target.min)}</span></div>}
       <div ref={graph} className="automation-graph" role="group" aria-label="Automation curve" tabIndex={0}

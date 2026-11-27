@@ -1,10 +1,29 @@
 import type { AutomationTarget } from "../../api/arrangement";
+import type { ChannelView } from "../../api/project";
 import { SAMPLER_PARAMS, formatValue as formatSamplerValue } from "../../devices/sampler/samplerLayout";
 import { SYNTH_PARAMS, formatValue as formatSynthValue } from "../../devices/synth/synthLayout";
 import { formatPan, formatVolume } from "../../rack/mixFormat";
 import type { TargetRange } from "./curve";
 
 export type PointTarget = TargetRange & { name: string; default: number; format: (value: number) => string };
+
+export const automationTargetKey = (target: AutomationTarget) => target.type === "instrumentParam"
+  ? `${target.channel}:${target.instrument}:${target.param}`
+  : `${target.channel}:${target.type}`;
+
+export function automationTargetCatalog(channels: readonly Pick<ChannelView, "id" | "kind" | "name">[]) {
+  return channels.map(({ id: channel, kind, name }) => {
+    const params = kind === "sampler" ? SAMPLER_PARAMS : SYNTH_PARAMS;
+    const targets: AutomationTarget[] = [
+      { type: "channelVolume", channel },
+      { type: "channelPan", channel },
+      ...params.map(param => ({ type: "instrumentParam" as const, channel, instrument: kind, param: param.id })),
+    ];
+    return { channel, name: `${name} · Channel ${channel}`, targets: targets.map(target => ({
+      id: automationTargetKey(target), name: `${name} · ${pointTarget(target)?.name ?? ""}`, target,
+    })) };
+  });
+}
 
 export function pointTarget(target: AutomationTarget): PointTarget | null {
   if (target.type === "channelVolume") {

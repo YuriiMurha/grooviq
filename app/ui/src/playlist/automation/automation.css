@@ -90,6 +90,16 @@
 .automation-point[aria-pressed="true"]::before { background: var(--select); border-color: var(--select); }
 .automation-value { color: var(--text); font-variant-numeric: tabular-nums; }
 
+@media (max-height: 650px) {
+  /* The dock can overflow at compact heights. Keep room for the workspace below it. */
+  .pattern-workspace-content > .playlist:has(.automation-dock) {
+    flex-basis: auto;
+    min-height: 0;
+    max-height: calc(100% - 64px);
+    overflow-y: auto;
+  }
+}
+
 @media (max-width: 960px) {
   /* A pending edit must not add a status row and resize the workspace beneath the dock. */
   .playlist:has(.automation-dock) .playlist-status {
@@ -98,3 +108,33 @@
   }
   .playlist:has(.automation-dock) .playlist-status [role="status"] { text-align: end; }
 }
+
+.automation-create { width: min(280px, calc(100vw - 16px)); }
+.automation-create-choices { display: grid; gap: 8px; padding: 4px; }
+
+.automation-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content max-content;
+  justify-items: start;
+}
+.automation-settings label { min-width: 0; }
+.automation-settings label:first-child { width: 100%; }
+.automation-settings select { min-width: 0; flex: 1; text-overflow: ellipsis; }
+
+@media (max-width: 640px) {
+  .automation-settings { grid-template-columns: minmax(0, 1fr) max-content; }
+  .automation-settings label:first-child { grid-column: 1 / -1; }
+}
+
+.automation-settings input {
+  width: 11ch;
+  min-height: 28px;
+  padding-inline: 6px;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  font: inherit;
+}
+
+.automation-settings input[aria-invalid="true"] { border-color: var(--warn); }

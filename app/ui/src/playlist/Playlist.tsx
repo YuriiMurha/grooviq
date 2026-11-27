@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from "react";
 import { pickSound } from "../rack/audioFiles";
 import { errorText } from "../api/project";
 import { dropNotice, missingAudioAssets } from "./audio/media";
 import { createWaveformLoader, packWaveforms, visibleWaveforms } from "./audio/waveforms";
 import { AudioEditGesture, type AudioEditInput } from "./audio/editGesture";
 import { AutomationPointEditor } from "./automation/AutomationPointEditor";
+import { selectedAutomationTrack } from "./automation/creation";
+import { useAutomationCreation } from "./automation/creationContext";
 import { AutomationEditGesture, type AutomationEditInput } from "./automation/editGesture";
 import { useAutomationCurve } from "./automation/useAutomationCurve";
 import { AudioClipInspector } from "./audio/AudioClipInspector";
@@ -46,6 +48,16 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
     ? selectedState.ids.filter(id => liveIds.has(id)) : [], [selectedState, snapshot, liveIds]);
   const selection = useMemo(() => new Set(selectedIds), [selectedIds]);
   const actionClips = useMemo(() => selectedClips(snapshot?.clips ?? [], selection), [snapshot, selection]);
+  const setAutomationSelection = useAutomationCreation()?.setSelection;
+  useLayoutEffect(() => {
+    if (!setAutomationSelection || !snapshot) return;
+    setAutomationSelection({
+      stamp: snapshot,
+      track: selectedAutomationTrack(actionClips, snapshot.tracks),
+      selectCreated: (generation, clip) => setSelected({ generation, ids: [clip] }),
+    });
+    return () => setAutomationSelection(null);
+  }, [actionClips, setAutomationSelection, snapshot]);
   const unmuteSelection = selectionIsMuted(actionClips);
   const clipLabel = selectedIds.length > 1 ? "clips" : "clip";
   const selected = selectedIds.length === 1 ? selectedIds[0] : null;
@@ -265,8 +277,8 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
     if (gesture instanceof ClipGroupGesture) setCapturedMembers(gesture.memberIds);
     else { showClipPreview(gesture); setPreviewIndex(index); }
   };
-  const commit = async (stamp: ArrangementStamp, operations: Parameters<typeof mutate>[1], selectCreated = true, createdCount = 1) => {
-    const result = await mutate(stamp, operations);
+  const commit = async (stamp: ArrangementStamp, operations: Parameters<typeof mutate>[1], selectCreated = true, createdCount = 1, still?: () => boolean) => {
+    const result = await mutate(stamp, operations, still);
     if (result.status === "applied" && selectCreated) {
       const id = result.reply.createdIds.at(-1);
       if (id !== undefined) setSelected({ generation: result.reply.generation, ids: result.reply.createdIds.slice(-createdCount) });
@@ -611,7 +623,7 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
     {snapshot && selectedAutomation &&
       <AutomationPointEditor key={`${snapshot.generation}:${selectedAutomation.id}`}
         clip={selectedAutomation} stamp={snapshot} curve={automationCurve} disabled={busy}
-        onEdit={(stamp, operation) => { cancel(); void commit(stamp, [operation], false); }} />}
+        onEdit={(stamp, operation, still) => { cancel(); void commit(stamp, [operation], false, 1, still); }} />}
     {message && <p role="alert" className="playlist-error">{message}</p>}
     {missingAsset !== null && <p className="playlist-readonly">The audio file for this clip is missing.</p>}
     {!state.busy && state.media === null && snapshot?.total === 0 && <p className="playlist-empty">Draw a pattern or drop an audio file onto a track.</p>}

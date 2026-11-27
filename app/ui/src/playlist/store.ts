@@ -340,7 +340,7 @@ export class PlaylistController {
     }
   };
 
-  mutate = (expected: ArrangementStamp, operations: readonly ArrangementOperation[]): Promise<PlaylistResult> => {
+  mutate = (expected: ArrangementStamp, operations: readonly ArrangementOperation[], still?: () => boolean): Promise<PlaylistResult> => {
     if (this.value.busy || this.mediaFlight || this.value.requiresRefresh || this.adapter.blocked()) return Promise.resolve({ status: "blocked" });
     if (!this.value.snapshot || !stampEquals(expected, this.value.snapshot)) return Promise.resolve({ status: "stale" });
     requireStamp(expected);
@@ -360,7 +360,20 @@ export class PlaylistController {
         // Exclude the registered wrapper itself, not work.settle (a different function).
         if (!await settleProjectEdits(this.settle)) return { status: "unsettled" };
         return await this.adapter.enqueueMutation<PlaylistResult>(async () => {
-          if (!this.current(origin, epoch) || !this.value.snapshot || !stampEquals(captured, this.value.snapshot)) throw new PlaylistOutcome({ status: "stale" });
+          const current = () => this.current(origin, epoch);
+          if (!current() || !this.value.snapshot || !stampEquals(captured, this.value.snapshot)) throw new PlaylistOutcome({ status: "stale" });
+          if (still && !still()) {
+            // An automatic reload can miss a Session publication while preflight is busy.
+            try {
+              const { snapshot } = await this.observe(current);
+              if (!current()) return { status: "cancelled" };
+              if (snapshot.generation !== captured.generation || snapshot.revision < captured.revision) throw new Error("The playlist changed before it could be refreshed");
+              this.set({ ...this.value, snapshot });
+            } catch (error) {
+              if (current()) this.set({ ...this.value, snapshot: null, message: messageOf(error) });
+            }
+            return { status: "cancelled" };
+          }
           invoked = true;
           const reply = await this.adapter.edit(captured, batch);
           if (!this.current(origin, epoch)) throw new PlaylistOutcome({ status: "stale" });
@@ -372,7 +385,6 @@ export class PlaylistController {
           }
           if (reply.status !== "applied" || (reply.changed && reply.revision === captured.revision)) throw new Error("Invalid native playlist outcome");
           applied = true;
-          const current = () => this.current(origin, epoch);
           try {
             // Save waits for this ticket, including the source switch after an accepted clone.
             const selection = unique ? await this.selectUniqueSource(unique.clip, reply, current) : null;
@@ -405,7 +417,7 @@ export class PlaylistController {
         finish?.();
         if (this.current(origin, epoch)) this.set({ ...this.value, busy: false });
       }
-    }, result => result.status === "applied" ||
+    }, result => result.status === "applied" || result.status === "cancelled" ||
       (unique !== null && result.status === "unpublished" && result.native === "applied"));
   };
 }

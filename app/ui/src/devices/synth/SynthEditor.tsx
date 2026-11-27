@@ -5,6 +5,7 @@ import type { ChannelView } from "../../api/project";
 import { EnvelopeGraph } from "../controls/EnvelopeGraph";
 import type { ParamControl } from "../controls/gesture";
 import { Knob } from "../controls/Knob";
+import { useAutomationCreation, useAutomationGestureGuard } from "../../playlist/automation/creationContext";
 import { Segmented } from "../controls/Segmented";
 import { DeviceWindow } from "../DeviceWindow";
 import { useDeviceParams } from "../useDeviceParams";
@@ -49,6 +50,8 @@ const SUB_GLYPHS = [glyph(0), glyph(3)];
 export function SynthEditor({ generation, active, channel, index, z, opener, onClose, onRaise, onError }: Props) {
   const params = useDeviceParams(channel.id, channel.synth, (id) => synthParam(id).default, onError);
   const v = params.value;
+  const automation = useAutomationCreation();
+  useAutomationGestureGuard(params.hasActiveChanges);
   const ctl = (id: string): ParamControl => ({ begin: () => params.begin(id), set: (x) => params.set(id, x) });
 
   const control = ({ id, kind }: Placement, opts: { row?: boolean; size?: number } = {}) => {
@@ -83,6 +86,8 @@ export function SynthEditor({ generation, active, channel, index, z, opener, onC
         row={opts.row}
         size={opts.size}
         control={ctl(id)}
+        onContextAction={automation ? (anchor, at) =>
+          automation.open({ type: "instrumentParam", channel: channel.id, instrument: "synth", param: id }, v(id), anchor, at) : undefined}
       />
     );
   };

@@ -644,3 +644,88 @@ fn edited_point_modes_reach_offline_render() {
     assert!(before[2048..].iter().all(|sample| *sample == 0.0));
     assert!(after[2048..].iter().any(|sample| sample.abs() > 0.001));
 }
+
+#[test]
+fn instrument_created_through_arrangement_restores_manual_output_on_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = project();
+    project.channels[0].synth.insert("master".into(), 0.0);
+    project.arrangement.clips.clear();
+    let (control, mut processor) = engine::engine(CONFIG);
+    let control = Arc::new(Mutex::new(control));
+    let mut session = Session::new(Arc::clone(&control));
+    session
+        .open(
+            &dir.path().join("instrument.grooviq"),
+            Loaded {
+                project,
+                samples: Default::default(),
+                warnings: vec![],
+            },
+            DecodedSamples::default(),
+        )
+        .unwrap();
+    let created = edit(
+        &mut session,
+        vec![Op::CreateClip {
+            track: 2,
+            name: "Master".into(),
+            start_tick: 0,
+            muted: false,
+            content: ClipContent::Automation {
+                target: AutomationTarget::InstrumentParam {
+                    channel: 1,
+                    instrument: "synth".into(),
+                    param: "master".into(),
+                },
+                priority: 0,
+                offset_tick: 0,
+                length_ticks: 7680,
+                points: vec![point(0, -36.0, SegmentMode::Hold)].into(),
+            },
+        }],
+    )
+    .unwrap();
+    let send = |command| control.lock().unwrap().send(command).unwrap();
+    let note = |id, on| engine::Command::ChannelNote {
+        channel: engine::ChannelId(1),
+        key: 60,
+        velocity: 0.8,
+        on,
+        id: engine::NoteId(id),
+    };
+    let mut measure = |blocks: usize| {
+        let mut block = [0.0_f32; 128];
+        let mut peak = 0.0_f32;
+        for index in 0..blocks {
+            processor.process(&mut block, 2);
+            if index >= blocks / 2 {
+                peak = block.iter().map(|sample| sample.abs()).fold(peak, f32::max);
+            }
+        }
+        peak
+    };
+    session.play().unwrap();
+    measure(96); // Let the automated gain settle before the first fresh note.
+    send(note(60, true));
+    let automated = measure(96);
+    assert!(control.lock().unwrap().live().playing);
+    assert!(automated > 0.0001, "the automated note must sound");
+
+    send(note(60, false));
+    measure(576);
+    assert!(control.lock().unwrap().live().playing);
+    send(engine::Command::Stop);
+    measure(96);
+    assert!(!control.lock().unwrap().live().playing);
+    send(note(61, true));
+    let restored = measure(96);
+    assert!(
+        restored > 0.02 && restored > automated * 20.0,
+        "Stop must restore manual synth gain: automated {automated}, restored {restored}"
+    );
+    assert_eq!(session.project().channels[0].synth["master"], 0.0);
+    let clip = &session.project().arrangement.clips[0];
+    assert_eq!(clip.id, created[0]);
+    assert_eq!(&**points(clip), &[point(0, -36.0, SegmentMode::Hold)]);
+}

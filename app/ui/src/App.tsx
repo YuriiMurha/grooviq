@@ -42,6 +42,7 @@ import { Meter } from "./meter/Meter";
 import { OutputChip } from "./output/OutputChip";
 import { OutputPopover } from "./output/OutputPopover";
 import { ProjectContext } from "./project/context";
+import { AutomationCreation } from "./playlist/automation/AutomationCreation";
 import { metronomeSet, onRecordingStopped, recordSet } from "./api/notes";
 import { Workspace } from "./layout/Workspace";
 import { ProjectMenu } from "./project/ProjectMenu";
@@ -451,6 +452,7 @@ export function App() {
 
   return (
     <ProjectContext.Provider value={session.context}>
+      <AutomationCreation model={playlist} rulerPosition={rulerPosition}>
       <div className="app">
         <header className="toolbar">
           {view && (
@@ -526,6 +528,7 @@ export function App() {
         <Toasts toasts={toasts} onDismiss={(id) => setToasts((all) => all.filter((t) => t.id !== id))} />
         {flows.dialogs}
       </div>
+      </AutomationCreation>
     </ProjectContext.Provider>
   );
 }
