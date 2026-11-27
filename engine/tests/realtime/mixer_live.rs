@@ -308,52 +308,66 @@ fn start_note(channel: u32, id: u64) -> Command {
     }
 }
 
-/// MAX_LEAVING channels fading, then one more removal: the node with no fading room comes
-/// back through the transaction's reserved `removed` capacity inside the callback.
 #[test]
-fn full_fading_room_returns_removed_nodes_under_guard() {
+fn full_fading_room_refuses_until_retirement_under_guard() {
     let state = EngineState {
         channels: (0..FADING_CAPACITY).map(synth).collect(),
         ..EngineState::default()
     };
-    let (mut c, mut p) = engine_with(
-        EngineConfig {
-            sample_rate: 48_000.0,
-        },
-        state,
-    );
-    let mut out = [0.0; 128];
-    super::realtime(|| p.process(&mut out, 2));
-    // Replace all 256 (256 leaving), then remove one more before any fade can finish.
-    c.set_sources_and_mix(edit(
-        (0..FADING_CAPACITY).collect(),
-        (1000..1000 + FADING_CAPACITY).collect(),
-    ))
-    .unwrap();
-    // This queued voice must disappear with the extra immediately removed node.
-    c.send(start_note(1000, 1)).unwrap();
-    c.set_sources_and_mix(edit(vec![1000], vec![])).unwrap();
-    c.send(start_note(1001, 2)).unwrap();
-    super::realtime(|| p.process(&mut out, 2));
-
-    // An isolated source proves the new nodes actually reached the graph and that the
-    // extra removed node contributes no sound, rather than only checking the mirror.
-    let (mut reference, mut renderer) = engine(EngineConfig {
+    let config = EngineConfig {
         sample_rate: 48_000.0,
-    });
-    let mut expected = [0.0; 128];
-    super::realtime(|| renderer.process(&mut expected, 2));
-    reference.add_channel(synth(1001)).unwrap();
-    reference.send(start_note(1001, 2)).unwrap();
-    super::realtime(|| renderer.process(&mut expected, 2));
-    assert!(expected.iter().any(|x| x.abs() > 1e-6));
-    assert_eq!(out, expected);
-    for _ in 0..50 {
-        super::realtime(|| p.process(&mut out, 2));
-        let _ = c.check_health();
+    };
+    let (mut c, mut p) = engine_with(config, state);
+    let mut out = [0.0; BLOCK * 2];
+    c.set_sources_and_mix(edit((0..FADING_CAPACITY).collect(), vec![1000]))
+        .unwrap();
+    c.send(start_note(1000, 1)).unwrap();
+    assert_eq!(
+        c.set_sources_and_mix(edit(vec![1000], vec![])),
+        Err(ControlError::Busy),
+        "all the accepted but still queued removals are charged"
+    );
+
+    // Occupy the trash queue and its parked slot before the fades turn silent.
+    for _ in 0..64 {
+        c.set_pattern(PatternData::default()).unwrap();
     }
-    assert_eq!(c.state().channels.len(), FADING_CAPACITY as usize - 1);
-    assert!(out.iter().all(|x| x.is_finite()));
+    let (mut reference, mut renderer) = engine_with(
+        config,
+        EngineState {
+            channels: vec![synth(1000)],
+            ..EngineState::default()
+        },
+    );
+    reference.send(start_note(1000, 1)).unwrap();
+    let mut expected = [0.0; BLOCK * 2];
+    for _ in 0..4 {
+        realtime_process(&mut p, &mut out);
+        realtime_process(&mut renderer, &mut expected);
+        assert!(expected.iter().any(|x| x.abs() > 1e-6));
+        assert_eq!(out, expected);
+    }
+    assert_eq!(
+        c.set_sources_and_mix(edit(vec![1000], vec![])),
+        Err(ControlError::Busy),
+        "collecting the preceding envelopes does not reclaim the silent nodes in the graph"
+    );
+    realtime_process(&mut p, &mut out);
+    realtime_process(&mut renderer, &mut expected);
+    assert_eq!(out, expected);
+
+    c.set_sources_and_mix(edit(vec![1000], vec![])).unwrap();
+    realtime_process(&mut p, &mut out);
+    assert!(
+        out.iter().any(|x| x.abs() > 1e-6),
+        "the retry starts a fade"
+    );
+    for _ in 0..8 {
+        let _ = c.check_health();
+        realtime_process(&mut p, &mut out);
+    }
+    assert!(c.state().channels.is_empty());
+    assert_eq!(out, [0.0; BLOCK * 2]);
 }
 
 /// A source transaction reaching a faulted graph is refused whole inside the callback and

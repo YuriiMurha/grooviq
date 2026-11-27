@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 /// Length of every de-click ramp: tone changes and the synth fade on `AllSoundOff`.
 const RAMP_SECONDS: f32 = 0.005;
-/// Channels fading out after their removal, at most. Past that, a removed channel stops at once.
-const MAX_LEAVING: usize = MAX_CHANNELS;
+/// Maximum number of leaving channels the graph can hold in place.
+pub(crate) const MAX_LEAVING: usize = MAX_CHANNELS;
 /// Note-ons of grouped channels one block chokes with. Past that, the further note-ons of the
 /// block (in channel order, then offset) choke nothing; they still play.
 const MAX_CHOKES: usize = 256;
@@ -196,8 +196,8 @@ impl Graph {
 
     /// Whether every part of a source transaction can apply to this graph now: its mix was
     /// prepared against this generation and revision, each removed channel is present, and
-    /// each added one finds its ID free (after the removals) and room. Checked before any
-    /// part changes, so a transaction applies whole or not at all. Real-time safe.
+    /// each added one finds its ID free (after the removals) and room. The caller also
+    /// checks fade room for every removal before applying any part. Real-time safe.
     pub(crate) fn sources_admissible(&self, t: &crate::command::SourceTransaction) -> bool {
         if !self.mix_installable(&t.mix) {
             return false;
@@ -219,15 +219,11 @@ impl Graph {
         present + adds.count() <= MAX_CHANNELS + t.removes.len()
     }
 
-    /// Applies a transaction [`Self::sources_admissible`] accepted: removals (each fades on
-    /// its prepared instance route; one with no fading room comes back at once), additions
-    /// in order, then the mix. Everything that leaves stays in `t` to retire off-thread.
+    /// Starts the admitted removals on their prepared instance routes, then adds channels
+    /// in order. Both [`Self::has_fade_room`] and [`Self::sources_admissible`] must pass first.
     pub(crate) fn apply_sources(&mut self, t: &mut crate::command::SourceTransaction) {
         for &id in &t.removes {
-            if let Some(node) = self.remove_channel(id) {
-                // Capacity reserved for every removal: no allocation.
-                t.removed.push(node);
-            }
+            self.start_channel_fade(id);
         }
         for slot in &mut t.adds {
             if let Some(node) = slot.take() {
@@ -283,26 +279,32 @@ impl Graph {
         None
     }
 
-    /// Removes a channel: it fades out over 5 ms in place (taking no new notes), and
-    /// [`Self::take_departed`] hands it over once silent. Its pending sequenced note-offs are
-    /// dropped. With [`MAX_LEAVING`] channels already fading it is taken out at once and
-    /// returned, for the caller to free elsewhere.
-    pub(crate) fn remove_channel(&mut self, id: ChannelId) -> Option<Box<ChannelNode>> {
-        let index = self
+    pub(crate) fn has_fade_room(&self, removals: usize) -> bool {
+        removals == 0
+            || self.channels.iter().filter(|c| c.leaving()).count() + removals <= MAX_LEAVING
+    }
+
+    /// Starts the 5 ms fade of a single removal if there is room.
+    pub(crate) fn remove_channel(&mut self, id: ChannelId) {
+        if self.has_fade_room(1) {
+            self.start_channel_fade(id);
+        }
+    }
+
+    /// The caller has checked room. The channel takes no new notes, and its pending sequenced
+    /// note-offs are dropped. [`Self::take_departed`] hands it over once silent.
+    fn start_channel_fade(&mut self, id: ChannelId) {
+        let Some(index) = self
             .channels
             .iter()
-            .position(|c| c.id() == id && !c.leaving())?;
+            .position(|c| c.id() == id && !c.leaving())
+        else {
+            return;
+        };
         self.sequencer.forget_channel(id);
         self.song_sequencer.forget_channel(id);
-        let leaving = self.channels.iter().filter(|c| c.leaving()).count();
-        let removed = if leaving < MAX_LEAVING {
-            self.channels[index].leave();
-            None
-        } else {
-            Some(self.channels.remove(index))
-        };
+        self.channels[index].leave();
         self.retarget();
-        removed
     }
 
     /// Takes out a removed channel whose fade has ended, if any, keeping the others in order;

@@ -2,9 +2,9 @@
 
 use grooviq_dsp::sampler::SPEC;
 use grooviq_engine::{
-    AudioProcessor, ChannelId, ChannelMix, ChannelSetup, Command, ControlError, Controller,
+    AudioProcessor, BLOCK, ChannelId, ChannelMix, ChannelSetup, Command, ControlError, Controller,
     EngineConfig, EngineState, HealthEvent, MAX_CHANNELS, NoteId, PatternData, STEP_TICKS,
-    SampleBuf, SeqNote, engine, engine_with, render_offline_with,
+    SampleBuf, SeqNote, SourceEdit, engine, engine_with, render_offline_with,
 };
 use std::f32::consts::SQRT_2;
 use std::sync::Arc;
@@ -416,6 +416,114 @@ fn removing_a_sounding_channel_frees_it_off_the_audio_thread() {
     assert_eq!(Arc::strong_count(&s), 1, "freed by the controller");
     assert!(c.state().channels.is_empty());
     assert!(c.send(note(1, true)).is_err(), "the channel is gone");
+}
+
+#[test]
+fn an_extra_sounding_channel_continues_when_fade_capacity_is_full() {
+    use grooviq_engine::{PlaybackMode, TimelineUpdate};
+
+    fn timeline(remove_channel: Option<ChannelId>) -> TimelineUpdate {
+        TimelineUpdate {
+            pattern: Box::new(PatternData {
+                length: 480,
+                notes: vec![],
+            }),
+            song: Box::default(),
+            bpm: 110.0,
+            mode: PlaybackMode::Song,
+            region: None,
+            remove_channel,
+        }
+    }
+
+    let sample = dc(0.5);
+    let sounding = MAX_CHANNELS as u32;
+    let id = ChannelId(sounding);
+    let setup = channel(sounding, &sample, ChannelMix::default());
+    let expected = render(
+        state(vec![setup.clone()]),
+        &[(0, note(sounding, true))],
+        8 * BLOCK,
+    );
+    assert!(expected.iter().all(|x| *x > 0.4));
+    for remove in [
+        Controller::remove_channel,
+        |c: &mut Controller, id| c.set_timeline(timeline(Some(id))),
+        |c: &mut Controller, id| {
+            c.set_sources_and_mix(SourceEdit {
+                remove: vec![id],
+                add: vec![],
+                timeline: Some(timeline(None)),
+                mix: Default::default(),
+            })
+            .map(|_| ())
+        },
+    ] {
+        let (mut c, mut p) = engine_with(
+            cfg(),
+            state(
+                (0..sounding)
+                    .map(|id| channel(id, &sample, ChannelMix::default()))
+                    .collect(),
+            ),
+        );
+        let rev = c
+            .set_sources_and_mix(SourceEdit {
+                remove: (0..sounding).map(ChannelId).collect(),
+                add: vec![setup.clone()],
+                timeline: None,
+                mix: Default::default(),
+            })
+            .unwrap();
+        c.send(note(sounding, true)).unwrap();
+        let mut block = [0.0; BLOCK * 2];
+        p.process(&mut block, 2);
+        assert_eq!(
+            block,
+            expected[..BLOCK * 2],
+            "the extra channel already sounds"
+        );
+        let old_state = c.state().clone();
+        let instance = c.channel_instance(id);
+
+        let refused = remove(&mut c, id);
+        let mut continued = [0.0; 3 * BLOCK * 2];
+        p.process(&mut continued, 2);
+        assert_eq!(
+            continued[0],
+            expected[BLOCK * 2],
+            "the first sample at full fade capacity must continue"
+        );
+        assert_eq!(continued, expected[BLOCK * 2..4 * BLOCK * 2]);
+        assert_eq!(refused, Err(ControlError::Busy));
+        assert_eq!(c.state(), &old_state);
+        assert_eq!(c.channel_instance(id), instance);
+        assert_eq!(c.mix_revision(), rev);
+
+        // The next admission collects returned channels itself. Compare every sample with
+        // the uninterrupted render times a 5 ms linear ramp, including the first silent frame.
+        remove(&mut c, id).unwrap();
+        let mut faded = [0.0; 4 * BLOCK * 2];
+        p.process(&mut faded, 2);
+        for (frame, (actual, dry)) in faded
+            .chunks_exact(2)
+            .zip(expected[4 * BLOCK * 2..].chunks_exact(2))
+            .enumerate()
+        {
+            let gain = RAMP.saturating_sub(frame + 1) as f32 / RAMP as f32;
+            if gain == 0.0 {
+                assert_eq!(actual, [0.0; 2], "frame {frame}");
+            } else {
+                for (&actual, &dry) in actual.iter().zip(dry) {
+                    assert!(
+                        (actual - dry * gain).abs() < 2e-6,
+                        "frame {frame}: {actual}"
+                    );
+                }
+            }
+        }
+        assert!(c.channel_instance(id).is_none());
+    }
 }
 
 #[test]
