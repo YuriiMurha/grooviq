@@ -85,9 +85,13 @@ class CaptureTests(unittest.TestCase):
         (self.repo / 'Cargo.lock').write_text('head lock')
         self.git('add', 'Cargo.lock')
         self.git('commit', '-qm', 'head')
+        self.source = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-qc', 'measured', self.base)
+        self.git('merge', '--no-ff', '-qm', 'synthetic measurement', self.source)
         self.head = self.git('rev-parse', 'HEAD')
         self.branch = self.git('branch', '--show-current')
-        for name, value in [('BASE', self.base), ('HEAD', self.head), ('PINS', {'workload': self.git('rev-parse', 'HEAD:workload')})]:
+        for name, value in [('BASE', self.base), ('HEAD', self.head), ('SOURCE_HEAD', self.source),
+                            ('PINS', {'workload': self.git('rev-parse', 'HEAD:workload')})]:
             p = patch.object(c, name, value)
             p.start()
             self.addCleanup(p.stop)
@@ -114,7 +118,9 @@ elif name == 'valgrind':
  if mode == 'tool-failure':
   print('fixture tool diagnostic', file=sys.stderr)
   sys.exit(23)
- print('valgrind-3.22.0')
+ print('valgrind-3.26.0' if mode == 'match' else 'valgrind-3.22.0')
+elif name == 'dpkg-query':
+ print('valgrind  1:3.26.0-0ubuntu1' if mode == 'match' else 'valgrind  1:3.22.0-0ubuntu3')
 elif name == 'cargo':
  if '-V' in sys.argv: print('cargo 1.100.0')
  else:
@@ -126,6 +132,7 @@ elif name == 'harness':
  # Gungraun 0.20 defaults direct launches without Cargo's --bench marker to
  # successful test mode: no Valgrind, metrics or output files (runner/meta.rs).
  if '--bench' not in sys.argv or mode == 'no-measurements': sys.exit(0)
+ if '*::drums_4ch' not in sys.argv: sys.exit(97)
  head = '--baseline=base' in sys.argv
  # Verify BASE evidence was saved before HEAD can overwrite its binary.
  evidence = root / 'evidence/base/binary-0'
@@ -134,12 +141,13 @@ elif name == 'harness':
  binary = target / 'build/pkg/out/exact-binary'
  binary.parent.mkdir(parents=True, exist_ok=True)
  binary.write_bytes(b'\\x7fELF' + (b'HEAD' if head else b'BASE'))
- for case in ('voices_16','init_4','dark_pad_4','drums_4ch','beat_16ch'):
-  if head and mode == 'missing' and case == 'beat_16ch': continue
+ for case in (('drums_4ch', 'beat_16ch') if mode == 'extra' else ('drums_4ch',)):
+  if head and mode == 'missing': continue
   p = target / case / ('callgrind.case.out' if head else 'callgrind.case.out.base@base')
   p.parent.mkdir(exist_ok=True)
   cmd = binary if mode != 'wrongbinary' else root / 'outside'
-  p.write_text(f'cmd: {cmd}\\nevents: Ir\\nsummary: {0 if mode == "zero" else 42}\\n')
+  count = (49356000 if head else 48020200) if mode == 'match' else 42
+  p.write_text(f'cmd: {cmd}\\nevents: Ir\\nsummary: {0 if mode == "zero" else count}\\n')
   if mode == 'stale': os.utime(p, ns=(1,1))
  sys.exit(3 if head else 0)
 else: print('annotation / symbols')
@@ -162,7 +170,7 @@ else: print('annotation / symbols')
 
     def test_invalid_options_execute_nothing(self):
         with patch.object(c, 'run', side_effect=AssertionError('process invoked')):
-            for value in (';touch /tmp/no', 'a'*39, '--help'):
+            for value in (';touch /tmp/no', 'a'*39, '--help', 'a'*40, self.head):
                 with self.assertRaises(c.CaptureError):
                     c.validate(self.repo, value, self.head, self.out)
         self.assertFalse(self.out.exists())
@@ -176,9 +184,16 @@ else: print('annotation / symbols')
             with self.assertRaises(c.CaptureError): self.capture()
         self.assertFalse(self.out.exists())
 
+    def test_rejects_wrong_synthetic_source_parent_before_capture(self):
+        same_tree = self.git('commit-tree', f'{self.source}^{{tree}}', '-p', self.base, '-m', 'alternate source')
+        with patch.object(c, 'SOURCE_HEAD', same_tree):
+            with self.assertRaisesRegex(c.CaptureError, 'synthetic merge parents'):
+                self.capture()
+        self.assertFalse(self.out.exists())
+
     def test_regression_preserves_base_hashes_and_ref(self):
         report = self.capture()
-        self.assertEqual(report['status'], 'completed_with_regression_unmatched_kit')
+        self.assertEqual(report['status'], 'completed_with_regression_unmatched_kit_outside_observed_totals')
         self.assertEqual([r['exit'] for r in report['runs']], [0, 3])
         self.assertNotEqual(report['runs'][0]['lock_blob'], report['runs'][1]['lock_blob'])
         self.assertEqual((self.out / 'base/binary-0').read_bytes(), b'\x7fELFBASE')
@@ -189,15 +204,27 @@ else: print('annotation / symbols')
         self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
         self.assertEqual(self.git('status', '--porcelain'), '')
 
+    def test_matching_kit_records_nonidentical_totals_within_observed_spread(self):
+        self.mode.write_text('match')
+        with patch.dict(os.environ, {'ImageVersion': '20261122.9.1'}):
+            report = self.capture()
+        self.assertEqual(report['status'], 'completed_with_regression')
+        self.assertTrue(report['matched_kit'])
+        comparison = report['instruction_comparison']
+        self.assertEqual([comparison[label]['observed_spread'] for label in ('base', 'head', 'delta')],
+                         [64, 5218, 5282])
+        self.assertTrue(all(item['inside_observed_range'] for item in comparison.values()))
+
     def test_failures_restore_ref_and_remain_failed(self):
         errors = {
             'compile': r'^cargo exited 101:',
             'crash': r'^.*/harness exited 101$',
-            'missing': r'^expected five fresh profiles, got \[.+\]$',
+            'missing': r'^expected one fresh drums_4ch profile, got \[\]$',
+            'extra': r'^unknown or duplicate profile:',
             'zero': r'^zero Ir$',
             'stale': r'^stale profile$',
             'wrongbinary': r'^unsafe evidence path: .*\/outside$',
-            'no-measurements': r'^expected five fresh profiles, got \[\]$',
+            'no-measurements': r'^expected one fresh drums_4ch profile, got \[\]$',
         }
         for mode, error in errors.items():
             with self.subTest(mode=mode):
@@ -260,7 +287,7 @@ else: print('annotation / symbols')
             with self.assertRaises(c.CaptureError): self.capture()
         report = json.loads((self.out / 'manifest.json').read_text())
         self.assertEqual(report['status'], 'failed_restore')
-        self.assertEqual(report['capture_result'], 'completed_with_regression_unmatched_kit')
+        self.assertEqual(report['capture_result'], 'completed_with_regression_unmatched_kit_outside_observed_totals')
         self.assertEqual(report['original_ref']['commit'], self.head)
         self.assertEqual(report['settled_ref']['branch'], 'HEAD')
         self.assertFalse(report['restoration']['succeeded'])

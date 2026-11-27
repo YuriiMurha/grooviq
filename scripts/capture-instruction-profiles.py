@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Bounded historical #179 capture. Requires a clean, disposable Linux checkout.
+"""One-shot #860 drums_4ch capture in a clean, disposable Linux checkout.
 
-Selected revisions execute their build scripts on the host; this is not a sandbox.
-Only the verified first pair is accepted. No workload overlay or codegen flags.
+The pinned commits execute their build scripts on the host. Use the original
+workloads and ordinary release codegen.
 """
 import argparse
 import ctypes
@@ -22,20 +22,22 @@ import sys
 import tempfile
 import time
 
-BASE = '014db45a96789bce99a27b1661d5a5204950ca6c'
-HEAD = 'bab875e7063ca5cc3427f4fa54c4f4b698758ac7'
+BASE = '21046d4dfd721b0ff1e1088c993745741d117872'
+HEAD = 'f287f2e643f98ebcf68ed6d3651159c5f084fac2'
+SOURCE_HEAD = '62b9d2f18b75522c25961b292503a4e55688f27f'
 LIMIT = 128 * 1024 * 1024
 PINS = {
-    'tests/golden/benches/instructions.rs': '1326c523f7a773f17f117451071d609fbad22799',
-    'tests/golden/src/perf.rs': '58bf15c66e6b50eb52558511fdf4c4c3a87579a5',
-    'tests/golden/src/lib.rs': 'bf12515db9dd39838c122a066cdd000d0c8dd32e',
-    'engine/src/processor.rs': '99b5a0e612f1f2f3fecf14dc148b9f317b357a01',
-    'Cargo.toml': '840f4f794aba20965d9a69db046d5e546715664b',
+    'tests/golden': '474fd5eb77e4e1c3a6207815315859182eed8f64',
+    'Cargo.toml': 'ef1065c49c007a3c978cbfa3d228686ba6e569b9',
+    'Cargo.lock': '5a609fc78cd9cc666d4d3bd3e004e3b2f664613f',
     'rust-toolchain.toml': '640a93b2aa0b414440705d09f9cf5384443aa022',
 }
-CASES = ('voices_16', 'init_4', 'dark_pad_4', 'drums_4ch', 'beat_16ch')
-TOTALS = ((27658416, 15986725, 37927429, 62800446, 435741806),
-          (27658416, 15986725, 37927429, 63434983, 436995569))
+CASE = 'drums_4ch'
+FILTER = f'*::{CASE}'
+# Both ordinary job attempts used the pinned pair and the same runner image.
+OBSERVED_IR = ((48020193, 49359395), (48020257, 49354177))
+EXPECTED_IMAGE_VERSION = '20261122.9.1'
+EXPECTED_VALGRIND_PACKAGE = '1:3.26.0-0ubuntu1'
 
 
 class CaptureError(RuntimeError):
@@ -163,7 +165,7 @@ def managed(args, cwd, env=None, timeout=1500, output=None, limit=None):
 
 @contextmanager
 def private_target():
-    path = Path(tempfile.mkdtemp(prefix='grooviq-370-target-')).resolve()
+    path = Path(tempfile.mkdtemp(prefix='grooviq-860-target-')).resolve()
     settled = True
     try:
         yield path
@@ -242,8 +244,7 @@ def profiles(target, label, started):
         text = p.read_text()
         if 'events:' not in text or 'summary:' not in text:
             continue
-        case = [c for c in CASES if c in str(p.relative_to(target)).split('/')[-2] or c in p.name]
-        if len(case) != 1 or case[0] in found:
+        if not re.search(r'(?<![\w])drums_4ch(?![\w])', f'{p.parent.name}/{p.name}') or found:
             raise CaptureError(f'unknown or duplicate profile: {p}')
         if p.stat().st_mtime_ns < started:
             raise CaptureError('stale profile')
@@ -260,16 +261,16 @@ def profiles(target, label, started):
         with binary.open('rb') as f:
             if f.read(4) != b'\x7fELF':
                 raise CaptureError('profile command is not an ELF binary')
-        found[case[0]] = (p, binary, count)
-    if set(found) != set(CASES):
-        raise CaptureError(f'expected five fresh profiles, got {sorted(found)}')
+        found[CASE] = (p, binary, count)
+    if not found:
+        raise CaptureError('expected one fresh drums_4ch profile, got []')
     return found
 
 
 def validate(repo, base, head, output):
     # Validate all external options before any process is invoked.
     if not all(re.fullmatch('[0-9a-f]{40}', s) for s in (base, head)) or (base, head) != (BASE, HEAD):
-        raise CaptureError('only the verified historical first pair is supported')
+        raise CaptureError('only the verified #860 base and synthetic head are supported')
     if platform.system() != 'Linux' or platform.machine() != 'x86_64':
         raise CaptureError('requires provisioned Linux x86_64 measurement host')
     if repo.is_symlink() or repo.resolve() != repo.absolute() or not (repo / '.git').exists():
@@ -286,8 +287,25 @@ def validate(repo, base, head, output):
             raise CaptureError('revision is not a commit')
         for path, blob in PINS.items():
             if git('rev-parse', f'{revision}:{path}') != blob:
-                raise CaptureError(f'historical workload mismatch: {path}')
+                raise CaptureError(f'pinned workload mismatch: {path}')
+    if git('show', '-s', '--format=%P', head).split() != [base, SOURCE_HEAD]:
+        raise CaptureError('unexpected synthetic merge parents')
+    if git('rev-parse', f'{head}^{{tree}}') != git('rev-parse', f'{SOURCE_HEAD}^{{tree}}'):
+        raise CaptureError('synthetic merge and reviewed source trees differ')
     return git
+
+
+def compare_instructions(base_ir, head_ir):
+    observed_base, observed_head = zip(*OBSERVED_IR)
+    observed_delta = [head - base for base, head in OBSERVED_IR]
+    measured = (base_ir, head_ir, head_ir - base_ir)
+    return {
+        label: {'measured': value, 'observed_min': min(samples), 'observed_max': max(samples),
+                'observed_spread': max(samples) - min(samples),
+                'inside_observed_range': min(samples) <= value <= max(samples)}
+        for label, value, samples in zip(('base', 'head', 'delta'), measured,
+                                         (observed_base, observed_head, observed_delta))
+    }
 
 
 def capture(repo, base, head, output):
@@ -298,20 +316,25 @@ def capture(repo, base, head, output):
     env.update(CARGO_BUILD_JOBS='2', CARGO_INCREMENTAL='0')
     tools = {}
     output.mkdir(mode=0o700)
-    report = {'status': 'failed', 'capture_result': 'failed', 'original_ref': original_ref, 'tools': tools, 'environment': {k: os.environ.get(k) for k in ('ImageOS', 'ImageVersion', 'RUNNER_ARCH')},
+    report = {'status': 'failed', 'capture_result': 'failed', 'original_ref': original_ref, 'tools': tools,
+              'environment': {k: os.environ.get(k) for k in ('ImageOS', 'ImageVersion', 'RUNNER_ARCH',
+                                                            'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_SHA')},
+              'source_head': SOURCE_HEAD, 'benchmark_filter': FILTER, 'original_job_ir': OBSERVED_IR,
               'source_blobs': PINS, 'cpu': Path('/proc/cpuinfo').read_text() if Path('/proc/cpuinfo').exists() else 'unavailable',
               'flags': {'CARGO_BUILD_JOBS': '2', 'CARGO_INCREMENTAL': '0'}, 'runs': [],
-              'limits': 'Historical runner image may be unavailable; totals must match before attribution. Selected commits execute build scripts; no sandbox.'}
+              'limits': 'Observed spread describes two prior runs. Review totals and runner provenance before attribution.'}
     unsettled = False
     in_tool_preflight = True
     probe = None
     try:
         for probe, args in {'rustc': ['rustc', '+1.100.0', '-Vv'], 'cargo': ['cargo', '+1.100.0', '-V'],
                             'runner': ['gungraun-runner', '--version'], 'valgrind': ['valgrind', '--version'],
-                            'valgrind_package': ['dpkg-query', '-W', 'valgrind'], 'uname': ['uname', '-a']}.items():
+                            'valgrind_package': ['dpkg-query', '-W', 'valgrind'],
+                            'binutils': ['objdump', '--version'], 'uname': ['uname', '-a']}.items():
             tools[probe] = run(args, repo, env)
         probe = None
-        if '0ef1bc386059596dada8fb65b50425aab2ea637a' not in tools['rustc'] or '0.20.0' not in tools['runner']:
+        if ('0ef1bc386059596dada8fb65b50425aab2ea637a' not in tools['rustc']
+                or tools['runner'].split() != ['gungraun-runner', '0.20.0']):
             raise CaptureError('compiler/runner mismatch')
         in_tool_preflight = False
         # Private fresh target prevents stale profile reuse; never clean a caller cache.
@@ -335,7 +358,7 @@ def capture(repo, base, head, output):
                 executable = Path(executables.pop())
                 regular(executable, target)
                 # Cargo supplies this marker; without it Gungraun defaults to test mode.
-                args = [str(executable), '--bench', '--save-baseline=base' if i == 0 else '--baseline=base']
+                args = [str(executable), '--bench', '--save-baseline=base' if i == 0 else '--baseline=base', FILTER]
                 record['build_command'] = build
                 record['command'] = args
                 started = time.time_ns()
@@ -352,21 +375,27 @@ def capture(repo, base, head, output):
                     if binary not in binaries:
                         binaries[binary] = dest / f'binary-{len(binaries)}'
                         record['artifacts'].append(copy_evidence(binary, binaries[binary], target, output))
-                        for tool in ('nm', 'objdump'):
-                            flags = ['-C', str(binary)] if tool == 'nm' else ['-d', '-C', str(binary)]
-                            with (dest / f'{binaries[binary].name}.{tool}').open('xb') as f:
-                                save_command([tool, *flags], repo, env, f, output)
+                        with (dest / f'{binaries[binary].name}.nm').open('xb') as f:
+                            save_command(['nm', '-C', str(binary)], repo, env, f, output)
+                        with (dest / f'{binaries[binary].name}.objdump.gz').open('xb') as f:
+                            save_command(['/bin/bash', '-o', 'pipefail', '-c',
+                                          'objdump -d -C -- "$1" | gzip -n', 'disassembly', str(binary)],
+                                         repo, env, f, output)
                     for inclusive in ('no', 'yes'):
                         with (dest / f'{case}.inclusive-{inclusive}.txt').open('xb') as f:
                             save_command(['callgrind_annotate', '--show=Ir', '--threshold=100', f'--inclusive={inclusive}', '--tree=both', str(raw)], repo, env, f, output)
                     budget(output)
                 if git('status', '--porcelain', '--untracked-files=all'):
                     raise CaptureError('benchmark modified checkout')
-            report['historical_totals_match'] = all(r['totals'] == dict(zip(CASES, TOTALS[i])) for i, r in enumerate(report['runs']))
+            report['instruction_comparison'] = compare_instructions(*(r['totals'][CASE] for r in report['runs']))
             report['capture_result'] = 'completed_with_regression' if report['runs'][1]['exit'] == 3 else 'completed'
-            report['historical_kit_match'] = ('1:3.22.0-0ubuntu3' in tools['valgrind_package'] and os.environ.get('ImageVersion') == '20261111.127.1')
-            if not report['historical_totals_match'] or not report['historical_kit_match']:
+            report['matched_kit'] = (tools['valgrind'] == 'valgrind-3.26.0'
+                                     and tools['valgrind_package'].split() == ['valgrind', EXPECTED_VALGRIND_PACKAGE]
+                                     and os.environ.get('ImageVersion') == EXPECTED_IMAGE_VERSION)
+            if not report['matched_kit']:
                 report['capture_result'] += '_unmatched_kit'
+            if not all(item['inside_observed_range'] for item in report['instruction_comparison'].values()):
+                report['capture_result'] += '_outside_observed_totals'
     except ProcessSettlementError:
         unsettled = True
         raise

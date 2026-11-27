@@ -1,516 +1,77 @@
-name: perf
-
-# Render timing is informational. Roll timing retries a budget failure once. M3 export timing
-# checks a single batch. The instruction job fails when a count rises by more than 1 % from
-# the merge commit's first parent (the base tip GitHub merged onto). None is a required check.
+# Temporary diagnostic branch for PR #860. This workflow is not for merging.
+name: '#860 Callgrind diagnostic'
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
     inputs:
-      capture_only:
-        description: 'Historical Linux profile capture only (trusted maintainer)'
-        type: boolean
-        default: false
-      capture_base:
-        description: 'Verified historical base, full SHA'
+      reviewed_workflow_sha:
+        description: Full reviewed diagnostic branch commit
+        required: true
         type: string
-        default: '014db45a96789bce99a27b1661d5a5204950ca6c'
-      capture_head:
-        description: 'Verified measured synthetic head, full SHA'
-        type: string
-        default: 'bab875e7063ca5cc3427f4fa54c4f4b698758ac7'
-      rt_workers_probe:
-        description: 'Measure Windows worker idle CPU and wake latency only'
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
-concurrency:
-  group: >-
-    perf-${{ ((inputs.capture_only || inputs.rt_workers_probe) && github.run_id) ||
-    (github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.ref)) ||
-    github.event.pull_request.number ||
-    github.ref }}
-  cancel-in-progress: >-
-    ${{ github.event_name == 'pull_request' ||
-    (github.event_name == 'push' && github.ref == 'refs/heads/merge-train/batch') }}
-
 jobs:
-  optional-inputs:
-    if: ${{ !inputs.capture_only && !inputs.rt_workers_probe }}
-    name: Optional performance inputs
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      run: ${{ steps.select.outputs.result }}
-      roll: ${{ steps.select.outputs.roll }}
-    steps:
-      - uses: actions/checkout@v5
-      - run: rustup toolchain install
-        timeout-minutes: 3
-      - run: make optional-rust-policy-test
-      - uses: actions/github-script@v8
-        id: select
-        with:
-          script: |
-            const { shouldRun } = require('./scripts/optional-rust-checks.cjs');
-            const request = {
-              eventName: context.eventName,
-              pullRequest: context.payload.pull_request,
-              repo: context.repo,
-              rest: github.rest,
-              paginate: github.paginate,
-            };
-            core.setOutput('roll', await shouldRun({ ...request, workflow: 'roll' }));
-            return await shouldRun({ ...request, workflow: 'perf' });
-
-  roll:
-    needs: optional-inputs
+  capture-860:
     if: >-
-      ${{ always() && !cancelled() && needs.optional-inputs.outputs.roll != 'false' &&
-      (github.event_name == 'pull_request' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
-    name: roll timing (ubuntu-latest)
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'YuriiMurha/grooviq' &&
+      github.ref == 'refs/heads/diagnostic/860-drums-callgrind' &&
+      github.run_attempt == '1'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        with:
-          node-version: 24
-          package-manager-cache: false
-      - run: make roll-timing-test
-      - run: npm --prefix app/ui ci --no-audit --no-fund
-      - name: Measure piano-roll operations
-        run: node scripts/roll-timing.cjs "$RUNNER_TEMP/roll-timing"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: roll-timing-ubuntu-latest-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/roll-timing/
-          retention-days: 7
-
-  bench:
-    needs: optional-inputs
-    # A failed selector must retain coverage; only an explicit false skips work.
-    if: ${{ !inputs.capture_only && !inputs.rt_workers_probe && always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
-    name: bench (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    env:
-      CARGO_NET_OFFLINE: 'true'
     defaults:
       run:
         shell: bash
+    env:
+      CAPTURE_BASE: '21046d4dfd721b0ff1e1088c993745741d117872'
+      CAPTURE_HEAD: 'f287f2e643f98ebcf68ed6d3651159c5f084fac2'
     steps:
-      - uses: actions/checkout@v5
-      - name: Key the Rust cache on the root manifest
-        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
-      - run: rustup toolchain install
-        timeout-minutes: 3
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.13'
-        timeout-minutes: 2
-      - uses: Swatinem/rust-cache@v2
-        timeout-minutes: 3
-        with:
-          key: bench
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Dependency fetch controls
+      - name: Check reviewed commit and runner before checkout
         timeout-minutes: 1
-        run: python -m unittest discover -s scripts -p test_perf_fetch.py -v
-      - name: Fetch locked benchmark dependencies (infrastructure)
-        timeout-minutes: 4
-        run: python scripts/perf-fetch.py
-      - name: Machine
-        run: |
-          case "$RUNNER_OS" in
-            macOS) cpu=$(sysctl -n machdep.cpu.brand_string); cores=$(sysctl -n hw.ncpu) ;;
-            Windows) cpu=$(powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name"); cores=$NUMBER_OF_PROCESSORS ;;
-            *) cpu=$(sed -n 's/^model name\s*: //p' /proc/cpuinfo | head -1); cores=$(nproc) ;;
-          esac
-          {
-            echo "## $RUNNER_OS ($RUNNER_ARCH)"
-            echo
-            echo "$cpu, $cores logical cores, $(rustc --version). Shared runner: compare runs on the same runner class only."
-            echo
-          } >> "$GITHUB_STEP_SUMMARY"
-          mkdir -p perf
-      - name: Render speed and block times
-        run: cargo bench --locked --offline -p grooviq-golden --bench render
         env:
-          GROOVIQ_PERF_JSON: ${{ github.workspace }}/perf/render.json
-      - name: DSP kernels
+          REVIEWED_WORKFLOW_SHA: ${{ inputs.reviewed_workflow_sha }}
         run: |
-          cargo bench --locked --offline -p grooviq-dsp --bench kernels | tee perf/kernels.txt
-          {
-            echo "### DSP kernels (divan): one 64-frame block"
-            echo
-            echo '```text'
-            cat perf/kernels.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: perf-${{ matrix.os }}
-          path: perf/
-
-  song-export:
-    needs: optional-inputs
-    if: ${{ !inputs.capture_only && !inputs.rt_workers_probe && always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
-    name: M3 export timing (ubuntu-latest)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v5
-      - name: Key the Rust cache on the root manifest
-        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libasound2-dev
-      - run: rustup toolchain install
-        timeout-minutes: 3
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: song-export
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Check the warmed production export budget
-        shell: bash
-        env:
-          GROOVIQ_SONG_EXPORT_BUDGET: '1'
-        run: make --silent bench-song | tee -a "$GITHUB_STEP_SUMMARY"
-
-  # The same scene must render the same bits on every platform (the export rule).
-  determinism:
-    if: ${{ !inputs.capture_only && !cancelled() && needs.bench.result == 'success' }}
-    name: determinism (macOS vs Windows)
-    needs: bench
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: perf-*
-          path: perf
-      - name: Compare the render hashes
-        run: |
-          python3 - <<'PY'
-          import glob, json, os, sys
-          runs = {}
-          for path in sorted(glob.glob("perf/perf-*/render.json")):
-              runs[path.split("/")[1].removeprefix("perf-")] = {
-                  (r["scene"], r["block"]): r["hash"] for r in json.load(open(path))["results"]
-              }
-          if len(runs) < 2:
-              sys.exit(f"expected results from two runners, got {sorted(runs)}")
-          names = sorted(runs)
-          keys = sorted(set().union(*runs.values()))
-          lines = ["## Render hashes across platforms", "",
-                   "| scene | block | " + " | ".join(names) + " | same |",
-                   "|---|--:|" + "---|" * len(names) + "---|"]
-          bad = 0
-          for key in keys:
-              hashes = [runs[n].get(key, "missing") for n in names]
-              same = len(set(hashes)) == 1 and "missing" not in hashes
-              bad += not same
-              lines.append(f"| {key[0]} | {key[1]} | " + " | ".join(f"`{h}`" for h in hashes)
-                           + f" | {'yes' if same else '**no**'} |")
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
-              f.write("\n".join(lines) + "\n")
-          print("\n".join(lines))
-          sys.exit(1 if bad else 0)
-          PY
-
-  instructions:
-    needs: optional-inputs
-    # A failed selector must retain coverage; only an explicit false skips work.
-    if: ${{ !inputs.capture_only && !inputs.rt_workers_probe && always() && !cancelled() && needs.optional-inputs.outputs.run != 'false' }}
-    name: instructions (ubuntu-latest)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 2
-      - name: Key the Rust cache on the root manifest
-        shell: bash
-        run: echo "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> "$GITHUB_ENV"
-      - name: Valgrind and ALSA headers
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends valgrind libasound2-dev
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: instructions
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Synth workload witnesses
-        run: cargo test -p grooviq-golden --test synth_workload
-      # The rust jobs never build this Linux-only code, so lint it here.
-      - run: cargo clippy -p grooviq-golden --benches -- -D warnings
-      # The runner must match the `gungraun` crate's version in Cargo.lock.
-      - name: gungraun-runner
-        run: |
-          version=$(sed -n '/^name = "gungraun"$/{n;s/^version = "\(.*\)"$/\1/p;}' Cargo.lock)
-          if [ "$(gungraun-runner --version 2>/dev/null | awk '{print $2}')" != "$version" ]; then
-            cargo install gungraun-runner --version "$version" --locked
-          fi
-      - name: Baseline (the merge commit's first parent)
-        if: github.event_name == 'pull_request'
-        env:
-          HEAD_SHA: ${{ github.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          read -r -a parents <<< "$(git show -s --format=%P HEAD)"
-          BASE_SHA=$(git rev-parse --verify HEAD^1 2>/dev/null) || BASE_SHA=unavailable
-          printf '%s\n' '### Instruction comparison revisions' '' \
-            "- BASE \`$BASE_SHA\`" "- HEAD \`$HEAD_SHA\`" "- PR head \`$PR_HEAD_SHA\`" '' |
-            tee -a "$GITHUB_STEP_SUMMARY"
-          reason=
-          if [ "${#parents[@]}" -ne 2 ] || [ "$BASE_SHA" = unavailable ]; then
-            reason="expected a merge commit with two parents available in the checkout."
-          elif ! second_parent=$(git rev-parse --verify HEAD^2 2>/dev/null) || [ "$second_parent" != "$PR_HEAD_SHA" ]; then
-            reason="the merge commit's second parent (${second_parent:-unavailable}) does not match the PR head."
-          fi
-          if [ -n "$reason" ]; then
-            echo "::error::Skipping comparison: $reason"
-            echo "Skipping comparison: $reason" >> "$GITHUB_STEP_SUMMARY"
+          if [[ ! "$REVIEWED_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ||
+                "$REVIEWED_WORKFLOW_SHA" != "$GITHUB_SHA" || "$RUNNER_ARCH" != X64 ]]; then
+            echo 'Dispatch requires the reviewed diagnostic commit and an x64 runner.' >&2
             exit 1
           fi
-          overlay=$(mktemp -d)
-          paths=(tests/golden/benches/instructions.rs tests/golden/benches/support/synth_workload.rs tests/golden/benches/support/sampler_workload.rs tests/golden/benches/support/song_workload.rs)
-          for path in "${paths[@]}"; do
-            mkdir -p "$overlay/$(dirname "$path")"
-            cp "$path" "$overlay/$path"
-          done
-          git checkout --quiet "$BASE_SHA"
-          # Restore BASE's tracked files, remove only overlays absent from BASE, even on failure.
-          cleanup() {
-            for path in "${paths[@]}"; do
-              if git cat-file -e "$BASE_SHA:$path" 2>/dev/null; then
-                git restore --source="$BASE_SHA" -- "$path"
-              else
-                rm -f -- "$path"
-              fi
-            done
-            git checkout --quiet "$HEAD_SHA"
-            rm -rf -- "$overlay"
-          }
-          trap cleanup EXIT
-          for path in "${paths[@]}"; do
-            mkdir -p "$(dirname "$path")"
-            cp "$overlay/$path" "$path"
-          done
-          if [ -f tests/golden/benches/instructions.rs ]; then
-            cargo bench -p grooviq-golden --bench instructions -- --save-baseline=base
-            echo "BASELINE=--baseline=base" >> "$GITHUB_ENV"
-          else
-            echo "The base has no instruction benchmarks yet: no comparison."
-          fi
-          cleanup
-          trap - EXIT
-      # BASELINE is set by the step above when there is one to compare with.
-      - name: Instruction counts
-        run: |
-          # The default `run` shell is `bash -e` without pipefail: keep gungraun's exit code
-          # (3 on a regression), not tee's.
-          set -o pipefail
-          status=0
-          cargo bench -p grooviq-golden --bench instructions -- ${BASELINE:+"$BASELINE"} 2>&1 | tee instructions.txt || status=$?
-          {
-            echo "## Instruction counts (Callgrind)"
-            echo
-            if [ -n "$BASELINE" ]; then
-              echo "Compared with the merge commit's first parent; more than 1 % more instructions fails this job."
-            else
-              echo "No base to compare with."
-            fi
-            echo
-            echo '```text'
-            sed 's/\x1b\[[0-9;]*m//g' instructions.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit $status
-
-  capture:
-    if: github.event_name == 'workflow_dispatch' && inputs.capture_only && !inputs.rt_workers_probe
-    name: historical profiles (Linux only)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
       - uses: actions/checkout@v5
         timeout-minutes: 1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
-          fetch-depth: 0
-      - name: Instruction capture safety tests
+      - name: Capture safety tests
         timeout-minutes: 2
         run: make test-instruction-profiles
-      - name: Validate before provisioning or fetching selected revisions
-        env:
-          CAPTURE_BASE: ${{ inputs.capture_base }}
-          CAPTURE_HEAD: ${{ inputs.capture_head }}
-        run: |
-          python3 - <<'PYTHON'
-          import os
-          if (os.environ['CAPTURE_BASE'], os.environ['CAPTURE_HEAD']) != (
-              '014db45a96789bce99a27b1661d5a5204950ca6c',
-              'bab875e7063ca5cc3427f4fa54c4f4b698758ac7'):
-              raise SystemExit('only the verified first historical pair is supported')
-          PYTHON
-          cp scripts/capture-instruction-profiles.py "$RUNNER_TEMP/capture-instruction-profiles.py"
-      # Keep the eight-minute setup budget, with a visible failure boundary per tool.
-      - name: Refresh historical tool package indexes
-        timeout-minutes: 2
-        run: sudo apt-get update -qq
-      - name: Install historical Valgrind and system tools
-        timeout-minutes: 2
-        run: sudo apt-get install -y -qq --no-install-recommends valgrind libasound2-dev binutils
-      - name: Install historical Rust toolchain
-        timeout-minutes: 1
-        run: rustup toolchain install 1.100.0 --profile minimal
-      - name: Install historical gungraun runner
+      - name: Install Linux capture tools
         timeout-minutes: 3
-        run: cargo +1.100.0 install gungraun-runner --version 0.20.0 --locked
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends valgrind libasound2-dev binutils
+          rustup toolchain install 1.100.0 --profile minimal
+      - name: Install the locked Gungraun runner
+        timeout-minutes: 4
         env:
           CARGO_BUILD_JOBS: '2'
           CARGO_INCREMENTAL: '0'
-      - name: Fetch verified commits and capture once each
+        run: cargo +1.100.0 install gungraun-runner --version 0.20.0 --locked
+      - name: Capture the two pinned revisions
+        id: capture
         timeout-minutes: 17
-        env:
-          CAPTURE_BASE: ${{ inputs.capture_base }}
-          CAPTURE_HEAD: ${{ inputs.capture_head }}
         run: |
-          git fetch --no-tags origin "$CAPTURE_BASE" "$CAPTURE_HEAD"
-          python3 "$RUNNER_TEMP/capture-instruction-profiles.py" --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/instruction-profiles" --base "$CAPTURE_BASE" --head "$CAPTURE_HEAD"
+          cp scripts/capture-instruction-profiles.py "$RUNNER_TEMP/capture-860.py"
+          git fetch --no-tags --depth=2 origin "$CAPTURE_BASE" "$CAPTURE_HEAD"
+          python3 -B "$RUNNER_TEMP/capture-860.py" \
+            --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/instruction-profiles-860" \
+            --base "$CAPTURE_BASE" --head "$CAPTURE_HEAD"
       - uses: actions/upload-artifact@v4
+        if: always() && steps.capture.outcome != 'skipped' && steps.capture.outcome != ''
         timeout-minutes: 1
-        if: always()
         with:
-          name: instruction-profiles-${{ github.run_id }}
-          path: ${{ runner.temp }}/instruction-profiles/
-          retention-days: 7
-          if-no-files-found: warn
-
-  rt-workers-probe:
-    if: github.event_name == 'workflow_dispatch' && inputs.rt_workers_probe
-    name: Worker pool probe (windows-latest)
-    runs-on: windows-latest
-    timeout-minutes: 30
-    env:
-      CARGO_NET_OFFLINE: 'true'
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-      - name: Key the Rust cache on the root manifest
-        run: |
-          "RUST_CACHE_ROOT_MANIFEST=${{ hashFiles('Cargo.toml') }}" >> $env:GITHUB_ENV
-      - run: rustup toolchain install
-        timeout-minutes: 3
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.13'
-        timeout-minutes: 2
-      - uses: Swatinem/rust-cache@v2
-        timeout-minutes: 3
-        with:
-          key: rt-workers-probe
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Fetch locked benchmark dependencies (infrastructure)
-        timeout-minutes: 4
-        run: python scripts/perf-fetch.py
-      - name: Build the worker benchmark once
-        run: |
-          $messages = cargo bench --locked --offline -p grooviq-engine --bench rt_workers --no-run --message-format=json-render-diagnostics
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $executables = @(
-            foreach ($line in $messages) {
-              if (!$line.StartsWith('{')) { continue }
-              $artifact = ConvertFrom-Json -InputObject $line
-              if ($artifact.reason -eq 'compiler-artifact' -and
-                  $artifact.target.name -eq 'rt_workers' -and $artifact.target.kind -contains 'bench' -and
-                  $artifact.executable) {
-                $artifact.executable
-              }
-            }
-          )
-          if ($executables.Count -ne 1 -or !(Test-Path -LiteralPath $executables[0] -PathType Leaf)) {
-            throw 'Cargo did not report exactly one rt_workers benchmark executable.'
-          }
-          "RT_WORKERS_BENCH=$($executables[0])" >> $env:GITHUB_ENV
-      - name: Measure idle process CPU and wake latency
-        timeout-minutes: 2
-        run: |
-          $report = Join-Path $env:RUNNER_TEMP 'rt-workers-probe.txt'
-          function Write-ProbeLine([string] $line) {
-            Add-Content -LiteralPath $report -Value $line
-            Write-Host $line
-          }
-          function Write-RunnerLoad([string] $phase) {
-            $load = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'"
-            Write-ProbeLine "Guest CPU load $($phase): $($load.PercentProcessorTime)% across logical cores (snapshot)"
-          }
-
-          Write-ProbeLine 'Hosted Windows performance observation. Compare runs on the same runner class.'
-          try {
-            $cpu = (Get-CimInstance Win32_Processor).Name | Sort-Object -Unique
-            $os = Get-CimInstance Win32_OperatingSystem
-            $rust = rustc --version
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            Write-ProbeLine "CPU: $($cpu -join ', '), $([Environment]::ProcessorCount) logical cores available"
-            Write-ProbeLine "OS: $($os.Caption) $($os.Version) ($env:RUNNER_ARCH); image: $env:ImageOS $env:ImageVersion"
-            Write-ProbeLine "Rust: $rust; source SHA: $env:GITHUB_SHA"
-
-            foreach ($workers in 2, 4) {
-              $argument = "--idle-cpu=$workers"
-              Write-RunnerLoad "before $argument"
-              $start = [Diagnostics.ProcessStartInfo]::new($env:RT_WORKERS_BENCH, $argument)
-              $start.UseShellExecute = $false
-              $watch = [Diagnostics.Stopwatch]::StartNew()
-              $process = [Diagnostics.Process]::Start($start)
-              try {
-                $process.WaitForExit()
-                $watch.Stop()
-                if ($process.ExitCode -ne 0) {
-                  Write-ProbeLine "$argument exited $($process.ExitCode)"
-                  exit $process.ExitCode
-                }
-                $elapsed = $watch.Elapsed.TotalSeconds
-                $cpuSeconds = $process.TotalProcessorTime.TotalSeconds
-                Write-ProbeLine ('{0} (n=1): {1:F4} s CPU (user + kernel) / {2:F3} s elapsed = {3:F3}% of one core' -f
-                  $argument, $cpuSeconds, $elapsed, (100 * $cpuSeconds / $elapsed))
-              } finally {
-                $process.Dispose()
-              }
-            }
-
-            Write-RunnerLoad 'before --wake-latency'
-            Write-ProbeLine '--wake-latency (microseconds; each percentile uses only worker claims)'
-            & $env:RT_WORKERS_BENCH --wake-latency | ForEach-Object { Write-ProbeLine $_ }
-            if ($LASTEXITCODE -ne 0) {
-              Write-ProbeLine "--wake-latency exited $LASTEXITCODE"
-              exit $LASTEXITCODE
-            }
-            Write-RunnerLoad 'after --wake-latency'
-          } finally {
-            @('## Windows worker pool probe', '', '```text', (Get-Content -Raw -LiteralPath $report), '```') >> $env:GITHUB_STEP_SUMMARY
-          }
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: rt-workers-probe-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/rt-workers-probe.txt
+          name: instruction-profiles-860-${{ github.run_id }}
+          path: ${{ runner.temp }}/instruction-profiles-860/
           retention-days: 7
           if-no-files-found: warn
