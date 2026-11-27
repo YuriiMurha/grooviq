@@ -11,6 +11,7 @@ use crate::command::{Command, Msg, Trash};
 use crate::graph::Graph;
 use crate::live::LiveShared;
 use crate::metronome::Metronome;
+use crate::mixer_meter::{MeterGraph, MixerMeterObserver};
 #[cfg(feature = "profiling")]
 use crate::profiling::Profile;
 use crate::record::{RecordEvent, Recorder};
@@ -107,10 +108,17 @@ pub struct AudioProcessor {
     faults: u32,
     guard_hits: u32,
     meter: [f32; 2],
+    mixer_meter: MixerMeterObserver,
     meter_release: f32,
     completed_recovery_stop: Option<u32>,
     #[cfg(feature = "profiling")]
     pub(crate) profile: Option<Profile>,
+}
+
+impl Drop for AudioProcessor {
+    fn drop(&mut self) {
+        self.mixer_meter.clear(&self.live.mixer_meter);
+    }
 }
 
 impl AudioProcessor {
@@ -147,6 +155,7 @@ impl AudioProcessor {
             faults: 0,
             guard_hits: 0,
             meter: [0.0; 2],
+            mixer_meter: MixerMeterObserver::default(),
             meter_release: meter_release(sample_rate),
             completed_recovery_stop: None,
             #[cfg(feature = "profiling")]
@@ -223,6 +232,7 @@ impl AudioProcessor {
     /// [`crate::Controller::reconfigure`] calls this, with the audio callback stopped, so the
     /// old graph is freed on its thread. The transport keeps playing from the tick it reached.
     pub(crate) fn restart(&mut self, sample_rate: f32, graph: Box<Graph>) {
+        self.mixer_meter.clear(&self.live.mixer_meter);
         self.stream_generation = self.stream_generation.wrapping_add(1);
         self.transport.set_sample_rate(self.clock, sample_rate);
         self.metronome.set_sample_rate(sample_rate);
@@ -309,6 +319,7 @@ impl AudioProcessor {
             changed,
             region,
         ));
+        let mut routed_block = false;
         if !self.faulted {
             let Self {
                 graph,
@@ -323,7 +334,8 @@ impl AudioProcessor {
                 graph.sequence(transport, start);
                 graph.render(block_l, block_r, &events[..count])
             })) {
-                Ok(silenced) => {
+                Ok((silenced, routed)) => {
+                    routed_block = routed;
                     self.successful_blocks = self.successful_blocks.saturating_add(1);
                     self.guard_hits = self.guard_hits.wrapping_add(silenced);
                     self.metronome.render(
@@ -368,6 +380,19 @@ impl AudioProcessor {
         let tone = !self.faulted && self.graph.tone_on();
         self.live
             .publish(self.meter, tone, self.clock, self.faults, self.guard_hits);
+        if let Some(kernel) = self.graph.mixer_kernel().filter(|_| routed_block) {
+            self.mixer_meter.observe(
+                &self.live.mixer_meter,
+                MeterGraph {
+                    revision: self.graph.mix_revision(),
+                    epoch: self.graph.epoch(),
+                },
+                start,
+                |id| kernel.post_fader_peaks(id, BLOCK),
+            );
+        } else {
+            self.mixer_meter.clear(&self.live.mixer_meter);
+        }
         // At most one fixed-size capture per 1024 rendered frames; no work when unleased.
         if self.clock.is_multiple_of(1024) {
             let instance = self.live.synth.selected(self.clock);
@@ -888,6 +913,7 @@ impl AudioProcessor {
     }
 
     fn fault(&mut self) {
+        self.mixer_meter.clear(&self.live.mixer_meter);
         self.successful_blocks = 0;
         self.faulted = true;
         self.faults = self.faults.wrapping_add(1);
@@ -899,6 +925,7 @@ impl AudioProcessor {
     fn replace_graph(&mut self, mut graph: Box<Graph>, at: u64) {
         self.host_last = None;
         let leaving = if graph.generation() == self.generation {
+            self.mixer_meter.clear(&self.live.mixer_meter);
             self.successful_blocks = 0;
             let new_len = graph.pattern_length();
             if !self.faulted {

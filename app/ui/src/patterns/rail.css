@@ -1,6 +1,7 @@
 .pattern-workspace { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .pattern-workspace-content { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
-.pattern-rail { flex: 0 0 188px; min-width: 0; min-height: 0; overflow: auto; padding: 12px; background: var(--panel); border-right: 1px solid var(--line); color: var(--text); font: 12px var(--font); scrollbar-color: var(--line) var(--panel); }
+.pattern-rail, .mx-workspace-rail { flex: 0 0 188px; min-width: 0; min-height: 0; }
+.pattern-rail { overflow: auto; padding: 12px; background: var(--panel); border-right: 1px solid var(--line); color: var(--text); font: 12px var(--font); scrollbar-color: var(--line) var(--panel); }
 .pattern-rail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
 .pattern-rail-head h2 { margin: 0; font-size: 13px; }
 .pattern-rail button, .pattern-rail input { font: inherit; color: var(--text); background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 6px 8px; min-height: 30px; }
@@ -24,7 +25,7 @@
 .pattern-playlist-shell { padding: 16px; border-bottom: 1px solid var(--line); color: var(--muted); background: var(--bg); }
 .pattern-playlist-shell h2 { color: var(--text); font-size: 14px; margin: 0 0 8px; }
 .pattern-playlist-shell p { margin: 0; font-size: 12px; }
-@media (max-width: 960px) { .pattern-rail { flex-basis: 150px; padding: 8px; } .pattern-current { max-width: 72px; } }
+@media (max-width: 960px) { .pattern-rail, .mx-workspace-rail { flex-basis: 150px; } .pattern-rail { padding: 8px; } .pattern-current { max-width: 72px; } }
 @media (max-width: 1120px) {
   .transport:has(.pattern-mode-controls) { gap: 4px; }
   .pattern-mode-controls { flex: 0 0 72px; flex-direction: column; align-items: stretch; gap: 0; width: 72px; }

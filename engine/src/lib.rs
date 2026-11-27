@@ -37,6 +37,8 @@ mod export;
 mod graph;
 mod leftover;
 mod live;
+mod mixer_meter;
+pub use mixer_meter::{MIXER_METER_MAX_TRACKS, MixerMeter, MixerTrackMeter};
 mod synth_meter;
 pub use synth_meter::{SYNTH_SCOPE_LEN, SynthMeter};
 mod metronome;

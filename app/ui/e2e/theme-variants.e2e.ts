@@ -18,7 +18,8 @@ beat.channels.push(...drums.channels.map((channel) => ({ ...channel, id: channel
 beat.pattern.notes.push(...drums.pattern.notes.map((note) => ({ ...note, channel: note.channel + 2 })));
 beat.nextId = beat.channels.length + 1;
 
-test.use({ seed: { project: beat, files: soundsFor(["Kick", "Snare", "Hat"]) }, viewport: { width: 1280, height: 800 } });
+const rackViewport = { width: 1280, height: 800 };
+test.use({ seed: { project: beat, files: soundsFor(["Kick", "Snare", "Hat"]) }, viewport: rackViewport });
 
 type Renderer = "webgl2" | "canvas2d";
 type RenderProbe = Window & { themeTestRenderers?: WeakMap<HTMLCanvasElement, Renderer> };
@@ -244,6 +245,27 @@ for (const { id } of themes) {
         expect(colourDistance(below, clearBelow), "no second ink in the gap below").toBeLessThan(8);
       }
       await app.screenshot({ path: info.outputPath("rack.png"), scale: "css", animations: "disabled" });
+      if (id === "taste" || id === "luminous") {
+        const compactViewport = { width: 900, height: 560 };
+        const gutter = { ...kick, x: kick.x + 16 };
+        const pixelRgb = ([red, green, blue]: number[]) => [red / 255, green / 255, blue / 255] as const;
+        for (const viewport of [rackViewport, compactViewport]) {
+          await app.setViewportSize(viewport);
+          const [emptyA, emptyB, gap] = (await pixelsAt(app, stepGrid,
+            [cellPoint(2, 1), cellPoint(2, 5), gutter])).map(pixelRgb);
+          const firstBeat = contrastRatio(emptyA, gap);
+          const secondBeat = contrastRatio(emptyB, gap);
+          if (viewport === compactViewport) {
+            await app.screenshot({ path: info.outputPath("rack-compact.png"), scale: "css", animations: "disabled" });
+          }
+          // Visual regression floors for the two dark palettes' recessed step faces.
+          expect.soft(Math.min(firstBeat, secondBeat),
+            `${viewport.width}px empty Kick steps versus gutter: ${firstBeat.toFixed(3)} / ${secondBeat.toFixed(3)}`).toBeGreaterThanOrEqual(1.20);
+          expect.soft(contrastRatio(emptyA, emptyB),
+            `${viewport.width}px alternating empty beat shades`).toBeGreaterThanOrEqual(1.08);
+        }
+        await app.setViewportSize(rackViewport);
+      }
 
       const ring = { ...kick, x: kick.x - 16 };
       const ringDistance = async (color: string) => {

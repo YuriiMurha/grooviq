@@ -26,6 +26,8 @@ mod macos_quit;
 mod menu;
 pub mod midi;
 mod midi_cmds;
+mod mixer_cmds;
+mod mixer_meter_cmd;
 mod notes_cmds;
 mod output_mode;
 pub mod panic_hook;
@@ -531,6 +533,9 @@ pub fn run() {
             arrangement_cmds::arrangement_mode,
             arrangement_cmds::arrangement_loop,
             arrangement_cmds::arrangement_seek,
+            mixer_cmds::mixer_view,
+            mixer_cmds::mixer_edit,
+            mixer_cmds::mixer_insert_detail,
             menu::edit_history_enabled,
             commands::audio_outputs,
             commands::audio_select,
@@ -568,6 +573,7 @@ pub fn run() {
             notes_cmds::channel_note,
             notes_cmds::channel_param_live,
             notes_cmds::synth_meter,
+            mixer_meter_cmd::mixer_meter,
             notes_cmds::channel_select,
             notes_cmds::channel_waveform,
             notes_cmds::record_set,

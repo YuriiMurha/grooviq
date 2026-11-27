@@ -30,6 +30,7 @@ pub struct LiveSnapshot {
 #[derive(Debug, Default)]
 pub struct LiveShared {
     recovery: AtomicU64,
+    pub(crate) mixer_meter: crate::mixer_meter::MixerMeterShared,
     pub(crate) synth: crate::synth_meter::SynthMeterShared,
     peak_l: AtomicU32,
     peak_r: AtomicU32,
@@ -61,6 +62,10 @@ impl LiveShared {
         self.synth
             .request(instance, self.frames.load(Relaxed).saturating_add(24000));
         self.synth.read(instance)
+    }
+
+    pub(crate) fn frame_clock(&self) -> u64 {
+        self.frames.load(Relaxed)
     }
 
     /// Reads every field. Never blocks; safe from any thread at any rate.

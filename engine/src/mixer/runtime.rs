@@ -145,6 +145,7 @@ pub struct PreparedMixer {
     detector: Vec<Feed>,
     inserts: Vec<InsertSlot>,
     keys: Vec<(InsertId, u32)>,
+    meter_taps: Vec<(MixerTrackId, u32)>,
     sources: Vec<SourceId>,
     /// Per node: pre L, pre R, post L, post R; then work L/R and detector L/R.
     buffers: Vec<f32>,
@@ -400,12 +401,16 @@ impl PreparedMixer {
         let mut detector = reserved(n_inputs)?;
         let mut inserts = reserved(owner.len())?;
         let mut keys = reserved(owner.len())?;
+        let mut meter_taps = reserved(order.len() - 1)?;
         let mut sources = reserved(source_set.len())?;
         sources.extend(source_set.iter().copied());
 
         for &ti in &order {
             let t = &compiled.tracks[ti];
             let id = t.track.id;
+            if id != MASTER {
+                meter_taps.push((id, tap_at(nodes.len(), Tap::PostFader)?));
+            }
             let level = level_of[&id];
             for pair in t.inputs.windows(2) {
                 if pair[0].id >= pair[1].id {
@@ -534,6 +539,7 @@ impl PreparedMixer {
         }
         assert!(timing.points.len() == 0 && timing.tracks.len() == 0);
         keys.sort_unstable_by_key(|(id, _)| *id);
+        meter_taps.sort_unstable_by_key(|(id, _)| *id);
 
         let samples = order
             .len()
@@ -551,6 +557,7 @@ impl PreparedMixer {
             bytes(&detector)?,
             bytes(&inserts)?,
             bytes(&keys)?,
+            bytes(&meter_taps)?,
             bytes(&sources)?,
             timing.bank.table_bytes()?,
         ]
@@ -588,6 +595,7 @@ impl PreparedMixer {
             detector,
             inserts,
             keys,
+            meter_taps,
             sources,
             buffers,
             delays: timing.bank,
@@ -597,6 +605,25 @@ impl PreparedMixer {
                 table_bytes,
             },
         })
+    }
+
+    /// Call after a successful render of `frames` samples, whose taps the guard has checked.
+    pub(crate) fn post_fader_peaks(&self, track: MixerTrackId, frames: usize) -> Option<[f32; 2]> {
+        let index = self
+            .meter_taps
+            .binary_search_by_key(&track, |&(id, _)| id)
+            .ok()?;
+        let left = self.meter_taps[index].1 as usize;
+        let right = left + self.max_frames;
+        let mut peak = [0.0f32; 2];
+        for (&l, &r) in self.buffers[left..left + frames]
+            .iter()
+            .zip(&self.buffers[right..right + frames])
+        {
+            peak[0] = peak[0].max(l.abs());
+            peak[1] = peak[1].max(r.abs());
+        }
+        Some(peak)
     }
 
     /// The exact source identities each render must supply, in this order.

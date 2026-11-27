@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import { RoutePreview } from "./RoutePreview";
 import { useSendRouting } from "./useSendRouting";
 import { Inspector } from "./Inspector";
+import { meterWindowNodes } from "./mixerMeterDriver";
 import { MixerGestures, navTarget, renderIndices, revealScroll, unsupportedReason, visibleWindow, type MixerProps, type MixerTrack, type ParamTarget, type Window } from "./mixerModel";
 import { TrackStrip, type StripActions } from "./TrackStrip";
 import "./mixer.css";
@@ -12,6 +13,7 @@ const PITCH = 80;
 const OVERSCAN = 2;
 /** The meter's floor: quieter reads as empty. */
 const FLOOR_DB = -60;
+type MountedWindow = Window & { visible: Window };
 
 function barLength(peak: number): number {
   if (!(peak > 0)) return 0;
@@ -70,12 +72,18 @@ export function Mixer(props: MixerProps) {
 
   // ---------------- windowing ----------------
   const scroller = useRef<HTMLDivElement>(null);
-  const [win, setWin] = useState<Window>({ start: 0, end: Math.min(tracks.length, 12) });
+  const [win, setWin] = useState<MountedWindow>(() => {
+    const initial = { start: 0, end: Math.min(tracks.length, 12) };
+    return { ...initial, visible: initial };
+  });
   const measure = useCallback(() => {
     const el = scroller.current;
     if (!el) return;
-    const next = visibleWindow({ count: latest.current.tracks.length, scroll: el.scrollLeft, viewport: el.clientWidth, pitch: PITCH, overscan: OVERSCAN });
-    setWin((w) => (w.start === next.start && w.end === next.end ? w : next));
+    const range = { count: latest.current.tracks.length, scroll: el.scrollLeft, viewport: el.clientWidth, pitch: PITCH };
+    const next = visibleWindow({ ...range, overscan: OVERSCAN });
+    const visible = visibleWindow({ ...range, overscan: 0 });
+    setWin((w) => w.start === next.start && w.end === next.end
+      && w.visible.start === visible.start && w.visible.end === visible.end ? w : { ...next, visible });
   }, []);
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -107,9 +115,9 @@ export function Mixer(props: MixerProps) {
   useEffect(() => {
     const peaks = new Float32Array(2);
     let raf = 0;
-    const draw = () => {
+    const draw = (time: number) => {
       for (const [id, el] of meterEls.current) {
-        const has = meters?.read(id, peaks);
+        const has = meters?.read(id, peaks, time);
         const bars = el.children;
         for (let c = 0; c < 2; c++) {
           const bar = bars[c] as HTMLElement | undefined;
@@ -155,8 +163,13 @@ export function Mixer(props: MixerProps) {
     },
   }));
 
-  const pinned = [focusId, selectedId, preview?.sourceId ?? null].map((id) => (id === null ? -1 : (indexOf.get(id) ?? -1)));
-  const drawn = renderIndices(win, pinned, tracks.length);
+  const routeSource = preview?.sourceId ?? null;
+  const pinned = useMemo(() => [focusId, selectedId, routeSource].map((id) => id === null ? -1 : (indexOf.get(id) ?? -1)),
+    [focusId, selectedId, routeSource, indexOf]);
+  const drawn = useMemo(() => renderIndices(win, pinned, tracks.length), [win, pinned, tracks.length]);
+  useLayoutEffect(() => {
+    meters?.setVisible?.(meterWindowNodes(tracks, win.visible, pinned, drawn));
+  }, [meters, tracks, win, pinned, drawn]);
   const selected = selectedId === null ? null : (byId.get(selectedId) ?? null);
   const tabId = focusId !== null && byId.has(focusId) ? focusId : selected ? selected.id : (tracks[0]?.id ?? master.id);
   return (
@@ -175,6 +188,7 @@ export function Mixer(props: MixerProps) {
                     track={t}
                     actions={actions}
                     nodes={byId}
+                    meters={meters}
                     unsupported={unsupported}
                     index={i + 1}
                     level={gestures.shown({ kind: "level", nodeId: t.id }) ?? t.level}
@@ -195,6 +209,7 @@ export function Mixer(props: MixerProps) {
           masterOutput={master.outputLabel}
           routeTarget={preview?.targetId === master.id ? preview.kind : undefined}
           nodes={byId}
+          meters={meters}
           unsupported={unsupported}
           level={gestures.shown({ kind: "level", nodeId: master.id }) ?? master.level}
           pan={gestures.shown({ kind: "pan", nodeId: master.id }) ?? master.pan}

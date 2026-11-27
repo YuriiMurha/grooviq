@@ -418,6 +418,10 @@ fn preparation_bound(mix: &RoutedMix, aliases: u64) -> Result<(u64, u64), Contro
     let peak = sum([
         topology.memory_bytes,
         routing_tables,
+        product(
+            mix.mixer.tracks.len() as u64,
+            size_of::<(MixerTrackId, u32)>() as u64,
+        )?,
         normalized,
         pulls,
         2 * stereo_block,
