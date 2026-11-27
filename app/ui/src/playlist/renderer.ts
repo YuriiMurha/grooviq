@@ -82,7 +82,6 @@ void main(){
   bool outline=edge<(flags.y>0.5?2.0:1.0);
   float opacity=flags.z>0.5?0.28:1.0;
   vec4 chosen=outline?(flags.y>0.5?selection:ink):vec4(ink.rgb,0.22);
-  // Existing audio/automation records remain visible, without invented editable previews.
   if(flags.w>0.5 && !outline)chosen.a=0.12;
   float alpha=chosen.a*opacity*clamp(edge*dpr,0.0,1.0);
   color=vec4(chosen.rgb*alpha,alpha);
