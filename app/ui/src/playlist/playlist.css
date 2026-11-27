@@ -37,7 +37,7 @@
 .playlist-loop { position: absolute; top: 0; bottom: 0; background: var(--select); opacity: .25; pointer-events: none; border-inline: 1px solid var(--select); }
 .playlist-loop[data-enabled="false"] { opacity: .1; }
 
-.playlist:has(.playlist-audio-inspector) { min-height: min-content; }
+.playlist:has(.playlist-audio-inspector, .automation-dock) { min-height: min-content; }
 
 .playlist-audio-inspector { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin: 0; padding: 6px 8px; border: 0; border-top: 1px solid var(--line); min-inline-size: 0; background: var(--panel); }
 .playlist-audio-controls, .playlist-audio-info { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }

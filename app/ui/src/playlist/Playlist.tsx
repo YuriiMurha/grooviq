@@ -4,6 +4,7 @@ import { errorText } from "../api/project";
 import { dropNotice, missingAudioAssets } from "./audio/media";
 import { createWaveformLoader, packWaveforms, visibleWaveforms } from "./audio/waveforms";
 import { AudioEditGesture, type AudioEditInput } from "./audio/editGesture";
+import { AutomationPointEditor } from "./automation/AutomationPointEditor";
 import { AudioClipInspector } from "./audio/AudioClipInspector";
 import { useAudioDrop } from "./audio/useAudioDrop";
 import { arrangementWaveform, type LoopRegion, type ArrangementStamp } from "../api/arrangement";
@@ -595,8 +596,12 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
     {snapshot && selectedAudio && selectedAsset && <AudioClipInspector key={`${snapshot.generation}:${selectedAudio.id}`}
       clip={selectedAudio} asset={selectedAsset} stamp={snapshot} disabled={busy} bpm={bpm} beats={beats} unit={unit}
       onEdit={(stamp, operation) => { cancel(); void commit(stamp, [operation], false); }} />}
+    {snapshot && selectedClip?.content.type === "automation" &&
+      <AutomationPointEditor key={`${snapshot.generation}:${selectedClip.id}`}
+        clip={{ ...selectedClip, content: selectedClip.content }} stamp={snapshot} disabled={busy}
+        onEdit={(stamp, operation) => { cancel(); void commit(stamp, [operation], false); }} />}
     {message && <p role="alert" className="playlist-error">{message}</p>}
-    {missingAsset !== null ? <p className="playlist-readonly">The audio file for this clip is missing.</p> : selectedClip?.content.type === "automation" && <p className="playlist-readonly">This clip is visible here; its editing controls are not available yet.</p>}
+    {missingAsset !== null && <p className="playlist-readonly">The audio file for this clip is missing.</p>}
     {!state.busy && state.media === null && snapshot?.total === 0 && <p className="playlist-empty">Draw a pattern or drop an audio file onto a track.</p>}
   </section>;
 }

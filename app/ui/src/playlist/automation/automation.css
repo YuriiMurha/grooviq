@@ -1,0 +1,100 @@
+.automation-dock {
+  display: grid;
+  gap: 6px;
+  flex: none;
+  min-width: 0;
+  padding: 6px 8px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.automation-dock-header, .automation-actions, .automation-dock-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.automation-dock-header, .automation-dock-footer { justify-content: space-between; }
+.automation-identity { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 8px; min-width: 0; }
+.automation-identity h3 { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.automation-identity span, .automation-dock-footer { color: var(--muted); font-size: 11px; }
+.automation-actions label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.automation-actions select {
+  min-height: 28px;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  font: inherit;
+}
+.automation-actions :is(select:disabled, button[aria-disabled="true"]) { color: var(--muted); cursor: default; }
+
+.automation-plot {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 10px 12px 10px 0;
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
+
+.automation-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding-inline: 6px;
+  text-align: right;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.automation-graph {
+  position: relative;
+  grid-column: 2;
+  height: clamp(52px, 11vh, 94px);
+  box-shadow: inset 0 1px var(--line), inset 0 -1px var(--line);
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+.automation-graph[aria-disabled="true"] { cursor: default; }
+.automation-graph svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.automation-graph path { stroke: var(--select); stroke-width: 1.5; fill: none; }
+.automation-graph-message { height: 100%; display: flex; gap: 8px; align-items: center; justify-content: center; color: var(--muted); }
+
+.playlist .automation-graph .automation-point {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  cursor: grab;
+}
+.automation-point::before {
+  display: block;
+  width: 8px;
+  height: 8px;
+  margin: auto;
+  border: 1px solid var(--text);
+  border-radius: 50%;
+  background: var(--bg);
+  content: "";
+}
+.automation-point[aria-pressed="true"] { z-index: 1; }
+.automation-point[aria-pressed="true"]::before { background: var(--select); border-color: var(--select); }
+.automation-value { color: var(--text); font-variant-numeric: tabular-nums; }
+
+@media (max-width: 960px) {
+  /* A pending edit must not add a status row and resize the workspace beneath the dock. */
+  .playlist:has(.automation-dock) .playlist-status {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content 16ch;
+  }
+  .playlist:has(.automation-dock) .playlist-status [role="status"] { text-align: end; }
+}
