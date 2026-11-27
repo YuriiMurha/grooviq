@@ -2771,6 +2771,1185 @@
         0,
         62
       ]
+    },
+    {
+      "ok": null
+    },
+    {
+      "ok": null
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [
+          2,
+          3,
+          4,
+          6,
+          8
+        ],
+        "generation": 3,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 2,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "audioAssets": [],
+        "clips": [
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 240,
+              "pointCount": 2,
+              "priority": 5,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 4,
+            "muted": false,
+            "name": "Volume",
+            "startTick": 960,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 240,
+              "pointCount": 2,
+              "priority": 7,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 6,
+            "muted": false,
+            "name": "Volume",
+            "startTick": 960,
+            "track": 3
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 0,
+              "pattern": 0,
+              "type": "pattern"
+            },
+            "id": 8,
+            "muted": false,
+            "name": "Pattern",
+            "startTick": 0,
+            "track": 2
+          }
+        ],
+        "generation": 3,
+        "loopRegion": null,
+        "offset": 0,
+        "pendingRequests": [],
+        "playMode": "pattern",
+        "revision": 2,
+        "songError": null,
+        "total": 3,
+        "tracks": [
+          {
+            "color": 0,
+            "id": 2,
+            "mute": false,
+            "name": "Automation"
+          },
+          {
+            "color": 1,
+            "id": 3,
+            "mute": false,
+            "name": "Layers"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 4,
+        "generation": 3,
+        "points": [
+          {
+            "mode": "hold",
+            "tick": 0,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 1200,
+            "value": 1.5
+          }
+        ],
+        "revision": 2
+      }
+    },
+    {
+      "error": "Stale curve request; reload"
+    },
+    {
+      "error": "Stale curve request; reload"
+    },
+    {
+      "error": "Unknown clip"
+    },
+    {
+      "error": "Not an automation clip"
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Resize must preserve source, target and priority",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Unknown track 98",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Unknown clip 99",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Unknown track 98",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Resize must preserve automation source phase",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Resize must preserve source, target and priority",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Resize must preserve source, target and priority",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Resize must preserve source, target and priority",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Resize must preserve automation source phase",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Clip 4 (Volume): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Clip 4 (Volume): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Clip 4 (Volume): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Clip 9 (Rejected): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Clip 9 (Rejected): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Clip 9 (Rejected): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Clip 9 (Rejected): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Source offset overflow",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Slice must be inside clip",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Invalid automation slice",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Invalid automation slice",
+        "reload": true,
+        "request": null,
+        "revision": 2,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 2,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [
+          9,
+          11
+        ],
+        "generation": 3,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 3,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "audioAssets": [],
+        "clips": [
+          {
+            "content": {
+              "lengthTicks": 240,
+              "offsetTick": 120,
+              "pointCount": 2,
+              "priority": 5,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 4,
+            "muted": false,
+            "name": "Volume",
+            "startTick": 1320,
+            "track": 3
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 0,
+              "pattern": 0,
+              "type": "pattern"
+            },
+            "id": 8,
+            "muted": false,
+            "name": "Pattern",
+            "startTick": 0,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 1080,
+              "offsetTick": 120,
+              "pointCount": 2,
+              "priority": 10,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 9,
+            "muted": false,
+            "name": "Volume",
+            "startTick": 1320,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 840,
+              "offsetTick": 360,
+              "pointCount": 2,
+              "priority": 5,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 11,
+            "muted": true,
+            "name": "Tail",
+            "startTick": 1560,
+            "track": 3
+          }
+        ],
+        "generation": 3,
+        "loopRegion": null,
+        "offset": 0,
+        "pendingRequests": [],
+        "playMode": "pattern",
+        "revision": 3,
+        "songError": null,
+        "total": 4,
+        "tracks": [
+          {
+            "color": 0,
+            "id": 2,
+            "mute": false,
+            "name": "Automation"
+          },
+          {
+            "color": 1,
+            "id": 3,
+            "mute": false,
+            "name": "Layers"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 9,
+        "generation": 3,
+        "points": [
+          {
+            "mode": "hold",
+            "tick": 0,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 1200,
+            "value": 1.5
+          }
+        ],
+        "revision": 3
+      }
+    },
+    {
+      "ok": {
+        "clip": 11,
+        "generation": 3,
+        "points": [
+          {
+            "mode": "hold",
+            "tick": 0,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 1200,
+            "value": 1.5
+          }
+        ],
+        "revision": 3
+      }
+    },
+    {
+      "error": "Unknown clip"
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Automation fragments sharing a priority must use one target and remain disjoint; copy to create a new layer.",
+        "reload": true,
+        "request": null,
+        "revision": 3,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "audioAssets": [],
+        "clips": [
+          {
+            "content": {
+              "lengthTicks": 240,
+              "offsetTick": 120,
+              "pointCount": 2,
+              "priority": 5,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 4,
+            "muted": false,
+            "name": "Volume",
+            "startTick": 1320,
+            "track": 3
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 0,
+              "pattern": 0,
+              "type": "pattern"
+            },
+            "id": 8,
+            "muted": false,
+            "name": "Pattern",
+            "startTick": 0,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 1080,
+              "offsetTick": 120,
+              "pointCount": 2,
+              "priority": 10,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 9,
+            "muted": false,
+            "name": "Volume",
+            "startTick": 1320,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 840,
+              "offsetTick": 360,
+              "pointCount": 2,
+              "priority": 5,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 11,
+            "muted": true,
+            "name": "Tail",
+            "startTick": 1560,
+            "track": 3
+          }
+        ],
+        "generation": 3,
+        "loopRegion": null,
+        "offset": 0,
+        "pendingRequests": [],
+        "playMode": "pattern",
+        "revision": 3,
+        "songError": null,
+        "total": 4,
+        "tracks": [
+          {
+            "color": 0,
+            "id": 2,
+            "mute": false,
+            "name": "Automation"
+          },
+          {
+            "color": 1,
+            "id": 3,
+            "mute": false,
+            "name": "Layers"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 3,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "effect": {
+          "kind": "arrangement"
+        },
+        "generation": 3,
+        "revision": 4,
+        "status": "applied"
+      }
+    },
+    {
+      "ok": {
+        "audioAssets": [],
+        "clips": [
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 240,
+              "pointCount": 2,
+              "priority": 5,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 4,
+            "muted": false,
+            "name": "Volume",
+            "startTick": 960,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 240,
+              "pointCount": 2,
+              "priority": 7,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 6,
+            "muted": false,
+            "name": "Volume",
+            "startTick": 960,
+            "track": 3
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 0,
+              "pattern": 0,
+              "type": "pattern"
+            },
+            "id": 8,
+            "muted": false,
+            "name": "Pattern",
+            "startTick": 0,
+            "track": 2
+          }
+        ],
+        "generation": 3,
+        "loopRegion": null,
+        "offset": 0,
+        "pendingRequests": [],
+        "playMode": "pattern",
+        "revision": 4,
+        "songError": null,
+        "total": 3,
+        "tracks": [
+          {
+            "color": 0,
+            "id": 2,
+            "mute": false,
+            "name": "Automation"
+          },
+          {
+            "color": 1,
+            "id": 3,
+            "mute": false,
+            "name": "Layers"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 6,
+        "generation": 3,
+        "points": [
+          {
+            "mode": "hold",
+            "tick": 0,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 1200,
+            "value": 1.5
+          }
+        ],
+        "revision": 4
+      }
+    },
+    {
+      "ok": {
+        "effect": {
+          "kind": "arrangement"
+        },
+        "generation": 3,
+        "revision": 5,
+        "status": "applied"
+      }
+    },
+    {
+      "ok": {
+        "audioAssets": [],
+        "clips": [
+          {
+            "content": {
+              "lengthTicks": 240,
+              "offsetTick": 120,
+              "pointCount": 2,
+              "priority": 5,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 4,
+            "muted": false,
+            "name": "Volume",
+            "startTick": 1320,
+            "track": 3
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 0,
+              "pattern": 0,
+              "type": "pattern"
+            },
+            "id": 8,
+            "muted": false,
+            "name": "Pattern",
+            "startTick": 0,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 1080,
+              "offsetTick": 120,
+              "pointCount": 2,
+              "priority": 10,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 9,
+            "muted": false,
+            "name": "Volume",
+            "startTick": 1320,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 840,
+              "offsetTick": 360,
+              "pointCount": 2,
+              "priority": 5,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 11,
+            "muted": true,
+            "name": "Tail",
+            "startTick": 1560,
+            "track": 3
+          }
+        ],
+        "generation": 3,
+        "loopRegion": null,
+        "offset": 0,
+        "pendingRequests": [],
+        "playMode": "pattern",
+        "revision": 5,
+        "songError": null,
+        "total": 4,
+        "tracks": [
+          {
+            "color": 0,
+            "id": 2,
+            "mute": false,
+            "name": "Automation"
+          },
+          {
+            "color": 1,
+            "id": 3,
+            "mute": false,
+            "name": "Layers"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [],
+        "generation": 3,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 6,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Clip 12 (Rejected): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 6,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Clip 12 (Rejected): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 6,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Clip 12 (Rejected): invalid track/source reference, bounds or automation value.",
+        "reload": true,
+        "request": null,
+        "revision": 6,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": true,
+        "createdIds": [
+          12
+        ],
+        "generation": 3,
+        "message": null,
+        "reload": false,
+        "request": null,
+        "revision": 7,
+        "status": "applied",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Resize must preserve source, target and priority",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "changed": false,
+        "createdIds": [],
+        "generation": 3,
+        "message": "Resize must preserve source, target and priority",
+        "reload": true,
+        "request": null,
+        "revision": 7,
+        "status": "refused",
+        "warnings": []
+      }
+    },
+    {
+      "ok": null
+    },
+    {
+      "ok": null
+    },
+    {
+      "ok": []
+    },
+    {
+      "ok": {
+        "audioAssets": [],
+        "clips": [
+          {
+            "content": {
+              "lengthTicks": 240,
+              "offsetTick": 120,
+              "pointCount": 2,
+              "priority": 5,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 4,
+            "muted": false,
+            "name": "Volume",
+            "startTick": 1320,
+            "track": 3
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 0,
+              "pattern": 0,
+              "type": "pattern"
+            },
+            "id": 8,
+            "muted": false,
+            "name": "Pattern",
+            "startTick": 0,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 1080,
+              "offsetTick": 120,
+              "pointCount": 2,
+              "priority": 10,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 9,
+            "muted": false,
+            "name": "Volume",
+            "startTick": 1320,
+            "track": 2
+          },
+          {
+            "content": {
+              "lengthTicks": 840,
+              "offsetTick": 360,
+              "pointCount": 2,
+              "priority": 5,
+              "target": {
+                "channel": 1,
+                "type": "channelVolume"
+              },
+              "type": "automation"
+            },
+            "id": 11,
+            "muted": true,
+            "name": "Tail",
+            "startTick": 0,
+            "track": 3
+          },
+          {
+            "content": {
+              "lengthTicks": 960,
+              "offsetTick": 240,
+              "pointCount": 2,
+              "priority": 13,
+              "target": {
+                "channel": 1,
+                "instrument": "synth",
+                "param": "osc1_level",
+                "type": "instrumentParam"
+              },
+              "type": "automation"
+            },
+            "id": 12,
+            "muted": false,
+            "name": "Oscillator 1",
+            "startTick": 960,
+            "track": 2
+          }
+        ],
+        "generation": 5,
+        "loopRegion": null,
+        "offset": 0,
+        "pendingRequests": [],
+        "playMode": "pattern",
+        "revision": 0,
+        "songError": null,
+        "total": 5,
+        "tracks": [
+          {
+            "color": 0,
+            "id": 2,
+            "mute": false,
+            "name": "Automation"
+          },
+          {
+            "color": 1,
+            "id": 3,
+            "mute": false,
+            "name": "Layers"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "ok": {
+        "clip": 4,
+        "generation": 5,
+        "points": [
+          {
+            "mode": "hold",
+            "tick": 0,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 1200,
+            "value": 1.5
+          }
+        ],
+        "revision": 0
+      }
+    },
+    {
+      "ok": {
+        "clip": 9,
+        "generation": 5,
+        "points": [
+          {
+            "mode": "hold",
+            "tick": 0,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 1200,
+            "value": 1.5
+          }
+        ],
+        "revision": 0
+      }
+    },
+    {
+      "ok": {
+        "clip": 11,
+        "generation": 5,
+        "points": [
+          {
+            "mode": "hold",
+            "tick": 0,
+            "value": 0.10000000149011612
+          },
+          {
+            "mode": "linear",
+            "tick": 1200,
+            "value": 1.5
+          }
+        ],
+        "revision": 0
+      }
+    },
+    {
+      "error": "Stale curve request; reload"
     }
   ],
   "files": {
@@ -3641,6 +4820,451 @@
         "start": 0
       },
       "command": "arrangement_waveform"
+    },
+    {
+      "args": {},
+      "command": "project_new"
+    },
+    {
+      "args": {
+        "generation": 3,
+        "preset": "Init"
+      },
+      "command": "channel_add_synth"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"color\":0,\"kind\":\"createTrack\",\"name\":\"Automation\"},{\"color\":1,\"kind\":\"createTrack\",\"name\":\"Layers\"},{\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":99,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"createClipOnCreatedTrack\",\"muted\":false,\"name\":\"Volume\",\"startTick\":960,\"trackOperation\":0},{\"clip\":4,\"kind\":\"copy\",\"startTick\":960,\"track\":3},{\"content\":{\"lengthTicks\":960,\"offsetTick\":0,\"pattern\":0,\"type\":\"pattern\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Pattern\",\"startTick\":0,\"track\":2}]",
+        "generation": 3,
+        "revision": 1
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "limit": 32,
+        "offset": 0
+      },
+      "command": "arrangement_view"
+    },
+    {
+      "args": {
+        "clip": 4,
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 4,
+        "generation": 2,
+        "revision": 2
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 4,
+        "generation": 3,
+        "revision": 1
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 99,
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 8,
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":8,\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":99,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":0}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":99,\"kind\":\"move\",\"startTick\":0,\"track\":98}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":99,\"kind\":\"copy\",\"startTick\":0,\"track\":3}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"kind\":\"move\",\"startTick\":0,\"track\":98}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"content\":{\"lengthTicks\":840,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":5,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":1080}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":5,\"target\":{\"channel\":1,\"type\":\"channelPan\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":960}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":99,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":960}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.5},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":5,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":960}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"content\":{\"lengthTicks\":960,\"offsetTick\":0,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":5,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":0}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"content\":{\"lengthTicks\":0,\"offsetTick\":0,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":5,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":720}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"kind\":\"move\",\"startTick\":0,\"track\":2},{\"clip\":4,\"content\":{\"lengthTicks\":38399761,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":5,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":0}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"content\":{\"lengthTicks\":38400000,\"offsetTick\":0,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":5,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":720}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":99,\"target\":{\"channel\":99,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Rejected\",\"startTick\":960,\"track\":2}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":2.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":99,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Rejected\",\"startTick\":960,\"track\":2}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5},{\"mode\":\"hold\",\"tick\":0,\"value\":0.1}],\"priority\":99,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Rejected\",\"startTick\":960,\"track\":2}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":38400001,\"value\":1.5}],\"priority\":99,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Rejected\",\"startTick\":960,\"track\":2}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"content\":{\"lengthTicks\":960,\"offsetTick\":4294967294,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":99,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Rejected\",\"startTick\":960,\"track\":2},{\"clip\":9,\"kind\":\"slice\",\"tick\":963}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"kind\":\"slice\",\"tick\":960}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"kind\":\"slice\",\"tick\":1920}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"audioFirstFrames\":1,\"clip\":4,\"kind\":\"slice\",\"tick\":1200}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"kind\":\"move\",\"startTick\":960,\"track\":2},{\"clip\":4,\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":5,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":960},{\"clip\":4,\"kind\":\"setClip\",\"muted\":false,\"name\":\"Volume\"}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"kind\":\"move\",\"startTick\":1440,\"track\":3},{\"clip\":4,\"content\":{\"lengthTicks\":1080,\"offsetTick\":120,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":1.5}],\"priority\":5,\"target\":{\"channel\":1,\"type\":\"channelVolume\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":1320},{\"clip\":4,\"kind\":\"copy\",\"startTick\":1320,\"track\":2},{\"audioFirstFrames\":null,\"clip\":4,\"kind\":\"slice\",\"tick\":1560},{\"clip\":11,\"kind\":\"setClip\",\"muted\":true,\"name\":\"Tail\"},{\"clip\":6,\"kind\":\"deleteClip\"}]",
+        "generation": 3,
+        "revision": 2
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "limit": 32,
+        "offset": 0
+      },
+      "command": "arrangement_view"
+    },
+    {
+      "args": {
+        "clip": 9,
+        "generation": 3,
+        "revision": 3
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 11,
+        "generation": 3,
+        "revision": 3
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 6,
+        "generation": 3,
+        "revision": 3
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":4,\"kind\":\"setClip\",\"muted\":true,\"name\":\"Must roll back\"},{\"clip\":11,\"kind\":\"move\",\"startTick\":1559,\"track\":2}]",
+        "generation": 3,
+        "revision": 3
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "limit": 32,
+        "offset": 0
+      },
+      "command": "arrangement_view"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":11,\"kind\":\"move\",\"startTick\":1559,\"track\":3},{\"clip\":11,\"kind\":\"move\",\"startTick\":1560,\"track\":3}]",
+        "generation": 3,
+        "revision": 3
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "generation": 3,
+        "revision": 3,
+        "undo": true
+      },
+      "command": "arrangement_history"
+    },
+    {
+      "args": {
+        "limit": 32,
+        "offset": 0
+      },
+      "command": "arrangement_view"
+    },
+    {
+      "args": {
+        "clip": 6,
+        "generation": 3,
+        "revision": 4
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "generation": 3,
+        "revision": 4,
+        "undo": false
+      },
+      "command": "arrangement_history"
+    },
+    {
+      "args": {
+        "limit": 32,
+        "offset": 0
+      },
+      "command": "arrangement_view"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":11,\"kind\":\"move\",\"startTick\":0,\"track\":3}]",
+        "generation": 3,
+        "revision": 5
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":0.75}],\"priority\":99,\"target\":{\"channel\":1,\"instrument\":\"sampler\",\"param\":\"start\",\"type\":\"instrumentParam\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Rejected\",\"startTick\":960,\"track\":2}]",
+        "generation": 3,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":0.75}],\"priority\":99,\"target\":{\"channel\":1,\"instrument\":\"drum\",\"param\":\"osc1_level\",\"type\":\"instrumentParam\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Rejected\",\"startTick\":960,\"track\":2}]",
+        "generation": 3,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":0.75}],\"priority\":99,\"target\":{\"channel\":1,\"instrument\":\"synth\",\"param\":\"unknown\",\"type\":\"instrumentParam\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Rejected\",\"startTick\":960,\"track\":2}]",
+        "generation": 3,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":0.75}],\"priority\":99,\"target\":{\"channel\":1,\"instrument\":\"synth\",\"param\":\"osc1_level\",\"type\":\"instrumentParam\"},\"type\":\"automation\"},\"kind\":\"createClip\",\"muted\":false,\"name\":\"Oscillator 1\",\"startTick\":960,\"track\":2}]",
+        "generation": 3,
+        "revision": 6
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":12,\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":0.75}],\"priority\":13,\"target\":{\"channel\":1,\"instrument\":\"synth\",\"param\":\"osc2_level\",\"type\":\"instrumentParam\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":960}]",
+        "generation": 3,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "editsJson": "[{\"clip\":12,\"content\":{\"lengthTicks\":960,\"offsetTick\":240,\"points\":[{\"mode\":\"hold\",\"tick\":0,\"value\":0.1},{\"mode\":\"linear\",\"tick\":1200,\"value\":0.75}],\"priority\":13,\"target\":{\"channel\":1,\"instrument\":\"sampler\",\"param\":\"osc1_level\",\"type\":\"instrumentParam\"},\"type\":\"automation\"},\"kind\":\"resize\",\"startTick\":960}]",
+        "generation": 3,
+        "revision": 7
+      },
+      "command": "arrangement_edit"
+    },
+    {
+      "args": {
+        "path": "/qa/automation.grooviq"
+      },
+      "command": "project_save_as"
+    },
+    {
+      "args": {},
+      "command": "project_new"
+    },
+    {
+      "args": {
+        "path": "/qa/automation.grooviq"
+      },
+      "command": "project_open"
+    },
+    {
+      "args": {
+        "limit": 32,
+        "offset": 0
+      },
+      "command": "arrangement_view"
+    },
+    {
+      "args": {
+        "clip": 4,
+        "generation": 5,
+        "revision": 0
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 9,
+        "generation": 5,
+        "revision": 0
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 11,
+        "generation": 5,
+        "revision": 0
+      },
+      "command": "arrangement_curve"
+    },
+    {
+      "args": {
+        "clip": 11,
+        "generation": 3,
+        "revision": 0
+      },
+      "command": "arrangement_curve"
     }
   ]
 }

@@ -1,7 +1,7 @@
 //! Drives the same command core as the Tauri adapters without opening a device.
 use grooviq_app::arrangement_core::{
-    arrangement_edit, arrangement_history, arrangement_view, arrangement_waveform, audio_cancel,
-    audio_cancel_ticket, prepare_media,
+    arrangement_curve, arrangement_edit, arrangement_history, arrangement_view,
+    arrangement_waveform, audio_cancel, audio_cancel_ticket, prepare_media,
 };
 use grooviq_engine::{EngineConfig, engine};
 use grooviq_project::{
@@ -119,7 +119,7 @@ fn steps() -> Vec<Value> {
         }})
     };
     let edit_audio = |revision, ops: Vec<Value>| edit(0, revision, &json!(ops).to_string());
-    vec![
+    let mut steps = vec![
         edit(0, 0, r#"[{"kind":"createTrack","name":"Audio","color":0}]"#),
         import(0, 1, "/qa/generated.wav", 11),
         import(1, 2, "/qa/generated.wav", 12),
@@ -289,6 +289,220 @@ fn steps() -> Vec<Value> {
         history(2, 2, false),
         view(),
         waveform(2, 0, 4),
+    ];
+    steps.extend(automation_steps());
+    steps
+}
+
+fn automation_steps() -> Vec<Value> {
+    let step = |command: &str, args: Value| json!({"command": command, "args": args});
+    let view = || step("arrangement_view", json!({"offset": 0, "limit": 32}));
+    let edit = |revision, ops: Vec<Value>| {
+        step(
+            "arrangement_edit",
+            json!({"generation": 3, "revision": revision, "editsJson": json!(ops).to_string()}),
+        )
+    };
+    let curve = |generation, revision, clip| {
+        step(
+            "arrangement_curve",
+            json!({"generation": generation, "revision": revision, "clip": clip}),
+        )
+    };
+    let history = |revision, undo| {
+        step(
+            "arrangement_history",
+            json!({"generation": 3, "revision": revision, "undo": undo}),
+        )
+    };
+    let content = json!({
+        "type":"automation", "target":{"type":"channelVolume","channel":1}, "priority":99,
+        "offsetTick":240, "lengthTicks":960,
+        "points":[{"tick":0,"value":0.1,"mode":"hold"},{"tick":1200,"value":1.5,"mode":"linear"}]
+    });
+    let resize = |start, offset, length| {
+        let mut content = content.clone();
+        content["priority"] = json!(5);
+        content["offsetTick"] = json!(offset);
+        content["lengthTicks"] = json!(length);
+        json!({"kind":"resize", "clip":4, "startTick":start, "content":content})
+    };
+    let mut retarget = resize(960, 240, 960);
+    retarget["content"]["target"]["type"] = json!("channelPan");
+    let mut reprioritize = resize(960, 240, 960);
+    reprioritize["content"]["priority"] = json!(99);
+    let mut reshape = resize(960, 240, 960);
+    reshape["content"]["points"][0]["value"] = json!(0.5);
+    let create = |content| json!({"kind":"createClip", "track":2, "name":"Rejected", "startTick":960, "muted":false,"content":content});
+    let mut unknown_target = content.clone();
+    unknown_target["target"]["channel"] = json!(99);
+    let mut out_of_range = content.clone();
+    out_of_range["points"][0]["value"] = json!(2.1);
+    let mut unsorted = content.clone();
+    unsorted["points"].as_array_mut().unwrap().reverse();
+    let mut late_point = content.clone();
+    late_point["points"][1]["tick"] = json!(38_400_001);
+    let mut overflowing_offset = content.clone();
+    overflowing_offset["offsetTick"] = json!(u32::MAX - 1);
+    let mut synth_param = content.clone();
+    synth_param["target"] =
+        json!({"type":"instrumentParam","channel":1,"instrument":"synth","param":"osc1_level"});
+    synth_param["points"][1]["value"] = json!(0.75);
+    let mut wrong_instrument = synth_param.clone();
+    wrong_instrument["target"]["instrument"] = json!("sampler");
+    wrong_instrument["target"]["param"] = json!("start");
+    let mut unknown_instrument = synth_param.clone();
+    unknown_instrument["target"]["instrument"] = json!("drum");
+    let mut unknown_param = synth_param.clone();
+    unknown_param["target"]["param"] = json!("unknown");
+    let param_resize = |instrument, param| {
+        let mut content = synth_param.clone();
+        content["target"]["instrument"] = json!(instrument);
+        content["target"]["param"] = json!(param);
+        content["priority"] = json!(13);
+        json!({"kind":"resize", "clip":12, "startTick":960, "content":content})
+    };
+    vec![
+        step("project_new", json!({})),
+        step(
+            "channel_add_synth",
+            json!({"generation":3, "preset":"Init"}),
+        ),
+        edit(
+            1,
+            vec![
+                json!({"kind":"createTrack","name":"Automation","color":0}),
+                json!({"kind":"createTrack","name":"Layers","color":1}),
+                json!({"kind":"createClipOnCreatedTrack","trackOperation":0,"name":"Volume","startTick":960,"muted":false,"content":content}),
+                json!({"kind":"copy","clip":4,"track":3,"startTick":960}),
+                json!({"kind":"createClip","track":2,"name":"Pattern","startTick":0,"muted":false,
+                "content":{"type":"pattern","pattern":0,"offsetTick":0,"lengthTicks":960}}),
+            ],
+        ),
+        view(),
+        curve(3, 2, 4),
+        curve(2, 2, 4),
+        curve(3, 1, 4),
+        curve(3, 2, 99),
+        curve(3, 2, 8),
+        edit(
+            2,
+            vec![json!({"kind":"resize","clip":8,"startTick":0,"content":content})],
+        ),
+        edit(
+            2,
+            vec![json!({"kind":"move","clip":99,"track":98,"startTick":0})],
+        ),
+        edit(
+            2,
+            vec![json!({"kind":"copy","clip":99,"track":3,"startTick":0})],
+        ),
+        edit(
+            2,
+            vec![json!({"kind":"move","clip":4,"track":98,"startTick":0})],
+        ),
+        edit(2, vec![resize(1080, 240, 840)]),
+        edit(2, vec![retarget]),
+        edit(2, vec![reprioritize]),
+        edit(2, vec![reshape]),
+        edit(2, vec![resize(0, 0, 960)]),
+        edit(2, vec![resize(720, 0, 0)]),
+        edit(
+            2,
+            vec![
+                json!({"kind":"move","clip":4,"track":2,"startTick":0}),
+                resize(0, 240, 38_399_761),
+            ],
+        ),
+        edit(2, vec![resize(720, 0, 38_400_000)]),
+        edit(2, vec![create(unknown_target)]),
+        edit(2, vec![create(out_of_range)]),
+        edit(2, vec![create(unsorted)]),
+        edit(2, vec![create(late_point)]),
+        edit(
+            2,
+            vec![
+                create(overflowing_offset),
+                json!({"kind":"slice","clip":9,"tick":963}),
+            ],
+        ),
+        edit(2, vec![json!({"kind":"slice","clip":4,"tick":960})]),
+        edit(2, vec![json!({"kind":"slice","clip":4,"tick":1920})]),
+        edit(
+            2,
+            vec![json!({"kind":"slice","clip":4,"tick":1200,"audioFirstFrames":1})],
+        ),
+        edit(
+            2,
+            vec![
+                json!({"kind":"move","clip":4,"track":2,"startTick":960}),
+                resize(960, 240, 960),
+                json!({"kind":"setClip","clip":4,"name":"Volume","muted":false}),
+            ],
+        ),
+        edit(
+            2,
+            vec![
+                json!({"kind":"move","clip":4,"track":3,"startTick":1440}),
+                resize(1320, 120, 1080),
+                json!({"kind":"copy","clip":4,"track":2,"startTick":1320}),
+                json!({"kind":"slice","clip":4,"tick":1560,"audioFirstFrames":null}),
+                json!({"kind":"setClip","clip":11,"name":"Tail","muted":true}),
+                json!({"kind":"deleteClip","clip":6}),
+            ],
+        ),
+        view(),
+        curve(3, 3, 9),
+        curve(3, 3, 11),
+        curve(3, 3, 6),
+        // Validation runs on the complete candidate. Moving the tail onto its same-priority
+        // sibling on another track rolls back the rename too.
+        edit(
+            3,
+            vec![
+                json!({"kind":"setClip","clip":4,"name":"Must roll back","muted":true}),
+                json!({"kind":"move","clip":11,"track":2,"startTick":1559}),
+            ],
+        ),
+        view(),
+        // Intermediate overlap is fine if the committed result is disjoint.
+        edit(
+            3,
+            vec![
+                json!({"kind":"move","clip":11,"track":3,"startTick":1559}),
+                json!({"kind":"move","clip":11,"track":3,"startTick":1560}),
+            ],
+        ),
+        history(3, true),
+        view(),
+        curve(3, 4, 6),
+        history(4, false),
+        view(),
+        // Validation sorts by timeline position, independent of persisted clip order.
+        edit(
+            5,
+            vec![json!({"kind":"move","clip":11,"track":3,"startTick":0})],
+        ),
+        edit(6, vec![create(wrong_instrument)]),
+        edit(6, vec![create(unknown_instrument)]),
+        edit(6, vec![create(unknown_param)]),
+        edit(
+            6,
+            vec![
+                json!({"kind":"createClip", "track":2, "name":"Oscillator 1", "startTick":960,
+            "muted":false,"content":synth_param}),
+            ],
+        ),
+        edit(7, vec![param_resize("synth", "osc2_level")]),
+        edit(7, vec![param_resize("sampler", "osc1_level")]),
+        step("project_save_as", json!({"path":"/qa/automation.grooviq"})),
+        step("project_new", json!({})),
+        step("project_open", json!({"path":"/qa/automation.grooviq"})),
+        view(),
+        curve(5, 0, 4),
+        curve(5, 0, 9),
+        curve(5, 0, 11),
+        curve(3, 0, 11),
     ]
 }
 
@@ -336,6 +550,9 @@ fn arrangement_media_matches_shared_replay() {
             "arrangement_view" => {
                 arrangement_view(&session, n("offset") as usize, n("limit") as usize)
             }
+            "arrangement_curve" => {
+                arrangement_curve(&session, n("generation"), n("revision"), n("clip") as u32)
+            }
             "audio_import" | "audio_relink" => {
                 let target = if step["command"] == "audio_import" {
                     MediaTarget::Import {
@@ -376,8 +593,15 @@ fn arrangement_media_matches_shared_replay() {
                 n("bins") as usize,
             ))
             .map(|bytes| json!(bytes)),
+            // The arrangement reads capture the channel that the curve targets.
+            "channel_add_synth" => session
+                .lock()
+                .unwrap()
+                .add_synth_channel_in(n("generation"), string("preset"), Instant::now())
+                .map(|_| Value::Null)
+                .map_err(|error| error.to_string()),
             // Project command replies include host-dependent paths. Their effects are
-            // captured by the following view and waveform reads.
+            // captured by the following arrangement reads.
             "project_save_as" => {
                 session
                     .lock()
