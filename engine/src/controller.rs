@@ -4,7 +4,7 @@
 
 use crate::channel::ChannelNode;
 use crate::command::{Command, Msg, Trash, rebuilt_queue};
-use crate::graph::{Graph, ramp_len};
+use crate::graph::{Graph, MAX_LEAVING, ramp_len};
 use crate::live::{LiveShared, LiveSnapshot};
 use crate::mixer::{MASTER, MixerTrackId, memory::MixerMemory};
 use crate::mixer_meter::{MIXER_METER_MAX_TRACKS, MeterGraph, MixerMeter};
@@ -57,8 +57,8 @@ pub enum ControlError {
     /// The channel's instrument has no such thing (a sample or a sampler parameter for a synth
     /// channel).
     WrongInstrument,
-    /// A removed channel is still fading out through a mixer track this change would delete
-    /// (or through the routed mix it would leave); retry once the fade is collected.
+    /// A removal needs more fade room, or a mix change would displace a fading route.
+    /// Retry once the fades are collected.
     Busy,
 }
 
@@ -426,7 +426,8 @@ impl Controller {
         Ok(())
     }
 
-    /// Removes a channel, cutting its notes. The processor hands it back to be freed here.
+    /// Removes a channel with a 5 ms fade, or returns `Busy` if there is no fade room.
+    /// The processor hands the channel back to be freed here.
     pub fn remove_channel(&mut self, id: ChannelId) -> Result<(), ControlError> {
         let index = self.channel_index(id)?;
         if self
@@ -440,6 +441,7 @@ impl Controller {
         {
             return Err(ControlError::Rejected);
         }
+        self.check_fade_room(1)?;
         self.push(Msg::RemoveChannel(id))?;
         self.state.channels.remove(index);
         self.record_fade(id);
@@ -509,6 +511,7 @@ impl Controller {
             return Err(ControlError::Rejected);
         }
         self.state.mix.covers(&channels, &song)?;
+        self.check_fade_room(usize::from(update.remove_channel.is_some()))?;
         self.push(Msg::Timeline(
             Box::new(crate::TimelineUpdate {
                 pattern: Box::new(pattern.clone()),
@@ -592,7 +595,6 @@ impl Controller {
         }
         let mut channels = self.state.channels.clone();
         let mut instances = self.instances.clone();
-        let mut fades = self.fades.clone();
         for (i, id) in remove.iter().enumerate() {
             if remove[..i].contains(id) {
                 return Err(ControlError::Rejected);
@@ -602,16 +604,7 @@ impl Controller {
                 .position(|c| c.id == *id)
                 .ok_or(ControlError::UnknownChannel)?;
             channels.remove(at);
-            let instance = instances.remove(id).unwrap_or(0);
-            let track = self
-                .state
-                .mix
-                .destination(SourceId::Channel(u64::from(id.0)));
-            fades.push(Fade {
-                instance,
-                track,
-                epoch: self.graph_epoch,
-            });
+            instances.remove(id);
         }
         let mut next = self.next_instance;
         let mut added = Vec::with_capacity(add.len());
@@ -656,6 +649,18 @@ impl Controller {
             return Err(ControlError::Rejected);
         }
         mix.covers(&channels, &song)?;
+        self.check_fade_room(remove.len())?;
+        let mut fades = self.fades.clone();
+        fades.extend(remove.iter().map(|id| {
+            Fade {
+                instance: self.instances.get(id).copied().unwrap_or(0),
+                track: self
+                    .state
+                    .mix
+                    .destination(SourceId::Channel(u64::from(id.0))),
+                epoch: self.graph_epoch,
+            }
+        }));
         let aliases = aliases(&mix, &instances, &fades)?;
         let rate = self.sample_rate;
         let ramp = ramp_len(rate);
@@ -676,10 +681,8 @@ impl Controller {
         let (adds, prepared) = built;
         let changes = live::plan(&self.state.mix, &mix, &self.mixer_memory)?;
         let revision = self.mix_revision + 1;
-        let removed = Vec::with_capacity(remove.len());
         let transaction = crate::command::SourceTransaction {
             removes: remove,
-            removed,
             adds,
             timeline: timeline.as_ref().map(|_| {
                 (
@@ -724,6 +727,18 @@ impl Controller {
         self.state.mix = mix;
         self.mix_revision = revision;
         Ok(revision)
+    }
+
+    /// Charge every accepted removal until its node or graph comes back, including
+    /// removals still in the command queue and silent nodes waiting for trash space.
+    fn check_fade_room(&mut self, removals: usize) -> Result<(), ControlError> {
+        if removals > 0 {
+            self.free_trash();
+            if self.fades.len() + removals > MAX_LEAVING {
+                return Err(ControlError::Busy);
+            }
+        }
+        Ok(())
     }
 
     /// Records the fade route of channel `id`'s current instance, which is being removed.
@@ -1288,16 +1303,13 @@ impl Controller {
 
     /// Frees what the processor handed back (graphs, channels, samples, patterns). The output layer also calls it while it runs
     /// the processor itself, so a restart waiting for room in the trash queue can go through.
-    /// Fade routes retire with their instance, or with every graph built up to theirs.
+    /// Fade routes retire with their departed node, or with every graph built up to theirs.
     pub(crate) fn free_trash(&mut self) {
         while let Ok(item) = self.trash.pop() {
-            let mut retire = |instance: u64| self.fades.retain(|f| f.instance != instance);
             match &item {
-                Trash::Channel(node) | Trash::Timeline(_, Some(node)) => retire(node.instance),
-                Trash::Sources(t) => {
-                    for node in &t.removed {
-                        retire(node.instance);
-                    }
+                // A refused add can share its instance with a node in a replacement graph.
+                Trash::Channel(node) if node.leaving() => {
+                    self.fades.retain(|f| f.instance != node.instance);
                 }
                 Trash::Graph(graph) => {
                     let epoch = graph.epoch();
@@ -1391,6 +1403,125 @@ mod tests {
         engine(EngineConfig {
             sample_rate: 48_000.0,
         })
+    }
+
+    #[test]
+    fn a_compound_removal_needing_two_slots_cannot_take_the_last_one() {
+        let setup = |id| ChannelSetup::synth(ChannelId(id), vec![], Default::default());
+        let (mut c, mut p) = crate::engine_with(
+            EngineConfig {
+                sample_rate: 48_000.0,
+            },
+            EngineState {
+                channels: (0..MAX_CHANNELS as u32).map(setup).collect(),
+                ..EngineState::default()
+            },
+        );
+        let first = MAX_CHANNELS as u32;
+        let second = first + 1;
+        let revision = c
+            .set_sources_and_mix(SourceEdit {
+                remove: (1..first).map(ChannelId).collect(),
+                add: vec![setup(first), setup(second)],
+                timeline: None,
+                mix: Default::default(),
+            })
+            .unwrap();
+        let mut block = [0.0; crate::BLOCK * 2];
+        p.process(&mut block, 2);
+        assert!(c.commands_drained());
+
+        let timeline = crate::TimelineUpdate {
+            pattern: Box::new(PatternData {
+                length: 480,
+                notes: vec![],
+            }),
+            song: Box::default(),
+            bpm: 110.0,
+            mode: crate::PlaybackMode::Song,
+            region: None,
+            remove_channel: None,
+        };
+        let before = c.state().clone();
+        let instances = c.instances.clone();
+        let next_instance = c.next_instance;
+        assert_eq!(
+            c.set_sources_and_mix(SourceEdit {
+                remove: vec![ChannelId(first), ChannelId(second)],
+                add: vec![setup(first)],
+                timeline: Some(timeline.clone()),
+                mix: Default::default(),
+            }),
+            Err(ControlError::Busy)
+        );
+        assert!(c.commands_drained(), "refusal consumes no command slot");
+        assert_eq!(c.mix_revision(), revision);
+        assert_eq!(c.state(), &before);
+        assert_eq!(c.instances, instances);
+        assert_eq!(c.next_instance, next_instance);
+
+        assert_eq!(
+            c.set_sources_and_mix(SourceEdit {
+                remove: vec![ChannelId(first)],
+                add: vec![setup(first)],
+                timeline: Some(timeline),
+                mix: Default::default(),
+            }),
+            Ok(revision + 1)
+        );
+        assert_eq!(c.state().pattern.length, 480);
+        assert_eq!(
+            c.channel_instance(ChannelId(first)),
+            Some(next_instance + 1)
+        );
+        assert_eq!(
+            c.channel_instance(ChannelId(second)),
+            instances.get(&ChannelId(second)).copied()
+        );
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn a_refused_add_does_not_retire_the_replacement_graphs_fade() {
+        let (mut c, mut p) = controller();
+        let mut block = [0.0; crate::BLOCK * 2];
+        c.send(Command::InjectPanic).unwrap();
+        p.process(&mut block, 2);
+
+        let id = ChannelId(1);
+        c.add_channel(ChannelSetup::synth(id, vec![], Default::default()))
+            .unwrap();
+        let instance = c.channel_instance(id).unwrap();
+        assert!(
+            c.check_health()
+                .contains(&HealthEvent::Restarted { faults: 1 })
+        );
+        c.send(Command::ChannelNote {
+            channel: id,
+            key: 60,
+            velocity: 1.0,
+            on: true,
+            id: NoteId(1),
+        })
+        .unwrap();
+        c.remove_channel(id).unwrap();
+
+        // The old graph refuses the add. The new graph already contains the same instance
+        // from the mirror, sounds the queued note, and starts its fade.
+        p.process(&mut block, 2);
+        assert!(block.iter().any(|x| x.abs() > 1e-6));
+        assert!(matches!(c.trash.peek(), Ok(Trash::Channel(n)) if n.instance == instance));
+        c.free_trash();
+        assert_eq!(
+            c.fades.iter().map(|f| f.instance).collect::<Vec<_>>(),
+            [instance],
+            "a refused add is not a completed fade"
+        );
+        for _ in 0..3 {
+            p.process(&mut block, 2);
+        }
+        c.free_trash();
+        assert!(c.fades.is_empty());
     }
 
     /// Publishes what the processor would after `faults` panics and `guard_hits` NaN blocks

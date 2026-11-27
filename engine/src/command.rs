@@ -317,6 +317,7 @@ pub(crate) enum Msg {
 impl Msg {
     /// Whether applying the message may hand something back through the trash queue: such a
     /// message waits while the processor holds a parked item (it has room for only one).
+    /// A plain removal keeps that same ordering fence as a timeline or source removal.
     pub(crate) fn makes_trash(&self) -> bool {
         !matches!(
             self,
@@ -469,7 +470,7 @@ pub(crate) enum Trash {
     Sample(Arc<SampleBuf>),
     Pattern(Box<PatternData>),
     Song(Box<crate::SongData>),
-    Timeline(Box<TimelineUpdate>, Option<Box<ChannelNode>>),
+    Timeline(Box<TimelineUpdate>),
     Mix(Box<crate::mixer::live::MixInstall>),
     FaultedMix(Box<crate::mixer::live::LiveMix>),
     Sources(Box<SourceTransaction>),
@@ -479,8 +480,6 @@ pub(crate) enum Trash {
 /// the control thread with room reserved for everything the callback may hand back.
 pub(crate) struct SourceTransaction {
     pub(crate) removes: Vec<ChannelId>,
-    /// Removed nodes with no fading room; capacity `removes.len()`.
-    pub(crate) removed: Vec<Box<ChannelNode>>,
     /// New nodes in order; a slot is empty once the graph took its node.
     pub(crate) adds: Vec<Option<Box<ChannelNode>>>,
     /// The timeline and its admission-time mode/loop transition flags.

@@ -499,10 +499,8 @@ impl AudioProcessor {
                 }
                 // A removed channel fades out first: `collect_departed` hands it back after.
                 Msg::RemoveChannel(id) => {
-                    if !self.faulted
-                        && let Some(node) = self.graph.remove_channel(id)
-                    {
-                        self.discard(Trash::Channel(node));
+                    if !self.faulted {
+                        self.graph.remove_channel(id);
                     }
                 }
                 Msg::SetSample { channel, sample } => {
@@ -534,12 +532,19 @@ impl AudioProcessor {
                     }
                 }
                 Msg::Timeline(mut update, mode_changed, loop_changed) => {
-                    let mut removed = None;
-                    if !self.faulted {
+                    // Even a faulted graph must replay accepted transport chronology when
+                    // detached. A healthy graph first checks room before swapping the timeline.
+                    let apply = !self.faulted
+                        && self
+                            .graph
+                            .has_fade_room(usize::from(update.remove_channel.is_some()));
+                    if apply {
                         update = self.swap_timeline(start, update);
                         if let Some(id) = update.remove_channel {
-                            removed = self.graph.remove_channel(id);
+                            self.graph.remove_channel(id);
                         }
+                    }
+                    if apply || (self.faulted && detached) {
                         self.timeline_transport(
                             start,
                             update.bpm,
@@ -549,23 +554,11 @@ impl AudioProcessor {
                             loop_changed,
                         );
                     }
-                    // Even a faulted graph must retain accepted transport chronology.
-                    // DSP payload mutations stay guarded, but its stop/disarm precedes
-                    // any subsequent seek and the exhaustion completion tag.
-                    else if detached {
-                        self.timeline_transport(
-                            start,
-                            update.bpm,
-                            update.mode,
-                            update.region,
-                            mode_changed,
-                            loop_changed,
-                        );
-                    }
-                    self.discard(Trash::Timeline(update, removed));
+                    self.discard(Trash::Timeline(update));
                 }
                 Msg::Sources(mut t) => {
-                    if !self.faulted && self.graph.sources_admissible(&t) {
+                    let fade_room = self.faulted || self.graph.has_fade_room(t.removes.len());
+                    if !self.faulted && fade_room && self.graph.sources_admissible(&t) {
                         // One boundary: sources, timeline, then the mix that names them.
                         self.graph.apply_sources(&mut t);
                         if let Some((update, mode_changed, loop_changed)) = t.timeline.take() {
@@ -583,6 +576,7 @@ impl AudioProcessor {
                         self.graph.apply_transaction_mix(&mut t);
                         t.applied = true;
                     } else if detached
+                        && fade_room
                         && let Some((update, mode_changed, loop_changed)) = &t.timeline
                     {
                         // As for a timeline: a faulted graph keeps accepted transport order.
@@ -1084,15 +1078,15 @@ mod tests {
         p.process(&mut [0.0; BLOCK * 2], 2);
         assert_eq!(p.graph.pattern().length, 20);
         assert_eq!(p.graph.song().end_tick, 20);
-        assert!(matches!(p.unsent, Some(Trash::Timeline(_, _))));
+        assert!(matches!(p.unsent, Some(Trash::Timeline(_))));
         assert_eq!(commands.slots(), QUEUE_CAPACITY - 1);
-        assert!(matches!(trash.pop(), Ok(Trash::Timeline(_, _))));
+        assert!(matches!(trash.pop(), Ok(Trash::Timeline(_))));
         p.process(&mut [0.0; BLOCK * 2], 2);
         assert_eq!(p.graph.pattern().length, 30);
         assert_eq!(p.graph.song().end_tick, 30);
-        assert!(matches!(trash.pop(), Ok(Trash::Timeline(_, _))));
+        assert!(matches!(trash.pop(), Ok(Trash::Timeline(_))));
         p.process(&mut [0.0; BLOCK * 2], 2);
-        assert!(matches!(trash.pop(), Ok(Trash::Timeline(_, _))));
+        assert!(matches!(trash.pop(), Ok(Trash::Timeline(_))));
     }
 
     fn sample() -> Arc<SampleBuf> {
@@ -1405,7 +1399,6 @@ mod tests {
             unreachable!()
         };
         Box::new(crate::command::SourceTransaction {
-            removed: Vec::with_capacity(removes.len()),
             removes,
             adds: adds.into_iter().map(|id| Some(synth_node(id))).collect(),
             timeline: Some((
@@ -1428,9 +1421,9 @@ mod tests {
         })
     }
 
-    fn retired_sources(trash: &mut Consumer<Trash>) -> (bool, usize, usize) {
+    fn retired_sources(trash: &mut Consumer<Trash>) -> (bool, usize) {
         match trash.pop() {
-            Ok(Trash::Sources(t)) => (t.applied, t.adds.iter().flatten().count(), t.removed.len()),
+            Ok(Trash::Sources(t)) => (t.applied, t.adds.iter().flatten().count()),
             _ => panic!("a source transaction always retires its envelope"),
         }
     }
@@ -1463,7 +1456,7 @@ mod tests {
             p.process(&mut buf, 2);
             p.faulted = false;
             assert_eq!(state(&p), before);
-            let (applied, held, _) = retired_sources(&mut trash);
+            let (applied, held) = retired_sources(&mut trash);
             assert!(!applied);
             assert_eq!(held, adds, "refused nodes come back");
         }
@@ -1479,25 +1472,82 @@ mod tests {
             vec![ChannelId(2), ChannelId(1), ChannelId(3)]
         );
         assert_eq!((p.graph.pattern_length(), p.graph.mix_revision()), (480, 1));
-        assert_eq!(retired_sources(&mut trash), (true, 0, 0));
+        assert_eq!(retired_sources(&mut trash), (true, 0));
     }
 
     #[test]
-    fn a_removal_with_no_fading_room_returns_in_the_envelope() {
-        let (mut p, mut commands, mut trash) = processor();
-        let mut buf = [0.0; BLOCK * 2];
-        for id in 0..crate::state::MAX_CHANNELS as u32 {
-            assert!(p.graph.add_channel(synth_node(id)).is_none());
-            assert!(p.graph.remove_channel(ChannelId(id)).is_none());
+    fn a_short_or_full_fade_budget_refuses_the_whole_callback_edit() {
+        for (room, detached) in [(1, false), (0, false), (0, true)] {
+            let (mut p, mut commands, mut trash) = processor();
+            let mut buf = [0.0; BLOCK * 2];
+            for id in 0..(crate::graph::MAX_LEAVING - room) as u32 {
+                assert!(p.graph.add_channel(synth_node(id)).is_none());
+                p.graph.remove_channel(ChannelId(id));
+            }
+            let ids = [ChannelId(1000), ChannelId(1001)];
+            for id in ids {
+                assert!(p.graph.add_channel(synth_node(id.0)).is_none());
+            }
+            let before = (
+                p.graph.pattern_length(),
+                p.graph.mix_revision(),
+                p.transport.bpm(),
+                p.graph.playback_mode,
+            );
+            let mut transaction = sources(0, 0, ids.to_vec(), vec![1000, 1002]);
+            let (update, mode_changed, _) = transaction.timeline.as_mut().unwrap();
+            update.mode = crate::PlaybackMode::Song;
+            *mode_changed = true;
+            assert!(commands.push(Msg::Sources(transaction)).is_ok());
+            if room == 0 {
+                let t = sources(0, 0, vec![ids[0]], vec![]);
+                let (mut timeline, _, _) = t.timeline.unwrap();
+                timeline.remove_channel = Some(ids[0]);
+                timeline.mode = crate::PlaybackMode::Song;
+                assert!(commands.push(Msg::RemoveChannel(ids[1])).is_ok());
+                assert!(commands.push(Msg::Timeline(timeline, true, false)).is_ok());
+            }
+            if detached {
+                for _ in 0..3 {
+                    assert!(p.recovery_prefix_step());
+                }
+            } else {
+                rtsan_standalone::realtime_enter();
+                p.process(&mut buf, 2);
+                rtsan_standalone::realtime_exit();
+            }
+            assert_eq!(commands.slots(), QUEUE_CAPACITY);
+            assert_eq!(p.graph.channel_ids(), ids);
+            assert_eq!(
+                (
+                    p.graph.pattern_length(),
+                    p.graph.mix_revision(),
+                    p.transport.bpm(),
+                    p.graph.playback_mode,
+                ),
+                before
+            );
+            let Ok(Trash::Sources(t)) = trash.pop() else {
+                panic!("a refused transaction hands back its envelope");
+            };
+            assert!(!t.applied);
+            assert_eq!(
+                t.adds.iter().flatten().map(|n| n.id()).collect::<Vec<_>>(),
+                [ChannelId(1000), ChannelId(1002)]
+            );
+            assert_eq!(t.timeline.unwrap().0.pattern.length, 480);
+            assert!(!t.mix.installed && t.mix.live.is_some());
+            if room == 0 {
+                assert!(matches!(p.unsent, Some(Trash::Timeline(_))));
+                p.retry_trash();
+                let Ok(Trash::Timeline(update)) = trash.pop() else {
+                    panic!("a refused timeline hands back its envelope");
+                };
+                assert_eq!(update.pattern.length, 480);
+                assert_eq!(update.remove_channel, Some(ids[0]));
+            }
+            assert!(trash.pop().is_err());
         }
-        assert!(p.graph.add_channel(synth_node(1000)).is_none());
-        assert!(
-            commands
-                .push(Msg::Sources(sources(0, 0, vec![ChannelId(1000)], vec![])))
-                .is_ok()
-        );
-        p.process(&mut buf, 2);
-        assert_eq!(retired_sources(&mut trash), (true, 0, 1));
     }
 
     #[test]
