@@ -5,6 +5,8 @@ import { dropNotice, missingAudioAssets } from "./audio/media";
 import { createWaveformLoader, packWaveforms, visibleWaveforms } from "./audio/waveforms";
 import { AudioEditGesture, type AudioEditInput } from "./audio/editGesture";
 import { AutomationPointEditor } from "./automation/AutomationPointEditor";
+import { AutomationEditGesture, type AutomationEditInput } from "./automation/editGesture";
+import { useAutomationCurve } from "./automation/useAutomationCurve";
 import { AudioClipInspector } from "./audio/AudioClipInspector";
 import { useAudioDrop } from "./audio/useAudioDrop";
 import { arrangementWaveform, type LoopRegion, type ArrangementStamp } from "../api/arrangement";
@@ -20,12 +22,12 @@ import { createPlaylistRenderer, readPlaylistPalette, type PlaylistRenderer, typ
 import type { PlaylistModel } from "./usePlaylist";
 import { extent, hitClip, projectClips, viewport, type RenderClip } from "./viewport";
 import { ClipGroupGesture, crossedThreshold, marqueeRect, marqueeSelection, toggleSelection, togglesSelection, type ClipGroupInput, type GroupPreview } from "./groupGesture";
-import { buildClipAction, selectedEditableClips, selectionIsMuted, type ClipAction } from "./clipActions";
+import { buildClipAction, selectedClips, selectionIsMuted, type ClipAction } from "./clipActions";
 import { keyboardLoop, keyboardSeek, seekTarget, LoopGesture, rulerTick } from "./ruler";
 import "./playlist.css";
 
 type Props = Readonly<{ rulerPosition: { readonly current: number | null }; model: PlaylistModel; patterns: PatternsView | null; bpm: number; beats: number; unit: number; notifyAudioDrop: (message: string) => void }>;
-type Active = { gesture: PatternGesture | AudioEditGesture | ClipGroupGesture; start: Point; moved: boolean; clickId: number | null; pointerId: number; stamp: ArrangementStamp; kind: GestureInput["kind"] };
+type Active = { gesture: PatternGesture | AudioEditGesture | AutomationEditGesture | ClipGroupGesture; start: Point; moved: boolean; clickId: number | null; pointerId: number; stamp: ArrangementStamp; kind: GestureInput["kind"] };
 const DEFAULT_VIEW: PlaylistView = { width: 1, height: 1, scrollTick: 0, scrollTrack: 0, tickWidth: 0.05, rowHeight: 64 };
 
 export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, notifyAudioDrop }: Props) {
@@ -43,7 +45,7 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
   const selectedIds = useMemo(() => selectedState && selectedState.generation === snapshot?.generation
     ? selectedState.ids.filter(id => liveIds.has(id)) : [], [selectedState, snapshot, liveIds]);
   const selection = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const actionClips = useMemo(() => selectedEditableClips(snapshot?.clips ?? [], selection), [snapshot, selection]);
+  const actionClips = useMemo(() => selectedClips(snapshot?.clips ?? [], selection), [snapshot, selection]);
   const unmuteSelection = selectionIsMuted(actionClips);
   const clipLabel = selectedIds.length > 1 ? "clips" : "clip";
   const selected = selectedIds.length === 1 ? selectedIds[0] : null;
@@ -84,6 +86,8 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
   const clipSummaries = useMemo(() => new Map(snapshot?.clips.map(clip => [clip.id, clip])), [snapshot]);
   const audioAssets = useMemo(() => new Map(snapshot?.audioAssets.map(asset => [asset.id, asset])), [snapshot]);
   const selectedClip = selected === null ? null : clipSummaries.get(selected);
+  const selectedAutomation = selectedClip?.content.type === "automation" ? { ...selectedClip, content: selectedClip.content } : null;
+  const automationCurve = useAutomationCurve(snapshot, selectedAutomation?.id ?? null, selectedAutomation?.content.pointCount ?? null);
   const selectedPattern = selectedClip?.content.type === "pattern" ? selectedClip : null;
   const missingAssets = useMemo(() => missingAudioAssets(snapshot?.warnings ?? []), [snapshot]);
   const selectedAudio = selectedClip?.content.type === "audio" ? { ...selectedClip, content: selectedClip.content } : null;
@@ -246,7 +250,7 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
     const point = localPoint({ x: event.clientX, y: event.clientY }, rect, view);
     return { point, tick: tickAtX(point.x, view), row: Math.max(0, Math.floor(point.y / view.rowHeight + view.scrollTrack)) };
   };
-  const showClipPreview = (gesture: PatternGesture | AudioEditGesture) => {
+  const showClipPreview = (gesture: PatternGesture | AudioEditGesture | AutomationEditGesture) => {
     const clip = gesture.preview;
     const renderClip: RenderClip = "content" in clip
       ? { ...clip, kind: "pattern", lengthTicks: clip.content.lengthTicks, ink: snapshot?.tracks[clip.trackIndex]?.color ?? 0 }
@@ -299,21 +303,18 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
       if (id === null) return;
       const clip = clipSummaries.get(id);
       if (tool === "select" && togglesSelection(event)) {
-        if (clip && clip.content.type !== "automation") {
-          const previous = selectedIds.filter(member => clipSummaries.get(member)?.content.type !== "automation");
-          setSelected({ generation: snapshot.generation, ids: toggleSelection(previous, id) });
-        }
+        if (clip) setSelected({ generation: snapshot.generation, ids: toggleSelection(selectedIds, id) });
         return;
       }
       const keepGroup = tool !== "draw" && selection.has(id);
       const ids = keepGroup ? selectedIds : [id];
       if (!keepGroup) setSelected({ generation: snapshot.generation, ids });
-      if (!clip || clip.content.type === "automation" || (tool === "slice" && ids.length > 1)) return;
+      if (!clip || (tool === "slice" && ids.length > 1)) return;
       const kind = tool === "slice" ? "slice" : event.altKey ? "copy" : ids.length === 1 && selected === id && hit.edge ? hit.edge === "start" ? "resizeStart" : "resizeEnd" : "move";
       const timing = { pointerId: event.pointerId, stamp: snapshot, replacements: projectGeneration(), originTick: tick, originTrack: row, quantum, tracks: snapshot.tracks };
       const start = { x: event.clientX, y: event.clientY };
       const index = kind === "copy" ? -1 : clips.indexOf(hit.clip);
-      if ((kind === "move" || kind === "copy") && (ids.length > 1 || clip.content.type === "audio")) {
+      if ((kind === "move" || kind === "copy") && (ids.length > 1 || clip.content.type !== "pattern")) {
         // Native copies append in batch order, which also determines playlist paint order.
         const members = ids.length > 1 ? clips.filter(member => member.id !== null && selection.has(member.id)) : [hit.clip];
         const input: ClipGroupInput = { ...timing, kind };
@@ -322,6 +323,17 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
         const { name, startTick, muted, content } = clip;
         const input: GestureInput = { ...timing, kind, sourceTicks: snapshot.sourcePeriods[content.pattern], clip: { id, name, startTick, muted, trackIndex, content } };
         begin(new PatternGesture(input), input, index, start, id);
+      } else if (clip.content.type === "automation") {
+        const geometry = { ...timing, clip: { ...hit.clip, id } };
+        if (kind === "slice") {
+          const input: AutomationEditInput = { ...geometry, kind };
+          begin(new AutomationEditGesture(input), input, index, start, id);
+        } else if ((kind === "resizeStart" || kind === "resizeEnd") && automationCurve.points) {
+          const { type, target, priority, offsetTick, lengthTicks } = clip.content;
+          const input: AutomationEditInput = { ...geometry, kind,
+            content: { type, target, priority, offsetTick, lengthTicks, points: automationCurve.points } };
+          begin(new AutomationEditGesture(input), input, index, start, id);
+        }
       } else if (kind === "resizeStart" || kind === "resizeEnd" || kind === "slice") {
         const asset = audioAssets.get(clip.content.asset);
         if (!asset) return;
@@ -404,7 +416,7 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
     if (busy || !snapshot || !selectedIds.length || isProjectReplacing() || modalIsOpen() || event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault(); cancel();
-      const members = clips.filter(member => member.id !== null && member.kind !== "automation" && selection.has(member.id));
+      const members = clips.filter(member => member.id !== null && selection.has(member.id));
       if (!members.length) return;
       const gesture = new ClipGroupGesture({ kind: "move", pointerId: 0, stamp: snapshot, replacements: projectGeneration(), originTick: 0, originTrack: 0, quantum, tracks: snapshot.tracks }, members);
       gesture.update(event.key === "ArrowLeft" ? -quantum : quantum, 0);
@@ -560,7 +572,7 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
     <div ref={scroll} className="playlist-scroll"><div className="playlist-space" style={{ width: dimensions.width, height: dimensions.height }}>
       <div className="playlist-camera" style={{ left: view.scrollTick * view.tickWidth, top: view.scrollTrack * view.rowHeight, width: view.width, height: view.height }}>
         <canvas ref={canvas} tabIndex={0} role="application" aria-label="Playlist clips" aria-disabled={busy} aria-describedby="playlist-help" data-renderer={rendererKind}
-          data-hint="Draw places the selected pattern. Drag moves a clip, Alt-drag copies it; select a clip to resize its edges. Slice cuts inside a pattern or audio clip on release. Escape cancels." onPointerDown={down} onPointerMove={event => move(event)} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel}
+          data-hint="Draw places the selected pattern. Drag moves a clip, Alt-drag copies it; select a clip to resize its edges. Slice cuts inside a clip on release. Escape cancels." onPointerDown={down} onPointerMove={event => move(event)} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel}
           onDragOver={event => { if (!busy && event.dataTransfer.types.includes(PATTERN_DRAG_TYPE)) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; } }} onDrop={drop} onKeyDown={key} />
         <div className="playlist-labels" aria-hidden="true">{selectionRect && <span className="playlist-marquee" style={{ position: "absolute", left: selectionRect.x, top: selectionRect.y, width: selectionRect.width, height: selectionRect.height, border: "1px solid var(--select)", background: "color-mix(in srgb, var(--select) 15%, transparent)" }} />}{snapshot?.tracks.map((track, index) => <span className="playlist-track-name" key={track.id} style={{ left: 4, top: (index - view.scrollTrack) * view.rowHeight + 1 }}>{track.name}</span>)}{visibleLabels.map((clip, index) => <span key={clip.id ?? `preview-${index}`} style={{ left: Math.max(0, (clip.startTick - view.scrollTick) * view.tickWidth) + 6, top: (clip.trackIndex - view.scrollTrack) * view.rowHeight + 21,
           maxWidth: Math.max(0, Math.min(clip.lengthTicks * view.tickWidth - 12, view.width)) }}>{clip.name}{clip.kind !== "pattern" ? ` · ${clip.kind}` : ""}</span>)}{sliceGuide && <div className="playlist-slice-guide" style={{ left: (sliceGuide.tick - view.scrollTick) * view.tickWidth, top: (sliceGuide.trackIndex - view.scrollTrack) * view.rowHeight + 18, height: Math.min(42, Math.max(1, view.rowHeight - 22)) }} />}</div>
@@ -596,9 +608,9 @@ export function Playlist({ model, patterns, bpm, beats, unit, rulerPosition, not
     {snapshot && selectedAudio && selectedAsset && <AudioClipInspector key={`${snapshot.generation}:${selectedAudio.id}`}
       clip={selectedAudio} asset={selectedAsset} stamp={snapshot} disabled={busy} bpm={bpm} beats={beats} unit={unit}
       onEdit={(stamp, operation) => { cancel(); void commit(stamp, [operation], false); }} />}
-    {snapshot && selectedClip?.content.type === "automation" &&
-      <AutomationPointEditor key={`${snapshot.generation}:${selectedClip.id}`}
-        clip={{ ...selectedClip, content: selectedClip.content }} stamp={snapshot} disabled={busy}
+    {snapshot && selectedAutomation &&
+      <AutomationPointEditor key={`${snapshot.generation}:${selectedAutomation.id}`}
+        clip={selectedAutomation} stamp={snapshot} curve={automationCurve} disabled={busy}
         onEdit={(stamp, operation) => { cancel(); void commit(stamp, [operation], false); }} />}
     {message && <p role="alert" className="playlist-error">{message}</p>}
     {missingAsset !== null && <p className="playlist-readonly">The audio file for this clip is missing.</p>}
