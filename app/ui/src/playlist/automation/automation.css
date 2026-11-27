@@ -98,3 +98,19 @@
   }
   .playlist:has(.automation-dock) .playlist-status [role="status"] { text-align: end; }
 }
+
+.automation-create { width: min(280px, calc(100vw - 16px)); }
+.automation-create-choices { display: grid; gap: 8px; padding: 4px; }
+
+.automation-actions input {
+  width: 11ch;
+  min-height: 28px;
+  padding-inline: 6px;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  font: inherit;
+}
+
+.automation-actions input[aria-invalid="true"] { border-color: var(--warn); }

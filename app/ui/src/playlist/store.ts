@@ -340,7 +340,7 @@ export class PlaylistController {
     }
   };
 
-  mutate = (expected: ArrangementStamp, operations: readonly ArrangementOperation[]): Promise<PlaylistResult> => {
+  mutate = (expected: ArrangementStamp, operations: readonly ArrangementOperation[], still?: () => boolean): Promise<PlaylistResult> => {
     if (this.value.busy || this.mediaFlight || this.value.requiresRefresh || this.adapter.blocked()) return Promise.resolve({ status: "blocked" });
     if (!this.value.snapshot || !stampEquals(expected, this.value.snapshot)) return Promise.resolve({ status: "stale" });
     requireStamp(expected);
@@ -361,6 +361,8 @@ export class PlaylistController {
         if (!await settleProjectEdits(this.settle)) return { status: "unsettled" };
         return await this.adapter.enqueueMutation<PlaylistResult>(async () => {
           if (!this.current(origin, epoch) || !this.value.snapshot || !stampEquals(captured, this.value.snapshot)) throw new PlaylistOutcome({ status: "stale" });
+          // Settlement may have published a device edit or opened a dialog since the command was accepted.
+          if (still && !still()) return { status: "cancelled" };
           invoked = true;
           const reply = await this.adapter.edit(captured, batch);
           if (!this.current(origin, epoch)) throw new PlaylistOutcome({ status: "stale" });
@@ -405,7 +407,7 @@ export class PlaylistController {
         finish?.();
         if (this.current(origin, epoch)) this.set({ ...this.value, busy: false });
       }
-    }, result => result.status === "applied" ||
+    }, result => result.status === "applied" || result.status === "cancelled" ||
       (unique !== null && result.status === "unpublished" && result.native === "applied"));
   };
 }

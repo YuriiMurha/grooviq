@@ -3,6 +3,7 @@ import type { ArrangementOperation, ArrangementStamp, ClipSummary, CurvePoint } 
 import { registerGestureCancellation } from "../../project/pending";
 import { isProjectReplacing, projectGeneration } from "../../project/replacement";
 import { modalIsOpen } from "../../project/shortcuts";
+import { AutomationClipSettings } from "./AutomationClipSettings";
 import { addPoint, clippedCurve, evaluate, freeTick, movePoint, pointAt, pointPosition, previewSource, windowPoints } from "./curve";
 import { pointTarget } from "./target";
 import type { AutomationCurve } from "./useAutomationCurve";
@@ -14,7 +15,7 @@ type Props = {
   stamp: ArrangementStamp;
   curve: AutomationCurve;
   disabled: boolean;
-  onEdit: (stamp: ArrangementStamp, operation: Extract<ArrangementOperation, { kind: "setAutomationPoints" }>) => void;
+  onEdit: (stamp: ArrangementStamp, operation: Extract<ArrangementOperation, { kind: "setAutomationPoints" | "setAutomationClip" }>) => void;
 };
 type Drag = {
   id: number;
@@ -195,6 +196,9 @@ export function AutomationPointEditor({ clip, stamp, curve, disabled, onEdit }: 
         <button type="button" aria-disabled={unavailable || !selected} onClick={() => remove(index)}>Delete point</button>
       </div>
     </header>
+    <AutomationClipSettings key={`${generation}:${revision}`} clip={id} target={content.target} priority={content.priority}
+      generation={generation} disabled={disabled || visiblePreview !== null}
+      onEdit={operation => { if (!drag.current) onEdit(stamp, operation); }} />
     <div className="automation-plot">
       {target && <div className="automation-axis" aria-label="Value range"><span>{target.format(target.max)}</span><span>{target.format(target.min)}</span></div>}
       <div ref={graph} className="automation-graph" role="group" aria-label="Automation curve" tabIndex={0}

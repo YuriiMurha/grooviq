@@ -11,6 +11,7 @@ import { EMPTY_PLAYLIST, PlaylistController, type PlaylistState } from "./store"
 type SessionAdapter = Readonly<{
   view: ProjectView | null;
   latest: { readonly current: { readonly view: ProjectView | null } };
+  unsettled: () => boolean;
   enqueue: <T>(command: () => Promise<T>) => Promise<T>;
   enqueueMutation: <T>(command: () => Promise<T>) => Promise<T>;
   adopt: (view: ProjectView) => void;
@@ -40,6 +41,10 @@ class SessionPlaylistBinding {
     });
   }
   update(session: SessionAdapter): void { this.session = session; }
+  automationContext = () => ({
+    sessionView: this.session.unsettled() ? null : this.session.latest.current.view,
+    state: this.controller.state,
+  });
   mount(): () => void {
     this.mounted = true;
     return () => { this.mounted = false; this.controller.retireMedia(); this.controller.retire(); };
@@ -67,6 +72,7 @@ export function usePlaylist(session: SessionAdapter) {
     if (session.view !== null) void controller.reload();
   }, [controller, session.view]);
   return { state, reload: controller.reload, mutate: controller.mutate, seek: controller.seek, unsettled: controller.unsettled,
+    automationContext: binding.automationContext,
     importAudio: controller.importAudio, relinkAudio: controller.relinkAudio, cancelMedia: controller.cancelMedia, settleMedia: controller.settleMedia,
     invalidateWaveforms: controller.invalidateWaveforms };
 }
